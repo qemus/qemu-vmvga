@@ -976,6 +976,7 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
   dpy_gfx_update(s->vga.con, dst_x, dst_y, width, height);
   return true;
 };
+static inline uint32_t vmsvga_fifo_read_raw(struct vmsvga_state_s *s);
 static inline void vmsvga_fifo_skip(struct vmsvga_state_s *s,
                                     uint32_t words) {
   while (words-- > 0) {
@@ -1102,6 +1103,103 @@ static inline uint32_t vmsvga_fifo_read(struct vmsvga_state_s *s) {
   uint32_t ret = le32_to_cpu(vmsvga_fifo_read_raw(s));
   VPRINT("vmsvga_fifo_read: ret: %u\n", ret);
   return ret;
+};
+static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
+                                     uint32_t y, uint32_t w, uint32_t h,
+                                     uint32_t foreground, uint32_t background,
+                                     bool clipped, uint32_t clip_x,
+                                     uint32_t clip_y, uint32_t clip_w,
+                                     uint32_t clip_h, uint32_t stride_words,
+                                     uint32_t payload_words) {
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  uint32_t bypl = surface_stride(surface);
+  uint32_t bypp = surface_bytes_per_pixel(surface);
+  uint32_t surface_width_px = surface_width(surface);
+  uint32_t surface_height_px = surface_height(surface);
+  uint64_t left = x;
+  uint64_t top = y;
+  uint64_t right = (uint64_t)x + w;
+  uint64_t bottom = (uint64_t)y + h;
+  uint8_t background_col[4];
+  uint8_t *scanline;
+  size_t stride_bytes;
+  uint32_t row;
+  bool background_transparent = !clipped || background == UINT32_MAX;
+  bool changed = false;
+  if (clipped) {
+    uint64_t clip_right = (uint64_t)clip_x + clip_w;
+    uint64_t clip_bottom = (uint64_t)clip_y + clip_h;
+    if (left < clip_x) {
+      left = clip_x;
+    };
+    if (top < clip_y) {
+      top = clip_y;
+    };
+    if (right > clip_right) {
+      right = clip_right;
+    };
+    if (bottom > clip_bottom) {
+      bottom = clip_bottom;
+    };
+  };
+  if (right > surface_width_px) {
+    right = surface_width_px;
+  };
+  if (bottom > surface_height_px) {
+    bottom = surface_height_px;
+  };
+  if (w == 0 || h == 0 || w > VMSVGA_MAX_WIDTH || h > VMSVGA_MAX_HEIGHT ||
+      bypp < 1 || bypp > 4 || left >= right || top >= bottom) {
+    vmsvga_fifo_skip(s, payload_words);
+    return;
+  };
+  stride_bytes = (size_t)stride_words * sizeof(uint32_t);
+  scanline = g_try_malloc(stride_bytes);
+  if (scanline == NULL) {
+    vmsvga_fifo_skip(s, payload_words);
+    return;
+  };
+  background_col[0] = background;
+  background_col[1] = background >> 8;
+  background_col[2] = background >> 16;
+  background_col[3] = background >> 24;
+  for (row = 0; row < h; row++) {
+    uint64_t dst_y = (uint64_t)y + row;
+    uint32_t word;
+    for (word = 0; word < stride_words; word++) {
+      uint32_t value = vmsvga_fifo_read_raw(s);
+      memcpy(scanline + (size_t)word * sizeof(value), &value, sizeof(value));
+    };
+    if (dst_y < top || dst_y >= bottom) {
+      continue;
+    };
+    {
+      uint32_t first_x = (uint32_t)left;
+      uint32_t last_x = (uint32_t)right;
+      uint32_t first_bit = first_x - x;
+      uint32_t last_bit = last_x - x;
+      uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (uint32_t)dst_y +
+                     (size_t)bypp * first_x;
+      uint32_t bit_index;
+      if (!background_transparent) {
+        vmsvga_rop_fill_buffer(dst, (size_t)(last_x - first_x) * bypp,
+                               background_col, bypp, VMSVGA_ROP_COPY);
+        changed = true;
+      };
+      for (bit_index = first_bit; bit_index < last_bit; bit_index++) {
+        if ((scanline[bit_index >> 3] >> (7 - (bit_index & 7))) & 1) {
+          vmsvga_store_pixel(dst + (size_t)(bit_index - first_bit) * bypp,
+                             bypp, foreground);
+          changed = true;
+        };
+      };
+    };
+  };
+  g_free(scanline);
+  if (changed) {
+    dpy_gfx_update(s->vga.con, (uint32_t)left, (uint32_t)top,
+                   (uint32_t)(right - left), (uint32_t)(bottom - top));
+  };
 };
 typedef struct {
   uint32 color;
@@ -1510,41 +1608,93 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       };
       VPRINT("SVGA_CMD_DISPLAY_CURSOR command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_DRAW_GLYPH:
-      if (len < (sizeof(SVGAFifoCmdDrawGlyph) / sizeof(uint32_t)) + 1) {
+    case SVGA_CMD_DRAW_GLYPH: {
+      uint32_t x;
+      uint32_t y;
+      uint32_t width;
+      uint32_t height;
+      uint32_t foreground;
+      uint64_t stride_words;
+      uint64_t payload_words;
+      uint64_t total_words;
+      if (len < 6) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdDrawGlyph) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDrawGlyph =
-          sizeof(SVGAFifoCmdDrawGlyph) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDrawGlyph >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDrawGlyph -= 1;
+      x = vmsvga_fifo_read(s);
+      y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      foreground = vmsvga_fifo_read(s);
+      stride_words = ((uint64_t)width + 31) >> 5;
+      payload_words = stride_words * height;
+      total_words = 6 + payload_words;
+      if (payload_words > INT32_MAX || total_words > (uint64_t)len) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        break;
       };
+      len -= (int32_t)total_words;
+      vmsvga_draw_glyph(s, x, y, width, height, foreground, UINT32_MAX, false,
+                        0, 0, 0, 0, (uint32_t)stride_words,
+                        (uint32_t)payload_words);
       VPRINT("SVGA_CMD_DRAW_GLYPH command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_DRAW_GLYPH_CLIPPED:
-      if (len < (sizeof(SVGAFifoCmdDrawGlyphClipped) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_DRAW_GLYPH_CLIPPED: {
+      uint32_t x;
+      uint32_t y;
+      uint32_t width;
+      uint32_t height;
+      uint32_t foreground;
+      uint32_t background;
+      uint32_t clip_x;
+      uint32_t clip_y;
+      uint32_t clip_width;
+      uint32_t clip_height;
+      uint64_t stride_words;
+      uint64_t payload_words;
+      uint64_t total_words;
+      if (len < 11) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdDrawGlyphClipped) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDrawGlyphClipped =
-          sizeof(SVGAFifoCmdDrawGlyphClipped) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDrawGlyphClipped >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDrawGlyphClipped -= 1;
+      x = vmsvga_fifo_read(s);
+      y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      foreground = vmsvga_fifo_read(s);
+      background = vmsvga_fifo_read(s);
+      clip_x = vmsvga_fifo_read(s);
+      clip_y = vmsvga_fifo_read(s);
+      clip_width = vmsvga_fifo_read(s);
+      clip_height = vmsvga_fifo_read(s);
+      stride_words = ((uint64_t)width + 31) >> 5;
+      payload_words = stride_words * height;
+      total_words = 11 + payload_words;
+      if (payload_words > INT32_MAX || total_words > (uint64_t)len) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        break;
       };
+      len -= (int32_t)total_words;
+      vmsvga_draw_glyph(s, x, y, width, height, foreground, background, true,
+                        clip_x, clip_y, clip_width, clip_height,
+                        (uint32_t)stride_words, (uint32_t)payload_words);
       VPRINT("SVGA_CMD_DRAW_GLYPH_CLIPPED command %u in SVGA command FIFO\n",
              cmd);
       break;
+    }
     case SVGA_CMD_FREE_OBJECT: {
       uint32_t id;
       if (len < 2) {
@@ -6300,8 +6450,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
 #else
     caps = SVGA_CAP_RECT_FILL | SVGA_CAP_RECT_COPY | SVGA_CAP_RECT_PAT_FILL |
            SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
-           SVGA_CAP_CURSOR_BYPASS |
-           SVGA_CAP_CURSOR_BYPASS_2 | SVGA_CAP_ALPHA_CURSOR |
+           SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
+           SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH | SVGA_CAP_GLYPH_CLIPPING |
            SVGA_CAP_EXTENDED_FIFO | SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK;
 #endif
     ret = caps;

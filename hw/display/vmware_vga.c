@@ -171,6 +171,110 @@ static void cursor_update_from_fifo(struct vmsvga_state_s *s) {
                   s->fifo[SVGA_FIFO_CURSOR_Y], SVGA_CURSOR_ON_HIDE);
   };
 };
+static inline bool vmsvga_verify_rect(DisplaySurface *surface, uint32_t x,
+                                      uint32_t y, uint32_t w, uint32_t h) {
+  uint32_t surface_width_px = surface_width(surface);
+  uint32_t surface_height_px = surface_height(surface);
+  if (x > 8192 || w > 8192 || x > surface_width_px ||
+      w > surface_width_px - x) {
+    return false;
+  };
+  if (y > 8192 || h > 8192 || y > surface_height_px ||
+      h > surface_height_px - y) {
+    return false;
+  };
+  return true;
+};
+static inline void vmsvga_update_rect(struct vmsvga_state_s *s, uint32_t x,
+                                      uint32_t y, uint32_t w, uint32_t h) {
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  if (!vmsvga_verify_rect(surface, x, y, w, h)) {
+    x = 0;
+    y = 0;
+    w = surface_width(surface);
+    h = surface_height(surface);
+  };
+  if (w == 0 || h == 0) {
+    return;
+  };
+  dpy_gfx_update(s->vga.con, x, y, w, h);
+};
+static inline bool vmsvga_copy_rect(struct vmsvga_state_s *s, uint32_t x0,
+                                    uint32_t y0, uint32_t x1, uint32_t y1,
+                                    uint32_t w, uint32_t h) {
+  VPRINT("vmsvga_copy_rect was just executed\n");
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  uint8_t *vram = s->vga.vram_ptr;
+  uint32_t bypl = surface_stride(surface);
+  uint32_t bypp = surface_bytes_per_pixel(surface);
+  size_t width = (size_t)bypp * w;
+  uint32_t line = h;
+  uint8_t *src;
+  uint8_t *dst;
+  if (!vmsvga_verify_rect(surface, x0, y0, w, h) ||
+      !vmsvga_verify_rect(surface, x1, y1, w, h)) {
+    return false;
+  };
+  if (w == 0 || h == 0) {
+    return true;
+  };
+  if (y1 > y0) {
+    src = vram + (size_t)bypp * x0 + (size_t)bypl * (y0 + h - 1);
+    dst = vram + (size_t)bypp * x1 + (size_t)bypl * (y1 + h - 1);
+    for (; line > 0; line--, src -= bypl, dst -= bypl) {
+      memmove(dst, src, width);
+    };
+  } else {
+    src = vram + (size_t)bypp * x0 + (size_t)bypl * y0;
+    dst = vram + (size_t)bypp * x1 + (size_t)bypl * y1;
+    for (; line > 0; line--, src += bypl, dst += bypl) {
+      memmove(dst, src, width);
+    };
+  };
+  dpy_gfx_update(s->vga.con, x1, y1, w, h);
+  return true;
+};
+static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
+                                    uint32_t x, uint32_t y, uint32_t w,
+                                    uint32_t h) {
+  VPRINT("vmsvga_fill_rect was just executed\n");
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  uint32_t bypl = surface_stride(surface);
+  uint32_t bypp = surface_bytes_per_pixel(surface);
+  size_t width = (size_t)bypp * w;
+  uint32_t line = h;
+  size_t column;
+  uint8_t *first;
+  uint8_t *dst;
+  uint8_t *src;
+  uint8_t col[4];
+  if (!vmsvga_verify_rect(surface, x, y, w, h) || bypp < 1 || bypp > 4) {
+    return false;
+  };
+  if (w == 0 || h == 0) {
+    return true;
+  };
+  col[0] = c;
+  col[1] = c >> 8;
+  col[2] = c >> 16;
+  col[3] = c >> 24;
+  first = s->vga.vram_ptr + (size_t)bypp * x + (size_t)bypl * y;
+  dst = first;
+  src = col;
+  for (column = width; column > 0; column--) {
+    *(dst++) = *(src++);
+    if (src - col == bypp) {
+      src = col;
+    };
+  };
+  dst = first;
+  for (line = 1; line < h; line++) {
+    dst += bypl;
+    memcpy(dst, first, width);
+  };
+  dpy_gfx_update(s->vga.con, x, y, w, h);
+  return true;
+};
 struct vmsvga_cursor_definition_s {
   uint32_t width;
   uint32_t height;
@@ -702,8 +806,19 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       uint32_t SizeOfSVGAFifoCmdRectFill =
           sizeof(SVGAFifoCmdRectFill) / sizeof(uint32_t);
       while (SizeOfSVGAFifoCmdRectFill >= 1) {
-        vmsvga_fifo_read(s);
+        uint32_t c = vmsvga_fifo_read(s);
         SizeOfSVGAFifoCmdRectFill -= 1;
+        uint32_t x = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectFill -= 1;
+        uint32_t y = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectFill -= 1;
+        uint32_t w = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectFill -= 1;
+        uint32_t h = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectFill -= 1;
+        if (!vmsvga_fill_rect(s, c, x, y, w, h)) {
+          VPRINT("SVGA_CMD_RECT_FILL ignored invalid rectangle\n");
+        };
       };
       VPRINT("SVGA_CMD_RECT_FILL command %u in SVGA command FIFO\n", cmd);
       break;
@@ -896,8 +1011,15 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       uint32_t SizeOfSVGAFifoCmdUpdate =
           sizeof(SVGAFifoCmdUpdate) / sizeof(uint32_t);
       while (SizeOfSVGAFifoCmdUpdate >= 1) {
-        vmsvga_fifo_read(s);
+        uint32_t x = vmsvga_fifo_read(s);
         SizeOfSVGAFifoCmdUpdate -= 1;
+        uint32_t y = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdUpdate -= 1;
+        uint32_t w = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdUpdate -= 1;
+        uint32_t h = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdUpdate -= 1;
+        vmsvga_update_rect(s, x, y, w, h);
       };
       VPRINT("SVGA_CMD_UPDATE command %u in SVGA command FIFO\n", cmd);
       break;
@@ -913,8 +1035,17 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       uint32_t SizeOfSVGAFifoCmdUpdateVerbose =
           sizeof(SVGAFifoCmdUpdateVerbose) / sizeof(uint32_t);
       while (SizeOfSVGAFifoCmdUpdateVerbose >= 1) {
+        uint32_t x = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdUpdateVerbose -= 1;
+        uint32_t y = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdUpdateVerbose -= 1;
+        uint32_t w = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdUpdateVerbose -= 1;
+        uint32_t h = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdUpdateVerbose -= 1;
         vmsvga_fifo_read(s);
         SizeOfSVGAFifoCmdUpdateVerbose -= 1;
+        vmsvga_update_rect(s, x, y, w, h);
       };
       VPRINT("SVGA_CMD_UPDATE_VERBOSE command %u in SVGA command FIFO\n", cmd);
       break;
@@ -930,8 +1061,21 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       uint32_t SizeOfSVGAFifoCmdRectCopy =
           sizeof(SVGAFifoCmdRectCopy) / sizeof(uint32_t);
       while (SizeOfSVGAFifoCmdRectCopy >= 1) {
-        vmsvga_fifo_read(s);
+        uint32_t x0 = vmsvga_fifo_read(s);
         SizeOfSVGAFifoCmdRectCopy -= 1;
+        uint32_t y0 = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectCopy -= 1;
+        uint32_t x1 = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectCopy -= 1;
+        uint32_t y1 = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectCopy -= 1;
+        uint32_t w = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectCopy -= 1;
+        uint32_t h = vmsvga_fifo_read(s);
+        SizeOfSVGAFifoCmdRectCopy -= 1;
+        if (!vmsvga_copy_rect(s, x0, y0, x1, y1, w, h)) {
+          VPRINT("SVGA_CMD_RECT_COPY ignored invalid rectangle\n");
+        };
       };
       VPRINT("SVGA_CMD_RECT_COPY command %u in SVGA command FIFO\n", cmd);
       break;
@@ -5422,8 +5566,6 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
   case SVGA_REG_CAPABILITIES:
     caps = 0xffffffff;
 #ifndef EXPCAPS
-    caps -= SVGA_CAP_RECT_FILL;        // Windows 9x
-    caps -= SVGA_CAP_RECT_COPY;        // Windows 9x & Windows (XPDM)
     caps -= SVGA_CAP_LEGACY_OFFSCREEN; // Windows 9x
     caps -= SVGA_CAP_SCREEN_OBJECT_2;  // Linux
     caps -= SVGA_CAP_CMD_BUFFERS_2;    // Windows (WDDM)

@@ -28,17 +28,11 @@
 */
 // #define ANY_FENCE_OFF
 // #define EXPCAPS
-// #define QEMU_V9_2_0
 // #define RAISE_IRQ_OFF
 // #define VERBOSE
 #include "qemu/osdep.h" // Required to be the first #include
 #include "qapi/error.h"
-#ifdef QEMU_V9_2_0
-#include "hw/pci/pci_device.h"
-#else
-#include "hw/pci/pci.h"
-#endif
-#include "hw/qdev-properties.h"
+#include "include/vmware_vga_compat.h"
 #include "include/includeCheck.h"
 #include "include/svga3d_caps.h"
 #include "include/svga3d_cmd.h"
@@ -275,9 +269,9 @@ static void cursor_update_from_fifo(struct vmsvga_state_s *s) {
   };
   if (s->cursor_on == SVGA_CURSOR_ON_SHOW ||
       s->cursor_on == SVGA_CURSOR_ON_RESTORE_TO_FB) {
-    dpy_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_SHOW);
+    vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_SHOW);
   } else {
-    dpy_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_HIDE);
+    vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_HIDE);
   };
   s->cursor_dirty = false;
 };
@@ -285,7 +279,7 @@ static inline void vmsvga_damage_flush(struct vmsvga_state_s *s) {
   uint32_t i;
   for (i = 0; i < s->damage_count; i++) {
     struct vmsvga_damage_rect_s *rect = &s->damage[i];
-    dpy_gfx_update(s->vga.con, rect->x, rect->y, rect->w, rect->h);
+    vmvga_console_update(s->vga.con, rect->x, rect->y, rect->w, rect->h);
   };
   s->damage_count = 0;
 };
@@ -1777,7 +1771,7 @@ static inline void vmsvga_cursor_cache_clear(struct vmsvga_state_s *s) {
   uint32_t id;
   for (id = 0; id < VMSVGA_MAX_CURSORS; id++) {
     if (s->cursor_cache[id] != NULL) {
-      cursor_unref(s->cursor_cache[id]);
+      vmvga_cursor_unref(s->cursor_cache[id]);
       s->cursor_cache[id] = NULL;
     };
   };
@@ -1793,7 +1787,7 @@ static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
                                         uint32_t id) {
   QEMUCursor *qc = vmsvga_cursor_cache_get(s, id);
   if (qc != NULL) {
-    dpy_cursor_define(s->vga.con, qc);
+    vmvga_console_set_cursor(s->vga.con, qc);
   };
 };
 static inline void vmsvga_cursor_test_flip(struct vmsvga_state_s *s,
@@ -1820,15 +1814,15 @@ static inline void vmsvga_cursor_test_flip(struct vmsvga_state_s *s,
 static inline void vmsvga_cursor_cache_put(struct vmsvga_state_s *s,
                                            uint32_t id, QEMUCursor *qc) {
   if (id >= VMSVGA_MAX_CURSORS) {
-    cursor_unref(qc);
+    vmvga_cursor_unref(qc);
     return;
   };
   if (s->cursor_cache[id] != NULL) {
-    cursor_unref(s->cursor_cache[id]);
+    vmvga_cursor_unref(s->cursor_cache[id]);
   };
   s->cursor_cache[id] = qc;
   if (s->cursor == id) {
-    dpy_cursor_define(s->vga.con, qc);
+    vmvga_console_set_cursor(s->vga.con, qc);
   };
 };
 static inline void vmsvga_cursor_define(struct vmsvga_state_s *s,
@@ -7227,7 +7221,7 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
            "new_format: %u, new_stride: %u\n",
            old_width, old_height, old_depth, old_stride, s->new_width,
            s->new_height, s->new_depth, format, new_stride);
-    dpy_gfx_replace_surface(s->vga.con, surface);
+    vmvga_console_set_surface(s->vga.con, surface);
     s->invalidated = true;
   };
 };
@@ -8169,7 +8163,7 @@ static void vmsvga_bios_write(void *opaque, uint32_t address, uint32_t data) {
   s->bios = data;
   VPRINT("vmsvga_bios_write %u %u\n", address, data);
 };
-static void vmsvga_update_display(void *opaque) {
+static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
   // VPRINT("vmsvga_update_display was just executed\n");
   struct vmsvga_state_s *s = opaque;
   if (s->enable && s->config &&
@@ -8195,14 +8189,15 @@ static void vmsvga_update_display(void *opaque) {
     vmsvga_scan_vram_dirty(s, explicit_damage, explicit_count);
     if (s->invalidated) {
       s->damage_count = 0;
-      dpy_gfx_update(s->vga.con, 0, 0, s->new_width, s->new_height);
+      vmvga_console_update(s->vga.con, 0, 0, s->new_width, s->new_height);
       s->invalidated = false;
     } else {
       vmsvga_damage_flush(s);
     };
   } else {
-    s->vga.hw_ops->gfx_update(&s->vga);
+    VMVGA_GFX_UPDATE_FALLBACK(s);
   };
+  VMVGA_GFX_UPDATE_DONE();
 };
 static void vmsvga_reset(DeviceState *dev) {
   VPRINT("vmsvga_reset was just executed\n");
@@ -8253,7 +8248,7 @@ static void vmsvga_invalidate_display(void *opaque) {
   };
   s->invalidated = true;
 };
-static void vmsvga_text_update(void *opaque, console_ch_t *chardata) {
+static void vmsvga_text_update(void *opaque, uint32_t *chardata) {
   VPRINT("vmsvga_text_update was just executed\n");
   struct vmsvga_state_s *s = opaque;
   if (s->vga.hw_ops->text_update) {
@@ -8358,18 +8353,14 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->scratch = g_new0(uint32_t, s->scratch_size);
   memset(s->cursor_cache, 0, sizeof(s->cursor_cache));
-  s->vga.con = graphic_console_init(dev, 0, &vmsvga_ops, s);
+  s->vga.con = vmvga_graphic_console_create(dev, 0, &vmsvga_ops, s);
   s->fifo_size = VMSVGA_FIFO_SIZE;
   memory_region_init_ram(&s->fifo_ram, OBJECT(dev), "vmsvga.fifo", s->fifo_size,
                          &error_fatal);
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
   vga_common_init(&s->vga, OBJECT(dev), &error_fatal);
   vga_init(&s->vga, OBJECT(dev), address_space, io, true);
-#ifdef QEMU_V9_2_0
-  vmstate_register_any(NULL, &vmstate_vga_common, &s->vga);
-#else
-  vmstate_register(NULL, 0, &vmstate_vga_common, &s->vga);
-#endif
+  VMVGA_REGISTER_VGA_VMSTATE(&s->vga);
   s->thread = 0;
   s->svgaid = SVGA_ID_2;
   s->new_width = 1024;
@@ -8468,20 +8459,16 @@ static void pci_vmsvga_uninit(PCIDevice *dev) {
   vmsvga_objects_clear(&s->chip);
   g_clear_pointer(&s->chip.scratch, g_free);
 };
-static Property vga_vmware_properties[] = {
+static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", struct pci_vmsvga_state_s,
                        chip.vga.vram_size_mb, 128),
     DEFINE_PROP_BOOL("global-vmstate", struct pci_vmsvga_state_s,
                      chip.vga.global_vmstate, true),
     DEFINE_PROP_BOOL("x-test-marker", struct pci_vmsvga_state_s,
                      chip.test_marker, false),
-    DEFINE_PROP_END_OF_LIST(),
+    VMVGA_PROPERTY_END
 };
-#ifdef QEMU_V9_2_0
-static void vmsvga_class_init(ObjectClass *klass, void *data) {
-#else
-static void vmsvga_class_init(ObjectClass *klass, const void *data) {
-#endif
+static void vmsvga_class_init(ObjectClass *klass, VMVGA_CLASS_INIT_DATA data) {
   VPRINT("vmsvga_class_init was just executed\n");
   DeviceClass *dc = DEVICE_CLASS(klass);
   PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -8494,7 +8481,7 @@ static void vmsvga_class_init(ObjectClass *klass, const void *data) {
   k->subsystem_vendor_id = PCI_VENDOR_ID_VMWARE;
   k->subsystem_id = PCI_DEVICE_ID_VMWARE_SVGA2;
   k->revision = 0x00;
-  device_class_set_legacy_reset(dc, vmsvga_reset);
+  VMVGA_SET_LEGACY_RESET(dc, vmsvga_reset);
   dc->vmsd = &vmstate_vmware_vga;
   device_class_set_props(dc, vga_vmware_properties);
   dc->hotpluggable = false;

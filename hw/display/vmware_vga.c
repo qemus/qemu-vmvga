@@ -130,6 +130,23 @@ enum {
   VMSVGA_ROP_NAND = 0x0e,
   VMSVGA_ROP_SET = 0x0f,
 };
+#define VMSVGA_MAX_OBJECTS 500
+
+enum vmsvga_object_type_e {
+  VMSVGA_OBJECT_BITMAP = 1,
+  VMSVGA_OBJECT_PIXMAP = 2,
+};
+
+struct vmsvga_object_s {
+  uint32_t type;
+  uint32_t width;
+  uint32_t height;
+  uint32_t depth;
+  uint32_t stride;
+  size_t size;
+  uint8_t *data;
+};
+
 #ifdef VERBOSE
 #define VPRINT(fmt, ...)                                                       \
   printf("vmsvga (%s): %u - %s: " fmt, __FILE__, (uint32_t)time(NULL),         \
@@ -181,6 +198,8 @@ struct vmsvga_state_s {
   uint32_t ff;
   uint32_t *fifo;
   uint32_t *scratch;
+  struct vmsvga_object_s *objects[VMSVGA_MAX_OBJECTS];
+  size_t object_bytes;
   VGACommonState vga;
   bool invalidated;
   MemoryRegion fifo_ram;
@@ -659,6 +678,319 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
   dpy_gfx_update(s->vga.con, x1, y1, w, h);
   return true;
 };
+static inline void vmsvga_object_destroy(struct vmsvga_object_s *object) {
+  if (object == NULL) {
+    return;
+  };
+  g_free(object->data);
+  g_free(object);
+};
+static void vmsvga_objects_clear(struct vmsvga_state_s *s) {
+  uint32_t id;
+  for (id = 0; id < VMSVGA_MAX_OBJECTS; id++) {
+    vmsvga_object_destroy(s->objects[id]);
+    s->objects[id] = NULL;
+  };
+  s->object_bytes = 0;
+};
+static inline bool vmsvga_object_layout(uint32_t type, uint32_t width,
+                                        uint32_t height, uint32_t depth,
+                                        uint32_t *stride_out,
+                                        size_t *size_out) {
+  uint64_t bits_per_line;
+  uint64_t stride;
+  uint64_t size;
+  if (width < 1 || width > VMSVGA_MAX_WIDTH || height < 1 ||
+      height > VMSVGA_MAX_HEIGHT) {
+    return false;
+  };
+  if (type == VMSVGA_OBJECT_BITMAP) {
+    depth = 1;
+  } else if (type != VMSVGA_OBJECT_PIXMAP || depth < 1 || depth > 32) {
+    return false;
+  };
+  bits_per_line = (uint64_t)width * depth;
+  stride = ((bits_per_line + 31) >> 5) * sizeof(uint32_t);
+  size = stride * height;
+  if (stride == 0 || stride > UINT32_MAX || size == 0 || size > SIZE_MAX) {
+    return false;
+  };
+  *stride_out = (uint32_t)stride;
+  *size_out = (size_t)size;
+  return true;
+};
+static inline struct vmsvga_object_s *
+vmsvga_object_create(struct vmsvga_state_s *s, uint32_t id, uint32_t type,
+                     uint32_t width, uint32_t height, uint32_t depth) {
+  struct vmsvga_object_s *old;
+  struct vmsvga_object_s *object;
+  uint32_t stride;
+  size_t size;
+  size_t old_size;
+  size_t limit;
+  if (id >= VMSVGA_MAX_OBJECTS ||
+      !vmsvga_object_layout(type, width, height, depth, &stride, &size)) {
+    return NULL;
+  };
+  old = s->objects[id];
+  old_size = old ? old->size : 0;
+  limit = s->vga.vram_size;
+  if (size > limit || s->object_bytes < old_size ||
+      s->object_bytes - old_size > limit - size) {
+    return NULL;
+  };
+  object = g_try_new0(struct vmsvga_object_s, 1);
+  if (object == NULL) {
+    return NULL;
+  };
+  object->data = g_try_malloc0(size);
+  if (object->data == NULL) {
+    g_free(object);
+    return NULL;
+  };
+  object->type = type;
+  object->width = width;
+  object->height = height;
+  object->depth = type == VMSVGA_OBJECT_BITMAP ? 1 : depth;
+  object->stride = stride;
+  object->size = size;
+  s->object_bytes -= old_size;
+  vmsvga_object_destroy(old);
+  s->objects[id] = object;
+  s->object_bytes += size;
+  return object;
+};
+static inline struct vmsvga_object_s *
+vmsvga_object_get(struct vmsvga_state_s *s, uint32_t id, uint32_t type) {
+  struct vmsvga_object_s *object;
+  if (id >= VMSVGA_MAX_OBJECTS) {
+    return NULL;
+  };
+  object = s->objects[id];
+  if (object == NULL || object->type != type) {
+    return NULL;
+  };
+  return object;
+};
+static inline void vmsvga_object_free(struct vmsvga_state_s *s, uint32_t id) {
+  struct vmsvga_object_s *object;
+  if (id >= VMSVGA_MAX_OBJECTS) {
+    return;
+  };
+  object = s->objects[id];
+  if (object == NULL) {
+    return;
+  };
+  if (s->object_bytes >= object->size) {
+    s->object_bytes -= object->size;
+  } else {
+    s->object_bytes = 0;
+  };
+  vmsvga_object_destroy(object);
+  s->objects[id] = NULL;
+};
+static inline bool vmsvga_object_matches(struct vmsvga_object_s *object,
+                                         uint32_t type, uint32_t width,
+                                         uint32_t height, uint32_t depth) {
+  if (object == NULL || object->type != type || object->width != width ||
+      object->height != height) {
+    return false;
+  };
+  return type == VMSVGA_OBJECT_BITMAP || object->depth == depth;
+};
+static inline uint32_t vmsvga_object_pixel(struct vmsvga_object_s *object,
+                                           uint32_t x, uint32_t y) {
+  const uint8_t *row;
+  uint64_t bit_offset;
+  size_t byte_offset;
+  uint32_t shift;
+  uint64_t value = 0;
+  uint32_t bytes;
+  uint32_t i;
+  uint64_t mask;
+  if (x >= object->width || y >= object->height) {
+    return 0;
+  };
+  row = object->data + (size_t)object->stride * y;
+  if (object->type == VMSVGA_OBJECT_BITMAP) {
+    return (row[x >> 3] >> (7 - (x & 7))) & 1;
+  };
+  bit_offset = (uint64_t)x * object->depth;
+  byte_offset = (size_t)(bit_offset >> 3);
+  shift = bit_offset & 7;
+  bytes = (object->depth + shift + 7) >> 3;
+  if (bytes > sizeof(value)) {
+    bytes = sizeof(value);
+  };
+  if (byte_offset + bytes > object->stride) {
+    bytes = object->stride - byte_offset;
+  };
+  for (i = 0; i < bytes; i++) {
+    value |= (uint64_t)row[byte_offset + i] << (i * 8);
+  };
+  if (object->depth == 32) {
+    mask = UINT32_MAX;
+  } else {
+    mask = (UINT64_C(1) << object->depth) - 1;
+  };
+  return (uint32_t)((value >> shift) & mask);
+};
+static inline bool vmsvga_object_rect_valid(struct vmsvga_object_s *object,
+                                            uint32_t x, uint32_t y,
+                                            uint32_t width, uint32_t height) {
+  return x <= object->width && width <= object->width - x &&
+         y <= object->height && height <= object->height - y;
+};
+static inline bool vmsvga_pixmap_compatible(struct vmsvga_state_s *s,
+                                            struct vmsvga_object_s *object) {
+  if (object->depth == s->new_depth) {
+    return true;
+  };
+  return (s->new_depth == 32 && object->depth == 24) ||
+         (s->new_depth == 24 && object->depth == 32);
+};
+static inline void vmsvga_store_pixel(uint8_t *dst, uint32_t bypp,
+                                      uint32_t pixel) {
+  uint32_t i;
+  for (i = 0; i < bypp; i++) {
+    dst[i] = pixel >> (i * 8);
+  };
+};
+static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
+                                      uint32_t type, bool pattern,
+                                      uint32_t src_x, uint32_t src_y,
+                                      uint32_t dst_x, uint32_t dst_y,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t foreground,
+                                      uint32_t background, uint32_t rop) {
+  struct vmsvga_object_s *object = vmsvga_object_get(s, id, type);
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  uint32_t bypl = surface_stride(surface);
+  uint32_t bypp = surface_bytes_per_pixel(surface);
+  size_t row_bytes;
+  uint8_t *source_row;
+  uint32_t row;
+  uint32_t column;
+  if (object == NULL || rop > VMSVGA_ROP_SET || bypp < 1 || bypp > 4 ||
+      !vmsvga_verify_rect(surface, dst_x, dst_y, width, height)) {
+    return false;
+  };
+  if (width == 0 || height == 0 || rop == VMSVGA_ROP_NOOP) {
+    return true;
+  };
+  if (!pattern && !vmsvga_object_rect_valid(object, src_x, src_y, width,
+                                             height)) {
+    return false;
+  };
+  if (type == VMSVGA_OBJECT_PIXMAP && !vmsvga_pixmap_compatible(s, object)) {
+    return false;
+  };
+  row_bytes = (size_t)width * bypp;
+  if (rop == VMSVGA_ROP_CLEAR || rop == VMSVGA_ROP_SET ||
+      rop == VMSVGA_ROP_INVERT) {
+    for (row = 0; row < height; row++) {
+      uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (dst_y + row) +
+                     (size_t)bypp * dst_x;
+      if (rop == VMSVGA_ROP_CLEAR) {
+        memset(dst, 0, row_bytes);
+      } else if (rop == VMSVGA_ROP_SET) {
+        memset(dst, 0xff, row_bytes);
+      } else {
+        vmsvga_rop_invert_buffer(dst, row_bytes);
+      };
+    };
+    dpy_gfx_update(s->vga.con, dst_x, dst_y, width, height);
+    return true;
+  };
+  if (type == VMSVGA_OBJECT_PIXMAP && rop == VMSVGA_ROP_COPY &&
+      object->depth == s->new_depth &&
+      (object->depth == 8 || object->depth == 16 || object->depth == 24 ||
+       object->depth == 32)) {
+    for (row = 0; row < height; row++) {
+      uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (dst_y + row) +
+                     (size_t)bypp * dst_x;
+      if (pattern) {
+        const uint8_t *src =
+            object->data +
+            (size_t)object->stride * ((dst_y + row) % object->height);
+        uint32_t source_x = dst_x % object->width;
+        uint32_t remaining = width;
+        while (remaining > 0) {
+          uint32_t pixels = MIN(remaining, object->width - source_x);
+          memcpy(dst, src + (size_t)source_x * bypp,
+                 (size_t)pixels * bypp);
+          dst += (size_t)pixels * bypp;
+          remaining -= pixels;
+          source_x = 0;
+        };
+      } else {
+        const uint8_t *src = object->data +
+                             (size_t)object->stride * (src_y + row) +
+                             (size_t)bypp * src_x;
+        memcpy(dst, src, row_bytes);
+      };
+    };
+    dpy_gfx_update(s->vga.con, dst_x, dst_y, width, height);
+    return true;
+  };
+  source_row = g_try_malloc(row_bytes);
+  if (source_row == NULL) {
+    return false;
+  };
+  for (row = 0; row < height; row++) {
+    uint32_t object_y =
+        pattern ? (dst_y + row) % object->height : src_y + row;
+    uint32_t source_pixels = pattern ? MIN(width, object->width) : width;
+    uint32_t pattern_x = pattern ? dst_x % object->width : 0;
+    uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (dst_y + row) +
+                   (size_t)bypp * dst_x;
+    for (column = 0; column < source_pixels; column++) {
+      uint32_t object_x =
+          pattern ? (pattern_x + column) % object->width : src_x + column;
+      uint32_t pixel = vmsvga_object_pixel(object, object_x, object_y);
+      if (type == VMSVGA_OBJECT_BITMAP) {
+        pixel = pixel ? foreground : background;
+      };
+      vmsvga_store_pixel(source_row + (size_t)column * bypp, bypp, pixel);
+    };
+    if (pattern) {
+      uint32_t filled = source_pixels;
+      while (filled < width) {
+        uint32_t pixels = MIN(source_pixels, width - filled);
+        memcpy(source_row + (size_t)filled * bypp, source_row,
+               (size_t)pixels * bypp);
+        filled += pixels;
+      };
+    };
+    if (rop == VMSVGA_ROP_COPY) {
+      memcpy(dst, source_row, row_bytes);
+    } else if (rop == VMSVGA_ROP_INVERT) {
+      vmsvga_rop_invert_buffer(dst, row_bytes);
+    } else if (rop == VMSVGA_ROP_COPY_INVERTED) {
+      vmsvga_rop_copy_inverted_buffer(dst, source_row, row_bytes, false);
+    } else {
+      vmsvga_rop_buffer(dst, source_row, row_bytes, rop, false);
+    };
+  };
+  g_free(source_row);
+  dpy_gfx_update(s->vga.con, dst_x, dst_y, width, height);
+  return true;
+};
+static inline void vmsvga_fifo_skip(struct vmsvga_state_s *s,
+                                    uint32_t words) {
+  while (words-- > 0) {
+    vmsvga_fifo_read_raw(s);
+  };
+};
+static inline void vmsvga_fifo_read_object_data(struct vmsvga_state_s *s,
+                                                uint8_t *dst,
+                                                uint32_t words) {
+  while (words-- > 0) {
+    uint32_t value = vmsvga_fifo_read_raw(s);
+    memcpy(dst, &value, sizeof(value));
+    dst += sizeof(value);
+  };
+};
 struct vmsvga_cursor_definition_s {
   uint32_t width;
   uint32_t height;
@@ -989,80 +1321,178 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       len = 0;
       VPRINT("SVGA_CMD_INVALID_CMD command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_DEFINE_BITMAP:
-      if (len < (sizeof(SVGAFifoCmdDefineBitmap) / sizeof(uint32_t)) + 1) {
+    case SVGA_CMD_DEFINE_BITMAP: {
+      uint32_t id;
+      uint32_t width;
+      uint32_t height;
+      uint32_t stride;
+      size_t size;
+      uint32_t payload_words;
+      struct vmsvga_object_s *object;
+      if (len < 4) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdDefineBitmap) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDefineBitmap =
-          sizeof(SVGAFifoCmdDefineBitmap) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDefineBitmap >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineBitmap -= 1;
+      id = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      if (!vmsvga_object_layout(VMSVGA_OBJECT_BITMAP, width, height, 1,
+                                &stride, &size) || size / 4 > INT32_MAX ||
+          len < 4 + (int32_t)(size / 4)) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        break;
+      };
+      payload_words = size / 4;
+      len -= 4 + (int32_t)payload_words;
+      object = vmsvga_object_create(s, id, VMSVGA_OBJECT_BITMAP, width, height,
+                                    1);
+      if (object != NULL) {
+        vmsvga_fifo_read_object_data(s, object->data, payload_words);
+      } else {
+        vmsvga_fifo_skip(s, payload_words);
       };
       VPRINT("SVGA_CMD_DEFINE_BITMAP command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_DEFINE_BITMAP_SCANLINE:
-      if (len <
-          (sizeof(SVGAFifoCmdDefineBitmapScanline) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_DEFINE_BITMAP_SCANLINE: {
+      uint32_t id;
+      uint32_t width;
+      uint32_t height;
+      uint32_t line_number;
+      uint32_t stride;
+      size_t size;
+      uint32_t payload_words;
+      struct vmsvga_object_s *object;
+      if (len < 5) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdDefineBitmapScanline) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDefineBitmapScanline =
-          sizeof(SVGAFifoCmdDefineBitmapScanline) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDefineBitmapScanline >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineBitmapScanline -= 1;
+      id = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      line_number = vmsvga_fifo_read(s);
+      if (!vmsvga_object_layout(VMSVGA_OBJECT_BITMAP, width, height, 1,
+                                &stride, &size) || stride / 4 > INT32_MAX ||
+          len < 5 + (int32_t)(stride / 4)) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        break;
       };
-      VPRINT(
-          "SVGA_CMD_DEFINE_BITMAP_SCANLINE command %u in SVGA command FIFO\n",
-          cmd);
+      payload_words = stride / 4;
+      len -= 5 + (int32_t)payload_words;
+      object = vmsvga_object_get(s, id, VMSVGA_OBJECT_BITMAP);
+      if (line_number < height &&
+          !vmsvga_object_matches(object, VMSVGA_OBJECT_BITMAP, width, height,
+                                 1)) {
+        object = vmsvga_object_create(s, id, VMSVGA_OBJECT_BITMAP, width,
+                                      height, 1);
+      };
+      if (object != NULL && line_number < height) {
+        vmsvga_fifo_read_object_data(
+            s, object->data + (size_t)object->stride * line_number,
+            payload_words);
+      } else {
+        vmsvga_fifo_skip(s, payload_words);
+      };
+      VPRINT("SVGA_CMD_DEFINE_BITMAP_SCANLINE command %u in SVGA command FIFO\n",
+             cmd);
       break;
-    case SVGA_CMD_DEFINE_PIXMAP:
-      if (len < (sizeof(SVGAFifoCmdDefinePixmap) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_DEFINE_PIXMAP: {
+      uint32_t id;
+      uint32_t width;
+      uint32_t height;
+      uint32_t depth;
+      uint32_t stride;
+      size_t size;
+      uint32_t payload_words;
+      struct vmsvga_object_s *object;
+      if (len < 5) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdDefinePixmap) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDefinePixmap =
-          sizeof(SVGAFifoCmdDefinePixmap) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDefinePixmap >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefinePixmap -= 1;
+      id = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      depth = vmsvga_fifo_read(s);
+      if (!vmsvga_object_layout(VMSVGA_OBJECT_PIXMAP, width, height, depth,
+                                &stride, &size) || size / 4 > INT32_MAX ||
+          len < 5 + (int32_t)(size / 4)) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        break;
+      };
+      payload_words = size / 4;
+      len -= 5 + (int32_t)payload_words;
+      object = vmsvga_object_create(s, id, VMSVGA_OBJECT_PIXMAP, width, height,
+                                    depth);
+      if (object != NULL) {
+        vmsvga_fifo_read_object_data(s, object->data, payload_words);
+      } else {
+        vmsvga_fifo_skip(s, payload_words);
       };
       VPRINT("SVGA_CMD_DEFINE_PIXMAP command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_DEFINE_PIXMAP_SCANLINE:
-      if (len <
-          (sizeof(SVGAFifoCmdDefinePixmapScanline) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_DEFINE_PIXMAP_SCANLINE: {
+      uint32_t id;
+      uint32_t width;
+      uint32_t height;
+      uint32_t depth;
+      uint32_t line_number;
+      uint32_t stride;
+      size_t size;
+      uint32_t payload_words;
+      struct vmsvga_object_s *object;
+      if (len < 6) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdDefinePixmapScanline) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDefinePixmapScanline =
-          sizeof(SVGAFifoCmdDefinePixmapScanline) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDefinePixmapScanline >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefinePixmapScanline -= 1;
+      id = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      depth = vmsvga_fifo_read(s);
+      line_number = vmsvga_fifo_read(s);
+      if (!vmsvga_object_layout(VMSVGA_OBJECT_PIXMAP, width, height, depth,
+                                &stride, &size) || stride / 4 > INT32_MAX ||
+          len < 6 + (int32_t)(stride / 4)) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        break;
       };
-      VPRINT(
-          "SVGA_CMD_DEFINE_PIXMAP_SCANLINE command %u in SVGA command FIFO\n",
-          cmd);
+      payload_words = stride / 4;
+      len -= 6 + (int32_t)payload_words;
+      object = vmsvga_object_get(s, id, VMSVGA_OBJECT_PIXMAP);
+      if (line_number < height &&
+          !vmsvga_object_matches(object, VMSVGA_OBJECT_PIXMAP, width, height,
+                                 depth)) {
+        object = vmsvga_object_create(s, id, VMSVGA_OBJECT_PIXMAP, width,
+                                      height, depth);
+      };
+      if (object != NULL && line_number < height) {
+        vmsvga_fifo_read_object_data(
+            s, object->data + (size_t)object->stride * line_number,
+            payload_words);
+      } else {
+        vmsvga_fifo_skip(s, payload_words);
+      };
+      VPRINT("SVGA_CMD_DEFINE_PIXMAP_SCANLINE command %u in SVGA command FIFO\n",
+             cmd);
       break;
+    }
     case SVGA_CMD_DISPLAY_CURSOR:
       if (len < (sizeof(SVGAFifoCmdDisplayCursor) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -1115,23 +1545,20 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       VPRINT("SVGA_CMD_DRAW_GLYPH_CLIPPED command %u in SVGA command FIFO\n",
              cmd);
       break;
-    case SVGA_CMD_FREE_OBJECT:
-      if (len < (sizeof(SVGAFifoCmdFreeObject) / sizeof(uint32_t)) + 1) {
+    case SVGA_CMD_FREE_OBJECT: {
+      uint32_t id;
+      if (len < 2) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdFreeObject) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdFreeObject =
-          sizeof(SVGAFifoCmdFreeObject) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdFreeObject >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdFreeObject -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      len -= 2;
+      vmsvga_object_free(s, id);
       VPRINT("SVGA_CMD_FREE_OBJECT command %u in SVGA command FIFO\n", cmd);
       break;
+    }
     case SVGA_CMD_MOVE_CURSOR:
       if (len < (sizeof(SVGAFifoCmdMoveCursor) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -1149,42 +1576,54 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       };
       VPRINT("SVGA_CMD_MOVE_CURSOR command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_RECT_BITMAP_COPY:
-      if (len < (sizeof(SVGAFifoCmdRectBitmapCopy) / sizeof(uint32_t)) + 1) {
+    case SVGA_CMD_RECT_BITMAP_COPY: {
+      uint32_t id, src_x, src_y, dst_x, dst_y, width, height, foreground,
+          background;
+      if (len < 10) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRectBitmapCopy) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectBitmapCopy =
-          sizeof(SVGAFifoCmdRectBitmapCopy) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectBitmapCopy >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectBitmapCopy -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      src_x = vmsvga_fifo_read(s);
+      src_y = vmsvga_fifo_read(s);
+      dst_x = vmsvga_fifo_read(s);
+      dst_y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      foreground = vmsvga_fifo_read(s);
+      background = vmsvga_fifo_read(s);
+      len -= 10;
+      vmsvga_object_blit(s, id, VMSVGA_OBJECT_BITMAP, false, src_x, src_y,
+                         dst_x, dst_y, width, height, foreground, background,
+                         VMSVGA_ROP_COPY);
       VPRINT("SVGA_CMD_RECT_BITMAP_COPY command %u in SVGA command FIFO\n",
              cmd);
       break;
-    case SVGA_CMD_RECT_BITMAP_FILL:
-      if (len < (sizeof(SVGAFifoCmdRectBitmapFill) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_RECT_BITMAP_FILL: {
+      uint32_t id, x, y, width, height, foreground, background;
+      if (len < 8) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRectBitmapFill) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectBitmapFill =
-          sizeof(SVGAFifoCmdRectBitmapFill) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectBitmapFill >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectBitmapFill -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      x = vmsvga_fifo_read(s);
+      y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      foreground = vmsvga_fifo_read(s);
+      background = vmsvga_fifo_read(s);
+      len -= 8;
+      vmsvga_object_blit(s, id, VMSVGA_OBJECT_BITMAP, true, 0, 0, x, y, width,
+                         height, foreground, background, VMSVGA_ROP_COPY);
       VPRINT("SVGA_CMD_RECT_BITMAP_FILL command %u in SVGA command FIFO\n",
              cmd);
       break;
+    }
     case SVGA_CMD_RECT_FILL:
       if (len < (sizeof(SVGAFifoCmdRectFill) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -1213,78 +1652,98 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       };
       VPRINT("SVGA_CMD_RECT_FILL command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_RECT_PIXMAP_COPY:
-      if (len < (sizeof(SVGAFifoCmdRectPixmapCopy) / sizeof(uint32_t)) + 1) {
+    case SVGA_CMD_RECT_PIXMAP_COPY: {
+      uint32_t id, src_x, src_y, dst_x, dst_y, width, height;
+      if (len < 8) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRectPixmapCopy) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectPixmapCopy =
-          sizeof(SVGAFifoCmdRectPixmapCopy) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectPixmapCopy >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectPixmapCopy -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      src_x = vmsvga_fifo_read(s);
+      src_y = vmsvga_fifo_read(s);
+      dst_x = vmsvga_fifo_read(s);
+      dst_y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      len -= 8;
+      vmsvga_object_blit(s, id, VMSVGA_OBJECT_PIXMAP, false, src_x, src_y,
+                         dst_x, dst_y, width, height, 0, 0, VMSVGA_ROP_COPY);
       VPRINT("SVGA_CMD_RECT_PIXMAP_COPY command %u in SVGA command FIFO\n",
              cmd);
       break;
-    case SVGA_CMD_RECT_PIXMAP_FILL:
-      if (len < (sizeof(SVGAFifoCmdRectPixmapFill) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_RECT_PIXMAP_FILL: {
+      uint32_t id, x, y, width, height;
+      if (len < 6) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRectPixmapFill) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectPixmapFill =
-          sizeof(SVGAFifoCmdRectPixmapFill) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectPixmapFill >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectPixmapFill -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      x = vmsvga_fifo_read(s);
+      y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      len -= 6;
+      vmsvga_object_blit(s, id, VMSVGA_OBJECT_PIXMAP, true, 0, 0, x, y, width,
+                         height, 0, 0, VMSVGA_ROP_COPY);
       VPRINT("SVGA_CMD_RECT_PIXMAP_FILL command %u in SVGA command FIFO\n",
              cmd);
       break;
-    case SVGA_CMD_RECT_ROP_BITMAP_COPY:
-      if (len < (sizeof(SVGAFifoCmdRectRopBitmapCopy) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_RECT_ROP_BITMAP_COPY: {
+      uint32_t id, src_x, src_y, dst_x, dst_y, width, height, foreground,
+          background, rop;
+      if (len < 11) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRectRopBitmapCopy) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectRopBitmapCopy =
-          sizeof(SVGAFifoCmdRectRopBitmapCopy) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectRopBitmapCopy >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectRopBitmapCopy -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      src_x = vmsvga_fifo_read(s);
+      src_y = vmsvga_fifo_read(s);
+      dst_x = vmsvga_fifo_read(s);
+      dst_y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      foreground = vmsvga_fifo_read(s);
+      background = vmsvga_fifo_read(s);
+      rop = vmsvga_fifo_read(s);
+      len -= 11;
+      vmsvga_object_blit(s, id, VMSVGA_OBJECT_BITMAP, false, src_x, src_y,
+                         dst_x, dst_y, width, height, foreground, background,
+                         rop);
       VPRINT("SVGA_CMD_RECT_ROP_BITMAP_COPY command %u in SVGA command FIFO\n",
              cmd);
       break;
-    case SVGA_CMD_RECT_ROP_BITMAP_FILL:
-      if (len < (sizeof(SVGAFifoCmdRectRopBitmapFill) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_RECT_ROP_BITMAP_FILL: {
+      uint32_t id, x, y, width, height, foreground, background, rop;
+      if (len < 9) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRectRopBitmapFill) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectRopBitmapFill =
-          sizeof(SVGAFifoCmdRectRopBitmapFill) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectRopBitmapFill >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectRopBitmapFill -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      x = vmsvga_fifo_read(s);
+      y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      foreground = vmsvga_fifo_read(s);
+      background = vmsvga_fifo_read(s);
+      rop = vmsvga_fifo_read(s);
+      len -= 9;
+      vmsvga_object_blit(s, id, VMSVGA_OBJECT_BITMAP, true, 0, 0, x, y, width,
+                         height, foreground, background, rop);
       VPRINT("SVGA_CMD_RECT_ROP_BITMAP_FILL command %u in SVGA command FIFO\n",
              cmd);
       break;
+    }
     case SVGA_CMD_RECT_ROP_FILL:
       if (len < (sizeof(SVGAFifoCmdRectRopFill) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -1306,42 +1765,50 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       };
       VPRINT("SVGA_CMD_RECT_ROP_FILL command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_RECT_ROP_PIXMAP_COPY:
-      if (len < (sizeof(SVGAFifoCmdRectRopPixmapCopy) / sizeof(uint32_t)) + 1) {
+    case SVGA_CMD_RECT_ROP_PIXMAP_COPY: {
+      uint32_t id, src_x, src_y, dst_x, dst_y, width, height, rop;
+      if (len < 9) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRectRopPixmapCopy) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectRopPixmapCopy =
-          sizeof(SVGAFifoCmdRectRopPixmapCopy) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectRopPixmapCopy >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectRopPixmapCopy -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      src_x = vmsvga_fifo_read(s);
+      src_y = vmsvga_fifo_read(s);
+      dst_x = vmsvga_fifo_read(s);
+      dst_y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      rop = vmsvga_fifo_read(s);
+      len -= 9;
+      vmsvga_object_blit(s, id, VMSVGA_OBJECT_PIXMAP, false, src_x, src_y,
+                         dst_x, dst_y, width, height, 0, 0, rop);
       VPRINT("SVGA_CMD_RECT_ROP_PIXMAP_COPY command %u in SVGA command FIFO\n",
              cmd);
       break;
-    case SVGA_CMD_RECT_ROP_PIXMAP_FILL:
-      if (len < (sizeof(SVGAFifoCmdRectRopPixmapFill) / sizeof(uint32_t)) + 1) {
+    }
+    case SVGA_CMD_RECT_ROP_PIXMAP_FILL: {
+      uint32_t id, x, y, width, height, rop;
+      if (len < 7) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRectRopPixmapFill) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectRopPixmapFill =
-          sizeof(SVGAFifoCmdRectRopPixmapFill) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectRopPixmapFill >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectRopPixmapFill -= 1;
-      };
+      id = vmsvga_fifo_read(s);
+      x = vmsvga_fifo_read(s);
+      y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      rop = vmsvga_fifo_read(s);
+      len -= 7;
+      vmsvga_object_blit(s, id, VMSVGA_OBJECT_PIXMAP, true, 0, 0, x, y, width,
+                         height, 0, 0, rop);
       VPRINT("SVGA_CMD_RECT_ROP_PIXMAP_FILL command %u in SVGA command FIFO\n",
              cmd);
       break;
+    }
     case SVGA_CMD_SURFACE_ALPHA_BLEND:
       if (len < (sizeof(SVGAFifoCmdSurfaceAlphaBlend) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -5831,8 +6298,9 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
 #ifdef EXPCAPS
     caps = 0xffffffff;
 #else
-    caps = SVGA_CAP_RECT_FILL | SVGA_CAP_RECT_COPY | SVGA_CAP_RASTER_OP |
-           SVGA_CAP_CURSOR | SVGA_CAP_CURSOR_BYPASS |
+    caps = SVGA_CAP_RECT_FILL | SVGA_CAP_RECT_COPY | SVGA_CAP_RECT_PAT_FILL |
+           SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
+           SVGA_CAP_CURSOR_BYPASS |
            SVGA_CAP_CURSOR_BYPASS_2 | SVGA_CAP_ALPHA_CURSOR |
            SVGA_CAP_EXTENDED_FIFO | SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK;
 #endif
@@ -6615,6 +7083,7 @@ static void vmsvga_reset(DeviceState *dev) {
   s->fence_goal = 0;
   s->thread = 0;
   s->invalidated = true;
+  vmsvga_objects_clear(s);
   vmsvga_set_fifo_capabilities(s);
   if (s->scratch != NULL) {
     memset(s->scratch, 0, s->scratch_size * sizeof(*s->scratch));
@@ -6663,6 +7132,7 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   s->fence = 0;
   s->fence_goal = 0;
   s->invalidated = true;
+  vmsvga_objects_clear(s);
   vmsvga_set_fifo_capabilities(s);
   vmsvga_update_fifo_registers(s);
 #ifndef RAISE_IRQ_OFF
@@ -6838,6 +7308,7 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp) {
 };
 static void pci_vmsvga_uninit(PCIDevice *dev) {
   struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+  vmsvga_objects_clear(&s->chip);
   g_clear_pointer(&s->chip.scratch, g_free);
 };
 static Property vga_vmware_properties[] = {

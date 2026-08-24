@@ -155,6 +155,7 @@ enum {
 #define VMSVGA_MAX_CURSORS 500
 #define VMSVGA_DAMAGE_RECTS 64
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
+#define VMSVGA_DIRTY_CHUNK_SIZE 4096
 
 enum vmsvga_object_type_e {
   VMSVGA_OBJECT_BITMAP = 1,
@@ -257,6 +258,8 @@ struct vmsvga_state_s {
   VGACommonState vga;
   bool invalidated;
   bool cursor_dirty;
+  bool test_marker;
+  bool marker_logged;
   MemoryRegion fifo_ram;
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMWARE_SVGA, "vmware-svga")
@@ -304,8 +307,15 @@ static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
     uint64_t rect_bottom = (uint64_t)rect.y + rect.h;
     uint64_t old_right = (uint64_t)old->x + old->w;
     uint64_t old_bottom = (uint64_t)old->y + old->h;
-    if ((uint64_t)rect.x <= old_right && (uint64_t)old->x <= rect_right &&
-        (uint64_t)rect.y <= old_bottom && (uint64_t)old->y <= rect_bottom) {
+    bool x_overlap = (uint64_t)rect.x < old_right &&
+                     (uint64_t)old->x < rect_right;
+    bool y_overlap = (uint64_t)rect.y < old_bottom &&
+                     (uint64_t)old->y < rect_bottom;
+    bool x_close = (uint64_t)rect.x <= old_right &&
+                   (uint64_t)old->x <= rect_right;
+    bool y_close = (uint64_t)rect.y <= old_bottom &&
+                   (uint64_t)old->y <= rect_bottom;
+    if ((x_overlap && y_close) || (y_overlap && x_close)) {
       uint32_t left = MIN(rect.x, old->x);
       uint32_t top = MIN(rect.y, old->y);
       uint64_t right = MAX(rect_right, old_right);
@@ -1786,6 +1796,27 @@ static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
     dpy_cursor_define(s->vga.con, qc);
   };
 };
+static inline void vmsvga_cursor_test_flip(struct vmsvga_state_s *s,
+                                             QEMUCursor *qc, uint32_t width,
+                                             uint32_t height) {
+  uint32_t y;
+  if (!s->test_marker || width == 0 || height == 0) {
+    return;
+  };
+  for (y = 0; y < height / 2; y++) {
+    uint32_t *top = qc->data + (size_t)y * width;
+    uint32_t *bottom = qc->data + (size_t)(height - 1 - y) * width;
+    uint32_t x;
+    for (x = 0; x < width; x++) {
+      uint32_t tmp = top[x];
+      top[x] = bottom[x];
+      bottom[x] = tmp;
+    };
+  };
+  if (qc->hot_y < height) {
+    qc->hot_y = height - 1 - qc->hot_y;
+  };
+};
 static inline void vmsvga_cursor_cache_put(struct vmsvga_state_s *s,
                                            uint32_t id, QEMUCursor *qc) {
   if (id >= VMSVGA_MAX_CURSORS) {
@@ -1823,6 +1854,7 @@ static inline void vmsvga_cursor_define(struct vmsvga_state_s *s,
 #endif
     VPRINT("vmsvga_cursor_define | xor_mask == %u : and_mask == %u\n",
            *c->xor_mask, *c->and_mask);
+    vmsvga_cursor_test_flip(s, qc, c->width, c->height);
     vmsvga_cursor_cache_put(s, c->id, qc);
   };
 };
@@ -1850,6 +1882,7 @@ vmsvga_rgba_cursor_define(struct vmsvga_state_s *s,
 #endif
     VPRINT("vmsvga_rgba_cursor_define | xor_mask == %u : and_mask == %u\n",
            *c->xor_mask, *c->and_mask);
+    vmsvga_cursor_test_flip(s, qc, c->width, c->height);
     vmsvga_cursor_cache_put(s, c->id, qc);
   };
 };
@@ -2172,7 +2205,7 @@ typedef struct {
 } SVGA3dCmdSize;
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
                                        uint32_t reg);
-static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
+static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   VPRINT("vmsvga_fifo_run was just executed\n");
   int32_t len;
   uint32_t cmd;
@@ -2184,7 +2217,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
   struct vmsvga_cursor_definition_s cursor;
   len = vmsvga_fifo_length(s);
   if (len < 1) {
-    vmsvga_damage_flush(s);
+    if (flush_damage) {
+      vmsvga_damage_flush(s);
+    };
     cursor_update_from_fifo(s);
     s->sync = 0;
     return;
@@ -6975,7 +7010,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
 #endif
     };
   };
-  vmsvga_damage_flush(s);
+  if (flush_damage) {
+    vmsvga_damage_flush(s);
+  };
   cursor_update_from_fifo(s);
   s->sync = 0;
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
@@ -7054,6 +7091,72 @@ static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s) {
     return s->pitchlock;
   };
   return s->new_width * vmsvga_bytes_per_pixel(s->new_depth);
+};
+static inline bool
+vmsvga_damage_overlaps(const struct vmsvga_damage_rect_s *rects,
+                        uint32_t count, uint32_t x, uint32_t y, uint32_t w,
+                        uint32_t h) {
+  uint32_t i;
+  uint64_t right = (uint64_t)x + w;
+  uint64_t bottom = (uint64_t)y + h;
+  for (i = 0; i < count; i++) {
+    uint64_t rect_right = (uint64_t)rects[i].x + rects[i].w;
+    uint64_t rect_bottom = (uint64_t)rects[i].y + rects[i].h;
+    if ((uint64_t)x < rect_right && (uint64_t)rects[i].x < right &&
+        (uint64_t)y < rect_bottom && (uint64_t)rects[i].y < bottom) {
+      return true;
+    };
+  };
+  return false;
+};
+static inline void
+vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
+                        const struct vmsvga_damage_rect_s *explicit_damage,
+                        uint32_t explicit_count) {
+  DirtyBitmapSnapshot *snap;
+  uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
+  uint32_t stride = vmsvga_stride(s);
+  uint32_t row_bytes;
+  uint32_t y;
+  hwaddr visible_size;
+  if (bypp == 0 || stride == 0 || s->new_width == 0 || s->new_height == 0) {
+    return;
+  };
+  row_bytes = s->new_width * bypp;
+  visible_size = (hwaddr)stride * s->new_height;
+  if (visible_size == 0 || visible_size > s->vga.vram_size) {
+    return;
+  };
+  snap = memory_region_snapshot_and_clear_dirty(
+      &s->vga.vram, 0, visible_size, DIRTY_MEMORY_VGA);
+  if (snap == NULL) {
+    return;
+  };
+  if (!s->invalidated && memory_region_snapshot_get_dirty(
+                            &s->vga.vram, snap, 0, visible_size)) {
+    for (y = 0; y < s->new_height; y++) {
+      uint32_t byte_x;
+      hwaddr row_addr = (hwaddr)y * stride;
+      if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, row_addr,
+                                            row_bytes)) {
+        continue;
+      };
+      for (byte_x = 0; byte_x < row_bytes; byte_x += VMSVGA_DIRTY_CHUNK_SIZE) {
+        uint32_t bytes = MIN(VMSVGA_DIRTY_CHUNK_SIZE, row_bytes - byte_x);
+        hwaddr addr = row_addr + byte_x;
+        if (memory_region_snapshot_get_dirty(&s->vga.vram, snap, addr, bytes)) {
+          uint32_t x = byte_x / bypp;
+          uint32_t end = (byte_x + bytes + bypp - 1) / bypp;
+          uint32_t w = MIN(end, s->new_width) - x;
+          if (!vmsvga_damage_overlaps(explicit_damage, explicit_count, x, y,
+                                      w, 1)) {
+            vmsvga_damage_add(s, x, y, w, 1);
+          };
+        };
+      };
+    };
+  };
+  g_free(snap);
 };
 static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s) {
 #ifdef EXPCAPS
@@ -7622,7 +7725,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
         vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
                           s->pitchlock)) {
       s->sync = 1;
-      vmsvga_fifo_run(s);
+      vmsvga_fifo_run(s, true);
     };
     VPRINT("SVGA_REG_SYNC register %u with the value of %u\n", s->index, value);
     break;
@@ -8072,14 +8175,30 @@ static void vmsvga_update_display(void *opaque) {
   if (s->enable && s->config &&
       vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
                         s->pitchlock)) {
+    struct vmsvga_damage_rect_s explicit_damage[VMSVGA_DAMAGE_RECTS];
+    uint32_t explicit_count;
     vmsvga_check_size(s);
+    if (s->test_marker && !s->marker_logged) {
+      fprintf(stderr, "vmware-vga: enhanced BAR1 dirty scanout active "
+                      "(test marker enabled)\n");
+      s->marker_logged = true;
+    };
     if (!s->sync) {
       s->sync = 1;
-      vmsvga_fifo_run(s);
+      vmsvga_fifo_run(s, false);
     };
+    explicit_count = s->damage_count;
+    if (explicit_count != 0) {
+      memcpy(explicit_damage, s->damage,
+             explicit_count * sizeof(explicit_damage[0]));
+    };
+    vmsvga_scan_vram_dirty(s, explicit_damage, explicit_count);
     if (s->invalidated) {
+      s->damage_count = 0;
       dpy_gfx_update(s->vga.con, 0, 0, s->new_width, s->new_height);
       s->invalidated = false;
+    } else {
+      vmsvga_damage_flush(s);
     };
   } else {
     s->vga.hw_ops->gfx_update(&s->vga);
@@ -8262,6 +8381,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->cursor_y = 0;
   s->cursor_on = SVGA_CURSOR_ON_SHOW;
   s->cursor_dirty = true;
+  s->marker_logged = false;
   s->damage_count = 0;
   s->fence = 0;
   s->fence_goal = 0;
@@ -8353,6 +8473,8 @@ static Property vga_vmware_properties[] = {
                        chip.vga.vram_size_mb, 128),
     DEFINE_PROP_BOOL("global-vmstate", struct pci_vmsvga_state_s,
                      chip.vga.global_vmstate, true),
+    DEFINE_PROP_BOOL("x-test-marker", struct pci_vmsvga_state_s,
+                     chip.test_marker, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 #ifdef QEMU_V9_2_0

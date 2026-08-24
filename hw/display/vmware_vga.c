@@ -130,6 +130,27 @@ enum {
   VMSVGA_ROP_NAND = 0x0e,
   VMSVGA_ROP_SET = 0x0f,
 };
+enum {
+  VMSVGA_BLENDOP_CLEAR = 0,
+  VMSVGA_BLENDOP_SRC = 1,
+  VMSVGA_BLENDOP_DST = 2,
+  VMSVGA_BLENDOP_OVER = 3,
+  VMSVGA_BLENDOP_OVER_REVERSE = 4,
+  VMSVGA_BLENDOP_IN = 5,
+  VMSVGA_BLENDOP_IN_REVERSE = 6,
+  VMSVGA_BLENDOP_OUT = 7,
+  VMSVGA_BLENDOP_OUT_REVERSE = 8,
+  VMSVGA_BLENDOP_ATOP = 9,
+  VMSVGA_BLENDOP_ATOP_REVERSE = 10,
+  VMSVGA_BLENDOP_XOR = 11,
+  VMSVGA_BLENDOP_ADD = 12,
+  VMSVGA_BLENDOP_SATURATE = 13,
+};
+#define VMSVGA_BLENDFLAG_CONSTANT_SOURCE_ALPHA 0x01
+#define VMSVGA_BLENDFLAG_CONSTANT_DEST_ALPHA 0x02
+#define VMSVGA_BLENDFLAG_ALL                                             \
+  (VMSVGA_BLENDFLAG_CONSTANT_SOURCE_ALPHA |                              \
+   VMSVGA_BLENDFLAG_CONSTANT_DEST_ALPHA)
 #define VMSVGA_MAX_OBJECTS 500
 
 enum vmsvga_object_type_e {
@@ -157,6 +178,13 @@ struct vmsvga_surface_s {
   uint32_t pitch;
   uint32_t data_offset;
   uint32_t bypp;
+};
+
+struct vmsvga_pixel_s {
+  uint32_t red;
+  uint32_t green;
+  uint32_t blue;
+  uint32_t alpha;
 };
 
 #ifdef VERBOSE
@@ -857,6 +885,12 @@ static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
   bool src_valid = vmsvga_surface_load(s, src_surface_offset, &src_surface);
   bool dst_valid = vmsvga_surface_load(s, dst_surface_offset, &dst_surface);
   if (!src_valid || !dst_valid) {
+    if (src_valid) {
+      vmsvga_surface_dequeue(s, &src_surface);
+    };
+    if (dst_valid) {
+      vmsvga_surface_dequeue(s, &dst_surface);
+    };
     return false;
   };
   if (!vmsvga_surface_rect_valid(&src_surface, src_x, src_y, w, h) ||
@@ -917,6 +951,333 @@ static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
       vmsvga_rop_copy_inverted_buffer(dst, src, width_bytes, reverse_columns);
     } else {
       vmsvga_rop_buffer(dst, src, width_bytes, rop, reverse_columns);
+    };
+  };
+  vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
+  vmsvga_surface_dequeue(s, &src_surface);
+  vmsvga_surface_dequeue(s, &dst_surface);
+  return true;
+};
+static inline uint32_t vmsvga_mul_u8(uint32_t value, uint32_t factor) {
+  return (value * factor + 127) / 255;
+};
+static inline uint32_t vmsvga_expand_5(uint32_t value) {
+  return (value << 3) | (value >> 2);
+};
+static inline uint32_t vmsvga_expand_6(uint32_t value) {
+  return (value << 2) | (value >> 4);
+};
+static inline uint32_t vmsvga_pack_5(uint32_t value) {
+  return (value * 31 + 127) / 255;
+};
+static inline uint32_t vmsvga_pack_6(uint32_t value) {
+  return (value * 63 + 127) / 255;
+};
+static inline struct vmsvga_pixel_s
+vmsvga_surface_read_pixel(const uint8_t *src, uint32_t bpp, bool opaque) {
+  struct vmsvga_pixel_s pixel = {0};
+  uint16_t value16;
+  switch (bpp) {
+  case 15:
+    memcpy(&value16, src, sizeof(value16));
+    value16 = le16_to_cpu(value16);
+    pixel.blue = vmsvga_expand_5(value16 & 0x1f);
+    pixel.green = vmsvga_expand_5((value16 >> 5) & 0x1f);
+    pixel.red = vmsvga_expand_5((value16 >> 10) & 0x1f);
+    pixel.alpha = 255;
+    break;
+  case 16:
+    memcpy(&value16, src, sizeof(value16));
+    value16 = le16_to_cpu(value16);
+    pixel.blue = vmsvga_expand_5(value16 & 0x1f);
+    pixel.green = vmsvga_expand_6((value16 >> 5) & 0x3f);
+    pixel.red = vmsvga_expand_5((value16 >> 11) & 0x1f);
+    pixel.alpha = 255;
+    break;
+  case 24:
+    pixel.blue = src[0];
+    pixel.green = src[1];
+    pixel.red = src[2];
+    pixel.alpha = 255;
+    break;
+  case 32:
+    pixel.blue = src[0];
+    pixel.green = src[1];
+    pixel.red = src[2];
+    pixel.alpha = opaque ? 255 : src[3];
+    break;
+  default:
+    break;
+  };
+  return pixel;
+};
+static inline void vmsvga_surface_write_pixel(uint8_t *dst, uint32_t bpp,
+                                               bool opaque,
+                                               struct vmsvga_pixel_s pixel) {
+  uint16_t value16;
+  pixel.red = MIN(pixel.red, 255U);
+  pixel.green = MIN(pixel.green, 255U);
+  pixel.blue = MIN(pixel.blue, 255U);
+  pixel.alpha = MIN(pixel.alpha, 255U);
+  switch (bpp) {
+  case 15:
+    value16 = (vmsvga_pack_5(pixel.red) << 10) |
+              (vmsvga_pack_5(pixel.green) << 5) |
+              vmsvga_pack_5(pixel.blue);
+    value16 = cpu_to_le16(value16);
+    memcpy(dst, &value16, sizeof(value16));
+    break;
+  case 16:
+    value16 = (vmsvga_pack_5(pixel.red) << 11) |
+              (vmsvga_pack_6(pixel.green) << 5) |
+              vmsvga_pack_5(pixel.blue);
+    value16 = cpu_to_le16(value16);
+    memcpy(dst, &value16, sizeof(value16));
+    break;
+  case 24:
+    dst[0] = pixel.blue;
+    dst[1] = pixel.green;
+    dst[2] = pixel.red;
+    break;
+  case 32:
+    dst[0] = pixel.blue;
+    dst[1] = pixel.green;
+    dst[2] = pixel.red;
+    dst[3] = opaque ? 255 : pixel.alpha;
+    break;
+  default:
+    break;
+  };
+};
+static inline void vmsvga_surface_scale_pixel(struct vmsvga_pixel_s *pixel,
+                                               uint32_t factor) {
+  pixel->red = vmsvga_mul_u8(pixel->red, factor);
+  pixel->green = vmsvga_mul_u8(pixel->green, factor);
+  pixel->blue = vmsvga_mul_u8(pixel->blue, factor);
+  pixel->alpha = vmsvga_mul_u8(pixel->alpha, factor);
+};
+static inline uint32_t vmsvga_blend_component(uint32_t src, uint32_t dst,
+                                               uint32_t src_factor,
+                                               uint32_t dst_factor) {
+  return MIN(255U, vmsvga_mul_u8(src, src_factor) +
+                       vmsvga_mul_u8(dst, dst_factor));
+};
+static inline struct vmsvga_pixel_s
+vmsvga_blend_pixel(struct vmsvga_pixel_s src, struct vmsvga_pixel_s dst,
+                    uint32_t blend_op) {
+  struct vmsvga_pixel_s out;
+  uint32_t src_factor;
+  uint32_t dst_factor;
+  switch (blend_op) {
+  case VMSVGA_BLENDOP_CLEAR:
+    src_factor = 0;
+    dst_factor = 0;
+    break;
+  case VMSVGA_BLENDOP_SRC:
+    src_factor = 255;
+    dst_factor = 0;
+    break;
+  case VMSVGA_BLENDOP_DST:
+    src_factor = 0;
+    dst_factor = 255;
+    break;
+  case VMSVGA_BLENDOP_OVER:
+    src_factor = 255;
+    dst_factor = 255 - src.alpha;
+    break;
+  case VMSVGA_BLENDOP_OVER_REVERSE:
+    src_factor = 255 - dst.alpha;
+    dst_factor = 255;
+    break;
+  case VMSVGA_BLENDOP_IN:
+    src_factor = dst.alpha;
+    dst_factor = 0;
+    break;
+  case VMSVGA_BLENDOP_IN_REVERSE:
+    src_factor = 0;
+    dst_factor = src.alpha;
+    break;
+  case VMSVGA_BLENDOP_OUT:
+    src_factor = 255 - dst.alpha;
+    dst_factor = 0;
+    break;
+  case VMSVGA_BLENDOP_OUT_REVERSE:
+    src_factor = 0;
+    dst_factor = 255 - src.alpha;
+    break;
+  case VMSVGA_BLENDOP_ATOP:
+    src_factor = dst.alpha;
+    dst_factor = 255 - src.alpha;
+    break;
+  case VMSVGA_BLENDOP_ATOP_REVERSE:
+    src_factor = 255 - dst.alpha;
+    dst_factor = src.alpha;
+    break;
+  case VMSVGA_BLENDOP_XOR:
+    src_factor = 255 - dst.alpha;
+    dst_factor = 255 - src.alpha;
+    break;
+  case VMSVGA_BLENDOP_ADD:
+    src_factor = 255;
+    dst_factor = 255;
+    break;
+  case VMSVGA_BLENDOP_SATURATE:
+    if (src.alpha == 0) {
+      src_factor = 255;
+    } else {
+      src_factor = MIN(255U, ((255 - dst.alpha) * 255U + src.alpha / 2) /
+                                 src.alpha);
+    };
+    dst_factor = 255;
+    break;
+  default:
+    src_factor = 0;
+    dst_factor = 255;
+    break;
+  };
+  out.red = vmsvga_blend_component(src.red, dst.red, src_factor, dst_factor);
+  out.green =
+      vmsvga_blend_component(src.green, dst.green, src_factor, dst_factor);
+  out.blue =
+      vmsvga_blend_component(src.blue, dst.blue, src_factor, dst_factor);
+  out.alpha =
+      vmsvga_blend_component(src.alpha, dst.alpha, src_factor, dst_factor);
+  return out;
+};
+static inline bool vmsvga_surface_alpha_blend(
+    struct vmsvga_state_s *s, uint32_t src_surface_offset,
+    uint32_t dst_surface_offset, uint32_t src_x, uint32_t src_y,
+    uint32_t dst_x, uint32_t dst_y, uint32_t w, uint32_t h,
+    uint32_t blend_op, uint32_t flags, uint32_t param1, uint32_t param2) {
+  struct vmsvga_surface_s src_surface = {0};
+  struct vmsvga_surface_s dst_surface = {0};
+  uint8_t *vram = s->vga.vram_ptr;
+  uint64_t src_start;
+  uint64_t src_end;
+  uint64_t dst_start;
+  uint64_t dst_end;
+  size_t src_width_bytes;
+  size_t dst_width_bytes;
+  bool reverse_rows = false;
+  bool reverse_columns = false;
+  bool src_opaque;
+  bool dst_opaque;
+  uint32_t row_count;
+  bool src_valid = vmsvga_surface_load(s, src_surface_offset, &src_surface);
+  bool dst_valid = vmsvga_surface_load(s, dst_surface_offset, &dst_surface);
+  if (!src_valid || !dst_valid) {
+    if (src_valid) {
+      vmsvga_surface_dequeue(s, &src_surface);
+    };
+    if (dst_valid) {
+      vmsvga_surface_dequeue(s, &dst_surface);
+    };
+    return false;
+  };
+  if (!vmsvga_surface_rect_valid(&src_surface, src_x, src_y, w, h) ||
+      !vmsvga_surface_rect_valid(&dst_surface, dst_x, dst_y, w, h) ||
+      src_surface.bpp < 15 || dst_surface.bpp < 15 ||
+      blend_op > VMSVGA_BLENDOP_SATURATE || (flags & ~VMSVGA_BLENDFLAG_ALL) ||
+      ((flags & VMSVGA_BLENDFLAG_CONSTANT_SOURCE_ALPHA) && param1 > 255) ||
+      ((flags & VMSVGA_BLENDFLAG_CONSTANT_DEST_ALPHA) && param2 > 255)) {
+    vmsvga_surface_dequeue(s, &src_surface);
+    vmsvga_surface_dequeue(s, &dst_surface);
+    return false;
+  };
+  if (w == 0 || h == 0 ||
+      (blend_op == VMSVGA_BLENDOP_DST &&
+       !(flags & VMSVGA_BLENDFLAG_CONSTANT_DEST_ALPHA))) {
+    vmsvga_surface_dequeue(s, &src_surface);
+    vmsvga_surface_dequeue(s, &dst_surface);
+    return true;
+  };
+  src_opaque = src_surface.bpp != 32 || src_surface.data_offset == 0;
+  dst_opaque = dst_surface.bpp != 32 || dst_surface.data_offset == 0;
+  src_width_bytes = (size_t)src_surface.bypp * w;
+  dst_width_bytes = (size_t)dst_surface.bypp * w;
+  src_start = (uint64_t)src_surface.data_offset +
+              (uint64_t)src_surface.pitch * src_y +
+              (uint64_t)src_surface.bypp * src_x;
+  src_end = (uint64_t)src_surface.data_offset +
+            (uint64_t)src_surface.pitch * (src_y + h - 1) +
+            (uint64_t)src_surface.bypp * src_x + src_width_bytes;
+  dst_start = (uint64_t)dst_surface.data_offset +
+              (uint64_t)dst_surface.pitch * dst_y +
+              (uint64_t)dst_surface.bypp * dst_x;
+  dst_end = (uint64_t)dst_surface.data_offset +
+            (uint64_t)dst_surface.pitch * (dst_y + h - 1) +
+            (uint64_t)dst_surface.bypp * dst_x + dst_width_bytes;
+  if (src_start < dst_end && dst_start < src_end) {
+    if (src_surface.data_offset != dst_surface.data_offset ||
+        src_surface.pitch != dst_surface.pitch ||
+        src_surface.width != dst_surface.width ||
+        src_surface.height != dst_surface.height ||
+        src_surface.bpp != dst_surface.bpp) {
+      vmsvga_surface_dequeue(s, &src_surface);
+      vmsvga_surface_dequeue(s, &dst_surface);
+      return false;
+    };
+    reverse_rows = dst_y > src_y && dst_y < src_y + h;
+    reverse_columns = src_y == dst_y && dst_x > src_x && dst_x < src_x + w;
+  };
+  if (blend_op == VMSVGA_BLENDOP_CLEAR) {
+    for (row_count = 0; row_count < h; row_count++) {
+      uint8_t *dst = vram + dst_surface.data_offset +
+                     (size_t)dst_surface.pitch * (dst_y + row_count) +
+                     (size_t)dst_surface.bypp * dst_x;
+      memset(dst, 0, dst_width_bytes);
+    };
+    vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
+    vmsvga_surface_dequeue(s, &src_surface);
+    vmsvga_surface_dequeue(s, &dst_surface);
+    return true;
+  };
+  if (blend_op == VMSVGA_BLENDOP_SRC && flags == 0 &&
+      src_surface.bpp == dst_surface.bpp &&
+      (src_surface.bpp != 32 || !src_opaque || dst_opaque)) {
+    for (row_count = 0; row_count < h; row_count++) {
+      uint32_t row = reverse_rows ? h - 1 - row_count : row_count;
+      uint8_t *src = vram + src_surface.data_offset +
+                     (size_t)src_surface.pitch * (src_y + row) +
+                     (size_t)src_surface.bypp * src_x;
+      uint8_t *dst = vram + dst_surface.data_offset +
+                     (size_t)dst_surface.pitch * (dst_y + row) +
+                     (size_t)dst_surface.bypp * dst_x;
+      memmove(dst, src, src_width_bytes);
+    };
+    vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
+    vmsvga_surface_dequeue(s, &src_surface);
+    vmsvga_surface_dequeue(s, &dst_surface);
+    return true;
+  };
+  for (row_count = 0; row_count < h; row_count++) {
+    uint32_t row = reverse_rows ? h - 1 - row_count : row_count;
+    uint8_t *src_row = vram + src_surface.data_offset +
+                       (size_t)src_surface.pitch * (src_y + row) +
+                       (size_t)src_surface.bypp * src_x;
+    uint8_t *dst_row = vram + dst_surface.data_offset +
+                       (size_t)dst_surface.pitch * (dst_y + row) +
+                       (size_t)dst_surface.bypp * dst_x;
+    uint32_t column_count;
+    for (column_count = 0; column_count < w; column_count++) {
+      uint32_t column = reverse_columns ? w - 1 - column_count : column_count;
+      struct vmsvga_pixel_s src = vmsvga_surface_read_pixel(
+          src_row + (size_t)src_surface.bypp * column, src_surface.bpp,
+          src_opaque);
+      struct vmsvga_pixel_s dst = vmsvga_surface_read_pixel(
+          dst_row + (size_t)dst_surface.bypp * column, dst_surface.bpp,
+          dst_opaque);
+      struct vmsvga_pixel_s out;
+      if (flags & VMSVGA_BLENDFLAG_CONSTANT_SOURCE_ALPHA) {
+        vmsvga_surface_scale_pixel(&src, param1);
+      };
+      if (flags & VMSVGA_BLENDFLAG_CONSTANT_DEST_ALPHA) {
+        vmsvga_surface_scale_pixel(&dst, param2);
+      };
+      out = vmsvga_blend_pixel(src, dst, blend_op);
+      vmsvga_surface_write_pixel(
+          dst_row + (size_t)dst_surface.bypp * column, dst_surface.bpp,
+          dst_opaque, out);
     };
   };
   vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
@@ -2205,7 +2566,19 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
              cmd);
       break;
     }
-    case SVGA_CMD_SURFACE_ALPHA_BLEND:
+    case SVGA_CMD_SURFACE_ALPHA_BLEND: {
+      uint32_t src_surface_offset;
+      uint32_t dst_surface_offset;
+      uint32_t src_x;
+      uint32_t src_y;
+      uint32_t dst_x;
+      uint32_t dst_y;
+      uint32_t width;
+      uint32_t height;
+      uint32_t blend_op;
+      uint32_t flags;
+      uint32_t param1;
+      uint32_t param2;
       if (len < (sizeof(SVGAFifoCmdSurfaceAlphaBlend) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -2214,15 +2587,28 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
         break;
       };
       len -= sizeof(SVGAFifoCmdSurfaceAlphaBlend) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdSurfaceAlphaBlend =
-          sizeof(SVGAFifoCmdSurfaceAlphaBlend) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdSurfaceAlphaBlend >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdSurfaceAlphaBlend -= 1;
+      src_surface_offset = vmsvga_fifo_read(s);
+      dst_surface_offset = vmsvga_fifo_read(s);
+      src_x = vmsvga_fifo_read(s);
+      src_y = vmsvga_fifo_read(s);
+      dst_x = vmsvga_fifo_read(s);
+      dst_y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      blend_op = vmsvga_fifo_read(s);
+      flags = vmsvga_fifo_read(s);
+      param1 = vmsvga_fifo_read(s);
+      param2 = vmsvga_fifo_read(s);
+      if (!vmsvga_surface_alpha_blend(
+              s, src_surface_offset, dst_surface_offset, src_x, src_y, dst_x,
+              dst_y, width, height, blend_op, flags, param1, param2)) {
+        VPRINT("SVGA_CMD_SURFACE_ALPHA_BLEND ignored invalid surface or "
+               "blend operation\n");
       };
       VPRINT("SVGA_CMD_SURFACE_ALPHA_BLEND command %u in SVGA command FIFO\n",
              cmd);
       break;
+    }
     case SVGA_CMD_SURFACE_COPY: {
       uint32_t src_surface_offset;
       uint32_t dst_surface_offset;
@@ -6729,8 +7115,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
            SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
            SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH | SVGA_CAP_GLYPH_CLIPPING |
-           SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_EXTENDED_FIFO | SVGA_CAP_PITCHLOCK |
-           SVGA_CAP_IRQMASK;
+           SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_EXTENDED_FIFO |
+           SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK;
 #endif
     ret = caps;
     VPRINT("SVGA_REG_CAPABILITIES register %u with the return of %u\n",

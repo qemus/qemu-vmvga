@@ -33,7 +33,6 @@
 // #define VERBOSE
 #include "qemu/osdep.h" // Required to be the first #include
 #include "qapi/error.h"
-#include <pthread.h>    // Required for Windows (MSYS2)
 #ifdef QEMU_V9_2_0
 #include "hw/pci/pci_device.h"
 #else
@@ -91,8 +90,16 @@
 #define SVGA_CMD_SURFACE_ALPHA_BLEND 28
 #define SVGA_CMD_SURFACE_COPY 27
 #define SVGA_CMD_SURFACE_FILL 26
-#define SVGA_PALETTE_SIZE 769
-#define SVGA_PIXMAP_SIZE(w, h, bpp) (((((w) * (bpp))) >> 5) * (h))
+#define SVGA_PALETTE_SIZE 768
+#define VMSVGA_PALETTE_STORAGE_SIZE 769
+#define SVGA_PIXMAP_SIZE(w, h, bpp) (((((w) * (bpp)) + 31) >> 5) * (h))
+#define VMSVGA_MAX_WIDTH 8192
+#define VMSVGA_MAX_HEIGHT 8192
+#define VMSVGA_CURSOR_MAX_DIMENSION 64
+#define VMSVGA_FIFO_SIZE (2 * 1024 * 1024)
+#define VMSVGA_SCRATCH_SIZE 32
+#define VMSVGA_CURSOR_MAX_BYTE_SIZE \
+  (VMSVGA_CURSOR_MAX_DIMENSION * VMSVGA_CURSOR_MAX_DIMENSION * 8)
 #define SVGA_REG_CURSOR_MAX_BYTE_SIZE 66
 #define SVGA_REG_CURSOR_MAX_DIMENSION 67
 #define SVGA_REG_CURSOR_MOBID 65
@@ -101,7 +108,8 @@
 #define SVGA_REG_FIFO_CAPS 68
 #define SVGA_REG_GBOBJECT_MEM_SIZE_KB 76
 #define SVGA_REG_MSHINT 81
-#define SVGA_REG_PALETTE_MAX (SVGA_REG_PALETTE_MIN + SVGA_PALETTE_SIZE)
+#define SVGA_REG_PALETTE_MAX \
+  (SVGA_REG_PALETTE_MIN + SVGA_PALETTE_SIZE - 1)
 #define SVGA_REG_PALETTE_MIN 1024
 #define SVGA_REG_SCREENDMA 75
 enum {
@@ -130,7 +138,7 @@ enum {
 #define VPRINT(...)
 #endif
 struct vmsvga_state_s {
-  uint32_t svgapalettebase[SVGA_PALETTE_SIZE];
+  uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
   uint32_t enable;
   uint32_t config;
   uint32_t index;
@@ -151,7 +159,7 @@ struct vmsvga_state_s {
   uint32_t cmd_high;
   uint32_t guest;
   uint32_t svgaid;
-  uint32_t thread;
+  uint32_t thread; // Kept only for migration compatibility.
   uint32_t sync;
   uint32_t bios;
   uint32_t fifo_size;
@@ -164,12 +172,17 @@ struct vmsvga_state_s {
   uint32_t display_id;
   uint32_t pitchlock;
   uint32_t cursor;
+  uint32_t cursor_x;
+  uint32_t cursor_y;
+  uint32_t cursor_on;
+  uint32_t fence;
+  uint32_t fence_goal;
   uint32_t fc;
   uint32_t ff;
   uint32_t *fifo;
   uint32_t *scratch;
   VGACommonState vga;
-  VGACommonState vcs;
+  bool invalidated;
   MemoryRegion fifo_ram;
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMWARE_SVGA, "vmware-svga")
@@ -180,13 +193,11 @@ struct pci_vmsvga_state_s {
 };
 static void cursor_update_from_fifo(struct vmsvga_state_s *s) {
   VPRINT("cursor_update_from_fifo was just executed\n");
-  if ((s->fifo[SVGA_FIFO_CURSOR_ON] == SVGA_CURSOR_ON_SHOW) ||
-      (s->fifo[SVGA_FIFO_CURSOR_ON] == SVGA_CURSOR_ON_RESTORE_TO_FB)) {
-    dpy_mouse_set(s->vga.con, s->fifo[SVGA_FIFO_CURSOR_X],
-                  s->fifo[SVGA_FIFO_CURSOR_Y], SVGA_CURSOR_ON_SHOW);
+  if (s->cursor_on == SVGA_CURSOR_ON_SHOW ||
+      s->cursor_on == SVGA_CURSOR_ON_RESTORE_TO_FB) {
+    dpy_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_SHOW);
   } else {
-    dpy_mouse_set(s->vga.con, s->fifo[SVGA_FIFO_CURSOR_X],
-                  s->fifo[SVGA_FIFO_CURSOR_Y], SVGA_CURSOR_ON_HIDE);
+    dpy_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_HIDE);
   };
 };
 static inline bool vmsvga_verify_rect(DisplaySurface *surface, uint32_t x,
@@ -683,11 +694,7 @@ static inline void vmsvga_cursor_define(struct vmsvga_state_s *s,
     VPRINT("vmsvga_cursor_define | xor_mask == %u : and_mask == %u\n",
            *c->xor_mask, *c->and_mask);
     dpy_cursor_define(s->vga.con, qc);
-#ifdef QEMU_V9_2_0
     cursor_unref(qc);
-#else
-    cursor_put(qc);
-#endif
   };
 };
 static inline void
@@ -715,32 +722,37 @@ vmsvga_rgba_cursor_define(struct vmsvga_state_s *s,
     VPRINT("vmsvga_rgba_cursor_define | xor_mask == %u : and_mask == %u\n",
            *c->xor_mask, *c->and_mask);
     dpy_cursor_define(s->vga.con, qc);
-#ifdef QEMU_V9_2_0
     cursor_unref(qc);
-#else
-    cursor_put(qc);
-#endif
   };
 };
 static inline int vmsvga_fifo_length(struct vmsvga_state_s *s) {
   VPRINT("vmsvga_fifo_length was just executed\n");
-  uint32_t num;
+  int num;
+  if (!s->enable || !s->config || s->fifo == NULL) {
+    return 0;
+  };
   s->fifo_min = le32_to_cpu(s->fifo[SVGA_FIFO_MIN]);
   s->fifo_max = le32_to_cpu(s->fifo[SVGA_FIFO_MAX]);
   s->fifo_next = le32_to_cpu(s->fifo[SVGA_FIFO_NEXT_CMD]);
   s->fifo_stop = le32_to_cpu(s->fifo[SVGA_FIFO_STOP]);
-  if (s->fifo_next >= s->fifo_stop) {
-    num = s->fifo_next - s->fifo_stop;
-  } else {
-    num = (s->fifo_next - s->fifo_min) + (s->fifo_max - s->fifo_stop);
+  if ((s->fifo_min | s->fifo_max | s->fifo_next | s->fifo_stop) & 3) {
+    return 0;
   };
-  VPRINT("fifo_min: %u, fifo_max: %u, fifo_next: %u, fifo_stop: %u, num: %u, "
-         "fifo_min: %u, fifo_max: %u, fifo_next: %u, fifo_stop: %u, ret: %lu\n",
+  if (s->fifo_min < sizeof(uint32_t) * 4 || s->fifo_min >= s->fifo_max ||
+      s->fifo_max > s->fifo_size || s->fifo_next < s->fifo_min ||
+      s->fifo_next >= s->fifo_max || s->fifo_stop < s->fifo_min ||
+      s->fifo_stop >= s->fifo_max || s->fifo_max - s->fifo_min < 10 * 1024) {
+    return 0;
+  };
+  num = (int)s->fifo_next - (int)s->fifo_stop;
+  if (num < 0) {
+    num += s->fifo_max - s->fifo_min;
+  };
+  VPRINT("fifo_min: %u, fifo_max: %u, fifo_next: %u, fifo_stop: %u, num: %d, "
+         "ret: %d\n",
          s->fifo_min, s->fifo_max, s->fifo_next, s->fifo_stop, num,
-         s->fifo[SVGA_FIFO_MIN], s->fifo[SVGA_FIFO_MAX],
-         s->fifo[SVGA_FIFO_NEXT_CMD], s->fifo[SVGA_FIFO_STOP],
-         (num / sizeof(uint32_t)));
-  return (num / sizeof(uint32_t));
+         num / (int)sizeof(uint32_t));
+  return num / sizeof(uint32_t);
 };
 static inline uint32_t vmsvga_fifo_read_raw(struct vmsvga_state_s *s) {
   VPRINT("vmsvga_fifo_read_raw was just executed\n");
@@ -941,21 +953,27 @@ typedef struct {
 typedef struct {
   SVGA3dSize size;
 } SVGA3dCmdSize;
+static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
+                                       uint32_t reg);
 static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
   VPRINT("vmsvga_fifo_run was just executed\n");
   uint32_t args;
-  uint32_t len;
+  int32_t len;
   uint32_t cmd;
   uint32_t i;
   uint32_t fence_arg;
   uint32_t irq_status;
   uint32_t fifo_start;
+  uint32_t maxloop = 1024;
   struct vmsvga_cursor_definition_s cursor;
   len = vmsvga_fifo_length(s);
-  while ((len >= 1) && (s->sync >= 1)) {
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+    s->fifo[SVGA_FIFO_BUSY] = 1;
+  };
+  while ((len >= 1) && (s->sync >= 1) && (maxloop-- > 0)) {
+    fifo_start = s->fifo_stop;
     cmd = vmsvga_fifo_read(s);
     irq_status = 0;
-    fifo_start = s->fifo_stop;
     VPRINT("Unknown command %u in SVGA command FIFO\n", cmd);
     switch (cmd) {
     case SVGA_CMD_INVALID_CMD:
@@ -1456,128 +1474,139 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       };
       VPRINT("SVGA_CMD_RECT_COPY command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_DEFINE_CURSOR:
-      len -= sizeof(SVGAFifoCmdDefineCursor) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDefineCursor =
+    case SVGA_CMD_DEFINE_CURSOR: {
+      uint32_t header_words =
           sizeof(SVGAFifoCmdDefineCursor) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDefineCursor >= 1) {
-        cursor.id = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineCursor -= 1;
-        cursor.hot_x = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineCursor -= 1;
-        cursor.hot_y = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineCursor -= 1;
-        cursor.width = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineCursor -= 1;
-        cursor.height = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineCursor -= 1;
-        cursor.and_mask_bpp = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineCursor -= 1;
-        cursor.xor_mask_bpp = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineCursor -= 1;
-      };
-      args =
-          (SVGA_PIXMAP_SIZE(cursor.width, cursor.height, cursor.and_mask_bpp) +
-           SVGA_PIXMAP_SIZE(cursor.width, cursor.height, cursor.xor_mask_bpp));
-      len -= args;
-      if (cursor.width < 1 || cursor.height < 1 || cursor.and_mask_bpp < 1 ||
-          cursor.xor_mask_bpp < 1 || cursor.width > s->new_width ||
-          cursor.height > s->new_height || cursor.and_mask_bpp > s->new_depth ||
-          cursor.xor_mask_bpp > s->new_depth) {
+      size_t and_words;
+      size_t xor_words;
+      if (len < (int32_t)header_words + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("SVGA_CMD_DEFINE_CURSOR command %u in SVGA command FIFO %u %u "
-               "%u %u %u %u %u\n",
-               cmd, cursor.id, cursor.hot_x, cursor.hot_y, cursor.width,
-               cursor.height, cursor.and_mask_bpp, cursor.xor_mask_bpp);
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      for (args = 0; args < SVGA_PIXMAP_SIZE(cursor.width, cursor.height,
-                                             cursor.and_mask_bpp);
-           args++) {
-        cursor.and_mask[args] = vmsvga_fifo_read_raw(s);
-        VPRINT("cursor.and_mask[args] %u\n", cursor.and_mask[args]);
+      memset(&cursor, 0, sizeof(cursor));
+      cursor.id = vmsvga_fifo_read(s);
+      cursor.hot_x = vmsvga_fifo_read(s);
+      cursor.hot_y = vmsvga_fifo_read(s);
+      cursor.width = vmsvga_fifo_read(s);
+      cursor.height = vmsvga_fifo_read(s);
+      cursor.and_mask_bpp = vmsvga_fifo_read(s);
+      cursor.xor_mask_bpp = vmsvga_fifo_read(s);
+      if (cursor.width < 1 || cursor.height < 1 ||
+          cursor.width > VMSVGA_CURSOR_MAX_DIMENSION ||
+          cursor.height > VMSVGA_CURSOR_MAX_DIMENSION ||
+          cursor.hot_x >= cursor.width || cursor.hot_y >= cursor.height ||
+          (cursor.and_mask_bpp != 1 && cursor.and_mask_bpp != s->new_depth) ||
+          (cursor.xor_mask_bpp != 1 && cursor.xor_mask_bpp != s->new_depth)) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("invalid SVGA_CMD_DEFINE_CURSOR command %u\n", cmd);
+        break;
       };
-      for (args = 0; args < SVGA_PIXMAP_SIZE(cursor.width, cursor.height,
-                                             cursor.xor_mask_bpp);
-           args++) {
+      and_words = SVGA_PIXMAP_SIZE(cursor.width, cursor.height,
+                                   cursor.and_mask_bpp);
+      xor_words = SVGA_PIXMAP_SIZE(cursor.width, cursor.height,
+                                   cursor.xor_mask_bpp);
+      if (and_words > ARRAY_SIZE(cursor.and_mask) ||
+          xor_words > ARRAY_SIZE(cursor.xor_mask) ||
+          (uint64_t)header_words + and_words + xor_words + 1 >
+              (uint64_t)len) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        break;
+      };
+      len -= header_words + and_words + xor_words + 1;
+      for (args = 0; args < and_words; args++) {
+        cursor.and_mask[args] = vmsvga_fifo_read_raw(s);
+      };
+      for (args = 0; args < xor_words; args++) {
         cursor.xor_mask[args] = vmsvga_fifo_read_raw(s);
-        VPRINT("cursor.xor_mask[args] %u\n", cursor.xor_mask[args]);
       };
       vmsvga_cursor_define(s, &cursor);
-      VPRINT("SVGA_CMD_DEFINE_CURSOR command %u in SVGA command FIFO %u %u %u "
-             "%u %u %u %u\n",
-             cmd, cursor.id, cursor.hot_x, cursor.hot_y, cursor.width,
-             cursor.height, cursor.and_mask_bpp, cursor.xor_mask_bpp);
+      VPRINT("SVGA_CMD_DEFINE_CURSOR command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_DEFINE_ALPHA_CURSOR:
-      len -= sizeof(SVGAFifoCmdDefineAlphaCursor) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDefineAlphaCursor =
+    }
+    case SVGA_CMD_DEFINE_ALPHA_CURSOR: {
+      uint32_t header_words =
           sizeof(SVGAFifoCmdDefineAlphaCursor) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDefineAlphaCursor >= 1) {
-        cursor.id = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineAlphaCursor -= 1;
-        cursor.hot_x = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineAlphaCursor -= 1;
-        cursor.hot_y = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineAlphaCursor -= 1;
-        cursor.width = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineAlphaCursor -= 1;
-        cursor.height = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineAlphaCursor -= 1;
-      };
-      cursor.and_mask_bpp = 32;
-      cursor.xor_mask_bpp = 32;
-      args = ((cursor.width) * (cursor.height));
-      len -= args;
-      if (cursor.width < 1 || cursor.height < 1 || cursor.and_mask_bpp < 1 ||
-          cursor.xor_mask_bpp < 1 || cursor.width > s->new_width ||
-          cursor.height > s->new_height || cursor.and_mask_bpp > s->new_depth ||
-          cursor.xor_mask_bpp > s->new_depth) {
+      size_t pixels;
+      if (len < (int32_t)header_words + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
-        VPRINT("SVGA_CMD_DEFINE_ALPHA_CURSOR command %u in SVGA command FIFO "
-               "%u %u %u %u %u %u %u\n",
-               cmd, cursor.id, cursor.hot_x, cursor.hot_y, cursor.width,
-               cursor.height, cursor.and_mask_bpp, cursor.xor_mask_bpp);
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      for (i = 0; i < args; i++) {
+      memset(&cursor, 0, sizeof(cursor));
+      cursor.id = vmsvga_fifo_read(s);
+      cursor.hot_x = vmsvga_fifo_read(s);
+      cursor.hot_y = vmsvga_fifo_read(s);
+      cursor.width = vmsvga_fifo_read(s);
+      cursor.height = vmsvga_fifo_read(s);
+      cursor.and_mask_bpp = 32;
+      cursor.xor_mask_bpp = 32;
+      if (cursor.width < 1 || cursor.height < 1 ||
+          cursor.width > VMSVGA_CURSOR_MAX_DIMENSION ||
+          cursor.height > VMSVGA_CURSOR_MAX_DIMENSION ||
+          cursor.hot_x >= cursor.width || cursor.hot_y >= cursor.height) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("invalid SVGA_CMD_DEFINE_ALPHA_CURSOR command %u\n", cmd);
+        break;
+      };
+      pixels = (size_t)cursor.width * cursor.height;
+      if (pixels > ARRAY_SIZE(cursor.and_mask) ||
+          pixels > ARRAY_SIZE(cursor.xor_mask) ||
+          (uint64_t)header_words + pixels + 1 > (uint64_t)len) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        break;
+      };
+      len -= header_words + pixels + 1;
+      for (i = 0; i < pixels; i++) {
         uint32_t rgba = vmsvga_fifo_read_raw(s);
         cursor.xor_mask[i] = rgba & 0x00ffffff;
         cursor.and_mask[i] = rgba & 0xff000000;
-        VPRINT("rgba %u\n", rgba);
       };
       vmsvga_rgba_cursor_define(s, &cursor);
-      VPRINT("SVGA_CMD_DEFINE_ALPHA_CURSOR command %u in SVGA command FIFO %u "
-             "%u %u %u %u %u %u\n",
-             cmd, cursor.id, cursor.hot_x, cursor.hot_y, cursor.width,
-             cursor.height, cursor.and_mask_bpp, cursor.xor_mask_bpp);
+      VPRINT("SVGA_CMD_DEFINE_ALPHA_CURSOR command %u in SVGA command FIFO\n",
+             cmd);
       break;
-    case SVGA_CMD_FENCE:
-      len -= sizeof(SVGAFifoCmdFence) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdFence =
+    }
+    case SVGA_CMD_FENCE: {
+      uint32_t command_words =
           sizeof(SVGAFifoCmdFence) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdFence >= 1) {
-        fence_arg = vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdFence -= 1;
+      if (len < (int32_t)command_words + 1) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        break;
       };
-      s->fifo[SVGA_FIFO_FENCE] = fence_arg;
-      if (((s->irq_mask) & (SVGA_IRQFLAG_FENCE_GOAL)) &&
-          ((fence_arg) == (s->fifo[SVGA_FIFO_FENCE_GOAL]))) {
-        VPRINT("FIFO: irq_status |= SVGA_IRQFLAG_FENCE_GOAL\n");
+      len -= command_words + 1;
+      fence_arg = vmsvga_fifo_read(s);
+      s->fence = fence_arg;
+      if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
+        s->fifo[SVGA_FIFO_FENCE] = fence_arg;
+      };
+      if (fence_arg == s->fence_goal) {
         irq_status |= SVGA_IRQFLAG_FENCE_GOAL;
-      } else if ((s->irq_mask) & (SVGA_IRQFLAG_ANY_FENCE)) {
-        VPRINT("FIFO: irq_status |= SVGA_IRQFLAG_ANY_FENCE\n");
-#ifndef ANY_FENCE_OFF
-        irq_status |= SVGA_IRQFLAG_ANY_FENCE;
-#endif
       };
+#ifndef ANY_FENCE_OFF
+      irq_status |= SVGA_IRQFLAG_ANY_FENCE;
+#endif
       VPRINT("SVGA_CMD_FENCE command %u in SVGA command FIFO %u\n", cmd,
              fence_arg);
       break;
+    }
     case SVGA_CMD_DEFINE_GMR2:
       if (len < (sizeof(SVGAFifoCmdDefineGMR2) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -1879,19 +1908,19 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       VPRINT("SVGA_3D_CMD_LEGACY_BASE command %u in SVGA command FIFO\n", cmd);
       break;
     case SVGA_3D_CMD_SURFACE_DEFINE:
-      if (len < sizeof(SVGA3dCmdSize) +
-                    sizeof(SVGA3dCmdDefineSurface) / sizeof(uint32_t) + 1) {
+      if (len < (sizeof(SVGA3dCmdSize) + sizeof(SVGA3dCmdDefineSurface)) /
+                    sizeof(uint32_t) + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGA3dCmdSize) +
-             sizeof(SVGA3dCmdDefineSurface) / sizeof(uint32_t) + 1;
+      len -= (sizeof(SVGA3dCmdSize) + sizeof(SVGA3dCmdDefineSurface)) /
+             sizeof(uint32_t) + 1;
       uint32_t SizeOfSVGA3dCmdDefineSurface =
-          sizeof(SVGA3dCmdSize) +
-          sizeof(SVGA3dCmdDefineSurface) / sizeof(uint32_t);
+          (sizeof(SVGA3dCmdSize) + sizeof(SVGA3dCmdDefineSurface)) /
+          sizeof(uint32_t);
       while (SizeOfSVGA3dCmdDefineSurface >= 1) {
         vmsvga_fifo_read(s);
         SizeOfSVGA3dCmdDefineSurface -= 1;
@@ -2401,19 +2430,19 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
              cmd);
       break;
     case SVGA_3D_CMD_SURFACE_DEFINE_V2:
-      if (len < sizeof(SVGA3dCmdSize) +
-                    sizeof(SVGA3dCmdDefineSurface_v2) / sizeof(uint32_t) + 1) {
+      if (len < (sizeof(SVGA3dCmdSize) + sizeof(SVGA3dCmdDefineSurface_v2)) /
+                    sizeof(uint32_t) + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGA3dCmdSize) +
-             sizeof(SVGA3dCmdDefineSurface_v2) / sizeof(uint32_t) + 1;
+      len -= (sizeof(SVGA3dCmdSize) + sizeof(SVGA3dCmdDefineSurface_v2)) /
+             sizeof(uint32_t) + 1;
       uint32_t SizeOfSVGA3dCmdDefineSurface_v2 =
-          sizeof(SVGA3dCmdSize) +
-          sizeof(SVGA3dCmdDefineSurface_v2) / sizeof(uint32_t);
+          (sizeof(SVGA3dCmdSize) + sizeof(SVGA3dCmdDefineSurface_v2)) /
+          sizeof(uint32_t);
       while (SizeOfSVGA3dCmdDefineSurface_v2 >= 1) {
         vmsvga_fifo_read(s);
         SizeOfSVGA3dCmdDefineSurface_v2 -= 1;
@@ -5450,27 +5479,23 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       VPRINT("default command %u in SVGA command FIFO\n", cmd);
       break;
     };
-    if ((irq_status) || ((s->irq_mask) & (SVGA_IRQFLAG_FIFO_PROGRESS))) {
-      VPRINT(
-          "FIFO: irq_status || s -> irq_mask & SVGA_IRQFLAG_FIFO_PROGRESS\n");
-      if ((s->irq_mask) & (SVGA_IRQFLAG_FIFO_PROGRESS)) {
-        VPRINT("FIFO: irq_status |= SVGA_IRQFLAG_FIFO_PROGRESS\n");
-        irq_status |= SVGA_IRQFLAG_FIFO_PROGRESS;
-      };
-      if ((s->irq_mask) & (irq_status)) {
+    if (s->fifo_stop != fifo_start) {
+      irq_status |= SVGA_IRQFLAG_FIFO_PROGRESS;
+    };
+    if (irq_status) {
+      s->irq_status |= irq_status;
 #ifndef RAISE_IRQ_OFF
-        struct pci_vmsvga_state_s *pci_vmsvga =
-            container_of(s, struct pci_vmsvga_state_s, chip);
+      struct pci_vmsvga_state_s *pci_vmsvga =
+          container_of(s, struct pci_vmsvga_state_s, chip);
+      pci_set_irq(PCI_DEVICE(pci_vmsvga),
+                  !!(s->irq_status & s->irq_mask));
 #endif
-        s->irq_status = irq_status;
-        VPRINT("FIFO: Pci_set_irq=1\n");
-#ifndef RAISE_IRQ_OFF
-        pci_set_irq(PCI_DEVICE(pci_vmsvga), 1);
-#endif
-      };
     };
   };
   s->sync = 0;
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+    s->fifo[SVGA_FIFO_BUSY] = 0;
+  };
 };
 static uint32_t vmsvga_index_read(void *opaque, uint32_t address) {
   VPRINT("vmsvga_index_read was just executed\n");
@@ -5505,257 +5530,138 @@ static pixman_format_code_t vmsvga_pixman_format(uint32_t bpp) {
     return qemu_default_pixman_format(bpp, true);
   }
 }
+static inline uint32_t vmsvga_bytes_per_pixel(uint32_t bpp) {
+  switch (bpp) {
+  case 8:
+    return 1;
+  case 15:
+  case 16:
+    return 2;
+  case 24:
+    return 3;
+  case 32:
+    return 4;
+  default:
+    return 0;
+  };
+};
+static inline bool vmsvga_mode_valid(struct vmsvga_state_s *s, uint32_t width,
+                                     uint32_t height, uint32_t depth,
+                                     uint32_t pitchlock) {
+  uint32_t bypp = vmsvga_bytes_per_pixel(depth);
+  uint64_t min_stride;
+  uint64_t stride;
+  uint64_t size;
+  if (width < 1 || width > VMSVGA_MAX_WIDTH || height < 1 ||
+      height > VMSVGA_MAX_HEIGHT || bypp == 0) {
+    return false;
+  };
+  min_stride = (uint64_t)width * bypp;
+  stride = pitchlock ? pitchlock : min_stride;
+  if (stride < min_stride || stride > UINT32_MAX) {
+    return false;
+  };
+  size = stride * height;
+  return size <= s->vga.vram_size;
+};
+static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s) {
+  if (s->pitchlock) {
+    return s->pitchlock;
+  };
+  return s->new_width * vmsvga_bytes_per_pixel(s->new_depth);
+};
+static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s) {
+#ifdef EXPCAPS
+  s->ff = 0xffffffff;
+  s->fc = 0xffffffff;
+#else
+  s->ff = SVGA_FIFO_FLAG_NONE;
+  s->fc = SVGA_FIFO_CAP_FENCE | SVGA_FIFO_CAP_PITCHLOCK;
+#endif
+};
+static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
+                                       uint32_t reg) {
+  uint32_t fifo_min;
+  if (s->fifo == NULL) {
+    return false;
+  };
+  fifo_min = le32_to_cpu(s->fifo[SVGA_FIFO_MIN]);
+  return fifo_min <= s->fifo_size &&
+         (uint64_t)(reg + 1) * sizeof(uint32_t) <= fifo_min;
+};
+static inline void vmsvga_update_fifo_registers(struct vmsvga_state_s *s) {
+  if (s->fifo == NULL) {
+    return;
+  };
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_CAPABILITIES)) {
+    s->fifo[SVGA_FIFO_CAPABILITIES] = s->fc;
+  };
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FLAGS)) {
+    s->fifo[SVGA_FIFO_FLAGS] = s->ff;
+  };
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
+    s->fifo[SVGA_FIFO_FENCE] = s->fence;
+  };
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_PITCHLOCK)) {
+    s->fifo[SVGA_FIFO_PITCHLOCK] = vmsvga_stride(s);
+  };
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+    s->fifo[SVGA_FIFO_BUSY] = s->sync;
+  };
+};
 static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
   VPRINT("vmsvga_check_size was just executed\n");
   DisplaySurface *surface = qemu_console_surface(s->vga.con);
   uint32_t new_stride;
-  if (s->pitchlock >= 1) {
-    new_stride = s->pitchlock;
-  } else {
-    new_stride = (((s->new_depth) * (s->new_width)) / (8));
+  int old_width;
+  int old_height;
+  int old_depth;
+  int old_stride;
+  if (!vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
+                         s->pitchlock)) {
+    VPRINT("vmsvga_check_size rejected invalid mode %ux%ux%u pitch %u\n",
+           s->new_width, s->new_height, s->new_depth, s->pitchlock);
+    return;
   };
+  new_stride = vmsvga_stride(s);
   if (s->new_width != surface_width(surface) ||
       s->new_height != surface_height(surface) ||
-      (new_stride != surface_stride(surface)) ||
+      new_stride != surface_stride(surface) ||
       s->new_depth != surface_bits_per_pixel(surface)) {
     pixman_format_code_t format = vmsvga_pixman_format(s->new_depth);
+    old_width = surface_width(surface);
+    old_height = surface_height(surface);
+    old_depth = surface_bits_per_pixel(surface);
+    old_stride = surface_stride(surface);
     surface = qemu_create_displaysurface_from(
         s->new_width, s->new_height, format, new_stride, s->vga.vram_ptr);
     VPRINT("vmsvga_check_size: old_width: %u, old_height: %u, old_depth: %u, "
-           "old_format: %u, old_stride: %u, new_width: %u, new_height: %u, "
-           "new_depth: %u, new_format: %u, new_stride: %u\n",
-           surface_width(surface), surface_height(surface),
-           surface_bits_per_pixel(surface),
-           vmsvga_pixman_format(surface_bits_per_pixel(surface)),
-           surface_stride(surface), s->new_width, s->new_height, s->new_depth,
-           format, new_stride);
+           "old_stride: %u, new_width: %u, new_height: %u, new_depth: %u, "
+           "new_format: %u, new_stride: %u\n",
+           old_width, old_height, old_depth, old_stride, s->new_width,
+           s->new_height, s->new_depth, format, new_stride);
     dpy_gfx_replace_surface(s->vga.con, surface);
+    s->invalidated = true;
   };
-};
-static void *vmsvga_loop(void *arg) {
-  VPRINT("vmsvga_loop was just executed\n");
-  struct vmsvga_state_s *s = (struct vmsvga_state_s *)arg;
-  while (true) {
-    // s->fifo[SVGA_FIFO_MIN] = 4096;
-    // s->fifo[SVGA_FIFO_MAX] = 2097152;
-    // s->fifo[SVGA_FIFO_NEXT_CMD] = 4096;
-    // s->fifo[SVGA_FIFO_STOP] = 4096;
-    // s->fifo[SVGA_FIFO_CAPABILITIES] = 1919;
-    // s->fifo[SVGA_FIFO_FENCE] = 4294967198;
-    s->fifo[SVGA_FIFO_3D_HWVERSION] = 131073;         // SVGA3D_HWVERSION_WS8_B1
-    s->fifo[SVGA_FIFO_RESERVED] = 4294967295;         // -1
-    s->fifo[SVGA_FIFO_CURSOR_SCREEN_ID] = 4294967295; // -1
-    // s->fifo[SVGA_FIFO_DEAD] = 2;
-    s->fifo[SVGA_FIFO_3D_HWVERSION_REVISED] = 131073; // SVGA3D_HWVERSION_WS8_B1
-    // SVGA_FIFO_3D_CAPS
-    s->fifo[32] = 186;
-    s->fifo[33] = 256;
-    s->fifo[35] = 1;
-    s->fifo[36] = 1;
-    s->fifo[37] = 8;
-    s->fifo[38] = 2;
-    s->fifo[39] = 8;
-    s->fifo[40] = 3;
-    s->fifo[41] = 8;
-    s->fifo[42] = 4;
-    s->fifo[43] = 7;
-    s->fifo[44] = 5;
-    s->fifo[45] = 1;
-    s->fifo[46] = 6;
-    s->fifo[47] = 13;
-    s->fifo[48] = 7;
-    s->fifo[49] = 1;
-    s->fifo[50] = 8;
-    s->fifo[51] = 8;
-    s->fifo[52] = 9;
-    s->fifo[53] = 1;
-    s->fifo[54] = 10;
-    s->fifo[55] = 1;
-    s->fifo[56] = 11;
-    s->fifo[57] = 4;
-    s->fifo[58] = 12;
-    s->fifo[59] = 1;
-    s->fifo[60] = 13;
-    s->fifo[61] = 1;
-    s->fifo[62] = 14;
-    s->fifo[63] = 1;
-    s->fifo[64] = 15;
-    s->fifo[65] = 1;
-    s->fifo[66] = 16;
-    s->fifo[67] = 1;
-    s->fifo[68] = 17;
-    s->fifo[69] = 1065353216;
-    s->fifo[70] = 18;
-    s->fifo[71] = 20;
-    s->fifo[72] = 19;
-    s->fifo[73] = 16384;
-    s->fifo[74] = 20;
-    s->fifo[75] = 16384;
-    s->fifo[76] = 21;
-    s->fifo[77] = 2048;
-    s->fifo[78] = 22;
-    s->fifo[79] = 16384;
-    s->fifo[80] = 23;
-    s->fifo[81] = 16384;
-    s->fifo[82] = 24;
-    s->fifo[83] = 16;
-    s->fifo[84] = 25;
-    s->fifo[85] = 2097151;
-    s->fifo[86] = 26;
-    s->fifo[87] = 1048575;
-    s->fifo[88] = 27;
-    s->fifo[89] = 65535;
-    s->fifo[90] = 28;
-    s->fifo[91] = 65535;
-    s->fifo[92] = 29;
-    s->fifo[93] = 32;
-    s->fifo[94] = 30;
-    s->fifo[95] = 32;
-    s->fifo[96] = 31;
-    s->fifo[97] = 67108863;
-    s->fifo[98] = 32;
-    s->fifo[99] = 1633311;
-    s->fifo[100] = 33;
-    s->fifo[101] = 1630495;
-    s->fifo[102] = 34;
-    s->fifo[103] = 548895;
-    s->fifo[104] = 35;
-    s->fifo[105] = 548895;
-    s->fifo[106] = 36;
-    s->fifo[107] = 549151;
-    s->fifo[108] = 37;
-    s->fifo[109] = 24863;
-    s->fifo[110] = 38;
-    s->fifo[111] = 1633311;
-    s->fifo[112] = 39;
-    s->fifo[113] = 24607;
-    s->fifo[114] = 40;
-    s->fifo[115] = 24583;
-    s->fifo[116] = 41;
-    s->fifo[117] = 24607;
-    s->fifo[118] = 42;
-    s->fifo[119] = 24607;
-    s->fifo[120] = 43;
-    s->fifo[121] = 16581;
-    s->fifo[122] = 44;
-    s->fifo[123] = 16581;
-    s->fifo[124] = 45;
-    s->fifo[125] = 16581;
-    s->fifo[126] = 46;
-    s->fifo[127] = 57349;
-    s->fifo[128] = 47;
-    s->fifo[129] = 57349;
-    s->fifo[130] = 48;
-    s->fifo[131] = 57349;
-    s->fifo[132] = 49;
-    s->fifo[133] = 57349;
-    s->fifo[134] = 50;
-    s->fifo[135] = 57349;
-    s->fifo[136] = 51;
-    s->fifo[137] = 81925;
-    s->fifo[138] = 52;
-    s->fifo[139] = 81927;
-    s->fifo[140] = 53;
-    s->fifo[141] = 81927;
-    s->fifo[142] = 54;
-    s->fifo[143] = 81925;
-    s->fifo[144] = 55;
-    s->fifo[145] = 81921;
-    s->fifo[146] = 56;
-    s->fifo[147] = 8413215;
-    s->fifo[148] = 57;
-    s->fifo[149] = 8413215;
-    s->fifo[150] = 58;
-    s->fifo[151] = 8413215;
-    s->fifo[152] = 59;
-    s->fifo[153] = 8413215;
-    s->fifo[154] = 60;
-    s->fifo[155] = 8413215;
-    s->fifo[156] = 61;
-    s->fifo[157] = 8413215;
-    s->fifo[158] = 62;
-    s->fifo[160] = 63;
-    s->fifo[161] = 4;
-    s->fifo[162] = 64;
-    s->fifo[163] = 8;
-    s->fifo[164] = 65;
-    s->fifo[165] = 81927;
-    s->fifo[166] = 66;
-    s->fifo[167] = 24607;
-    s->fifo[168] = 67;
-    s->fifo[169] = 24607;
-    s->fifo[170] = 68;
-    s->fifo[171] = 19161088;
-    s->fifo[172] = 69;
-    s->fifo[173] = 19161088;
-    s->fifo[174] = 70;
-    s->fifo[176] = 71;
-    s->fifo[178] = 72;
-    s->fifo[180] = 73;
-    s->fifo[182] = 74;
-    s->fifo[183] = 1;
-    s->fifo[184] = 75;
-    s->fifo[185] = 19161088;
-    s->fifo[186] = 76;
-    s->fifo[188] = 77;
-    s->fifo[189] = 256;
-    s->fifo[190] = 78;
-    s->fifo[191] = 32768;
-    s->fifo[192] = 79;
-    s->fifo[193] = 16581;
-    s->fifo[194] = 80;
-    s->fifo[195] = 16581;
-    s->fifo[196] = 81;
-    s->fifo[197] = 16581;
-    s->fifo[198] = 82;
-    s->fifo[199] = 24581;
-    s->fifo[200] = 83;
-    s->fifo[201] = 24581;
-    s->fifo[202] = 84;
-    s->fifo[204] = 85;
-    s->fifo[206] = 86;
-    s->fifo[208] = 87;
-    s->fifo[209] = 1;
-    s->fifo[210] = 88;
-    s->fifo[212] = 89;
-    s->fifo[213] = 1092616192;
-    s->fifo[214] = 90;
-    s->fifo[215] = 1092616192;
-    s->fifo[216] = 91;
-    s->fifo[217] = 19161088;
-    // SVGA_FIFO_3D_CAPS
-    // s->fifo[SVGA_FIFO_FENCE_GOAL] = 4294967198;
-    if (s->pitchlock >= 1) {
-      s->fifo[SVGA_FIFO_PITCHLOCK] = s->pitchlock;
-    } else {
-      s->fifo[SVGA_FIFO_PITCHLOCK] = (((s->new_depth) * (s->new_width)) / (8));
-    };
-    s->fifo[SVGA_FIFO_FLAGS] = s->ff;
-    s->fifo[SVGA_FIFO_CAPABILITIES] = s->fc;
-    s->fifo[SVGA_FIFO_BUSY] = s->sync;
-    s->fifo[SVGA_FIFO_DEAD] = 0;
-    if ((s->enable >= 1 || s->config >= 1) &&
-        (s->new_width >= 1 && s->new_height >= 1 && s->new_depth >= 1)) {
-      if (s->pitchlock >= 1) {
-        s->new_width = (((s->pitchlock) * (8)) / (s->new_depth));
-      };
-      dpy_gfx_update(s->vga.con, 0, 0, s->new_width, s->new_height);
-    };
-  };
-  return 0;
 };
 static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
   VPRINT("vmsvga_value_read was just executed\n");
   uint32_t ret;
   uint32_t caps;
-  uint32_t cap2;
   struct vmsvga_state_s *s = opaque;
   struct pci_vmsvga_state_s *pci_vmsvga =
       container_of(s, struct pci_vmsvga_state_s, chip);
+  if (s->index >= SVGA_REG_PALETTE_MIN && s->index <= SVGA_REG_PALETTE_MAX) {
+    return s->svgapalettebase[s->index - SVGA_REG_PALETTE_MIN];
+  };
+  if (s->index >= SVGA_SCRATCH_BASE &&
+      s->index < SVGA_SCRATCH_BASE + s->scratch_size) {
+    return s->scratch[s->index - SVGA_SCRATCH_BASE];
+  };
   VPRINT("Unknown register %u\n", s->index);
   switch (s->index) {
   case SVGA_REG_FENCE_GOAL:
-    ret = s->fifo[SVGA_FIFO_FENCE_GOAL];
+    ret = s->fence_goal;
     VPRINT("SVGA_REG_FENCE_GOAL register %u with the return of %u\n", s->index,
            ret);
     break;
@@ -5769,56 +5675,38 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_WIDTH:
-    if (s->new_width >= 1) {
-      ret = s->new_width;
-    } else {
-      ret = 1024;
-      s->enable = 0;
-      s->config = 0;
-    };
+    ret = s->new_width ? s->new_width : 1024;
     VPRINT("SVGA_REG_WIDTH register %u with the return of %u\n", s->index, ret);
     break;
   case SVGA_REG_HEIGHT:
-    if (s->new_height >= 1) {
-      ret = s->new_height;
-    } else {
-      ret = 768;
-      s->enable = 0;
-      s->config = 0;
-    };
+    ret = s->new_height ? s->new_height : 768;
     VPRINT("SVGA_REG_HEIGHT register %u with the return of %u\n", s->index,
            ret);
     break;
   case SVGA_REG_MAX_WIDTH:
-    ret = 8192;
+    ret = VMSVGA_MAX_WIDTH;
     VPRINT("SVGA_REG_MAX_WIDTH register %u with the return of %u\n", s->index,
            ret);
     break;
   case SVGA_REG_MAX_HEIGHT:
-    ret = 8192;
+    ret = VMSVGA_MAX_HEIGHT;
     VPRINT("SVGA_REG_MAX_HEIGHT register %u with the return of %u\n", s->index,
            ret);
     break;
   case SVGA_REG_SCREENTARGET_MAX_WIDTH:
-    ret = 8192;
+    ret = VMSVGA_MAX_WIDTH;
     VPRINT(
         "SVGA_REG_SCREENTARGET_MAX_WIDTH register %u with the return of %u\n",
         s->index, ret);
     break;
   case SVGA_REG_SCREENTARGET_MAX_HEIGHT:
-    ret = 8192;
+    ret = VMSVGA_MAX_HEIGHT;
     VPRINT(
         "SVGA_REG_SCREENTARGET_MAX_HEIGHT register %u with the return of %u\n",
         s->index, ret);
     break;
   case SVGA_REG_BITS_PER_PIXEL:
-    if (s->new_depth >= 1) {
-      ret = s->new_depth;
-    } else {
-      ret = 32;
-      s->enable = 0;
-      s->config = 0;
-    };
+    ret = s->new_depth ? s->new_depth : 32;
     VPRINT("SVGA_REG_BITS_PER_PIXEL register %u with the return of %u\n",
            s->index, ret);
     break;
@@ -5828,15 +5716,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            s->index, ret);
     break;
   case SVGA_REG_DEPTH:
-    if ((s->new_depth) == (32)) {
-      ret = 24;
-    } else if (s->new_depth >= 1) {
-      ret = s->new_depth;
-    } else {
-      ret = 24;
-      s->enable = 0;
-      s->config = 0;
-    };
+    ret = s->new_depth == 32 ? 24 : (s->new_depth ? s->new_depth : 24);
     VPRINT("SVGA_REG_DEPTH register %u with the return of %u\n", s->index, ret);
     break;
   case SVGA_REG_PSEUDOCOLOR:
@@ -5888,11 +5768,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_BYTES_PER_LINE:
-    if (s->pitchlock >= 1) {
-      ret = s->pitchlock;
-    } else {
-      ret = (((s->new_depth) * (s->new_width)) / (8));
-    };
+    ret = vmsvga_stride(s);
     VPRINT("SVGA_REG_BYTES_PER_LINE register %u with the return of %u\n",
            s->index, ret);
     break;
@@ -5917,65 +5793,59 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_FB_SIZE:
-    if (s->pitchlock >= 1) {
-      ret = ((s->new_height) * (s->pitchlock));
-    } else {
-      ret = ((s->new_height) * ((((s->new_depth) * (s->new_width)) / (8))));
-    };
+    ret = vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
+                            s->pitchlock)
+              ? s->new_height * vmsvga_stride(s)
+              : 0;
     VPRINT("SVGA_REG_FB_SIZE register %u with the return of %u\n", s->index,
            ret);
     break;
   case SVGA_REG_MOB_MAX_SIZE:
-    ret = s->vga.vram_size;
+    ret = 0;
     VPRINT("SVGA_REG_MOB_MAX_SIZE register %u with the return of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_GBOBJECT_MEM_SIZE_KB:
-    ret = 8388608;
+    ret = 0;
     VPRINT("SVGA_REG_GBOBJECT_MEM_SIZE_KB register %u with the return of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB:
-    if (s->pitchlock >= 1) {
-      ret = ((s->new_height) * (s->pitchlock));
-    } else {
-      ret = ((s->new_height) * ((((s->new_depth) * (s->new_width)) / (8))));
-    };
+    ret = 0;
     VPRINT("SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB register %u with the "
            "return of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_MSHINT:
-    ret = 1;
+    ret = 0;
     VPRINT("SVGA_REG_MSHINT register %u with the return of %u\n", s->index,
            ret);
     break;
   case SVGA_REG_MAX_PRIMARY_BOUNDING_BOX_MEM:
-    ret = 134217728;
+    ret = s->vga.vram_size;
     VPRINT("SVGA_REG_MAX_PRIMARY_BOUNDING_BOX_MEM register %u with the return "
            "of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_CAPABILITIES:
+#ifdef EXPCAPS
     caps = 0xffffffff;
-#ifndef EXPCAPS
-    caps -= SVGA_CAP_RECT_PAT_FILL;     // Windows 9x
-    caps -= SVGA_CAP_LEGACY_OFFSCREEN; // Windows 9x
-    caps -= SVGA_CAP_GLYPH;            // Windows 9x
-    caps -= SVGA_CAP_GLYPH_CLIPPING;   // Windows 9x
-    caps -= SVGA_CAP_OFFSCREEN_1;      // Windows 9x & Windows (XPDM)
-    caps -= SVGA_CAP_ALPHA_BLEND;      // Windows (XPDM)
-    caps -= SVGA_CAP_SCREEN_OBJECT_2;  // Linux
-    caps -= SVGA_CAP_CMD_BUFFERS_2;    // Windows (WDDM)
-    caps -= SVGA_CAP_GBOBJECTS;        // Linux, Windows (XPDM) & Windows (WDDM)
+#else
+    caps = SVGA_CAP_RECT_FILL | SVGA_CAP_RECT_COPY | SVGA_CAP_RASTER_OP |
+           SVGA_CAP_CURSOR | SVGA_CAP_CURSOR_BYPASS |
+           SVGA_CAP_CURSOR_BYPASS_2 | SVGA_CAP_ALPHA_CURSOR |
+           SVGA_CAP_EXTENDED_FIFO | SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK;
 #endif
     ret = caps;
     VPRINT("SVGA_REG_CAPABILITIES register %u with the return of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_CAP2:
-    cap2 = 0xffffffff;
-    ret = cap2;
+#ifdef EXPCAPS
+    ret = 0xffffffff;
+#else
+    ret = SVGA_CAP2_NONE;
+#endif
     VPRINT("SVGA_REG_CAP2 register %u with the return of %u\n", s->index, ret);
     break;
   case SVGA_REG_MEM_START:
@@ -6012,18 +5882,18 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_CURSOR_X:
-    ret = s->fifo[SVGA_FIFO_CURSOR_X];
+    ret = s->cursor_x;
     VPRINT("SVGA_REG_CURSOR_X register %u with the return of %u\n", s->index,
            ret);
     break;
   case SVGA_REG_CURSOR_Y:
-    ret = s->fifo[SVGA_FIFO_CURSOR_Y];
+    ret = s->cursor_y;
     VPRINT("SVGA_REG_CURSOR_Y register %u with the return of %u\n", s->index,
            ret);
     break;
   case SVGA_REG_CURSOR_ON:
-    if ((s->fifo[SVGA_FIFO_CURSOR_ON] == SVGA_CURSOR_ON_SHOW) ||
-        (s->fifo[SVGA_FIFO_CURSOR_ON] == SVGA_CURSOR_ON_RESTORE_TO_FB)) {
+    if (s->cursor_on == SVGA_CURSOR_ON_SHOW ||
+        s->cursor_on == SVGA_CURSOR_ON_RESTORE_TO_FB) {
       ret = SVGA_CURSOR_ON_SHOW;
     } else {
       ret = SVGA_CURSOR_ON_HIDE;
@@ -6047,11 +5917,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            s->index, ret);
     break;
   case SVGA_REG_PITCHLOCK:
-    if (s->pitchlock >= 1) {
-      ret = s->pitchlock;
-    } else {
-      ret = (((s->new_depth) * (s->new_width)) / (8));
-    };
+    ret = vmsvga_stride(s);
     VPRINT("SVGA_REG_PITCHLOCK register %u with the return of %u\n", s->index,
            ret);
     break;
@@ -6149,7 +6015,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_MEMORY_SIZE:
-    ret = s->vga.vram_size + 61440000;
+    ret = s->vga.vram_size;
     VPRINT("SVGA_REG_MEMORY_SIZE register %u with the return of %u\n", s->index,
            ret);
     break;
@@ -6159,7 +6025,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_FENCE:
-    ret = s->fifo[SVGA_FIFO_FENCE];
+    ret = s->fence;
     VPRINT("SVGA_REG_FENCE register %u with the return of %u\n", s->index, ret);
     break;
   case SVGA_REG_FIFO_CAPS:
@@ -6168,12 +6034,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_CURSOR_MAX_DIMENSION:
-    ret = 2048;
+    ret = VMSVGA_CURSOR_MAX_DIMENSION;
     VPRINT("SVGA_REG_CURSOR_MAX_DIMENSION register %u with the return of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_CURSOR_MAX_BYTE_SIZE:
-    ret = 8388608;
+    ret = VMSVGA_CURSOR_MAX_BYTE_SIZE;
     VPRINT("SVGA_REG_CURSOR_MAX_BYTE_SIZE register %u with the return of %u\n",
            s->index, ret);
     break;
@@ -6182,797 +6048,35 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     VPRINT("SVGA_REG_CURSOR_MOBID register %u with the return of %u\n",
            s->index, ret);
     break;
-  case 1029:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1031:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1034:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1035:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1036:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1039:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1041:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1042:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1043:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1045:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1046:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1047:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1048:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1049:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1050:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1051:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1052:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1053:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1054:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1055:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1056:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1057:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1058:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1059:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1060:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1061:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1062:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1063:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1064:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1065:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1066:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1067:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1068:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1069:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1070:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1071:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1073:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1076:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1077:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1079:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1082:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1083:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1084:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1085:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1087:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1088:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1089:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1090:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1091:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1093:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1094:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1095:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1097:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1098:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1100:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1101:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1103:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1104:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1106:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1107:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1108:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1109:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1110:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1111:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1112:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1113:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1114:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1115:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1116:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1117:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1118:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1119:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1120:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1123:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1125:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1126:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1127:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1129:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1130:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1131:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1132:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1135:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1137:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1138:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1139:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1141:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1142:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1143:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1144:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1146:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1147:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1149:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1150:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1151:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1152:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1153:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1154:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1155:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1156:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1158:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1159:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1161:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1162:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1163:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1164:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1165:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1166:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1167:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1168:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1169:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1171:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1172:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1173:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1174:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1175:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1177:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1178:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1179:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1180:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1181:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1183:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1184:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1185:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1186:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1187:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1189:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1190:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1191:
-    ret = 42;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1192:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1193:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1194:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1195:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1196:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1197:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1198:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1199:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1200:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1201:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1202:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1203:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1204:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1205:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1206:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1207:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1208:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1209:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1210:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1211:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1212:
-    ret = 21;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1213:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1214:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1215:
-    ret = 63;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
-  case 1792:
-    ret = 3;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
-    break;
   default:
     ret = 0;
     VPRINT("default register %u with the return of %u\n", s->index, ret);
     break;
-  };
-  if (s->index >= SVGA_REG_PALETTE_MIN && s->index <= SVGA_REG_PALETTE_MAX) {
-    uint32_t idx = s->index - SVGA_REG_PALETTE_MIN;
-    ret = s->svgapalettebase[idx];
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the return of %u\n", s->index,
-           s->index, ret);
   };
   return ret;
 };
 static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
   VPRINT("vmsvga_value_write was just executed\n");
   struct vmsvga_state_s *s = opaque;
-  uint32_t irq_status;
-  irq_status = 0;
+  if (s->index >= SVGA_REG_PALETTE_MIN && s->index <= SVGA_REG_PALETTE_MAX) {
+    s->svgapalettebase[s->index - SVGA_REG_PALETTE_MIN] = value;
+    return;
+  };
+  if (s->index >= SVGA_SCRATCH_BASE &&
+      s->index < SVGA_SCRATCH_BASE + s->scratch_size) {
+    s->scratch[s->index - SVGA_SCRATCH_BASE] = value;
+    return;
+  };
   VPRINT("Unknown register %u with the value of %u\n", s->index, value);
   switch (s->index) {
   case SVGA_REG_ID:
-    s->svgaid = value;
+    if (value == SVGA_ID_0 || value == SVGA_ID_1 || value == SVGA_ID_2) {
+      s->svgaid = value;
+    };
     VPRINT("SVGA_REG_ID register %u with the value of %u\n", s->index, value);
     break;
   case SVGA_REG_FENCE_GOAL:
-    s->fifo[SVGA_FIFO_FENCE_GOAL] = value;
+    s->fence_goal = value;
     VPRINT("SVGA_REG_FENCE_GOAL register %u with the value of %u\n", s->index,
            value);
     break;
@@ -6980,63 +6084,59 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     if ((value < 1) || (value & SVGA_REG_ENABLE_DISABLE) ||
         (value & SVGA_REG_ENABLE_HIDE)) {
       s->enable = 0;
-      s->config = 0;
     } else {
-      s->enable = value;
+      s->enable = 1;
     };
+    s->invalidated = true;
     VPRINT("SVGA_REG_ENABLE register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_WIDTH:
-    if (value >= 1) {
+    if (vmsvga_mode_valid(s, value, s->new_height, s->new_depth,
+                          s->pitchlock)) {
       s->new_width = value;
-    } else {
-      s->new_width = 1024;
-      s->enable = 0;
-      s->config = 0;
+      s->invalidated = true;
     };
     VPRINT("SVGA_REG_WIDTH register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_HEIGHT:
-    if (value >= 1) {
+    if (vmsvga_mode_valid(s, s->new_width, value, s->new_depth,
+                          s->pitchlock)) {
       s->new_height = value;
-    } else {
-      s->new_height = 768;
-      s->enable = 0;
-      s->config = 0;
+      s->invalidated = true;
     };
     VPRINT("SVGA_REG_HEIGHT register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_BITS_PER_PIXEL:
-    if (value >= 1) {
+    if (vmsvga_mode_valid(s, s->new_width, s->new_height, value,
+                          s->pitchlock)) {
       s->new_depth = value;
-    } else {
-      s->new_depth = 32;
-      s->enable = 0;
-      s->config = 0;
+      s->invalidated = true;
     };
     VPRINT("SVGA_REG_BITS_PER_PIXEL register %u with the value of %u\n",
            s->index, value);
     break;
   case SVGA_REG_CONFIG_DONE:
-    if (value < 1) {
-      s->enable = 0;
-      s->config = 0;
+    s->config = !!value;
+    if (s->config) {
+      vmsvga_update_fifo_registers(s);
     } else {
-      s->config = value;
+      s->sync = 0;
+      if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+        s->fifo[SVGA_FIFO_BUSY] = 0;
+      };
     };
     VPRINT("SVGA_REG_CONFIG_DONE register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_SYNC:
-    if ((s->enable >= 1 || s->config >= 1) &&
-        (s->new_width >= 1 && s->new_height >= 1 && s->new_depth >= 1)) {
-      if (s->sync < 1 && value >= 1) {
-        s->sync = 1;
-        vmsvga_fifo_run(s);
-      };
+    if (s->enable && s->config && value && !s->sync &&
+        vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
+                          s->pitchlock)) {
+      s->sync = 1;
+      vmsvga_fifo_run(s);
     };
     VPRINT("SVGA_REG_SYNC register %u with the value of %u\n", s->index, value);
     break;
@@ -7054,81 +6154,49 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_CURSOR_X:
-    s->fifo[SVGA_FIFO_CURSOR_X] = value;
+    s->cursor_x = value;
     VPRINT("SVGA_REG_CURSOR_X register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_CURSOR_Y:
-    s->fifo[SVGA_FIFO_CURSOR_Y] = value;
+    s->cursor_y = value;
     VPRINT("SVGA_REG_CURSOR_Y register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_CURSOR_ON:
-    s->fifo[SVGA_FIFO_CURSOR_ON] = value;
+    if (value <= SVGA_CURSOR_ON_RESTORE_TO_FB) {
+      s->cursor_on = value;
+    };
     VPRINT("SVGA_REG_CURSOR_ON register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_BYTES_PER_LINE:
-    if (value >= 1) {
-      // s->pitchlock = value;
-    } else {
-      // s->pitchlock = (((s->new_depth) * (s->new_width)) / (8));
-    };
-    VPRINT("SVGA_REG_BYTES_PER_LINE register %u with the value of %u\n",
-           s->index, value);
+    VPRINT("SVGA_REG_BYTES_PER_LINE register %u is read-only\n", s->index);
     break;
   case SVGA_REG_PITCHLOCK:
-    if (value >= 1) {
-      // s->pitchlock = value;
-    } else {
-      // s->pitchlock = (((s->new_depth) * (s->new_width)) / (8));
+    if (value == 0 ||
+        vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
+                          value)) {
+      s->pitchlock = value;
+      s->invalidated = true;
+      if (vmsvga_fifo_has_reg(s, SVGA_FIFO_PITCHLOCK)) {
+        s->fifo[SVGA_FIFO_PITCHLOCK] = vmsvga_stride(s);
+      };
     };
     VPRINT("SVGA_REG_PITCHLOCK register %u with the value of %u\n", s->index,
            value);
     break;
-  case SVGA_REG_IRQMASK:
+  case SVGA_REG_IRQMASK: {
     s->irq_mask = value;
 #ifndef RAISE_IRQ_OFF
     struct pci_vmsvga_state_s *pci_vmsvga =
         container_of(s, struct pci_vmsvga_state_s, chip);
-    PCIDevice *pci_dev = PCI_DEVICE(pci_vmsvga);
+    pci_set_irq(PCI_DEVICE(pci_vmsvga), !!(s->irq_status & s->irq_mask));
 #endif
-    if ((value) & (SVGA_IRQFLAG_FENCE_GOAL)) {
-      VPRINT("REG: irq_status |= SVGA_IRQFLAG_FENCE_GOAL\n");
-      irq_status |= SVGA_IRQFLAG_FENCE_GOAL;
-    } else if ((value) & (SVGA_IRQFLAG_ANY_FENCE)) {
-      VPRINT("REG: irq_status |= SVGA_IRQFLAG_ANY_FENCE\n");
-#ifndef ANY_FENCE_OFF
-      irq_status |= SVGA_IRQFLAG_ANY_FENCE;
-#endif
-    };
-    if ((irq_status) || ((value) & (SVGA_IRQFLAG_FIFO_PROGRESS))) {
-      VPRINT("REG: irq_status || value & SVGA_IRQFLAG_FIFO_PROGRESS\n");
-      if ((value) & (SVGA_IRQFLAG_FIFO_PROGRESS)) {
-        VPRINT("REG: irq_status |= SVGA_IRQFLAG_FIFO_PROGRESS\n");
-        irq_status |= SVGA_IRQFLAG_FIFO_PROGRESS;
-      };
-      if ((value) & (irq_status)) {
-        VPRINT("REG: Pci_set_irq=1\n");
-        s->irq_status = irq_status;
-#ifndef RAISE_IRQ_OFF
-        pci_set_irq(pci_dev, 1);
-#endif
-      };
-    } else if ((s->irq_status) & (value)) {
-      VPRINT("REG: Pci_set_irq=1\n");
-#ifndef RAISE_IRQ_OFF
-      pci_set_irq(pci_dev, 1);
-#endif
-    } else {
-      VPRINT("REG: Pci_set_irq=0\n");
-#ifndef RAISE_IRQ_OFF
-      pci_set_irq(pci_dev, 0);
-#endif
-    };
     VPRINT("SVGA_REG_IRQMASK register %u with the value of %u\n", s->index,
            value);
     break;
+  }
   case SVGA_REG_NUM_GUEST_DISPLAYS:
     s->num_gd = value;
     VPRINT("SVGA_REG_NUM_GUEST_DISPLAYS register %u with the value of %u\n",
@@ -7155,23 +6223,19 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_DISPLAY_WIDTH:
-    if (value >= 1) {
+    if (vmsvga_mode_valid(s, value, s->new_height, s->new_depth,
+                          s->pitchlock)) {
       s->new_width = value;
-    } else {
-      s->new_width = 1024;
-      s->enable = 0;
-      s->config = 0;
+      s->invalidated = true;
     };
     VPRINT("SVGA_REG_DISPLAY_WIDTH register %u with the value of %u\n",
            s->index, value);
     break;
   case SVGA_REG_DISPLAY_HEIGHT:
-    if (value >= 1) {
+    if (vmsvga_mode_valid(s, s->new_width, value, s->new_depth,
+                          s->pitchlock)) {
       s->new_height = value;
-    } else {
-      s->new_height = 768;
-      s->enable = 0;
-      s->config = 0;
+      s->invalidated = true;
     };
     VPRINT("SVGA_REG_DISPLAY_HEIGHT register %u with the value of %u\n",
            s->index, value);
@@ -7474,12 +6538,6 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
   default:
     VPRINT("default register %u with the value of %u\n", s->index, value);
   };
-  if (s->index >= SVGA_REG_PALETTE_MIN && s->index <= SVGA_REG_PALETTE_MAX) {
-    uint32_t idx = s->index - SVGA_REG_PALETTE_MIN;
-    s->svgapalettebase[idx] = value;
-    VPRINT("SVGA_REG_PALETTE_%u register %u with the value of %u\n", s->index,
-           s->index, value);
-  };
   return;
 };
 static uint32_t vmsvga_irqstatus_read(void *opaque, uint32_t address) {
@@ -7497,14 +6555,8 @@ static void vmsvga_irqstatus_write(void *opaque, uint32_t address,
 #ifndef RAISE_IRQ_OFF
   struct pci_vmsvga_state_s *pci_vmsvga =
       container_of(s, struct pci_vmsvga_state_s, chip);
-  PCIDevice *pci_dev = PCI_DEVICE(pci_vmsvga);
+  pci_set_irq(PCI_DEVICE(pci_vmsvga), !!(s->irq_status & s->irq_mask));
 #endif
-  if (!((s->irq_status) & (s->irq_mask))) {
-    VPRINT("PORT: Pci_set_irq=0\n");
-#ifndef RAISE_IRQ_OFF
-    pci_set_irq(pci_dev, 0);
-#endif
-  };
 };
 static uint32_t vmsvga_bios_read(void *opaque, uint32_t address) {
   VPRINT("vmsvga_bios_read was just executed\n");
@@ -7521,28 +6573,67 @@ static void vmsvga_bios_write(void *opaque, uint32_t address, uint32_t data) {
 static void vmsvga_update_display(void *opaque) {
   // VPRINT("vmsvga_update_display was just executed\n");
   struct vmsvga_state_s *s = opaque;
-  if ((s->enable >= 1 || s->config >= 1) &&
-      (s->new_width >= 1 && s->new_height >= 1 && s->new_depth >= 1)) {
+  if (s->enable && s->config &&
+      vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
+                        s->pitchlock)) {
     vmsvga_check_size(s);
-    if (s->sync < 1) {
+    if (!s->sync) {
       s->sync = 1;
       vmsvga_fifo_run(s);
       cursor_update_from_fifo(s);
     };
+    if (s->invalidated) {
+      dpy_gfx_update(s->vga.con, 0, 0, s->new_width, s->new_height);
+      s->invalidated = false;
+    };
   } else {
-    s->vcs = s->vga;
-    s->vga.hw_ops->gfx_update(&s->vcs);
+    s->vga.hw_ops->gfx_update(&s->vga);
   };
 };
 static void vmsvga_reset(DeviceState *dev) {
   VPRINT("vmsvga_reset was just executed\n");
   struct pci_vmsvga_state_s *pci = VMWARE_SVGA(dev);
   struct vmsvga_state_s *s = &pci->chip;
+  s->index = 0;
+  s->scratch_size = VMSVGA_SCRATCH_SIZE;
+  s->fifo_size = VMSVGA_FIFO_SIZE;
   s->enable = 0;
   s->config = 0;
+  s->svgaid = SVGA_ID_2;
+  s->new_width = 1024;
+  s->new_height = 768;
+  s->new_depth = 32;
+  s->pitchlock = 0;
+  s->sync = 0;
+  s->irq_mask = 0;
+  s->irq_status = 0;
+  s->cursor = 0;
+  s->cursor_x = 0;
+  s->cursor_y = 0;
+  s->cursor_on = SVGA_CURSOR_ON_SHOW;
+  s->fence = 0;
+  s->fence_goal = 0;
+  s->thread = 0;
+  s->invalidated = true;
+  vmsvga_set_fifo_capabilities(s);
+  if (s->scratch != NULL) {
+    memset(s->scratch, 0, s->scratch_size * sizeof(*s->scratch));
+  };
+  if (s->fifo != NULL) {
+    vmsvga_update_fifo_registers(s);
+  };
+#ifndef RAISE_IRQ_OFF
+  pci_set_irq(PCI_DEVICE(pci), 0);
+#endif
 };
 static void vmsvga_invalidate_display(void *opaque) {
   VPRINT("vmsvga_invalidate_display was just executed\n");
+  struct vmsvga_state_s *s = opaque;
+  if (!s->enable || !s->config) {
+    s->vga.hw_ops->invalidate(&s->vga);
+    return;
+  };
+  s->invalidated = true;
 };
 static void vmsvga_text_update(void *opaque, console_ch_t *chardata) {
   VPRINT("vmsvga_text_update was just executed\n");
@@ -7553,6 +6644,32 @@ static void vmsvga_text_update(void *opaque, console_ch_t *chardata) {
 };
 static int vmsvga_post_load(void *opaque, int version_id) {
   VPRINT("vmsvga_post_load was just executed\n");
+  struct vmsvga_state_s *s = opaque;
+  s->scratch_size = VMSVGA_SCRATCH_SIZE;
+  s->fifo_size = VMSVGA_FIFO_SIZE;
+  s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
+  if (!vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
+                         s->pitchlock)) {
+    s->new_width = 1024;
+    s->new_height = 768;
+    s->new_depth = 32;
+    s->pitchlock = 0;
+  };
+  s->sync = 0;
+  s->thread = 0;
+  s->cursor_x = 0;
+  s->cursor_y = 0;
+  s->cursor_on = SVGA_CURSOR_ON_SHOW;
+  s->fence = 0;
+  s->fence_goal = 0;
+  s->invalidated = true;
+  vmsvga_set_fifo_capabilities(s);
+  vmsvga_update_fifo_registers(s);
+#ifndef RAISE_IRQ_OFF
+  struct pci_vmsvga_state_s *pci_vmsvga =
+      container_of(s, struct pci_vmsvga_state_s, chip);
+  pci_set_irq(PCI_DEVICE(pci_vmsvga), !!(s->irq_status & s->irq_mask));
+#endif
   return 0;
 };
 static VMStateDescription vmstate_vmware_vga_internal = {
@@ -7562,7 +6679,7 @@ static VMStateDescription vmstate_vmware_vga_internal = {
     .post_load = vmsvga_post_load,
     .fields = (const VMStateField[]){
         VMSTATE_UINT32_ARRAY(svgapalettebase, struct vmsvga_state_s,
-                             SVGA_PALETTE_SIZE),
+                             VMSVGA_PALETTE_STORAGE_SIZE),
         VMSTATE_UINT32(enable, struct vmsvga_state_s),
         VMSTATE_UINT32(config, struct vmsvga_state_s),
         VMSTATE_UINT32(index, struct vmsvga_state_s),
@@ -7616,11 +6733,11 @@ static GraphicHwOps vmsvga_ops = {
 static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                         MemoryRegion *address_space, MemoryRegion *io) {
   VPRINT("vmsvga_init was just executed\n");
-  s->scratch_size = 32;
-  s->scratch = g_malloc(s->scratch_size * 4);
+  s->scratch_size = VMSVGA_SCRATCH_SIZE;
+  s->scratch = g_new0(uint32_t, s->scratch_size);
   s->vga.con = graphic_console_init(dev, 0, &vmsvga_ops, s);
-  s->fifo_size = 2097152;
-  memory_region_init_ram(&s->fifo_ram, NULL, "vmsvga.fifo", s->fifo_size,
+  s->fifo_size = VMSVGA_FIFO_SIZE;
+  memory_region_init_ram(&s->fifo_ram, OBJECT(dev), "vmsvga.fifo", s->fifo_size,
                          &error_fatal);
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
   vga_common_init(&s->vga, OBJECT(dev), &error_fatal);
@@ -7630,22 +6747,20 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
 #else
   vmstate_register(NULL, 0, &vmstate_vga_common, &s->vga);
 #endif
-  if (s->thread < 1) {
-    s->thread++;
-    s->fifo[SVGA_FIFO_CURSOR_ON] = SVGA_CURSOR_ON_SHOW;
-    s->new_width = 1024;
-    s->new_height = 768;
-    s->new_depth = 32;
-    pthread_t threads[1];
-    s->ff = 0xffffffff;
-    s->fc = 0xffffffff;
-#ifndef EXPCAPS
-    s->ff -= SVGA_FIFO_FLAG_ACCELFRONT;     // Windows (XPDM)
-    s->fc -= SVGA_FIFO_CAP_SCREEN_OBJECT;   // Windows (WDDM)
-    s->fc -= SVGA_FIFO_CAP_SCREEN_OBJECT_2; // Windows (WDDM)
-#endif
-    pthread_create(threads, NULL, vmsvga_loop, (void *)s);
-  };
+  s->thread = 0;
+  s->svgaid = SVGA_ID_2;
+  s->new_width = 1024;
+  s->new_height = 768;
+  s->new_depth = 32;
+  s->pitchlock = 0;
+  s->sync = 0;
+  s->cursor_x = 0;
+  s->cursor_y = 0;
+  s->cursor_on = SVGA_CURSOR_ON_SHOW;
+  s->fence = 0;
+  s->fence_goal = 0;
+  s->invalidated = true;
+  vmsvga_set_fifo_capabilities(s);
 };
 static uint64_t vmsvga_io_read(void *opaque, hwaddr addr, unsigned size) {
   VPRINT("vmsvga_io_read was just executed\n");
@@ -7721,6 +6836,10 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp) {
   pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.vga.vram);
   pci_register_bar(dev, 2, PCI_BASE_ADDRESS_MEM_TYPE_32, &s->chip.fifo_ram);
 };
+static void pci_vmsvga_uninit(PCIDevice *dev) {
+  struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+  g_clear_pointer(&s->chip.scratch, g_free);
+};
 static Property vga_vmware_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", struct pci_vmsvga_state_s,
                        chip.vga.vram_size_mb, 128),
@@ -7728,11 +6847,16 @@ static Property vga_vmware_properties[] = {
                      chip.vga.global_vmstate, true),
     DEFINE_PROP_END_OF_LIST(),
 };
+#ifdef QEMU_V9_2_0
 static void vmsvga_class_init(ObjectClass *klass, void *data) {
+#else
+static void vmsvga_class_init(ObjectClass *klass, const void *data) {
+#endif
   VPRINT("vmsvga_class_init was just executed\n");
   DeviceClass *dc = DEVICE_CLASS(klass);
   PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
   k->realize = pci_vmsvga_realize;
+  k->exit = pci_vmsvga_uninit;
   k->romfile = "vgabios-vmware.bin";
   k->vendor_id = PCI_VENDOR_ID_VMWARE;
   k->device_id = PCI_DEVICE_ID_VMWARE_SVGA2;
@@ -7740,11 +6864,7 @@ static void vmsvga_class_init(ObjectClass *klass, void *data) {
   k->subsystem_vendor_id = PCI_VENDOR_ID_VMWARE;
   k->subsystem_id = PCI_DEVICE_ID_VMWARE_SVGA2;
   k->revision = 0x00;
-#ifdef QEMU_V9_2_0
   device_class_set_legacy_reset(dc, vmsvga_reset);
-#else
-  dc->reset = vmsvga_reset;
-#endif
   dc->vmsd = &vmstate_vmware_vga;
   device_class_set_props(dc, vga_vmware_properties);
   dc->hotpluggable = false;

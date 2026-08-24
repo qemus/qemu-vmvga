@@ -147,6 +147,18 @@ struct vmsvga_object_s {
   uint8_t *data;
 };
 
+#define VMSVGA_SURFACE_VERSION_1 1
+
+struct vmsvga_surface_s {
+  uint32_t descriptor_offset;
+  uint32_t bpp;
+  uint32_t width;
+  uint32_t height;
+  uint32_t pitch;
+  uint32_t data_offset;
+  uint32_t bypp;
+};
+
 #ifdef VERBOSE
 #define VPRINT(fmt, ...)                                                       \
   printf("vmsvga (%s): %u - %s: " fmt, __FILE__, (uint32_t)time(NULL),         \
@@ -676,6 +688,240 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
     };
   };
   dpy_gfx_update(s->vga.con, x1, y1, w, h);
+  return true;
+};
+static inline uint32_t vmsvga_bytes_per_pixel(uint32_t bpp);
+
+static inline uint32_t vmsvga_vram_read_u32(struct vmsvga_state_s *s,
+                                               uint32_t offset) {
+  uint32_t value;
+  memcpy(&value, s->vga.vram_ptr + offset, sizeof(value));
+  return le32_to_cpu(value);
+};
+static inline void vmsvga_vram_write_u32(struct vmsvga_state_s *s,
+                                         uint32_t offset, uint32_t value) {
+  value = cpu_to_le32(value);
+  memcpy(s->vga.vram_ptr + offset, &value, sizeof(value));
+};
+static inline bool vmsvga_surface_load(struct vmsvga_state_s *s,
+                                       uint32_t descriptor_offset,
+                                       struct vmsvga_surface_s *surface) {
+  uint64_t vram_size = s->vga.vram_size;
+  uint32_t size;
+  uint32_t version;
+  uint64_t min_pitch;
+  uint64_t data_size;
+  if ((descriptor_offset & 3) != 0 ||
+      descriptor_offset > vram_size ||
+      sizeof(uint32_t) * 10 > vram_size - descriptor_offset) {
+    return false;
+  };
+  size = vmsvga_vram_read_u32(s, descriptor_offset + 0);
+  version = vmsvga_vram_read_u32(s, descriptor_offset + 4);
+  surface->descriptor_offset = descriptor_offset;
+  surface->bpp = vmsvga_vram_read_u32(s, descriptor_offset + 8);
+  surface->width = vmsvga_vram_read_u32(s, descriptor_offset + 12);
+  surface->height = vmsvga_vram_read_u32(s, descriptor_offset + 16);
+  surface->pitch = vmsvga_vram_read_u32(s, descriptor_offset + 20);
+  surface->data_offset = vmsvga_vram_read_u32(s, descriptor_offset + 36);
+  surface->bypp = vmsvga_bytes_per_pixel(surface->bpp);
+  if (size < sizeof(uint32_t) * 10 || size > vram_size - descriptor_offset ||
+      version != VMSVGA_SURFACE_VERSION_1 || surface->bypp == 0 ||
+      surface->width < 1 ||
+      surface->width > VMSVGA_MAX_WIDTH || surface->height < 1 ||
+      surface->height > VMSVGA_MAX_HEIGHT) {
+    return false;
+  };
+  min_pitch = (uint64_t)surface->width * surface->bypp;
+  if (surface->pitch < min_pitch) {
+    return false;
+  };
+  data_size = (uint64_t)surface->pitch * surface->height;
+  if (surface->data_offset > vram_size || data_size > vram_size - surface->data_offset) {
+    return false;
+  };
+  return true;
+};
+static inline bool vmsvga_surface_rect_valid(const struct vmsvga_surface_s *surface,
+                                              uint32_t x, uint32_t y,
+                                              uint32_t w, uint32_t h) {
+  return x <= surface->width && y <= surface->height &&
+         w <= surface->width - x && h <= surface->height - y;
+};
+static inline void vmsvga_surface_dequeue(struct vmsvga_state_s *s,
+                                          const struct vmsvga_surface_s *surface) {
+  uint32_t offset = surface->descriptor_offset + 28;
+  uint32_t dequeued = vmsvga_vram_read_u32(s, offset);
+  vmsvga_vram_write_u32(s, offset, dequeued + 1);
+};
+static inline void vmsvga_surface_update_display(struct vmsvga_state_s *s,
+                                                 const struct vmsvga_surface_s *surface,
+                                                 uint32_t x, uint32_t y,
+                                                 uint32_t w, uint32_t h) {
+  DisplaySurface *display = qemu_console_surface(s->vga.con);
+  uint32_t display_stride = surface_stride(display);
+  uint32_t display_bypp = surface_bytes_per_pixel(display);
+  uint64_t fb_size = (uint64_t)display_stride * surface_height(display);
+  uint64_t surface_start = surface->data_offset;
+  if (w == 0 || h == 0 || surface_start >= fb_size) {
+    return;
+  };
+  if (surface->data_offset == 0 && surface->pitch == display_stride &&
+      surface->bypp == display_bypp &&
+      x <= (uint32_t)surface_width(display) &&
+      y <= (uint32_t)surface_height(display) &&
+      w <= (uint32_t)surface_width(display) - x &&
+      h <= (uint32_t)surface_height(display) - y) {
+    dpy_gfx_update(s->vga.con, x, y, w, h);
+  } else {
+    dpy_gfx_update(s->vga.con, 0, 0, surface_width(display),
+                   surface_height(display));
+  };
+};
+static inline bool vmsvga_surface_fill(struct vmsvga_state_s *s, uint32_t color,
+                                       uint32_t surface_offset, uint32_t x,
+                                       uint32_t y, uint32_t w, uint32_t h,
+                                       uint32_t rop) {
+  struct vmsvga_surface_s surface = {0};
+  uint8_t col[4];
+  size_t width_bytes;
+  uint32_t row;
+  bool valid = vmsvga_surface_load(s, surface_offset, &surface);
+  if (!valid) {
+    return false;
+  };
+  if (!vmsvga_surface_rect_valid(&surface, x, y, w, h) ||
+      rop > VMSVGA_ROP_SET) {
+    vmsvga_surface_dequeue(s, &surface);
+    return false;
+  };
+  if (w == 0 || h == 0 || rop == VMSVGA_ROP_NOOP) {
+    vmsvga_surface_dequeue(s, &surface);
+    return true;
+  };
+  width_bytes = (size_t)surface.bypp * w;
+  col[0] = color;
+  col[1] = color >> 8;
+  col[2] = color >> 16;
+  col[3] = color >> 24;
+  if (rop == VMSVGA_ROP_COPY || rop == VMSVGA_ROP_COPY_INVERTED) {
+    uint8_t inverted[4] = {~col[0], ~col[1], ~col[2], ~col[3]};
+    const uint8_t *pattern = rop == VMSVGA_ROP_COPY ? col : inverted;
+    uint8_t *first = s->vga.vram_ptr + surface.data_offset +
+                     (size_t)surface.pitch * y + (size_t)surface.bypp * x;
+    vmsvga_rop_fill_buffer(first, width_bytes, pattern, surface.bypp,
+                           VMSVGA_ROP_COPY);
+    for (row = 1; row < h; row++) {
+      uint8_t *dst = s->vga.vram_ptr + surface.data_offset +
+                     (size_t)surface.pitch * (y + row) +
+                     (size_t)surface.bypp * x;
+      memcpy(dst, first, width_bytes);
+    };
+  } else {
+    for (row = 0; row < h; row++) {
+      uint8_t *dst = s->vga.vram_ptr + surface.data_offset +
+                     (size_t)surface.pitch * (y + row) +
+                     (size_t)surface.bypp * x;
+      if (rop == VMSVGA_ROP_CLEAR) {
+        memset(dst, 0, width_bytes);
+      } else if (rop == VMSVGA_ROP_SET) {
+        memset(dst, 0xff, width_bytes);
+      } else if (rop == VMSVGA_ROP_INVERT) {
+        vmsvga_rop_invert_buffer(dst, width_bytes);
+      } else {
+        vmsvga_rop_fill_buffer(dst, width_bytes, col, surface.bypp, rop);
+      };
+    };
+  };
+  vmsvga_surface_update_display(s, &surface, x, y, w, h);
+  vmsvga_surface_dequeue(s, &surface);
+  return true;
+};
+static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
+                                       uint32_t src_surface_offset,
+                                       uint32_t dst_surface_offset,
+                                       uint32_t src_x, uint32_t src_y,
+                                       uint32_t dst_x, uint32_t dst_y,
+                                       uint32_t w, uint32_t h, uint32_t rop) {
+  struct vmsvga_surface_s src_surface = {0};
+  struct vmsvga_surface_s dst_surface = {0};
+  uint8_t *vram = s->vga.vram_ptr;
+  size_t width_bytes;
+  uint64_t src_start;
+  uint64_t src_end;
+  uint64_t dst_start;
+  uint64_t dst_end;
+  bool reverse_rows = false;
+  bool reverse_columns = false;
+  uint32_t row_count;
+  bool src_valid = vmsvga_surface_load(s, src_surface_offset, &src_surface);
+  bool dst_valid = vmsvga_surface_load(s, dst_surface_offset, &dst_surface);
+  if (!src_valid || !dst_valid) {
+    return false;
+  };
+  if (!vmsvga_surface_rect_valid(&src_surface, src_x, src_y, w, h) ||
+      !vmsvga_surface_rect_valid(&dst_surface, dst_x, dst_y, w, h) ||
+      src_surface.bpp != dst_surface.bpp || src_surface.bypp != dst_surface.bypp ||
+      rop > VMSVGA_ROP_SET) {
+    vmsvga_surface_dequeue(s, &src_surface);
+    vmsvga_surface_dequeue(s, &dst_surface);
+    return false;
+  };
+  if (w == 0 || h == 0 || rop == VMSVGA_ROP_NOOP) {
+    vmsvga_surface_dequeue(s, &src_surface);
+    vmsvga_surface_dequeue(s, &dst_surface);
+    return true;
+  };
+  width_bytes = (size_t)src_surface.bypp * w;
+  src_start = (uint64_t)src_surface.data_offset +
+              (uint64_t)src_surface.pitch * src_y +
+              (uint64_t)src_surface.bypp * src_x;
+  src_end = (uint64_t)src_surface.data_offset +
+            (uint64_t)src_surface.pitch * (src_y + h - 1) +
+            (uint64_t)src_surface.bypp * src_x + width_bytes;
+  dst_start = (uint64_t)dst_surface.data_offset +
+              (uint64_t)dst_surface.pitch * dst_y +
+              (uint64_t)dst_surface.bypp * dst_x;
+  dst_end = (uint64_t)dst_surface.data_offset +
+            (uint64_t)dst_surface.pitch * (dst_y + h - 1) +
+            (uint64_t)dst_surface.bypp * dst_x + width_bytes;
+  if (src_start < dst_end && dst_start < src_end) {
+    if (src_surface.data_offset != dst_surface.data_offset ||
+        src_surface.pitch != dst_surface.pitch ||
+        src_surface.width != dst_surface.width ||
+        src_surface.height != dst_surface.height) {
+      vmsvga_surface_dequeue(s, &src_surface);
+      vmsvga_surface_dequeue(s, &dst_surface);
+      return false;
+    };
+    reverse_rows = dst_y > src_y && dst_y < src_y + h;
+    reverse_columns = src_y == dst_y && dst_x > src_x && dst_x < src_x + w;
+  };
+  for (row_count = 0; row_count < h; row_count++) {
+    uint32_t row = reverse_rows ? h - 1 - row_count : row_count;
+    uint8_t *src = vram + src_surface.data_offset +
+                   (size_t)src_surface.pitch * (src_y + row) +
+                   (size_t)src_surface.bypp * src_x;
+    uint8_t *dst = vram + dst_surface.data_offset +
+                   (size_t)dst_surface.pitch * (dst_y + row) +
+                   (size_t)dst_surface.bypp * dst_x;
+    if (rop == VMSVGA_ROP_COPY) {
+      memmove(dst, src, width_bytes);
+    } else if (rop == VMSVGA_ROP_CLEAR) {
+      memset(dst, 0, width_bytes);
+    } else if (rop == VMSVGA_ROP_SET) {
+      memset(dst, 0xff, width_bytes);
+    } else if (rop == VMSVGA_ROP_INVERT) {
+      vmsvga_rop_invert_buffer(dst, width_bytes);
+    } else if (rop == VMSVGA_ROP_COPY_INVERTED) {
+      vmsvga_rop_copy_inverted_buffer(dst, src, width_bytes, reverse_columns);
+    } else {
+      vmsvga_rop_buffer(dst, src, width_bytes, rop, reverse_columns);
+    };
+  };
+  vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
+  vmsvga_surface_dequeue(s, &src_surface);
+  vmsvga_surface_dequeue(s, &dst_surface);
   return true;
 };
 static inline void vmsvga_object_destroy(struct vmsvga_object_s *object) {
@@ -1977,7 +2223,16 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       VPRINT("SVGA_CMD_SURFACE_ALPHA_BLEND command %u in SVGA command FIFO\n",
              cmd);
       break;
-    case SVGA_CMD_SURFACE_COPY:
+    case SVGA_CMD_SURFACE_COPY: {
+      uint32_t src_surface_offset;
+      uint32_t dst_surface_offset;
+      uint32_t src_x;
+      uint32_t src_y;
+      uint32_t dst_x;
+      uint32_t dst_y;
+      uint32_t width;
+      uint32_t height;
+      uint32_t rop;
       if (len < (sizeof(SVGAFifoCmdSurfaceCopy) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -1986,15 +2241,31 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
         break;
       };
       len -= sizeof(SVGAFifoCmdSurfaceCopy) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdSurfaceCopy =
-          sizeof(SVGAFifoCmdSurfaceCopy) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdSurfaceCopy >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdSurfaceCopy -= 1;
+      src_surface_offset = vmsvga_fifo_read(s);
+      dst_surface_offset = vmsvga_fifo_read(s);
+      src_x = vmsvga_fifo_read(s);
+      src_y = vmsvga_fifo_read(s);
+      dst_x = vmsvga_fifo_read(s);
+      dst_y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      rop = vmsvga_fifo_read(s);
+      if (!vmsvga_surface_copy(s, src_surface_offset, dst_surface_offset,
+                               src_x, src_y, dst_x, dst_y, width, height,
+                               rop)) {
+        VPRINT("SVGA_CMD_SURFACE_COPY ignored invalid surface or ROP\n");
       };
       VPRINT("SVGA_CMD_SURFACE_COPY command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_SURFACE_FILL:
+    }
+    case SVGA_CMD_SURFACE_FILL: {
+      uint32_t color;
+      uint32_t dst_surface_offset;
+      uint32_t x;
+      uint32_t y;
+      uint32_t width;
+      uint32_t height;
+      uint32_t rop;
       if (len < (sizeof(SVGAFifoCmdSurfaceFill) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -2003,14 +2274,20 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
         break;
       };
       len -= sizeof(SVGAFifoCmdSurfaceFill) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdSurfaceFill =
-          sizeof(SVGAFifoCmdSurfaceFill) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdSurfaceFill >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdSurfaceFill -= 1;
+      color = vmsvga_fifo_read(s);
+      dst_surface_offset = vmsvga_fifo_read(s);
+      x = vmsvga_fifo_read(s);
+      y = vmsvga_fifo_read(s);
+      width = vmsvga_fifo_read(s);
+      height = vmsvga_fifo_read(s);
+      rop = vmsvga_fifo_read(s);
+      if (!vmsvga_surface_fill(s, color, dst_surface_offset, x, y, width,
+                               height, rop)) {
+        VPRINT("SVGA_CMD_SURFACE_FILL ignored invalid surface or ROP\n");
       };
       VPRINT("SVGA_CMD_SURFACE_FILL command %u in SVGA command FIFO\n", cmd);
       break;
+    }
     case SVGA_CMD_UPDATE:
       if (len < (sizeof(SVGAFifoCmdUpdate) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -6452,7 +6729,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
            SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
            SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH | SVGA_CAP_GLYPH_CLIPPING |
-           SVGA_CAP_EXTENDED_FIFO | SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK;
+           SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_EXTENDED_FIFO | SVGA_CAP_PITCHLOCK |
+           SVGA_CAP_IRQMASK;
 #endif
     ret = caps;
     VPRINT("SVGA_REG_CAPABILITIES register %u with the return of %u\n",

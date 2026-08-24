@@ -32,6 +32,7 @@
 // #define VERBOSE
 #include "qemu/osdep.h" // Required to be the first #include
 #include "qapi/error.h"
+#include "trace.h"
 #include "include/vmware_vga_compat.h"
 #include "include/includeCheck.h"
 #include "include/svga3d_caps.h"
@@ -7214,6 +7215,7 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     int old_depth = surface_bits_per_pixel(surface);
     int old_stride = surface_stride(surface);
 #endif
+    trace_vmware_setmode(s->new_width, s->new_height, s->new_depth);
     surface = qemu_create_displaysurface_from(
         s->new_width, s->new_height, format, new_stride, s->vga.vram_ptr);
     VPRINT("vmsvga_check_size: old_width: %u, old_height: %u, old_depth: %u, "
@@ -7233,11 +7235,15 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
   struct pci_vmsvga_state_s *pci_vmsvga =
       container_of(s, struct pci_vmsvga_state_s, chip);
   if (s->index >= SVGA_REG_PALETTE_MIN && s->index <= SVGA_REG_PALETTE_MAX) {
-    return s->svgapalettebase[s->index - SVGA_REG_PALETTE_MIN];
+    ret = s->svgapalettebase[s->index - SVGA_REG_PALETTE_MIN];
+    trace_vmware_palette_read(s->index, ret);
+    return ret;
   };
   if (s->index >= SVGA_SCRATCH_BASE &&
       s->index < SVGA_SCRATCH_BASE + s->scratch_size) {
-    return s->scratch[s->index - SVGA_SCRATCH_BASE];
+    ret = s->scratch[s->index - SVGA_SCRATCH_BASE];
+    trace_vmware_scratch_read(s->index, ret);
+    return ret;
   };
   VPRINT("Unknown register %u\n", s->index);
   switch (s->index) {
@@ -7636,20 +7642,24 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     VPRINT("default register %u with the return of %u\n", s->index, ret);
     break;
   };
+  trace_vmware_value_read(s->index, ret);
   return ret;
 };
 static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
   VPRINT("vmsvga_value_write was just executed\n");
   struct vmsvga_state_s *s = opaque;
   if (s->index >= SVGA_REG_PALETTE_MIN && s->index <= SVGA_REG_PALETTE_MAX) {
+    trace_vmware_palette_write(s->index, value);
     s->svgapalettebase[s->index - SVGA_REG_PALETTE_MIN] = value;
     return;
   };
   if (s->index >= SVGA_SCRATCH_BASE &&
       s->index < SVGA_SCRATCH_BASE + s->scratch_size) {
+    trace_vmware_scratch_write(s->index, value);
     s->scratch[s->index - SVGA_SCRATCH_BASE] = value;
     return;
   };
+  trace_vmware_value_write(s->index, value);
   VPRINT("Unknown register %u with the value of %u\n", s->index, value);
   switch (s->index) {
   case SVGA_REG_ID:

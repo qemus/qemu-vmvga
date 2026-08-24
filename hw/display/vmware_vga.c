@@ -152,6 +152,7 @@ enum {
   (VMSVGA_BLENDFLAG_CONSTANT_SOURCE_ALPHA |                              \
    VMSVGA_BLENDFLAG_CONSTANT_DEST_ALPHA)
 #define VMSVGA_MAX_OBJECTS 500
+#define VMSVGA_MAX_CURSORS 500
 #define VMSVGA_DAMAGE_RECTS 64
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
 
@@ -248,6 +249,7 @@ struct vmsvga_state_s {
   uint32_t *fifo;
   uint32_t *scratch;
   struct vmsvga_object_s *objects[VMSVGA_MAX_OBJECTS];
+  QEMUCursor *cursor_cache[VMSVGA_MAX_CURSORS];
   size_t object_bytes;
   uint8_t blit_scratch[VMSVGA_BLIT_SCRATCH_SIZE];
   struct vmsvga_damage_rect_s damage[VMSVGA_DAMAGE_RECTS];
@@ -1761,6 +1763,43 @@ struct vmsvga_cursor_definition_s {
   uint32_t and_mask[4096];
   uint32_t xor_mask[4096];
 };
+static inline void vmsvga_cursor_cache_clear(struct vmsvga_state_s *s) {
+  uint32_t id;
+  for (id = 0; id < VMSVGA_MAX_CURSORS; id++) {
+    if (s->cursor_cache[id] != NULL) {
+      cursor_unref(s->cursor_cache[id]);
+      s->cursor_cache[id] = NULL;
+    };
+  };
+};
+static inline QEMUCursor *vmsvga_cursor_cache_get(struct vmsvga_state_s *s,
+                                                  uint32_t id) {
+  if (id >= VMSVGA_MAX_CURSORS) {
+    return NULL;
+  };
+  return s->cursor_cache[id];
+};
+static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
+                                        uint32_t id) {
+  QEMUCursor *qc = vmsvga_cursor_cache_get(s, id);
+  if (qc != NULL) {
+    dpy_cursor_define(s->vga.con, qc);
+  };
+};
+static inline void vmsvga_cursor_cache_put(struct vmsvga_state_s *s,
+                                           uint32_t id, QEMUCursor *qc) {
+  if (id >= VMSVGA_MAX_CURSORS) {
+    cursor_unref(qc);
+    return;
+  };
+  if (s->cursor_cache[id] != NULL) {
+    cursor_unref(s->cursor_cache[id]);
+  };
+  s->cursor_cache[id] = qc;
+  if (s->cursor == id) {
+    dpy_cursor_define(s->vga.con, qc);
+  };
+};
 static inline void vmsvga_cursor_define(struct vmsvga_state_s *s,
                                         struct vmsvga_cursor_definition_s *c) {
   VPRINT("vmsvga_cursor_define was just executed\n");
@@ -1784,8 +1823,7 @@ static inline void vmsvga_cursor_define(struct vmsvga_state_s *s,
 #endif
     VPRINT("vmsvga_cursor_define | xor_mask == %u : and_mask == %u\n",
            *c->xor_mask, *c->and_mask);
-    dpy_cursor_define(s->vga.con, qc);
-    cursor_unref(qc);
+    vmsvga_cursor_cache_put(s, c->id, qc);
   };
 };
 static inline void
@@ -1812,8 +1850,7 @@ vmsvga_rgba_cursor_define(struct vmsvga_state_s *s,
 #endif
     VPRINT("vmsvga_rgba_cursor_define | xor_mask == %u : and_mask == %u\n",
            *c->xor_mask, *c->and_mask);
-    dpy_cursor_define(s->vga.con, qc);
-    cursor_unref(qc);
+    vmsvga_cursor_cache_put(s, c->id, qc);
   };
 };
 static inline int vmsvga_fifo_length(struct vmsvga_state_s *s) {
@@ -2369,6 +2406,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
       id = vmsvga_fifo_read(s);
       display = vmsvga_fifo_read(s);
       s->cursor = id;
+      vmsvga_cursor_select(s, id);
       display = display ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
       if (s->cursor_on != display) {
         s->cursor_on = display;
@@ -7597,7 +7635,10 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_CURSOR_ID:
-    s->cursor = value;
+    if (s->cursor != value) {
+      s->cursor = value;
+      vmsvga_cursor_select(s, value);
+    };
     VPRINT("SVGA_REG_CURSOR_ID register %u with the value of %u\n", s->index,
            value);
     break;
@@ -8071,6 +8112,7 @@ static void vmsvga_reset(DeviceState *dev) {
   s->fence_goal = 0;
   s->thread = 0;
   s->invalidated = true;
+  vmsvga_cursor_cache_clear(s);
   vmsvga_objects_clear(s);
   vmsvga_set_fifo_capabilities(s);
   if (s->scratch != NULL) {
@@ -8122,6 +8164,7 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   s->fence = 0;
   s->fence_goal = 0;
   s->invalidated = true;
+  vmsvga_cursor_cache_clear(s);
   vmsvga_objects_clear(s);
   vmsvga_set_fifo_capabilities(s);
   vmsvga_update_fifo_registers(s);
@@ -8195,6 +8238,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   VPRINT("vmsvga_init was just executed\n");
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->scratch = g_new0(uint32_t, s->scratch_size);
+  memset(s->cursor_cache, 0, sizeof(s->cursor_cache));
   s->vga.con = graphic_console_init(dev, 0, &vmsvga_ops, s);
   s->fifo_size = VMSVGA_FIFO_SIZE;
   memory_region_init_ram(&s->fifo_ram, OBJECT(dev), "vmsvga.fifo", s->fifo_size,
@@ -8300,6 +8344,7 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp) {
 };
 static void pci_vmsvga_uninit(PCIDevice *dev) {
   struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+  vmsvga_cursor_cache_clear(&s->chip);
   vmsvga_objects_clear(&s->chip);
   g_clear_pointer(&s->chip.scratch, g_free);
 };

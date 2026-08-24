@@ -104,6 +104,24 @@
 #define SVGA_REG_PALETTE_MAX (SVGA_REG_PALETTE_MIN + SVGA_PALETTE_SIZE)
 #define SVGA_REG_PALETTE_MIN 1024
 #define SVGA_REG_SCREENDMA 75
+enum {
+  VMSVGA_ROP_CLEAR = 0x00,
+  VMSVGA_ROP_AND = 0x01,
+  VMSVGA_ROP_AND_REVERSE = 0x02,
+  VMSVGA_ROP_COPY = SVGA_ROP_COPY,
+  VMSVGA_ROP_AND_INVERTED = 0x04,
+  VMSVGA_ROP_NOOP = 0x05,
+  VMSVGA_ROP_XOR = 0x06,
+  VMSVGA_ROP_OR = 0x07,
+  VMSVGA_ROP_NOR = 0x08,
+  VMSVGA_ROP_EQUIV = 0x09,
+  VMSVGA_ROP_INVERT = 0x0a,
+  VMSVGA_ROP_OR_REVERSE = 0x0b,
+  VMSVGA_ROP_COPY_INVERTED = 0x0c,
+  VMSVGA_ROP_OR_INVERTED = 0x0d,
+  VMSVGA_ROP_NAND = 0x0e,
+  VMSVGA_ROP_SET = 0x0f,
+};
 #ifdef VERBOSE
 #define VPRINT(fmt, ...)                                                       \
   printf("vmsvga (%s): %u - %s: " fmt, __FILE__, (uint32_t)time(NULL),         \
@@ -273,6 +291,361 @@ static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
     memcpy(dst, first, width);
   };
   dpy_gfx_update(s->vga.con, x, y, w, h);
+  return true;
+};
+static inline void vmsvga_rop_invert_buffer(uint8_t *dst, size_t length) {
+  size_t offset = 0;
+  while (length - offset >= sizeof(uint64_t)) {
+    uint64_t value;
+    memcpy(&value, dst + offset, sizeof(value));
+    value = ~value;
+    memcpy(dst + offset, &value, sizeof(value));
+    offset += sizeof(value);
+  };
+  while (offset < length) {
+    dst[offset] = ~dst[offset];
+    offset++;
+  };
+};
+static inline void vmsvga_rop_copy_inverted_buffer(uint8_t *dst,
+                                                   const uint8_t *src,
+                                                   size_t length,
+                                                   bool reverse) {
+  size_t offset;
+  if (reverse) {
+    offset = length;
+    while (offset >= sizeof(uint64_t)) {
+      uint64_t src_value;
+      uint64_t result;
+      offset -= sizeof(uint64_t);
+      memcpy(&src_value, src + offset, sizeof(src_value));
+      result = ~src_value;
+      memcpy(dst + offset, &result, sizeof(result));
+    };
+    while (offset > 0) {
+      offset--;
+      dst[offset] = ~src[offset];
+    };
+  } else {
+    offset = 0;
+    while (length - offset >= sizeof(uint64_t)) {
+      uint64_t src_value;
+      uint64_t result;
+      memcpy(&src_value, src + offset, sizeof(src_value));
+      result = ~src_value;
+      memcpy(dst + offset, &result, sizeof(result));
+      offset += sizeof(uint64_t);
+    };
+    while (offset < length) {
+      dst[offset] = ~src[offset];
+      offset++;
+    };
+  };
+};
+static inline void vmsvga_rop_buffer(uint8_t *dst, const uint8_t *src,
+                                     size_t length, uint32_t rop,
+                                     bool reverse) {
+  size_t offset;
+#define VMSVGA_ROP_BUFFER_LOOP(operation)                                      \
+  do {                                                                         \
+    if (reverse) {                                                             \
+      offset = length;                                                         \
+      while (offset >= sizeof(uint64_t)) {                                     \
+        uint64_t src_value;                                                    \
+        uint64_t dst_value;                                                    \
+        uint64_t result;                                                       \
+        offset -= sizeof(uint64_t);                                            \
+        memcpy(&src_value, src + offset, sizeof(src_value));                   \
+        memcpy(&dst_value, dst + offset, sizeof(dst_value));                   \
+        (void)src_value;                                                       \
+        (void)dst_value;                                                       \
+        result = (operation);                                                  \
+        memcpy(dst + offset, &result, sizeof(result));                         \
+      };                                                                       \
+      while (offset > 0) {                                                     \
+        uint64_t src_value;                                                    \
+        uint64_t dst_value;                                                    \
+        uint8_t result;                                                        \
+        offset--;                                                              \
+        src_value = src[offset];                                               \
+        dst_value = dst[offset];                                               \
+        (void)src_value;                                                       \
+        (void)dst_value;                                                       \
+        result = (uint8_t)(operation);                                         \
+        dst[offset] = result;                                                  \
+      };                                                                       \
+    } else {                                                                   \
+      offset = 0;                                                              \
+      while (length - offset >= sizeof(uint64_t)) {                            \
+        uint64_t src_value;                                                    \
+        uint64_t dst_value;                                                    \
+        uint64_t result;                                                       \
+        memcpy(&src_value, src + offset, sizeof(src_value));                   \
+        memcpy(&dst_value, dst + offset, sizeof(dst_value));                   \
+        (void)src_value;                                                       \
+        (void)dst_value;                                                       \
+        result = (operation);                                                  \
+        memcpy(dst + offset, &result, sizeof(result));                         \
+        offset += sizeof(uint64_t);                                            \
+      };                                                                       \
+      while (offset < length) {                                                \
+        uint64_t src_value = src[offset];                                      \
+        uint64_t dst_value = dst[offset];                                      \
+        uint8_t result;                                                        \
+        (void)src_value;                                                       \
+        (void)dst_value;                                                       \
+        result = (uint8_t)(operation);                                         \
+        dst[offset] = result;                                                  \
+        offset++;                                                              \
+      };                                                                       \
+    };                                                                         \
+  } while (0)
+  switch (rop) {
+  case VMSVGA_ROP_CLEAR:
+    VMSVGA_ROP_BUFFER_LOOP(0);
+    break;
+  case VMSVGA_ROP_AND:
+    VMSVGA_ROP_BUFFER_LOOP(src_value & dst_value);
+    break;
+  case VMSVGA_ROP_AND_REVERSE:
+    VMSVGA_ROP_BUFFER_LOOP(src_value & ~dst_value);
+    break;
+  case VMSVGA_ROP_COPY:
+    VMSVGA_ROP_BUFFER_LOOP(src_value);
+    break;
+  case VMSVGA_ROP_AND_INVERTED:
+    VMSVGA_ROP_BUFFER_LOOP(~src_value & dst_value);
+    break;
+  case VMSVGA_ROP_NOOP:
+    break;
+  case VMSVGA_ROP_XOR:
+    VMSVGA_ROP_BUFFER_LOOP(src_value ^ dst_value);
+    break;
+  case VMSVGA_ROP_OR:
+    VMSVGA_ROP_BUFFER_LOOP(src_value | dst_value);
+    break;
+  case VMSVGA_ROP_NOR:
+    VMSVGA_ROP_BUFFER_LOOP(~src_value & ~dst_value);
+    break;
+  case VMSVGA_ROP_EQUIV:
+    VMSVGA_ROP_BUFFER_LOOP(~src_value ^ dst_value);
+    break;
+  case VMSVGA_ROP_INVERT:
+    VMSVGA_ROP_BUFFER_LOOP(~dst_value);
+    break;
+  case VMSVGA_ROP_OR_REVERSE:
+    VMSVGA_ROP_BUFFER_LOOP(src_value | ~dst_value);
+    break;
+  case VMSVGA_ROP_COPY_INVERTED:
+    VMSVGA_ROP_BUFFER_LOOP(~src_value);
+    break;
+  case VMSVGA_ROP_OR_INVERTED:
+    VMSVGA_ROP_BUFFER_LOOP(~src_value | dst_value);
+    break;
+  case VMSVGA_ROP_NAND:
+    VMSVGA_ROP_BUFFER_LOOP(~src_value | ~dst_value);
+    break;
+  case VMSVGA_ROP_SET:
+    VMSVGA_ROP_BUFFER_LOOP(UINT64_MAX);
+    break;
+  };
+#undef VMSVGA_ROP_BUFFER_LOOP
+};
+static inline void vmsvga_rop_fill_buffer(uint8_t *dst, size_t length,
+                                          const uint8_t col[4], uint32_t bypp,
+                                          uint32_t rop) {
+  uint8_t pattern[24];
+  size_t offset;
+  size_t i;
+  for (i = 0; i < sizeof(pattern); i++) {
+    pattern[i] = col[i % bypp];
+  };
+#define VMSVGA_ROP_FILL_BUFFER_LOOP(operation)                                 \
+  do {                                                                         \
+    offset = 0;                                                                \
+    while (length - offset >= sizeof(uint64_t)) {                              \
+      uint64_t src_value;                                                      \
+      uint64_t dst_value;                                                      \
+      uint64_t result;                                                         \
+      size_t pattern_offset = offset % sizeof(pattern);                        \
+      memcpy(&src_value, pattern + pattern_offset, sizeof(src_value));         \
+      memcpy(&dst_value, dst + offset, sizeof(dst_value));                     \
+      (void)src_value;                                                         \
+      (void)dst_value;                                                         \
+      result = (operation);                                                    \
+      memcpy(dst + offset, &result, sizeof(result));                           \
+      offset += sizeof(uint64_t);                                              \
+    };                                                                         \
+    while (offset < length) {                                                  \
+      uint64_t src_value = pattern[offset % sizeof(pattern)];                  \
+      uint64_t dst_value = dst[offset];                                        \
+      uint8_t result;                                                          \
+      (void)src_value;                                                         \
+      (void)dst_value;                                                         \
+      result = (uint8_t)(operation);                                           \
+      dst[offset] = result;                                                    \
+      offset++;                                                                \
+    };                                                                         \
+  } while (0)
+  switch (rop) {
+  case VMSVGA_ROP_CLEAR:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(0);
+    break;
+  case VMSVGA_ROP_AND:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(src_value & dst_value);
+    break;
+  case VMSVGA_ROP_AND_REVERSE:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(src_value & ~dst_value);
+    break;
+  case VMSVGA_ROP_COPY:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(src_value);
+    break;
+  case VMSVGA_ROP_AND_INVERTED:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(~src_value & dst_value);
+    break;
+  case VMSVGA_ROP_NOOP:
+    break;
+  case VMSVGA_ROP_XOR:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(src_value ^ dst_value);
+    break;
+  case VMSVGA_ROP_OR:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(src_value | dst_value);
+    break;
+  case VMSVGA_ROP_NOR:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(~src_value & ~dst_value);
+    break;
+  case VMSVGA_ROP_EQUIV:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(~src_value ^ dst_value);
+    break;
+  case VMSVGA_ROP_INVERT:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(~dst_value);
+    break;
+  case VMSVGA_ROP_OR_REVERSE:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(src_value | ~dst_value);
+    break;
+  case VMSVGA_ROP_COPY_INVERTED:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(~src_value);
+    break;
+  case VMSVGA_ROP_OR_INVERTED:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(~src_value | dst_value);
+    break;
+  case VMSVGA_ROP_NAND:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(~src_value | ~dst_value);
+    break;
+  case VMSVGA_ROP_SET:
+    VMSVGA_ROP_FILL_BUFFER_LOOP(UINT64_MAX);
+    break;
+  };
+#undef VMSVGA_ROP_FILL_BUFFER_LOOP
+};
+static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
+                                        uint32_t x, uint32_t y, uint32_t w,
+                                        uint32_t h, uint32_t rop) {
+  VPRINT("vmsvga_rop_fill_rect was just executed\n");
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  uint32_t bypl = surface_stride(surface);
+  uint32_t bypp = surface_bytes_per_pixel(surface);
+  size_t width = (size_t)bypp * w;
+  uint8_t col[4];
+  uint32_t row;
+  if (rop == VMSVGA_ROP_COPY) {
+    return vmsvga_fill_rect(s, c, x, y, w, h);
+  };
+  if (!vmsvga_verify_rect(surface, x, y, w, h) || bypp < 1 || bypp > 4 ||
+      rop > VMSVGA_ROP_SET) {
+    return false;
+  };
+  if (w == 0 || h == 0 || rop == VMSVGA_ROP_NOOP) {
+    return true;
+  };
+  if (rop == VMSVGA_ROP_CLEAR) {
+    for (row = 0; row < h; row++) {
+      uint8_t *dst = s->vga.vram_ptr + (size_t)bypp * x +
+                     (size_t)bypl * (y + row);
+      memset(dst, 0, width);
+    };
+    dpy_gfx_update(s->vga.con, x, y, w, h);
+    return true;
+  };
+  if (rop == VMSVGA_ROP_SET) {
+    for (row = 0; row < h; row++) {
+      uint8_t *dst = s->vga.vram_ptr + (size_t)bypp * x +
+                     (size_t)bypl * (y + row);
+      memset(dst, 0xff, width);
+    };
+    dpy_gfx_update(s->vga.con, x, y, w, h);
+    return true;
+  };
+  if (rop == VMSVGA_ROP_COPY_INVERTED) {
+    return vmsvga_fill_rect(s, ~c, x, y, w, h);
+  };
+  col[0] = c;
+  col[1] = c >> 8;
+  col[2] = c >> 16;
+  col[3] = c >> 24;
+  for (row = 0; row < h; row++) {
+    uint8_t *dst = s->vga.vram_ptr + (size_t)bypp * x +
+                   (size_t)bypl * (y + row);
+    if (rop == VMSVGA_ROP_INVERT) {
+      vmsvga_rop_invert_buffer(dst, width);
+    } else {
+      vmsvga_rop_fill_buffer(dst, width, col, bypp, rop);
+    };
+  };
+  dpy_gfx_update(s->vga.con, x, y, w, h);
+  return true;
+};
+static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
+                                        uint32_t x0, uint32_t y0, uint32_t x1,
+                                        uint32_t y1, uint32_t w, uint32_t h,
+                                        uint32_t rop) {
+  VPRINT("vmsvga_rop_copy_rect was just executed\n");
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  uint8_t *vram = s->vga.vram_ptr;
+  uint32_t bypl = surface_stride(surface);
+  uint32_t bypp = surface_bytes_per_pixel(surface);
+  size_t width = (size_t)bypp * w;
+  bool reverse_rows;
+  bool reverse_columns;
+  uint32_t row_count;
+  if (rop == VMSVGA_ROP_COPY) {
+    return vmsvga_copy_rect(s, x0, y0, x1, y1, w, h);
+  };
+  if (!vmsvga_verify_rect(surface, x0, y0, w, h) ||
+      !vmsvga_verify_rect(surface, x1, y1, w, h) || bypp < 1 || bypp > 4 ||
+      rop > VMSVGA_ROP_SET) {
+    return false;
+  };
+  if (w == 0 || h == 0 || rop == VMSVGA_ROP_NOOP) {
+    return true;
+  };
+  if (rop == VMSVGA_ROP_CLEAR || rop == VMSVGA_ROP_SET) {
+    uint8_t value = rop == VMSVGA_ROP_CLEAR ? 0 : 0xff;
+    for (row_count = 0; row_count < h; row_count++) {
+      uint8_t *dst = vram + (size_t)bypp * x1 +
+                     (size_t)bypl * (y1 + row_count);
+      memset(dst, value, width);
+    };
+    dpy_gfx_update(s->vga.con, x1, y1, w, h);
+    return true;
+  };
+  reverse_rows = y1 > y0 && y1 < y0 + h;
+  reverse_columns = y0 == y1 && x1 > x0 && x1 < x0 + w;
+  for (row_count = 0; row_count < h; row_count++) {
+    uint32_t row = reverse_rows ? h - 1 - row_count : row_count;
+    uint8_t *src_row =
+        vram + (size_t)bypp * x0 + (size_t)bypl * (y0 + row);
+    uint8_t *dst_row =
+        vram + (size_t)bypp * x1 + (size_t)bypl * (y1 + row);
+    if (rop == VMSVGA_ROP_INVERT) {
+      vmsvga_rop_invert_buffer(dst_row, width);
+    } else if (rop == VMSVGA_ROP_COPY_INVERTED) {
+      vmsvga_rop_copy_inverted_buffer(dst_row, src_row, width, reverse_columns);
+    } else {
+      vmsvga_rop_buffer(dst_row, src_row, width, rop, reverse_columns);
+    };
+  };
+  dpy_gfx_update(s->vga.con, x1, y1, w, h);
   return true;
 };
 struct vmsvga_cursor_definition_s {
@@ -903,11 +1276,15 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
         break;
       };
       len -= sizeof(SVGAFifoCmdRectRopFill) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectRopFill =
-          sizeof(SVGAFifoCmdRectRopFill) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectRopFill >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectRopFill -= 1;
+      uint32_t rop_fill_color = vmsvga_fifo_read(s);
+      uint32_t rop_fill_x = vmsvga_fifo_read(s);
+      uint32_t rop_fill_y = vmsvga_fifo_read(s);
+      uint32_t rop_fill_w = vmsvga_fifo_read(s);
+      uint32_t rop_fill_h = vmsvga_fifo_read(s);
+      uint32_t rop_fill_rop = vmsvga_fifo_read(s);
+      if (!vmsvga_rop_fill_rect(s, rop_fill_color, rop_fill_x, rop_fill_y,
+                                rop_fill_w, rop_fill_h, rop_fill_rop)) {
+        VPRINT("SVGA_CMD_RECT_ROP_FILL ignored invalid rectangle or ROP\n");
       };
       VPRINT("SVGA_CMD_RECT_ROP_FILL command %u in SVGA command FIFO\n", cmd);
       break;
@@ -1244,11 +1621,17 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
         break;
       };
       len -= sizeof(SVGAFifoCmdRectRopCopy) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRectRopCopy =
-          sizeof(SVGAFifoCmdRectRopCopy) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRectRopCopy >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRectRopCopy -= 1;
+      uint32_t rop_copy_x0 = vmsvga_fifo_read(s);
+      uint32_t rop_copy_y0 = vmsvga_fifo_read(s);
+      uint32_t rop_copy_x1 = vmsvga_fifo_read(s);
+      uint32_t rop_copy_y1 = vmsvga_fifo_read(s);
+      uint32_t rop_copy_w = vmsvga_fifo_read(s);
+      uint32_t rop_copy_h = vmsvga_fifo_read(s);
+      uint32_t rop_copy_rop = vmsvga_fifo_read(s);
+      if (!vmsvga_rop_copy_rect(s, rop_copy_x0, rop_copy_y0, rop_copy_x1,
+                                rop_copy_y1, rop_copy_w, rop_copy_h,
+                                rop_copy_rop)) {
+        VPRINT("SVGA_CMD_RECT_ROP_COPY ignored invalid rectangle or ROP\n");
       };
       VPRINT("SVGA_CMD_RECT_ROP_COPY command %u in SVGA command FIFO\n", cmd);
       break;
@@ -1399,13 +1782,23 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s) {
         break;
       };
       len -= sizeof(SVGAFifoCmdFrontRopFill) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdFrontRopFill =
-          sizeof(SVGAFifoCmdFrontRopFill) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdFrontRopFill >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdFrontRopFill -= 1;
+      vmsvga_fifo_read(s);
+      uint32_t front_rop_x = vmsvga_fifo_read(s);
+      uint32_t front_rop_y = vmsvga_fifo_read(s);
+      uint32_t front_rop_w = vmsvga_fifo_read(s);
+      uint32_t front_rop_h = vmsvga_fifo_read(s);
+      uint32_t front_rop_rop = vmsvga_fifo_read(s);
+      DisplaySurface *front_rop_surface = qemu_console_surface(s->vga.con);
+      if (front_rop_rop == VMSVGA_ROP_COPY &&
+          vmsvga_verify_rect(front_rop_surface, front_rop_x, front_rop_y,
+                             front_rop_w, front_rop_h)) {
+        vmsvga_update_rect(s, front_rop_x, front_rop_y, front_rop_w,
+                           front_rop_h);
+      } else {
+        VPRINT("SVGA_CMD_FRONT_ROP_FILL ignored invalid rectangle or ROP\n");
       };
-      VPRINT("SVGA_CMD_FRONT_ROP_FILL command %u in SVGA command FIFO\n", cmd);
+      VPRINT("SVGA_CMD_FRONT_ROP_FILL command %u in SVGA command FIFO\n",
+             cmd);
       break;
     case SVGA_CMD_DEAD:
       if (len < 1) {
@@ -5566,7 +5959,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
   case SVGA_REG_CAPABILITIES:
     caps = 0xffffffff;
 #ifndef EXPCAPS
+    caps -= SVGA_CAP_RECT_PAT_FILL;     // Windows 9x
     caps -= SVGA_CAP_LEGACY_OFFSCREEN; // Windows 9x
+    caps -= SVGA_CAP_GLYPH;            // Windows 9x
+    caps -= SVGA_CAP_GLYPH_CLIPPING;   // Windows 9x
+    caps -= SVGA_CAP_OFFSCREEN_1;      // Windows 9x & Windows (XPDM)
+    caps -= SVGA_CAP_ALPHA_BLEND;      // Windows (XPDM)
     caps -= SVGA_CAP_SCREEN_OBJECT_2;  // Linux
     caps -= SVGA_CAP_CMD_BUFFERS_2;    // Windows (WDDM)
     caps -= SVGA_CAP_GBOBJECTS;        // Linux, Windows (XPDM) & Windows (WDDM)

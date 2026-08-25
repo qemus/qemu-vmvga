@@ -1422,6 +1422,21 @@ static void vmsvga_objects_clear(struct vmsvga_state_s *s) {
   };
   s->object_bytes = 0;
 };
+/*
+ * SVGA_REG_MEMORY_SIZE includes both VRAM and dedicated surface memory.
+ * Keep the advertised surface-memory budget equal to the allocation limit
+ * enforced for device objects.
+ */
+static inline size_t
+vmsvga_surface_memory_size(const struct vmsvga_state_s *s) {
+  return s->vga.vram_size;
+};
+static inline uint32_t
+vmsvga_memory_size(const struct vmsvga_state_s *s) {
+  uint64_t memory_size =
+      (uint64_t)s->vga.vram_size + vmsvga_surface_memory_size(s);
+  return memory_size > UINT32_MAX ? UINT32_MAX : (uint32_t)memory_size;
+};
 static inline bool vmsvga_object_layout(uint32_t type, uint32_t width,
                                         uint32_t height, uint32_t depth,
                                         uint32_t *stride_out,
@@ -1463,7 +1478,7 @@ vmsvga_object_create(struct vmsvga_state_s *s, uint32_t id, uint32_t type,
   };
   old = s->objects[id];
   old_size = old ? old->size : 0;
-  limit = s->vga.vram_size;
+  limit = vmsvga_surface_memory_size(s);
   if (size > limit || s->object_bytes < old_size ||
       s->object_bytes - old_size > limit - size) {
     return NULL;
@@ -7605,7 +7620,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_MEMORY_SIZE:
-    ret = s->vga.vram_size;
+    ret = vmsvga_memory_size(s);
     VPRINT("SVGA_REG_MEMORY_SIZE register %u with the return of %u\n", s->index,
            ret);
     break;

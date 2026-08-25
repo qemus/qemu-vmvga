@@ -153,6 +153,7 @@ enum {
 #define VMSVGA_MAX_CURSORS 500
 #define VMSVGA_DAMAGE_RECTS 256
 #define VMSVGA_DIRTY_BLOCK_PAGES 64
+#define VMSVGA_PSEUDOCOLOR_ENTRIES 256
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
 
 enum vmsvga_object_type_e {
@@ -205,6 +206,9 @@ struct vmsvga_damage_rect_s {
 #endif
 struct vmsvga_state_s {
   uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
+#ifdef CONFIG_PIXMAN
+  pixman_indexed_t indexed_palette;
+#endif
   uint32_t enable;
   uint32_t config;
   uint32_t index;
@@ -7365,7 +7369,11 @@ static pixman_format_code_t vmsvga_pixman_format(uint32_t bpp) {
   case 4:
     return PIXMAN_FORMAT(4, 2, 0, 1, 2, 1);
   case 8:
+#ifdef CONFIG_PIXMAN
+    return PIXMAN_c8;
+#else
     return PIXMAN_FORMAT(8, 2, 0, 3, 3, 2);
+#endif
   case 15:
     return PIXMAN_FORMAT(16, 2, 0, 5, 5, 5);
   case 16:
@@ -7562,6 +7570,25 @@ static inline void vmsvga_update_fifo_registers(struct vmsvga_state_s *s) {
     s->fifo[SVGA_FIFO_BUSY] = s->sync;
   };
 };
+#ifdef CONFIG_PIXMAN
+static inline void vmsvga_palette_update_entry(struct vmsvga_state_s *s,
+                                                uint32_t entry) {
+  uint32_t base = entry * 3;
+  uint32_t red = s->svgapalettebase[base] & 0xff;
+  uint32_t green = s->svgapalettebase[base + 1] & 0xff;
+  uint32_t blue = s->svgapalettebase[base + 2] & 0xff;
+  s->indexed_palette.rgba[entry] =
+      0xff000000u | (red << 16) | (green << 8) | blue;
+};
+static inline void vmsvga_palette_rebuild(struct vmsvga_state_s *s) {
+  uint32_t entry;
+  memset(&s->indexed_palette, 0, sizeof(s->indexed_palette));
+  s->indexed_palette.color = true;
+  for (entry = 0; entry < VMSVGA_PSEUDOCOLOR_ENTRIES; entry++) {
+    vmsvga_palette_update_entry(s, entry);
+  };
+};
+#endif
 static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
   VPRINT("vmsvga_check_size was just executed\n");
   DisplaySurface *surface = qemu_console_surface(s->vga.con);
@@ -7587,6 +7614,11 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     trace_vmware_setmode(s->new_width, s->new_height, s->new_depth);
     surface = qemu_create_displaysurface_from(
         s->new_width, s->new_height, format, new_stride, s->vga.vram_ptr);
+#ifdef CONFIG_PIXMAN
+    if (s->new_depth == 8) {
+      pixman_image_set_indexed(surface->image, &s->indexed_palette);
+    };
+#endif
     VPRINT("vmsvga_check_size: old_width: %u, old_height: %u, old_depth: %u, "
            "old_stride: %u, new_width: %u, new_height: %u, new_depth: %u, "
            "new_format: %u, new_stride: %u\n",
@@ -8018,8 +8050,15 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
   VPRINT("vmsvga_value_write was just executed\n");
   struct vmsvga_state_s *s = opaque;
   if (s->index >= SVGA_REG_PALETTE_MIN && s->index <= SVGA_REG_PALETTE_MAX) {
+    uint32_t palette_offset = s->index - SVGA_REG_PALETTE_MIN;
     trace_vmware_palette_write(s->index, value);
-    s->svgapalettebase[s->index - SVGA_REG_PALETTE_MIN] = value;
+    s->svgapalettebase[palette_offset] = value;
+#ifdef CONFIG_PIXMAN
+    vmsvga_palette_update_entry(s, palette_offset / 3);
+    if (s->new_depth == 8) {
+      s->invalidated = true;
+    };
+#endif
     return;
   };
   if (s->index >= SVGA_SCRATCH_BASE &&
@@ -8611,6 +8650,9 @@ static void vmsvga_reset(DeviceState *dev) {
   s->invalidated = true;
   vmsvga_cursor_cache_clear(s);
   vmsvga_objects_clear(s);
+#ifdef CONFIG_PIXMAN
+  vmsvga_palette_rebuild(s);
+#endif
   vmsvga_set_fifo_capabilities(s);
   if (s->scratch != NULL) {
     memset(s->scratch, 0, s->scratch_size * sizeof(*s->scratch));
@@ -8663,6 +8705,9 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   s->invalidated = true;
   vmsvga_cursor_cache_clear(s);
   vmsvga_objects_clear(s);
+#ifdef CONFIG_PIXMAN
+  vmsvga_palette_rebuild(s);
+#endif
   vmsvga_set_fifo_capabilities(s);
   vmsvga_update_fifo_registers(s);
 #ifndef RAISE_IRQ_OFF
@@ -8760,6 +8805,9 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->fence = 0;
   s->fence_goal = 0;
   s->invalidated = true;
+#ifdef CONFIG_PIXMAN
+  vmsvga_palette_rebuild(s);
+#endif
   vmsvga_set_fifo_capabilities(s);
 };
 static uint64_t vmsvga_io_read(void *opaque, hwaddr addr, unsigned size) {

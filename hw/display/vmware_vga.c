@@ -148,7 +148,7 @@ enum {
    VMSVGA_BLENDFLAG_CONSTANT_DEST_ALPHA)
 #define VMSVGA_MAX_OBJECTS 500
 #define VMSVGA_MAX_CURSORS 500
-#define VMSVGA_DAMAGE_RECTS 64
+#define VMSVGA_DAMAGE_RECTS 256
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
 #define VMSVGA_DIRTY_CHUNK_SIZE 4096
 
@@ -7835,7 +7835,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
         vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
                           s->pitchlock)) {
       s->sync = 1;
-      vmsvga_fifo_run(s, true);
+      vmsvga_fifo_run(s, false);
     };
     VPRINT("SVGA_REG_SYNC register %u with the value of %u\n", s->index, value);
     break;

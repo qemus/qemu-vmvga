@@ -7,6 +7,8 @@
  Copyright (c) 2023-2026 Christopher Eric Lentocha
  <christopherericlentocha@gmail.com>
 
+ Copyright (c) 2026 https://github.com/qemus/qemu-vmvga
+
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
  in the Software without restriction, including without limitation the rights
@@ -404,6 +406,13 @@ static inline bool vmsvga_copy_rect(struct vmsvga_state_s *s, uint32_t x0,
   if (w == 0 || h == 0) {
     return true;
   };
+  if (x0 == 0 && x1 == 0 && width == bypl) {
+    src = vram + (size_t)bypl * y0;
+    dst = vram + (size_t)bypl * y1;
+    memmove(dst, src, width * h);
+    vmsvga_damage_add(s, x1, y1, w, h);
+    return true;
+  };
   if (y1 > y0) {
     src = vram + (size_t)bypp * x0 + (size_t)bypl * (y0 + h - 1);
     dst = vram + (size_t)bypp * x1 + (size_t)bypl * (y1 + h - 1);
@@ -464,6 +473,11 @@ static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
   col[2] = c >> 16;
   col[3] = c >> 24;
   first = s->vga.vram_ptr + (size_t)bypp * x + (size_t)bypl * y;
+  if (x == 0 && width == bypl) {
+    vmsvga_fill_pattern(first, width * h, col, bypp);
+    vmsvga_damage_add(s, x, y, w, h);
+    return true;
+  };
   vmsvga_fill_pattern(first, width, col, bypp);
   dst = first;
   for (line = 1; line < h; line++) {
@@ -777,6 +791,11 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
     return true;
   };
   if (rop == VMSVGA_ROP_CLEAR) {
+    if (x == 0 && width == bypl) {
+      memset(s->vga.vram_ptr + (size_t)bypl * y, 0, width * h);
+      vmsvga_damage_add(s, x, y, w, h);
+      return true;
+    };
     for (row = 0; row < h; row++) {
       uint8_t *dst = s->vga.vram_ptr + (size_t)bypp * x +
                      (size_t)bypl * (y + row);
@@ -786,6 +805,11 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
     return true;
   };
   if (rop == VMSVGA_ROP_SET) {
+    if (x == 0 && width == bypl) {
+      memset(s->vga.vram_ptr + (size_t)bypl * y, 0xff, width * h);
+      vmsvga_damage_add(s, x, y, w, h);
+      return true;
+    };
     for (row = 0; row < h; row++) {
       uint8_t *dst = s->vga.vram_ptr + (size_t)bypp * x +
                      (size_t)bypl * (y + row);
@@ -801,6 +825,16 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
   col[1] = c >> 8;
   col[2] = c >> 16;
   col[3] = c >> 24;
+  if (x == 0 && width == bypl) {
+    uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * y;
+    if (rop == VMSVGA_ROP_INVERT) {
+      vmsvga_rop_invert_buffer(dst, width * h);
+    } else {
+      vmsvga_rop_fill_buffer(dst, width * h, col, bypp, rop);
+    };
+    vmsvga_damage_add(s, x, y, w, h);
+    return true;
+  };
   for (row = 0; row < h; row++) {
     uint8_t *dst = s->vga.vram_ptr + (size_t)bypp * x +
                    (size_t)bypl * (y + row);
@@ -839,10 +873,30 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
   };
   if (rop == VMSVGA_ROP_CLEAR || rop == VMSVGA_ROP_SET) {
     uint8_t value = rop == VMSVGA_ROP_CLEAR ? 0 : 0xff;
+    if (x1 == 0 && width == bypl) {
+      memset(vram + (size_t)bypl * y1, value, width * h);
+      vmsvga_damage_add(s, x1, y1, w, h);
+      return true;
+    };
     for (row_count = 0; row_count < h; row_count++) {
       uint8_t *dst = vram + (size_t)bypp * x1 +
                      (size_t)bypl * (y1 + row_count);
       memset(dst, value, width);
+    };
+    vmsvga_damage_add(s, x1, y1, w, h);
+    return true;
+  };
+  if (x0 == 0 && x1 == 0 && width == bypl) {
+    uint8_t *src = vram + (size_t)bypl * y0;
+    uint8_t *dst = vram + (size_t)bypl * y1;
+    size_t length = width * h;
+    bool reverse = y1 > y0 && y1 < y0 + h;
+    if (rop == VMSVGA_ROP_INVERT) {
+      vmsvga_rop_invert_buffer(dst, length);
+    } else if (rop == VMSVGA_ROP_COPY_INVERTED) {
+      vmsvga_rop_copy_inverted_buffer(dst, src, length, reverse);
+    } else {
+      vmsvga_rop_buffer(dst, src, length, rop, reverse);
     };
     vmsvga_damage_add(s, x1, y1, w, h);
     return true;
@@ -972,7 +1026,9 @@ static inline bool vmsvga_surface_fill(struct vmsvga_state_s *s, uint32_t color,
   struct vmsvga_surface_s surface = {0};
   uint8_t col[4];
   size_t width_bytes;
+  size_t span_bytes;
   uint32_t row;
+  bool contiguous;
   bool valid = vmsvga_surface_load(s, surface_offset, &surface);
   if (!valid) {
     return false;
@@ -991,6 +1047,8 @@ static inline bool vmsvga_surface_fill(struct vmsvga_state_s *s, uint32_t color,
     return true;
   };
   width_bytes = (size_t)surface.bypp * w;
+  span_bytes = width_bytes * h;
+  contiguous = x == 0 && width_bytes == surface.pitch;
   col[0] = color;
   col[1] = color >> 8;
   col[2] = color >> 16;
@@ -1000,12 +1058,27 @@ static inline bool vmsvga_surface_fill(struct vmsvga_state_s *s, uint32_t color,
     const uint8_t *pattern = rop == VMSVGA_ROP_COPY ? col : inverted;
     uint8_t *first = s->vga.vram_ptr + surface.data_offset +
                      (size_t)surface.pitch * y + (size_t)surface.bypp * x;
-    vmsvga_fill_pattern(first, width_bytes, pattern, surface.bypp);
-    for (row = 1; row < h; row++) {
-      uint8_t *dst = s->vga.vram_ptr + surface.data_offset +
-                     (size_t)surface.pitch * (y + row) +
-                     (size_t)surface.bypp * x;
-      memcpy(dst, first, width_bytes);
+    vmsvga_fill_pattern(first, contiguous ? span_bytes : width_bytes, pattern,
+                        surface.bypp);
+    if (!contiguous) {
+      for (row = 1; row < h; row++) {
+        uint8_t *dst = s->vga.vram_ptr + surface.data_offset +
+                       (size_t)surface.pitch * (y + row) +
+                       (size_t)surface.bypp * x;
+        memcpy(dst, first, width_bytes);
+      };
+    };
+  } else if (contiguous) {
+    uint8_t *dst = s->vga.vram_ptr + surface.data_offset +
+                   (size_t)surface.pitch * y;
+    if (rop == VMSVGA_ROP_CLEAR) {
+      memset(dst, 0, span_bytes);
+    } else if (rop == VMSVGA_ROP_SET) {
+      memset(dst, 0xff, span_bytes);
+    } else if (rop == VMSVGA_ROP_INVERT) {
+      vmsvga_rop_invert_buffer(dst, span_bytes);
+    } else {
+      vmsvga_rop_fill_buffer(dst, span_bytes, col, surface.bypp, rop);
     };
   } else {
     for (row = 0; row < h; row++) {
@@ -1037,12 +1110,15 @@ static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
   struct vmsvga_surface_s dst_surface = {0};
   uint8_t *vram = s->vga.vram_ptr;
   size_t width_bytes;
+  size_t span_bytes;
   uint64_t src_start;
   uint64_t src_end;
   uint64_t dst_start;
   uint64_t dst_end;
   bool reverse_rows = false;
   bool reverse_columns = false;
+  bool src_contiguous;
+  bool dst_contiguous;
   uint32_t row_count;
   bool src_valid = vmsvga_surface_load(s, src_surface_offset, &src_surface);
   bool dst_valid = vmsvga_surface_load(s, dst_surface_offset, &dst_surface);
@@ -1069,6 +1145,7 @@ static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
     return true;
   };
   width_bytes = (size_t)src_surface.bypp * w;
+  span_bytes = width_bytes * h;
   src_start = (uint64_t)src_surface.data_offset +
               (uint64_t)src_surface.pitch * src_y +
               (uint64_t)src_surface.bypp * src_x;
@@ -1092,6 +1169,40 @@ static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
     };
     reverse_rows = dst_y > src_y && dst_y < src_y + h;
     reverse_columns = src_y == dst_y && dst_x > src_x && dst_x < src_x + w;
+  };
+  src_contiguous = src_x == 0 && width_bytes == src_surface.pitch;
+  dst_contiguous = dst_x == 0 && width_bytes == dst_surface.pitch;
+  if (dst_contiguous && (rop == VMSVGA_ROP_CLEAR ||
+                         rop == VMSVGA_ROP_SET ||
+                         rop == VMSVGA_ROP_INVERT)) {
+    uint8_t *dst = vram + (size_t)dst_start;
+    if (rop == VMSVGA_ROP_CLEAR) {
+      memset(dst, 0, span_bytes);
+    } else if (rop == VMSVGA_ROP_SET) {
+      memset(dst, 0xff, span_bytes);
+    } else {
+      vmsvga_rop_invert_buffer(dst, span_bytes);
+    };
+    vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
+    vmsvga_surface_dequeue(s, &src_surface);
+    vmsvga_surface_dequeue(s, &dst_surface);
+    return true;
+  };
+  if (src_contiguous && dst_contiguous) {
+    uint8_t *src = vram + (size_t)src_start;
+    uint8_t *dst = vram + (size_t)dst_start;
+    bool reverse = dst_start > src_start && dst_start < src_start + span_bytes;
+    if (rop == VMSVGA_ROP_COPY) {
+      memmove(dst, src, span_bytes);
+    } else if (rop == VMSVGA_ROP_COPY_INVERTED) {
+      vmsvga_rop_copy_inverted_buffer(dst, src, span_bytes, reverse);
+    } else {
+      vmsvga_rop_buffer(dst, src, span_bytes, rop, reverse);
+    };
+    vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
+    vmsvga_surface_dequeue(s, &src_surface);
+    vmsvga_surface_dequeue(s, &dst_surface);
+    return true;
   };
   for (row_count = 0; row_count < h; row_count++) {
     uint32_t row = reverse_rows ? h - 1 - row_count : row_count;
@@ -1561,6 +1672,13 @@ vmsvga_object_create(struct vmsvga_state_s *s, uint32_t id, uint32_t type,
       s->object_bytes - old_size > limit - size) {
     return NULL;
   };
+  if (old != NULL && old->type == type && old->width == width &&
+      old->height == height &&
+      old->depth == (type == VMSVGA_OBJECT_BITMAP ? 1 : depth) &&
+      old->stride == stride && old->size == size) {
+    memset(old->data, 0, size);
+    return old;
+  };
   object = g_try_new0(struct vmsvga_object_s, 1);
   if (object == NULL) {
     return NULL;
@@ -1690,6 +1808,38 @@ static inline void vmsvga_store_pixel(uint8_t *dst, uint32_t bypp,
     break;
   };
 };
+static inline bool vmsvga_mono_overlay(uint8_t *dst, const uint8_t *bitmap,
+                                       uint32_t first_bit, uint32_t last_bit,
+                                       uint32_t bypp, uint32_t foreground) {
+  uint32_t byte_index;
+  uint32_t last_byte;
+  bool changed = false;
+  if (first_bit >= last_bit) {
+    return false;
+  };
+  byte_index = first_bit >> 3;
+  last_byte = (last_bit - 1) >> 3;
+  for (; byte_index <= last_byte; byte_index++) {
+    uint32_t bit_base = byte_index << 3;
+    uint32_t byte_end = MIN(8U, last_bit - bit_base);
+    uint8_t bits = bitmap[byte_index];
+    if (bit_base < first_bit) {
+      bits &= (uint8_t)(UINT8_MAX >> (first_bit - bit_base));
+    };
+    if (byte_end < 8) {
+      bits &= (uint8_t)(UINT8_MAX << (8 - byte_end));
+    };
+    while (bits != 0) {
+      uint32_t bit_in_byte = 7 - __builtin_ctz((unsigned)bits);
+      uint32_t bit = bit_base + bit_in_byte;
+      vmsvga_store_pixel(dst + (size_t)(bit - first_bit) * bypp, bypp,
+                         foreground);
+      bits &= bits - 1;
+      changed = true;
+    };
+  };
+  return changed;
+};
 static inline void vmsvga_repeat_pattern_row(uint8_t *row,
                                              uint32_t pattern_pixels,
                                              uint32_t width, uint32_t bypp) {
@@ -1740,6 +1890,19 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
   row_bytes = (size_t)width * bypp;
   if (rop == VMSVGA_ROP_CLEAR || rop == VMSVGA_ROP_SET ||
       rop == VMSVGA_ROP_INVERT) {
+    if (dst_x == 0 && row_bytes == bypl) {
+      uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * dst_y;
+      size_t length = row_bytes * height;
+      if (rop == VMSVGA_ROP_CLEAR) {
+        memset(dst, 0, length);
+      } else if (rop == VMSVGA_ROP_SET) {
+        memset(dst, 0xff, length);
+      } else {
+        vmsvga_rop_invert_buffer(dst, length);
+      };
+      vmsvga_damage_add(s, dst_x, dst_y, width, height);
+      return true;
+    };
     for (row = 0; row < height; row++) {
       uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (dst_y + row) +
                      (size_t)bypp * dst_x;
@@ -1754,9 +1917,69 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
     vmsvga_damage_add(s, dst_x, dst_y, width, height);
     return true;
   };
+  if (type == VMSVGA_OBJECT_BITMAP) {
+    uint8_t background_col[4];
+    background_col[0] = background;
+    background_col[1] = background >> 8;
+    background_col[2] = background >> 16;
+    background_col[3] = background >> 24;
+    for (row = 0; row < height; row++) {
+      uint32_t object_y =
+          pattern ? (dst_y + row) % object->height : src_y + row;
+      const uint8_t *bitmap_row =
+          object->data + (size_t)object->stride * object_y;
+      uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (dst_y + row) +
+                     (size_t)bypp * dst_x;
+      if (pattern) {
+        uint32_t pattern_x = dst_x % object->width;
+        uint32_t pattern_pixels = MIN(width, object->width);
+        uint32_t tail_pixels =
+            MIN(pattern_pixels, object->width - pattern_x);
+        vmsvga_fill_pattern(source_row, (size_t)pattern_pixels * bypp,
+                            background_col, bypp);
+        vmsvga_mono_overlay(source_row, bitmap_row, pattern_x,
+                            pattern_x + tail_pixels, bypp, foreground);
+        if (tail_pixels < pattern_pixels) {
+          vmsvga_mono_overlay(source_row + (size_t)tail_pixels * bypp,
+                              bitmap_row, 0, pattern_pixels - tail_pixels,
+                              bypp, foreground);
+        };
+        vmsvga_repeat_pattern_row(source_row, pattern_pixels, width, bypp);
+      } else {
+        vmsvga_fill_pattern(source_row, row_bytes, background_col, bypp);
+        vmsvga_mono_overlay(source_row, bitmap_row, src_x, src_x + width,
+                            bypp, foreground);
+      };
+      if (rop == VMSVGA_ROP_COPY) {
+        memcpy(dst, source_row, row_bytes);
+      } else if (rop == VMSVGA_ROP_COPY_INVERTED) {
+        vmsvga_rop_copy_inverted_buffer(dst, source_row, row_bytes, false);
+      } else {
+        vmsvga_rop_buffer(dst, source_row, row_bytes, rop, false);
+      };
+    };
+    vmsvga_damage_add(s, dst_x, dst_y, width, height);
+    return true;
+  };
   if (type == VMSVGA_OBJECT_PIXMAP && object->depth == s->new_depth &&
       (object->depth == 8 || object->depth == 16 || object->depth == 24 ||
        object->depth == 32)) {
+    if (!pattern && src_x == 0 && dst_x == 0 &&
+        row_bytes == object->stride && row_bytes == bypl) {
+      const uint8_t *src =
+          object->data + (size_t)object->stride * src_y;
+      uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * dst_y;
+      size_t length = row_bytes * height;
+      if (rop == VMSVGA_ROP_COPY) {
+        memcpy(dst, src, length);
+      } else if (rop == VMSVGA_ROP_COPY_INVERTED) {
+        vmsvga_rop_copy_inverted_buffer(dst, src, length, false);
+      } else {
+        vmsvga_rop_buffer(dst, src, length, rop, false);
+      };
+      vmsvga_damage_add(s, dst_x, dst_y, width, height);
+      return true;
+    };
     for (row = 0; row < height; row++) {
       uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (dst_y + row) +
                      (size_t)bypp * dst_x;
@@ -2102,19 +2325,13 @@ static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
       uint32_t last_bit = last_x - x;
       uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (uint32_t)dst_y +
                      (size_t)bypp * first_x;
-      uint32_t bit_index;
       if (!background_transparent) {
         vmsvga_fill_pattern(dst, (size_t)(last_x - first_x) * bypp,
                             background_col, bypp);
         changed = true;
       };
-      for (bit_index = first_bit; bit_index < last_bit; bit_index++) {
-        if ((scanline[bit_index >> 3] >> (7 - (bit_index & 7))) & 1) {
-          vmsvga_store_pixel(dst + (size_t)(bit_index - first_bit) * bypp,
-                             bypp, foreground);
-          changed = true;
-        };
-      };
+      changed |= vmsvga_mono_overlay(dst, scanline, first_bit, last_bit, bypp,
+                                     foreground);
     };
   };
   if (changed) {

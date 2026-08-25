@@ -7,7 +7,7 @@
  Copyright (c) 2023-2026 Christopher Eric Lentocha
  <christopherericlentocha@gmail.com>
 
- Copyright (c) 2026 https://github.com/qemus/qemu-vmvga
+ Copyright (c) 2026 QEMU VMVGA (https://github.com/qemus/qemu-vmvga)
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
@@ -197,6 +197,31 @@ struct vmsvga_damage_rect_s {
   uint32_t h;
 };
 
+/*
+ * These VMState shadows borrow runtime buffers while saving and own the
+ * VMState-allocated buffers while loading, until post_load transfers them.
+ */
+struct vmsvga_object_migration_s {
+  bool present;
+  uint32_t type;
+  uint32_t width;
+  uint32_t height;
+  uint32_t depth;
+  uint32_t stride;
+  uint32_t data_size;
+  uint8_t *data;
+};
+
+struct vmsvga_cursor_migration_s {
+  bool present;
+  uint32_t width;
+  uint32_t height;
+  int32_t hot_x;
+  int32_t hot_y;
+  uint32_t pixel_count;
+  uint32_t *data;
+};
+
 #ifdef VERBOSE
 #define VPRINT(fmt, ...)                                                       \
   printf("vmsvga (%s): %u - %s: " fmt, __FILE__, (uint32_t)time(NULL),         \
@@ -229,7 +254,7 @@ struct vmsvga_state_s {
   uint32_t cmd_high;
   uint32_t guest;
   uint32_t svgaid;
-  uint32_t thread; // Kept only for migration compatibility.
+  uint32_t thread;
   uint32_t sync;
   uint32_t bios;
   uint32_t fifo_size;
@@ -250,9 +275,11 @@ struct vmsvga_state_s {
   uint32_t fc;
   uint32_t ff;
   uint32_t *fifo;
-  uint32_t *scratch;
+  uint32_t scratch[VMSVGA_SCRATCH_SIZE];
   struct vmsvga_object_s *objects[VMSVGA_MAX_OBJECTS];
   QEMUCursor *cursor_cache[VMSVGA_MAX_CURSORS];
+  struct vmsvga_object_migration_s object_migration[VMSVGA_MAX_OBJECTS];
+  struct vmsvga_cursor_migration_s cursor_migration[VMSVGA_MAX_CURSORS];
   size_t object_bytes;
   uint8_t blit_scratch[VMSVGA_BLIT_SCRATCH_SIZE];
   struct vmsvga_damage_rect_s damage[VMSVGA_DAMAGE_RECTS];
@@ -8654,9 +8681,7 @@ static void vmsvga_reset(DeviceState *dev) {
   vmsvga_palette_rebuild(s);
 #endif
   vmsvga_set_fifo_capabilities(s);
-  if (s->scratch != NULL) {
-    memset(s->scratch, 0, s->scratch_size * sizeof(*s->scratch));
-  };
+  memset(s->scratch, 0, sizeof(s->scratch));
   if (s->fifo != NULL) {
     vmsvga_update_fifo_registers(s);
   };
@@ -8680,9 +8705,174 @@ static void vmsvga_text_update(void *opaque, uint32_t *chardata) {
     s->vga.hw_ops->text_update(&s->vga, chardata);
   };
 };
+static void vmsvga_migration_buffers_clear(struct vmsvga_state_s *s) {
+  uint32_t id;
+  for (id = 0; id < VMSVGA_MAX_OBJECTS; id++) {
+    g_clear_pointer(&s->object_migration[id].data, g_free);
+  };
+  for (id = 0; id < VMSVGA_MAX_CURSORS; id++) {
+    g_clear_pointer(&s->cursor_migration[id].data, g_free);
+  };
+  memset(s->object_migration, 0, sizeof(s->object_migration));
+  memset(s->cursor_migration, 0, sizeof(s->cursor_migration));
+};
+static int vmsvga_pre_load(void *opaque) {
+  struct vmsvga_state_s *s = opaque;
+  vmsvga_migration_buffers_clear(s);
+  vmsvga_cursor_cache_clear(s);
+  vmsvga_objects_clear(s);
+  memset(s->scratch, 0, sizeof(s->scratch));
+  return 0;
+};
+static int vmsvga_pre_save(void *opaque) {
+  struct vmsvga_state_s *s = opaque;
+  uint32_t id;
+  for (id = 0; id < VMSVGA_MAX_OBJECTS; id++) {
+    struct vmsvga_object_s *object = s->objects[id];
+    if (object != NULL &&
+        (object->data == NULL || object->size > UINT32_MAX)) {
+      return -EINVAL;
+    };
+  };
+  for (id = 0; id < VMSVGA_MAX_CURSORS; id++) {
+    QEMUCursor *cursor = s->cursor_cache[id];
+    if (cursor != NULL &&
+        (cursor->width < 1 ||
+         cursor->width > VMSVGA_CURSOR_MAX_DIMENSION ||
+         cursor->height < 1 ||
+         cursor->height > VMSVGA_CURSOR_MAX_DIMENSION ||
+         cursor->hot_x < 0 || cursor->hot_x >= cursor->width ||
+         cursor->hot_y < 0 || cursor->hot_y >= cursor->height)) {
+      return -EINVAL;
+    };
+  };
+  memset(s->object_migration, 0, sizeof(s->object_migration));
+  memset(s->cursor_migration, 0, sizeof(s->cursor_migration));
+  for (id = 0; id < VMSVGA_MAX_OBJECTS; id++) {
+    struct vmsvga_object_s *object = s->objects[id];
+    struct vmsvga_object_migration_s *migration =
+        &s->object_migration[id];
+    if (object == NULL) {
+      continue;
+    };
+    migration->present = true;
+    migration->type = object->type;
+    migration->width = object->width;
+    migration->height = object->height;
+    migration->depth = object->depth;
+    migration->stride = object->stride;
+    migration->data_size = object->size;
+    migration->data = object->data;
+  };
+  for (id = 0; id < VMSVGA_MAX_CURSORS; id++) {
+    QEMUCursor *cursor = s->cursor_cache[id];
+    struct vmsvga_cursor_migration_s *migration =
+        &s->cursor_migration[id];
+    if (cursor == NULL) {
+      continue;
+    };
+    migration->present = true;
+    migration->width = cursor->width;
+    migration->height = cursor->height;
+    migration->hot_x = cursor->hot_x;
+    migration->hot_y = cursor->hot_y;
+    migration->pixel_count =
+        (uint32_t)((uint64_t)cursor->width * cursor->height);
+    migration->data = cursor->data;
+  };
+  return 0;
+};
+static void vmsvga_post_save(void *opaque) {
+  struct vmsvga_state_s *s = opaque;
+  memset(s->object_migration, 0, sizeof(s->object_migration));
+  memset(s->cursor_migration, 0, sizeof(s->cursor_migration));
+};
+static int vmsvga_restore_objects(struct vmsvga_state_s *s) {
+  size_t total = 0;
+  size_t limit = vmsvga_surface_memory_size(s);
+  uint32_t id;
+  for (id = 0; id < VMSVGA_MAX_OBJECTS; id++) {
+    struct vmsvga_object_migration_s *migration =
+        &s->object_migration[id];
+    struct vmsvga_object_s *object;
+    uint32_t stride;
+    size_t size;
+    if (!migration->present) {
+      if (migration->data_size != 0 || migration->data != NULL) {
+        return -EINVAL;
+      };
+      continue;
+    };
+    if (migration->data == NULL ||
+        !vmsvga_object_layout(migration->type, migration->width,
+                              migration->height, migration->depth,
+                              &stride, &size) ||
+        stride != migration->stride || size != migration->data_size ||
+        size > limit || total > limit - size) {
+      return -EINVAL;
+    };
+    object = g_try_new0(struct vmsvga_object_s, 1);
+    if (object == NULL) {
+      return -ENOMEM;
+    };
+    object->type = migration->type;
+    object->width = migration->width;
+    object->height = migration->height;
+    object->depth = migration->depth;
+    object->stride = migration->stride;
+    object->size = size;
+    object->data = migration->data;
+    migration->data = NULL;
+    s->objects[id] = object;
+    total += size;
+  };
+  s->object_bytes = total;
+  return 0;
+};
+static int vmsvga_restore_cursors(struct vmsvga_state_s *s) {
+  uint32_t id;
+  for (id = 0; id < VMSVGA_MAX_CURSORS; id++) {
+    struct vmsvga_cursor_migration_s *migration =
+        &s->cursor_migration[id];
+    QEMUCursor *cursor;
+    uint64_t data_size;
+    if (!migration->present) {
+      if (migration->pixel_count != 0 || migration->data != NULL) {
+        return -EINVAL;
+      };
+      continue;
+    };
+    data_size = (uint64_t)migration->width * migration->height *
+                sizeof(uint32_t);
+    if (migration->width < 1 ||
+        migration->width > VMSVGA_CURSOR_MAX_DIMENSION ||
+        migration->height < 1 ||
+        migration->height > VMSVGA_CURSOR_MAX_DIMENSION ||
+        migration->hot_x < 0 ||
+        (uint32_t)migration->hot_x >= migration->width ||
+        migration->hot_y < 0 ||
+        (uint32_t)migration->hot_y >= migration->height ||
+        data_size / sizeof(uint32_t) != migration->pixel_count ||
+        migration->data == NULL) {
+      return -EINVAL;
+    };
+    cursor = cursor_alloc(migration->width, migration->height);
+    if (cursor == NULL) {
+      return -ENOMEM;
+    };
+    cursor->hot_x = migration->hot_x;
+    cursor->hot_y = migration->hot_y;
+    memcpy(cursor->data, migration->data, data_size);
+    g_clear_pointer(&migration->data, g_free);
+    vmsvga_cursor_cache_put(s, id, cursor);
+  };
+  return 0;
+};
 static int vmsvga_post_load(void *opaque, int version_id) {
   VPRINT("vmsvga_post_load was just executed\n");
   struct vmsvga_state_s *s = opaque;
+  int ret;
+  (void)version_id;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
@@ -8695,16 +8885,18 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   };
   s->sync = 0;
   s->thread = 0;
-  s->cursor_x = 0;
-  s->cursor_y = 0;
-  s->cursor_on = SVGA_CURSOR_ON_SHOW;
   s->cursor_dirty = true;
   s->damage_count = 0;
-  s->fence = 0;
-  s->fence_goal = 0;
   s->invalidated = true;
-  vmsvga_cursor_cache_clear(s);
-  vmsvga_objects_clear(s);
+  ret = vmsvga_restore_objects(s);
+  if (ret < 0) {
+    goto fail;
+  };
+  ret = vmsvga_restore_cursors(s);
+  if (ret < 0) {
+    goto fail;
+  };
+  vmsvga_migration_buffers_clear(s);
 #ifdef CONFIG_PIXMAN
   vmsvga_palette_rebuild(s);
 #endif
@@ -8716,12 +8908,53 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   pci_set_irq(PCI_DEVICE(pci_vmsvga), !!(s->irq_status & s->irq_mask));
 #endif
   return 0;
+fail:
+  vmsvga_cursor_cache_clear(s);
+  vmsvga_objects_clear(s);
+  vmsvga_migration_buffers_clear(s);
+  return ret;
 };
+static const VMStateDescription vmstate_vmsvga_object_migration = {
+    .name = "vmware_vga_object",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields =
+        (const VMStateField[]){
+            VMSTATE_BOOL(present, struct vmsvga_object_migration_s),
+            VMSTATE_UINT32(type, struct vmsvga_object_migration_s),
+            VMSTATE_UINT32(width, struct vmsvga_object_migration_s),
+            VMSTATE_UINT32(height, struct vmsvga_object_migration_s),
+            VMSTATE_UINT32(depth, struct vmsvga_object_migration_s),
+            VMSTATE_UINT32(stride, struct vmsvga_object_migration_s),
+            VMSTATE_UINT32(data_size, struct vmsvga_object_migration_s),
+            VMSTATE_VBUFFER_ALLOC_UINT32(data,
+                                         struct vmsvga_object_migration_s, 0,
+                                         NULL, data_size),
+            VMSTATE_END_OF_LIST()}};
+static const VMStateDescription vmstate_vmsvga_cursor_migration = {
+    .name = "vmware_vga_cursor",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields =
+        (const VMStateField[]){
+            VMSTATE_BOOL(present, struct vmsvga_cursor_migration_s),
+            VMSTATE_UINT32(width, struct vmsvga_cursor_migration_s),
+            VMSTATE_UINT32(height, struct vmsvga_cursor_migration_s),
+            VMSTATE_INT32(hot_x, struct vmsvga_cursor_migration_s),
+            VMSTATE_INT32(hot_y, struct vmsvga_cursor_migration_s),
+            VMSTATE_UINT32(pixel_count, struct vmsvga_cursor_migration_s),
+            VMSTATE_VARRAY_UINT32_ALLOC(
+                data, struct vmsvga_cursor_migration_s, pixel_count, 0,
+                vmstate_info_uint32, uint32_t),
+            VMSTATE_END_OF_LIST()}};
 static VMStateDescription vmstate_vmware_vga_internal = {
     .name = "vmware_vga_internal",
-    .version_id = 1,
-    .minimum_version_id = 0,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .pre_load = vmsvga_pre_load,
     .post_load = vmsvga_post_load,
+    .pre_save = vmsvga_pre_save,
+    .post_save = vmsvga_post_save,
     .fields = (const VMStateField[]){
         VMSTATE_UINT32_ARRAY(svgapalettebase, struct vmsvga_state_s,
                              VMSVGA_PALETTE_STORAGE_SIZE),
@@ -8729,6 +8962,8 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32(config, struct vmsvga_state_s),
         VMSTATE_UINT32(index, struct vmsvga_state_s),
         VMSTATE_UINT32(scratch_size, struct vmsvga_state_s),
+        VMSTATE_UINT32_ARRAY(scratch, struct vmsvga_state_s,
+                             VMSVGA_SCRATCH_SIZE),
         VMSTATE_UINT32(new_width, struct vmsvga_state_s),
         VMSTATE_UINT32(new_height, struct vmsvga_state_s),
         VMSTATE_UINT32(new_depth, struct vmsvga_state_s),
@@ -8758,13 +8993,26 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32(display_id, struct vmsvga_state_s),
         VMSTATE_UINT32(pitchlock, struct vmsvga_state_s),
         VMSTATE_UINT32(cursor, struct vmsvga_state_s),
+        VMSTATE_UINT32(cursor_x, struct vmsvga_state_s),
+        VMSTATE_UINT32(cursor_y, struct vmsvga_state_s),
+        VMSTATE_UINT32(cursor_on, struct vmsvga_state_s),
+        VMSTATE_UINT32(fence, struct vmsvga_state_s),
+        VMSTATE_UINT32(fence_goal, struct vmsvga_state_s),
         VMSTATE_UINT32(fc, struct vmsvga_state_s),
         VMSTATE_UINT32(ff, struct vmsvga_state_s),
+        VMSTATE_STRUCT_ARRAY(object_migration, struct vmsvga_state_s,
+                             VMSVGA_MAX_OBJECTS, 2,
+                             vmstate_vmsvga_object_migration,
+                             struct vmsvga_object_migration_s),
+        VMSTATE_STRUCT_ARRAY(cursor_migration, struct vmsvga_state_s,
+                             VMSVGA_MAX_CURSORS, 2,
+                             vmstate_vmsvga_cursor_migration,
+                             struct vmsvga_cursor_migration_s),
         VMSTATE_END_OF_LIST()}};
 static VMStateDescription vmstate_vmware_vga = {
     .name = "vmware_vga",
-    .version_id = 0,
-    .minimum_version_id = 0,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]){
         VMSTATE_PCI_DEVICE(parent_obj, struct pci_vmsvga_state_s),
         VMSTATE_STRUCT(chip, struct pci_vmsvga_state_s, 0,
@@ -8779,7 +9027,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                         MemoryRegion *address_space, MemoryRegion *io) {
   VPRINT("vmsvga_init was just executed\n");
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
-  s->scratch = g_new0(uint32_t, s->scratch_size);
+  memset(s->scratch, 0, sizeof(s->scratch));
   memset(s->cursor_cache, 0, sizeof(s->cursor_cache));
   s->vga.con = vmvga_graphic_console_create(dev, 0, &vmsvga_ops, s);
   s->fifo_size = VMSVGA_FIFO_SIZE;
@@ -8891,9 +9139,9 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp) {
 };
 static void pci_vmsvga_uninit(PCIDevice *dev) {
   struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+  vmsvga_migration_buffers_clear(&s->chip);
   vmsvga_cursor_cache_clear(&s->chip);
   vmsvga_objects_clear(&s->chip);
-  g_clear_pointer(&s->chip.scratch, g_free);
 };
 static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", struct pci_vmsvga_state_s,

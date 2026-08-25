@@ -4,8 +4,6 @@ Enhanced VMware SVGA II (`vmware-svga`) device implementation for QEMU.
 
 ## Purpose 🎯
 
-## Purpose 🎯
-
 QEMU’s stock VMware SVGA II device provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, important device characteristics do not accurately match real VMware hardware, and guest drivers can therefore fail to initialize or fall back to slow framebuffer rendering.
 
 This fork provides a substantially more complete and compatible VMware SVGA II device. It implements the full legacy 2D command stack used by VMware display drivers, including rectangle operations, raster operations, bitmap and pixmap patterns, glyph rendering, offscreen surfaces, alpha blending, hardware cursors, and display updates.

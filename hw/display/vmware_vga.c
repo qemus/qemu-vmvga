@@ -8381,7 +8381,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->vga.con = vmvga_graphic_console_create(dev, 0, &vmsvga_ops, s);
   s->fifo_size = VMSVGA_FIFO_SIZE;
   memory_region_init_ram(&s->fifo_ram, OBJECT(dev), "vmsvga.fifo",
-                         VMSVGA_FIFO_APERTURE_SIZE, &error_fatal);
+                          s->fifo_size, &error_fatal);
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
   vga_common_init(&s->vga, OBJECT(dev), &error_fatal);
   vga_init(&s->vga, OBJECT(dev), address_space, io, true);

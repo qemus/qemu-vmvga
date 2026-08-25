@@ -152,6 +152,7 @@ enum {
 #define VMSVGA_MAX_OBJECTS 500
 #define VMSVGA_MAX_CURSORS 500
 #define VMSVGA_DAMAGE_RECTS 256
+#define VMSVGA_DIRTY_BLOCK_PAGES 64
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
 
 enum vmsvga_object_type_e {
@@ -2241,6 +2242,13 @@ static inline int vmsvga_fifo_length(struct vmsvga_state_s *s) {
          s->fifo_min, s->fifo_max, s->fifo_next, s->fifo_stop, num,
          num / (int)sizeof(uint32_t));
   return num / sizeof(uint32_t);
+};
+static inline bool vmsvga_fifo_pending(struct vmsvga_state_s *s) {
+  if (!s->enable || !s->config || s->fifo == NULL) {
+    return false;
+  };
+  return le32_to_cpu(s->fifo[SVGA_FIFO_NEXT_CMD]) !=
+         le32_to_cpu(s->fifo[SVGA_FIFO_STOP]);
 };
 static inline uint32_t vmsvga_fifo_read_raw(struct vmsvga_state_s *s) {
   VPRINT("vmsvga_fifo_read_raw was just executed\n");
@@ -7451,6 +7459,8 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
   uint32_t stride = vmsvga_stride(s);
   uint32_t row_bytes;
+  hwaddr block_addr;
+  hwaddr block_size;
   hwaddr page_addr;
   hwaddr visible_size;
   if (bypp == 0 || stride == 0 || s->new_width == 0 || s->new_height == 0) {
@@ -7468,35 +7478,45 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   };
   if (!s->invalidated && memory_region_snapshot_get_dirty(
                             &s->vga.vram, snap, 0, visible_size)) {
-    for (page_addr = 0; page_addr < visible_size;
-         page_addr += TARGET_PAGE_SIZE) {
-      hwaddr page_end = MIN(page_addr + (hwaddr)TARGET_PAGE_SIZE, visible_size);
-      uint32_t first_y;
-      uint32_t last_y;
-      uint32_t y;
-      if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, page_addr,
-                                            page_end - page_addr)) {
+    block_size = (hwaddr)TARGET_PAGE_SIZE * VMSVGA_DIRTY_BLOCK_PAGES;
+    for (block_addr = 0; block_addr < visible_size;
+         block_addr += block_size) {
+      hwaddr block_end = MIN(block_addr + block_size, visible_size);
+      if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, block_addr,
+                                            block_end - block_addr)) {
         continue;
       };
-      first_y = page_addr / stride;
-      last_y = (page_end - 1) / stride;
-      for (y = first_y; y <= last_y; y++) {
-        hwaddr row_addr = (hwaddr)y * stride;
-        hwaddr start = MAX(page_addr, row_addr);
-        hwaddr end = MIN(page_end, row_addr + row_bytes);
-        uint32_t byte_x;
-        uint32_t byte_end;
-        uint32_t x;
-        uint32_t end_x;
-        if (start >= end) {
+      for (page_addr = block_addr; page_addr < block_end;
+           page_addr += TARGET_PAGE_SIZE) {
+        hwaddr page_end =
+            MIN(page_addr + (hwaddr)TARGET_PAGE_SIZE, block_end);
+        uint32_t first_y;
+        uint32_t last_y;
+        uint32_t y;
+        if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, page_addr,
+                                              page_end - page_addr)) {
           continue;
         };
-        byte_x = start - row_addr;
-        byte_end = end - row_addr;
-        x = byte_x / bypp;
-        end_x = MIN((byte_end + bypp - 1) / bypp, s->new_width);
-        vmsvga_add_uncovered_dirty_span(s, explicit_damage, explicit_count, x,
-                                        y, end_x - x);
+        first_y = page_addr / stride;
+        last_y = (page_end - 1) / stride;
+        for (y = first_y; y <= last_y; y++) {
+          hwaddr row_addr = (hwaddr)y * stride;
+          hwaddr start = MAX(page_addr, row_addr);
+          hwaddr end = MIN(page_end, row_addr + row_bytes);
+          uint32_t byte_x;
+          uint32_t byte_end;
+          uint32_t x;
+          uint32_t end_x;
+          if (start >= end) {
+            continue;
+          };
+          byte_x = start - row_addr;
+          byte_end = end - row_addr;
+          x = byte_x / bypp;
+          end_x = MIN((byte_end + bypp - 1) / bypp, s->new_width);
+          vmsvga_add_uncovered_dirty_span(
+              s, explicit_damage, explicit_count, x, y, end_x - x);
+        };
       };
     };
   };
@@ -8537,8 +8557,12 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
       s->marker_logged = true;
     };
     if (!s->sync) {
-      s->sync = 1;
-      vmsvga_fifo_run(s, false);
+      if (vmsvga_fifo_pending(s)) {
+        s->sync = 1;
+        vmsvga_fifo_run(s, false);
+      } else {
+        cursor_update_from_fifo(s);
+      };
     };
     explicit_count = s->damage_count;
     if (explicit_count != 0) {

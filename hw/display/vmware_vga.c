@@ -34,6 +34,7 @@
 // #define VERBOSE
 #include "qemu/osdep.h" // Required to be the first #include
 #include "qapi/error.h"
+#include "exec/target_page.h"
 #include "trace.h"
 #include "include/vmware_vga_compat.h"
 #include "include/includeCheck.h"
@@ -152,7 +153,6 @@ enum {
 #define VMSVGA_MAX_CURSORS 500
 #define VMSVGA_DAMAGE_RECTS 256
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
-#define VMSVGA_DIRTY_CHUNK_SIZE 4096
 
 enum vmsvga_object_type_e {
   VMSVGA_OBJECT_BITMAP = 1,
@@ -7410,22 +7410,38 @@ static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s) {
   };
   return s->new_width * vmsvga_bytes_per_pixel(s->new_depth);
 };
-static inline bool
-vmsvga_damage_overlaps(const struct vmsvga_damage_rect_s *rects,
-                        uint32_t count, uint32_t x, uint32_t y, uint32_t w,
-                        uint32_t h) {
-  uint32_t i;
+static inline void vmsvga_add_uncovered_dirty_span(
+    struct vmsvga_state_s *s,
+    const struct vmsvga_damage_rect_s *explicit_damage,
+    uint32_t explicit_count, uint32_t x, uint32_t y, uint32_t w) {
+  uint64_t left = x;
   uint64_t right = (uint64_t)x + w;
-  uint64_t bottom = (uint64_t)y + h;
-  for (i = 0; i < count; i++) {
-    uint64_t rect_right = (uint64_t)rects[i].x + rects[i].w;
-    uint64_t rect_bottom = (uint64_t)rects[i].y + rects[i].h;
-    if ((uint64_t)x < rect_right && (uint64_t)rects[i].x < right &&
-        (uint64_t)y < rect_bottom && (uint64_t)rects[i].y < bottom) {
-      return true;
+  while (left < right) {
+    uint64_t covered_end = left;
+    uint64_t next_covered = right;
+    uint32_t i;
+    for (i = 0; i < explicit_count; i++) {
+      const struct vmsvga_damage_rect_s *rect = &explicit_damage[i];
+      uint64_t rect_right = (uint64_t)rect->x + rect->w;
+      uint64_t rect_bottom = (uint64_t)rect->y + rect->h;
+      if ((uint64_t)y < rect->y || (uint64_t)y >= rect_bottom ||
+          rect_right <= left || (uint64_t)rect->x >= right) {
+        continue;
+      };
+      if ((uint64_t)rect->x <= left) {
+        covered_end = MAX(covered_end, MIN(rect_right, right));
+      } else {
+        next_covered = MIN(next_covered, (uint64_t)rect->x);
+      };
     };
+    if (covered_end > left) {
+      left = covered_end;
+      continue;
+    };
+    vmsvga_damage_add(s, (uint32_t)left, y,
+                      (uint32_t)(next_covered - left), 1);
+    left = next_covered;
   };
-  return false;
 };
 static inline void
 vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
@@ -7435,7 +7451,7 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
   uint32_t stride = vmsvga_stride(s);
   uint32_t row_bytes;
-  uint32_t y;
+  hwaddr page_addr;
   hwaddr visible_size;
   if (bypp == 0 || stride == 0 || s->new_width == 0 || s->new_height == 0) {
     return;
@@ -7452,25 +7468,35 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   };
   if (!s->invalidated && memory_region_snapshot_get_dirty(
                             &s->vga.vram, snap, 0, visible_size)) {
-    for (y = 0; y < s->new_height; y++) {
-      uint32_t byte_x;
-      hwaddr row_addr = (hwaddr)y * stride;
-      if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, row_addr,
-                                            row_bytes)) {
+    for (page_addr = 0; page_addr < visible_size;
+         page_addr += TARGET_PAGE_SIZE) {
+      hwaddr page_end = MIN(page_addr + (hwaddr)TARGET_PAGE_SIZE, visible_size);
+      uint32_t first_y;
+      uint32_t last_y;
+      uint32_t y;
+      if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, page_addr,
+                                            page_end - page_addr)) {
         continue;
       };
-      for (byte_x = 0; byte_x < row_bytes; byte_x += VMSVGA_DIRTY_CHUNK_SIZE) {
-        uint32_t bytes = MIN(VMSVGA_DIRTY_CHUNK_SIZE, row_bytes - byte_x);
-        hwaddr addr = row_addr + byte_x;
-        if (memory_region_snapshot_get_dirty(&s->vga.vram, snap, addr, bytes)) {
-          uint32_t x = byte_x / bypp;
-          uint32_t end = (byte_x + bytes + bypp - 1) / bypp;
-          uint32_t w = MIN(end, s->new_width) - x;
-          if (!vmsvga_damage_overlaps(explicit_damage, explicit_count, x, y,
-                                      w, 1)) {
-            vmsvga_damage_add(s, x, y, w, 1);
-          };
+      first_y = page_addr / stride;
+      last_y = (page_end - 1) / stride;
+      for (y = first_y; y <= last_y; y++) {
+        hwaddr row_addr = (hwaddr)y * stride;
+        hwaddr start = MAX(page_addr, row_addr);
+        hwaddr end = MIN(page_end, row_addr + row_bytes);
+        uint32_t byte_x;
+        uint32_t byte_end;
+        uint32_t x;
+        uint32_t end_x;
+        if (start >= end) {
+          continue;
         };
+        byte_x = start - row_addr;
+        byte_end = end - row_addr;
+        x = byte_x / bypp;
+        end_x = MIN((byte_end + bypp - 1) / bypp, s->new_width);
+        vmsvga_add_uncovered_dirty_span(s, explicit_damage, explicit_count, x,
+                                        y, end_x - x);
       };
     };
   };

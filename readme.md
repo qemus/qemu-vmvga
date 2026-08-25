@@ -4,11 +4,13 @@ Enhanced VMware SVGA II (`vmware-svga`) device implementation for QEMU.
 
 ## Purpose 🎯
 
-QEMU’s stock VMware SVGA II device provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, important device characteristics do not accurately match real VMware hardware, and guest drivers can therefore fail to initialize or fall back to slow framebuffer rendering.
+QEMU’s stock VMware SVGA II device provides only a minimal implementation of the hardware, and most legacy 2D FIFO commands are missing. This fork provides a substantially more complete and compatible VMware SVGA II device.
 
-This fork provides a substantially more complete and compatible VMware SVGA II device. It implements the full legacy 2D command stack used by VMware display drivers, including rectangle operations, raster operations, bitmap and pixmap patterns, glyph rendering, offscreen surfaces, alpha blending, hardware cursors, and display updates.
+It implements the full legacy 2D command stack used by VMware display drivers, including rectangle operations, raster operations, bitmap and pixmap patterns, glyph rendering, offscreen surfaces, alpha blending, hardware cursors, and display updates.
 
-It also improves the parts surrounding those commands: PCI compatibility, register and FIFO behavior, VRAM and surface-memory calculations, bounds checking, dirty-memory scanning, damage tracking, command batching, and optimized pixel operations. The result is better driver compatibility, more reliable rendering, and more efficient display updates—particularly when QEMU’s VNC output is used.
+It also improves the parts surrounding those commands: PCI compatibility, register and FIFO behavior, VRAM and surface-memory calculations, bounds checking, dirty-memory scanning, damage tracking, command batching, and optimized pixel operations.
+
+The result is better driver compatibility, more reliable rendering, and more efficient display updates—particularly when QEMU’s VNC output is used.
 
 ## Integration 🔗
 

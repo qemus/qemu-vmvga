@@ -405,6 +405,53 @@ static inline bool vmsvga_verify_rect(DisplaySurface *surface, uint32_t x,
   };
   return true;
 };
+static inline bool vmsvga_verify_vram_rect(struct vmsvga_state_s *s,
+                                           DisplaySurface *surface, uint32_t x,
+                                           uint32_t y, uint32_t w,
+                                           uint32_t h) {
+  uint32_t bypl = surface_stride(surface);
+  uint32_t bypp = surface_bytes_per_pixel(surface);
+  uint64_t surface_width_px = surface_width(surface);
+  uint64_t surface_height_px = surface_height(surface);
+  uint64_t x_bytes;
+  uint64_t width_bytes;
+  uint64_t rows;
+  if (bypl == 0 || bypp < 1 || bypp > 4) {
+    return false;
+  };
+  x_bytes = (uint64_t)x * bypp;
+  width_bytes = (uint64_t)w * bypp;
+  if (x_bytes > bypl || width_bytes > (uint64_t)bypl - x_bytes) {
+    return false;
+  };
+  if (h != 0 && (uint64_t)y < surface_height_px &&
+      ((uint64_t)x > surface_width_px ||
+       (uint64_t)w > surface_width_px - x)) {
+    return false;
+  };
+  rows = (uint64_t)s->vga.vram_size / bypl;
+  if ((uint64_t)y > rows || (uint64_t)h > rows - y) {
+    return false;
+  };
+  return true;
+};
+static inline void vmsvga_damage_add_visible(struct vmsvga_state_s *s,
+                                             uint32_t x, uint32_t y,
+                                             uint32_t w, uint32_t h) {
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  uint64_t surface_width_px = surface_width(surface);
+  uint64_t surface_height_px = surface_height(surface);
+  uint64_t right;
+  uint64_t bottom;
+  if ((uint64_t)x >= surface_width_px || (uint64_t)y >= surface_height_px ||
+      w == 0 || h == 0) {
+    return;
+  };
+  right = MIN((uint64_t)x + w, surface_width_px);
+  bottom = MIN((uint64_t)y + h, surface_height_px);
+  vmsvga_damage_add(s, x, y, (uint32_t)(right - x),
+                    (uint32_t)(bottom - y));
+};
 static inline void vmsvga_update_rect(struct vmsvga_state_s *s, uint32_t x,
                                       uint32_t y, uint32_t w, uint32_t h) {
   DisplaySurface *surface = qemu_console_surface(s->vga.con);
@@ -431,8 +478,8 @@ static inline bool vmsvga_copy_rect(struct vmsvga_state_s *s, uint32_t x0,
   uint32_t line = h;
   uint8_t *src;
   uint8_t *dst;
-  if (!vmsvga_verify_rect(surface, x0, y0, w, h) ||
-      !vmsvga_verify_rect(surface, x1, y1, w, h)) {
+  if (!vmsvga_verify_vram_rect(s, surface, x0, y0, w, h) ||
+      !vmsvga_verify_vram_rect(s, surface, x1, y1, w, h)) {
     return false;
   };
   if (w == 0 || h == 0) {
@@ -442,7 +489,7 @@ static inline bool vmsvga_copy_rect(struct vmsvga_state_s *s, uint32_t x0,
     src = vram + (size_t)bypl * y0;
     dst = vram + (size_t)bypl * y1;
     memmove(dst, src, width * h);
-    vmsvga_damage_add(s, x1, y1, w, h);
+    vmsvga_damage_add_visible(s, x1, y1, w, h);
     return true;
   };
   if (y1 > y0) {
@@ -458,7 +505,7 @@ static inline bool vmsvga_copy_rect(struct vmsvga_state_s *s, uint32_t x0,
       memmove(dst, src, width);
     };
   };
-  vmsvga_damage_add(s, x1, y1, w, h);
+  vmsvga_damage_add_visible(s, x1, y1, w, h);
   return true;
 };
 static inline void vmsvga_fill_pattern(uint8_t *dst, size_t length,
@@ -494,7 +541,8 @@ static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
   uint8_t *first;
   uint8_t *dst;
   uint8_t col[4];
-  if (!vmsvga_verify_rect(surface, x, y, w, h) || bypp < 1 || bypp > 4) {
+  if (!vmsvga_verify_vram_rect(s, surface, x, y, w, h) || bypp < 1 ||
+      bypp > 4) {
     return false;
   };
   if (w == 0 || h == 0) {
@@ -507,7 +555,7 @@ static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
   first = s->vga.vram_ptr + (size_t)bypp * x + (size_t)bypl * y;
   if (x == 0 && width == bypl) {
     vmsvga_fill_pattern(first, width * h, col, bypp);
-    vmsvga_damage_add(s, x, y, w, h);
+    vmsvga_damage_add_visible(s, x, y, w, h);
     return true;
   };
   vmsvga_fill_pattern(first, width, col, bypp);
@@ -516,7 +564,7 @@ static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
     dst += bypl;
     memcpy(dst, first, width);
   };
-  vmsvga_damage_add(s, x, y, w, h);
+  vmsvga_damage_add_visible(s, x, y, w, h);
   return true;
 };
 static inline bool vmsvga_solid_rop_is_noop(uint32_t color, uint32_t bypp,
@@ -812,8 +860,8 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
   if (rop == VMSVGA_ROP_COPY) {
     return vmsvga_fill_rect(s, c, x, y, w, h);
   };
-  if (!vmsvga_verify_rect(surface, x, y, w, h) || bypp < 1 || bypp > 4 ||
-      rop > VMSVGA_ROP_SET) {
+  if (!vmsvga_verify_vram_rect(s, surface, x, y, w, h) || bypp < 1 ||
+      bypp > 4 || rop > VMSVGA_ROP_SET) {
     return false;
   };
   if (w == 0 || h == 0 || rop == VMSVGA_ROP_NOOP) {
@@ -825,7 +873,7 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
   if (rop == VMSVGA_ROP_CLEAR) {
     if (x == 0 && width == bypl) {
       memset(s->vga.vram_ptr + (size_t)bypl * y, 0, width * h);
-      vmsvga_damage_add(s, x, y, w, h);
+      vmsvga_damage_add_visible(s, x, y, w, h);
       return true;
     };
     for (row = 0; row < h; row++) {
@@ -833,13 +881,13 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
                      (size_t)bypl * (y + row);
       memset(dst, 0, width);
     };
-    vmsvga_damage_add(s, x, y, w, h);
+    vmsvga_damage_add_visible(s, x, y, w, h);
     return true;
   };
   if (rop == VMSVGA_ROP_SET) {
     if (x == 0 && width == bypl) {
       memset(s->vga.vram_ptr + (size_t)bypl * y, 0xff, width * h);
-      vmsvga_damage_add(s, x, y, w, h);
+      vmsvga_damage_add_visible(s, x, y, w, h);
       return true;
     };
     for (row = 0; row < h; row++) {
@@ -847,7 +895,7 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
                      (size_t)bypl * (y + row);
       memset(dst, 0xff, width);
     };
-    vmsvga_damage_add(s, x, y, w, h);
+    vmsvga_damage_add_visible(s, x, y, w, h);
     return true;
   };
   if (rop == VMSVGA_ROP_COPY_INVERTED) {
@@ -864,7 +912,7 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
     } else {
       vmsvga_rop_fill_buffer(dst, width * h, col, bypp, rop);
     };
-    vmsvga_damage_add(s, x, y, w, h);
+    vmsvga_damage_add_visible(s, x, y, w, h);
     return true;
   };
   for (row = 0; row < h; row++) {
@@ -876,7 +924,7 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
       vmsvga_rop_fill_buffer(dst, width, col, bypp, rop);
     };
   };
-  vmsvga_damage_add(s, x, y, w, h);
+  vmsvga_damage_add_visible(s, x, y, w, h);
   return true;
 };
 static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
@@ -895,9 +943,9 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
   if (rop == VMSVGA_ROP_COPY) {
     return vmsvga_copy_rect(s, x0, y0, x1, y1, w, h);
   };
-  if (!vmsvga_verify_rect(surface, x0, y0, w, h) ||
-      !vmsvga_verify_rect(surface, x1, y1, w, h) || bypp < 1 || bypp > 4 ||
-      rop > VMSVGA_ROP_SET) {
+  if (!vmsvga_verify_vram_rect(s, surface, x0, y0, w, h) ||
+      !vmsvga_verify_vram_rect(s, surface, x1, y1, w, h) || bypp < 1 ||
+      bypp > 4 || rop > VMSVGA_ROP_SET) {
     return false;
   };
   if (w == 0 || h == 0 || rop == VMSVGA_ROP_NOOP) {
@@ -907,7 +955,7 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
     uint8_t value = rop == VMSVGA_ROP_CLEAR ? 0 : 0xff;
     if (x1 == 0 && width == bypl) {
       memset(vram + (size_t)bypl * y1, value, width * h);
-      vmsvga_damage_add(s, x1, y1, w, h);
+      vmsvga_damage_add_visible(s, x1, y1, w, h);
       return true;
     };
     for (row_count = 0; row_count < h; row_count++) {
@@ -915,7 +963,7 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
                      (size_t)bypl * (y1 + row_count);
       memset(dst, value, width);
     };
-    vmsvga_damage_add(s, x1, y1, w, h);
+    vmsvga_damage_add_visible(s, x1, y1, w, h);
     return true;
   };
   if (x0 == 0 && x1 == 0 && width == bypl) {
@@ -930,7 +978,7 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
     } else {
       vmsvga_rop_buffer(dst, src, length, rop, reverse);
     };
-    vmsvga_damage_add(s, x1, y1, w, h);
+    vmsvga_damage_add_visible(s, x1, y1, w, h);
     return true;
   };
   reverse_rows = y1 > y0 && y1 < y0 + h;
@@ -949,7 +997,7 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
       vmsvga_rop_buffer(dst_row, src_row, width, rop, reverse_columns);
     };
   };
-  vmsvga_damage_add(s, x1, y1, w, h);
+  vmsvga_damage_add_visible(s, x1, y1, w, h);
   return true;
 };
 static inline uint32_t vmsvga_bytes_per_pixel(uint32_t bpp);
@@ -2109,6 +2157,31 @@ static inline void vmsvga_fifo_read_raw_data(struct vmsvga_state_s *s,
   };
   s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
 };
+static inline void vmsvga_fifo_peek_raw_data(struct vmsvga_state_s *s,
+                                             size_t byte_offset, void *dst,
+                                             size_t bytes) {
+  uint8_t *out = dst;
+  size_t ring_size = s->fifo_max - s->fifo_min;
+  uint32_t pos;
+  if (bytes == 0 || ring_size == 0) {
+    return;
+  };
+  byte_offset %= ring_size;
+  pos = s->fifo_stop + byte_offset;
+  if (pos >= s->fifo_max) {
+    pos = s->fifo_min + (pos - s->fifo_max);
+  };
+  while (bytes > 0) {
+    size_t chunk = MIN(bytes, (size_t)(s->fifo_max - pos));
+    memcpy(out, (uint8_t *)s->fifo + pos, chunk);
+    out += chunk;
+    pos += chunk;
+    if (pos == s->fifo_max) {
+      pos = s->fifo_min;
+    };
+    bytes -= chunk;
+  };
+};
 static inline void vmsvga_fifo_skip(struct vmsvga_state_s *s,
                                     uint32_t words) {
   vmsvga_fifo_read_raw_data(s, NULL, words);
@@ -2303,7 +2376,7 @@ static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
                                      uint32_t foreground, uint32_t background,
                                      bool clipped, uint32_t clip_x,
                                      uint32_t clip_y, uint32_t clip_w,
-                                     uint32_t clip_h, uint32_t stride_words,
+                                     uint32_t clip_h, uint32_t stride_bytes,
                                      uint32_t payload_words) {
   DisplaySurface *surface = qemu_console_surface(s->vga.con);
   uint32_t bypl = surface_stride(surface);
@@ -2353,7 +2426,8 @@ static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
   background_col[3] = background >> 24;
   for (row = 0; row < h; row++) {
     uint64_t dst_y = (uint64_t)y + row;
-    vmsvga_fifo_read_raw_data(s, scanline, stride_words);
+    vmsvga_fifo_peek_raw_data(s, (size_t)row * stride_bytes, scanline,
+                              stride_bytes);
     if (dst_y < top || dst_y >= bottom) {
       continue;
     };
@@ -2373,6 +2447,7 @@ static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
                                      foreground);
     };
   };
+  vmsvga_fifo_skip(s, payload_words);
   if (changed) {
     vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top,
                       (uint32_t)(right - left), (uint32_t)(bottom - top));
@@ -2813,7 +2888,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       uint32_t width;
       uint32_t height;
       uint32_t foreground;
-      uint64_t stride_words;
+      uint64_t stride_bytes;
+      uint64_t payload_bytes;
       uint64_t payload_words;
       uint64_t total_words;
       if (len < 6) {
@@ -2828,8 +2904,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       width = vmsvga_fifo_read(s);
       height = vmsvga_fifo_read(s);
       foreground = vmsvga_fifo_read(s);
-      stride_words = ((uint64_t)width + 31) >> 5;
-      payload_words = stride_words * height;
+      stride_bytes = ((uint64_t)width + 7) >> 3;
+      payload_bytes = stride_bytes * height;
+      payload_words = (payload_bytes + 3) >> 2;
       total_words = 6 + payload_words;
       if (payload_words > INT32_MAX || total_words > (uint64_t)len) {
         s->fifo_stop = fifo_start;
@@ -2840,7 +2917,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       };
       len -= (int32_t)total_words;
       vmsvga_draw_glyph(s, x, y, width, height, foreground, UINT32_MAX, false,
-                        0, 0, 0, 0, (uint32_t)stride_words,
+                        0, 0, 0, 0, (uint32_t)stride_bytes,
                         (uint32_t)payload_words);
       VPRINT("SVGA_CMD_DRAW_GLYPH command %u in SVGA command FIFO\n", cmd);
       break;
@@ -2856,7 +2933,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       uint32_t clip_y;
       uint32_t clip_width;
       uint32_t clip_height;
-      uint64_t stride_words;
+      uint64_t stride_bytes;
+      uint64_t payload_bytes;
       uint64_t payload_words;
       uint64_t total_words;
       if (len < 11) {
@@ -2876,8 +2954,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       clip_y = vmsvga_fifo_read(s);
       clip_width = vmsvga_fifo_read(s);
       clip_height = vmsvga_fifo_read(s);
-      stride_words = ((uint64_t)width + 31) >> 5;
-      payload_words = stride_words * height;
+      stride_bytes = ((uint64_t)width + 7) >> 3;
+      payload_bytes = stride_bytes * height;
+      payload_words = (payload_bytes + 3) >> 2;
       total_words = 11 + payload_words;
       if (payload_words > INT32_MAX || total_words > (uint64_t)len) {
         s->fifo_stop = fifo_start;
@@ -2889,7 +2968,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       len -= (int32_t)total_words;
       vmsvga_draw_glyph(s, x, y, width, height, foreground, background, true,
                         clip_x, clip_y, clip_width, clip_height,
-                        (uint32_t)stride_words, (uint32_t)payload_words);
+                        (uint32_t)stride_bytes, (uint32_t)payload_words);
       VPRINT("SVGA_CMD_DRAW_GLYPH_CLIPPED command %u in SVGA command FIFO\n",
              cmd);
       break;
@@ -3495,9 +3574,16 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         vmsvga_fifo_read(s);
         SizeOfSVGAFifoCmdDefineGMR2 -= 1;
       };
+      /* TODO: Model GMR2 state before advertising SVGA_CAP_GMR2. */
       VPRINT("SVGA_CMD_DEFINE_GMR2 command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_REMAP_GMR2:
+    case SVGA_CMD_REMAP_GMR2: {
+      uint32_t gmr_id;
+      uint32_t flags;
+      uint32_t offset_pages;
+      uint32_t num_pages;
+      uint64_t payload_words;
+      uint64_t total_words;
       if (len < (sizeof(SVGAFifoCmdRemapGMR2) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -3505,15 +3591,43 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdRemapGMR2) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdRemapGMR2 =
-          sizeof(SVGAFifoCmdRemapGMR2) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdRemapGMR2 >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdRemapGMR2 -= 1;
+      gmr_id = vmsvga_fifo_read(s);
+      flags = vmsvga_fifo_read(s);
+      offset_pages = vmsvga_fifo_read(s);
+      num_pages = vmsvga_fifo_read(s);
+      if (flags & ~(SVGA_REMAP_GMR2_VIA_GMR | SVGA_REMAP_GMR2_PPN64 |
+                    SVGA_REMAP_GMR2_SINGLE_PPN)) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("invalid SVGA_CMD_REMAP_GMR2 flags %u\n", flags);
+        break;
       };
-      VPRINT("SVGA_CMD_REMAP_GMR2 command %u in SVGA command FIFO\n", cmd);
+      if (flags & SVGA_REMAP_GMR2_VIA_GMR) {
+        payload_words = sizeof(SVGAGuestPtr) / sizeof(uint32_t);
+      } else {
+        uint64_t entries =
+            (flags & SVGA_REMAP_GMR2_SINGLE_PPN) ? 1 : num_pages;
+        payload_words = entries *
+                        ((flags & SVGA_REMAP_GMR2_PPN64) ? 2 : 1);
+      };
+      total_words = sizeof(SVGAFifoCmdRemapGMR2) / sizeof(uint32_t) + 1 +
+                    payload_words;
+      if (payload_words > UINT32_MAX || total_words > (uint64_t)len) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        break;
+      };
+      len -= (int32_t)total_words;
+      vmsvga_fifo_skip(s, (uint32_t)payload_words);
+      /* TODO: Apply the remap to GMR2 state once GMR2 is implemented. */
+      VPRINT("SVGA_CMD_REMAP_GMR2 command %u in SVGA command FIFO: gmr %u, "
+             "offset %u, pages %u\n",
+             cmd, gmr_id, offset_pages, num_pages);
       break;
+    }
     case SVGA_CMD_RECT_ROP_COPY:
       if (len < (sizeof(SVGAFifoCmdRectRopCopy) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -3537,7 +3651,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       };
       VPRINT("SVGA_CMD_RECT_ROP_COPY command %u in SVGA command FIFO\n", cmd);
       break;
-    case SVGA_CMD_ESCAPE:
+    case SVGA_CMD_ESCAPE: {
+      uint32_t nsid;
+      uint32_t size;
+      uint64_t payload_words;
+      uint64_t total_words;
       if (len < (sizeof(SVGAFifoCmdEscape) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -3545,32 +3663,55 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdEscape) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdEscape =
-          sizeof(SVGAFifoCmdEscape) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdEscape >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdEscape -= 1;
-      };
-      VPRINT("SVGA_CMD_ESCAPE command %u in SVGA command FIFO\n", cmd);
-      break;
-    case SVGA_CMD_DEFINE_SCREEN:
-      if (len < (sizeof(SVGAFifoCmdDefineScreen) / sizeof(uint32_t)) + 1) {
+      nsid = vmsvga_fifo_read(s);
+      size = vmsvga_fifo_read(s);
+      payload_words = ((uint64_t)size + 3) >> 2;
+      total_words = sizeof(SVGAFifoCmdEscape) / sizeof(uint32_t) + 1 +
+                    payload_words;
+      if (payload_words > UINT32_MAX || total_words > (uint64_t)len) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      len -= sizeof(SVGAFifoCmdDefineScreen) / sizeof(uint32_t) + 1;
-      uint32_t SizeOfSVGAFifoCmdDefineScreen =
-          sizeof(SVGAFifoCmdDefineScreen) / sizeof(uint32_t);
-      while (SizeOfSVGAFifoCmdDefineScreen >= 1) {
-        vmsvga_fifo_read(s);
-        SizeOfSVGAFifoCmdDefineScreen -= 1;
-      };
-      VPRINT("SVGA_CMD_DEFINE_SCREEN command %u in SVGA command FIFO\n", cmd);
+      len -= (int32_t)total_words;
+      vmsvga_fifo_skip(s, (uint32_t)payload_words);
+      /* TODO: Dispatch supported escape namespaces before advertising ESCAPE. */
+      VPRINT("SVGA_CMD_ESCAPE command %u in SVGA command FIFO: nsid %u, "
+             "size %u\n",
+             cmd, nsid, size);
       break;
+    }
+    case SVGA_CMD_DEFINE_SCREEN: {
+      uint32_t struct_size;
+      uint64_t screen_words;
+      uint64_t total_words;
+      if (len < 2) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        break;
+      };
+      struct_size = vmsvga_fifo_read(s);
+      screen_words = ((uint64_t)struct_size + 3) >> 2;
+      total_words = screen_words + 1;
+      if (struct_size < sizeof(uint32_t) || struct_size > SVGA_CMD_MAX_DATASIZE ||
+          screen_words > UINT32_MAX || total_words > (uint64_t)len) {
+        s->fifo_stop = fifo_start;
+        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+        len = 0;
+        VPRINT("invalid SVGA_CMD_DEFINE_SCREEN size %u\n", struct_size);
+        break;
+      };
+      len -= (int32_t)total_words;
+      vmsvga_fifo_skip(s, (uint32_t)screen_words - 1);
+      /* TODO: Model screen objects before advertising SCREEN_OBJECT support. */
+      VPRINT("SVGA_CMD_DEFINE_SCREEN command %u in SVGA command FIFO: size %u\n",
+             cmd, struct_size);
+      break;
+    }
     case SVGA_CMD_DESTROY_SCREEN:
       if (len < (sizeof(SVGAFifoCmdDestroyScreen) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
@@ -7747,9 +7888,9 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     if (s->new_depth == 8) {
       ret = 0x00000007;
     } else if (s->new_depth == 15) {
-      ret = 0x0000001f;
+      ret = 0x00007c00;
     } else if (s->new_depth == 16) {
-      ret = 0x0000001f;
+      ret = 0x0000f800;
     } else {
       ret = 0x00ff0000;
     };
@@ -7773,9 +7914,9 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     if (s->new_depth == 8) {
       ret = 0x000000c0;
     } else if (s->new_depth == 15) {
-      ret = 0x00007c00;
+      ret = 0x0000001f;
     } else if (s->new_depth == 16) {
-      ret = 0x0000f800;
+      ret = 0x0000001f;
     } else {
       ret = 0x000000ff;
     };
@@ -8109,6 +8250,11 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_ENABLE:
+    /*
+     * TODO: SVGA_REG_ENABLE_HIDE is independent of ENABLE. ENABLE|HIDE should
+     * keep SVGA mode active while suppressing scanout; model hidden state
+     * separately instead of treating HIDE as DISABLE.
+     */
     if ((value < 1) || (value & SVGA_REG_ENABLE_DISABLE) ||
         (value & SVGA_REG_ENABLE_HIDE)) {
       s->enable = 0;

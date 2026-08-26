@@ -2651,8 +2651,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   uint32_t irq_status;
   uint32_t fifo_start;
   /*
-   * Keep each processing pass bounded. A guest that needs a full FIFO drain
-   * polls SVGA_REG_BUSY; each BUSY read runs another bounded pass.
+   * Keep each processing pass bounded. FIFO processing itself is independent
+   * of SVGA_REG_BUSY; an explicit SYNC request is tracked separately in
+   * s->sync and BUSY polling merely asks us to run another bounded pass.
    */
   uint32_t maxloop = 1024;
   struct vmsvga_cursor_definition_s cursor;
@@ -2671,7 +2672,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
     s->fifo[SVGA_FIFO_BUSY] = 1;
   };
-  while ((len >= 1) && (s->sync >= 1) && maxloop > 0) {
+  while ((len >= 1) && maxloop > 0) {
     maxloop--;
     fifo_start = s->fifo_stop;
     cmd = vmsvga_fifo_read(s);
@@ -7529,10 +7530,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   cursor_update_from_fifo(s);
   if (len >= 1 && maxloop == 0 && vmsvga_fifo_pending(s)) {
     /*
-     * The fairness budget expired while valid FIFO work remains. Keep BUSY
-     * asserted so BUSY polling or normal display polling continues draining.
+     * The fairness budget expired while valid FIFO work remains. Keep the
+     * FIFO-side busy hint asserted so normal polling continues draining it,
+     * but do not invent an architected SVGA_REG_BUSY state. If an explicit
+     * SYNC is active, s->sync is intentionally left set until the FIFO drains.
      */
-    s->sync = 1;
     if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
       s->fifo[SVGA_FIFO_BUSY] = 1;
     };
@@ -7761,7 +7763,7 @@ static inline void vmsvga_update_fifo_registers(struct vmsvga_state_s *s) {
     s->fifo[SVGA_FIFO_PITCHLOCK] = vmsvga_stride(s);
   };
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-    s->fifo[SVGA_FIFO_BUSY] = s->sync;
+    s->fifo[SVGA_FIFO_BUSY] = 0;
   };
 };
 #ifdef CONFIG_PIXMAN
@@ -8798,7 +8800,6 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
      */
     if (s->config && mode_valid) {
       if (vmsvga_fifo_pending(s)) {
-        s->sync = 1;
         vmsvga_fifo_run(s, false);
       } else {
         cursor_update_from_fifo(s);
@@ -8815,7 +8816,6 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
       s->marker_logged = true;
     };
     if (vmsvga_fifo_pending(s)) {
-      s->sync = 1;
       vmsvga_fifo_run(s, false);
     } else {
       cursor_update_from_fifo(s);

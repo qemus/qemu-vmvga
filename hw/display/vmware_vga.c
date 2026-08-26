@@ -2642,7 +2642,8 @@ typedef struct {
 } SVGA3dCmdSize;
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
                                        uint32_t reg);
-static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
+static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
+                            bool drain_all) {
   VPRINT("vmsvga_fifo_run was just executed\n");
   int32_t len;
   uint32_t cmd;
@@ -2650,6 +2651,10 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   uint32_t fence_arg;
   uint32_t irq_status;
   uint32_t fifo_start;
+  /*
+   * Bound asynchronous display polling, but an explicit SVGA_REG_SYNC must
+   * drain all queued commands before BUSY can become zero.
+   */
   uint32_t maxloop = 1024;
   struct vmsvga_cursor_definition_s cursor;
   len = vmsvga_fifo_length(s);
@@ -2664,7 +2669,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
     s->fifo[SVGA_FIFO_BUSY] = 1;
   };
-  while ((len >= 1) && (s->sync >= 1) && (maxloop-- > 0)) {
+  while ((len >= 1) && (s->sync >= 1) &&
+         (drain_all || maxloop-- > 0)) {
     fifo_start = s->fifo_stop;
     cmd = vmsvga_fifo_read(s);
     irq_status = 0;
@@ -8314,11 +8320,11 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_SYNC:
-    if (s->enable && s->config && value && !s->sync &&
+    if (s->enable && s->config && !s->sync &&
         vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
                           s->pitchlock)) {
       s->sync = 1;
-      vmsvga_fifo_run(s, false);
+      vmsvga_fifo_run(s, false, true);
     };
     VPRINT("SVGA_REG_SYNC register %u with the value of %u\n", s->index, value);
     break;
@@ -8777,7 +8783,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
     if (s->config && mode_valid && !s->sync) {
       if (vmsvga_fifo_pending(s)) {
         s->sync = 1;
-        vmsvga_fifo_run(s, false);
+        vmsvga_fifo_run(s, false, false);
       } else {
         cursor_update_from_fifo(s);
       };
@@ -8795,7 +8801,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
     if (!s->sync) {
       if (vmsvga_fifo_pending(s)) {
         s->sync = 1;
-        vmsvga_fifo_run(s, false);
+        vmsvga_fifo_run(s, false, false);
       } else {
         cursor_update_from_fifo(s);
       };

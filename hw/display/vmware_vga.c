@@ -286,6 +286,7 @@ struct vmsvga_state_s {
   uint32_t damage_count;
   VGACommonState vga;
   bool invalidated;
+  bool hidden;
   bool cursor_dirty;
   bool test_marker;
   bool marker_logged;
@@ -302,8 +303,9 @@ static void cursor_update_from_fifo(struct vmsvga_state_s *s) {
   if (!s->cursor_dirty) {
     return;
   };
-  if (s->cursor_on == SVGA_CURSOR_ON_SHOW ||
-      s->cursor_on == SVGA_CURSOR_ON_RESTORE_TO_FB) {
+  if (s->enable && !s->hidden &&
+      (s->cursor_on == SVGA_CURSOR_ON_SHOW ||
+       s->cursor_on == SVGA_CURSOR_ON_RESTORE_TO_FB)) {
     vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_SHOW);
   } else {
     vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_HIDE);
@@ -7826,7 +7828,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     VPRINT("SVGA_REG_ID register %u with the return of %u\n", s->index, ret);
     break;
   case SVGA_REG_ENABLE:
-    ret = s->enable;
+    ret = s->enable | (s->hidden ? SVGA_REG_ENABLE_HIDE : 0);
     VPRINT("SVGA_REG_ENABLE register %u with the return of %u\n", s->index,
            ret);
     break;
@@ -8115,6 +8117,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     } else {
       ret = 1024;
       s->enable = 0;
+      s->hidden = false;
       s->config = 0;
     };
     VPRINT("SVGA_REG_DISPLAY_WIDTH register %u with the return of %u\n",
@@ -8126,6 +8129,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     } else {
       ret = 768;
       s->enable = 0;
+      s->hidden = false;
       s->config = 0;
     };
     VPRINT("SVGA_REG_DISPLAY_HEIGHT register %u with the return of %u\n",
@@ -8249,22 +8253,19 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     VPRINT("SVGA_REG_FENCE_GOAL register %u with the value of %u\n", s->index,
            value);
     break;
-  case SVGA_REG_ENABLE:
-    /*
-     * TODO: SVGA_REG_ENABLE_HIDE is independent of ENABLE. ENABLE|HIDE should
-     * keep SVGA mode active while suppressing scanout; model hidden state
-     * separately instead of treating HIDE as DISABLE.
-     */
-    if ((value < 1) || (value & SVGA_REG_ENABLE_DISABLE) ||
-        (value & SVGA_REG_ENABLE_HIDE)) {
-      s->enable = 0;
-    } else {
-      s->enable = 1;
+  case SVGA_REG_ENABLE: {
+    bool was_hidden = s->hidden;
+    s->enable = !!(value & SVGA_REG_ENABLE_ENABLE);
+    s->hidden = s->enable && !!(value & SVGA_REG_ENABLE_HIDE);
+    if (was_hidden != s->hidden) {
+      s->cursor_dirty = true;
+      cursor_update_from_fifo(s);
     };
     s->invalidated = true;
     VPRINT("SVGA_REG_ENABLE register %u with the value of %u\n", s->index,
            value);
     break;
+  };
   case SVGA_REG_WIDTH:
     if (vmsvga_mode_valid(s, value, s->new_height, s->new_depth,
                           s->pitchlock)) {
@@ -8757,9 +8758,25 @@ static void vmsvga_bios_write(void *opaque, uint32_t address, uint32_t data) {
 static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
   // VPRINT("vmsvga_update_display was just executed\n");
   struct vmsvga_state_s *s = opaque;
-  if (s->enable && s->config &&
+  bool mode_valid =
       vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
-                        s->pitchlock)) {
+                        s->pitchlock);
+  if (s->enable && s->hidden) {
+    /*
+     * ENABLE|HIDE keeps SVGA mode selected instead of falling back to VGA.
+     * Keep servicing the FIFO while it is configured, but suppress scanout
+     * and preserve invalidated so unhide forces a full redraw.
+     */
+    if (s->config && mode_valid && !s->sync) {
+      if (vmsvga_fifo_pending(s)) {
+        s->sync = 1;
+        vmsvga_fifo_run(s, false);
+      } else {
+        cursor_update_from_fifo(s);
+      };
+    };
+    s->damage_count = 0;
+  } else if (s->enable && s->config && mode_valid) {
     struct vmsvga_damage_rect_s explicit_damage[VMSVGA_DAMAGE_RECTS];
     uint32_t explicit_count;
     vmsvga_check_size(s);
@@ -8802,6 +8819,7 @@ static void vmsvga_reset(DeviceState *dev) {
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
   s->enable = 0;
+  s->hidden = false;
   s->config = 0;
   s->svgaid = SVGA_ID_2;
   s->new_width = 1024;
@@ -8864,6 +8882,7 @@ static void vmsvga_migration_buffers_clear(struct vmsvga_state_s *s) {
 };
 static int vmsvga_pre_load(void *opaque) {
   struct vmsvga_state_s *s = opaque;
+  s->hidden = false;
   vmsvga_migration_buffers_clear(s);
   vmsvga_cursor_cache_clear(s);
   vmsvga_objects_clear(s);
@@ -9018,7 +9037,6 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   VPRINT("vmsvga_post_load was just executed\n");
   struct vmsvga_state_s *s = opaque;
   int ret;
-  (void)version_id;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
@@ -9031,6 +9049,9 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   };
   s->sync = 0;
   s->thread = 0;
+  if (version_id < 3 || !s->enable) {
+    s->hidden = false;
+  };
   s->cursor_dirty = true;
   s->damage_count = 0;
   s->invalidated = true;
@@ -9042,6 +9063,7 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   if (ret < 0) {
     goto fail;
   };
+  cursor_update_from_fifo(s);
   vmsvga_migration_buffers_clear(s);
 #ifdef CONFIG_PIXMAN
   vmsvga_palette_rebuild(s);
@@ -9095,7 +9117,7 @@ static const VMStateDescription vmstate_vmsvga_cursor_migration = {
             VMSTATE_END_OF_LIST()}};
 static VMStateDescription vmstate_vmware_vga_internal = {
     .name = "vmware_vga_internal",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
     .pre_load = vmsvga_pre_load,
     .post_load = vmsvga_post_load,
@@ -9105,6 +9127,7 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32_ARRAY(svgapalettebase, struct vmsvga_state_s,
                              VMSVGA_PALETTE_STORAGE_SIZE),
         VMSTATE_UINT32(enable, struct vmsvga_state_s),
+        VMSTATE_BOOL_V(hidden, struct vmsvga_state_s, 3),
         VMSTATE_UINT32(config, struct vmsvga_state_s),
         VMSTATE_UINT32(index, struct vmsvga_state_s),
         VMSTATE_UINT32(scratch_size, struct vmsvga_state_s),
@@ -9157,7 +9180,7 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_END_OF_LIST()}};
 static VMStateDescription vmstate_vmware_vga = {
     .name = "vmware_vga",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
     .fields = (const VMStateField[]){
         VMSTATE_PCI_DEVICE(parent_obj, struct pci_vmsvga_state_s),
@@ -9177,6 +9200,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   memset(s->cursor_cache, 0, sizeof(s->cursor_cache));
   s->vga.con = vmvga_graphic_console_create(dev, 0, &vmsvga_ops, s);
   s->fifo_size = VMSVGA_FIFO_SIZE;
+  s->hidden = false;
   memory_region_init_ram(&s->fifo_ram, OBJECT(dev), "vmsvga.fifo",
                          s->fifo_size, &error_fatal);
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);

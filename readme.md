@@ -12,7 +12,7 @@ It also improves the parts surrounding those commands: PCI compatibility, regist
 
 The result is better driver compatibility, more reliable rendering, and more efficient display updates—particularly when QEMU’s VNC output is used.
 
-## Integration 🔗
+## Building 🔨
 
 The source is designed to be overlaid onto a QEMU source tree before QEMU is built. Downstream projects can therefore fetch or vendor this repository, copy the files into their QEMU source tree, and then run their existing QEMU build process.
 
@@ -31,10 +31,6 @@ or:
 ```
 
 The guest still requires a compatible VMware SVGA display driver to use device-specific features.
-
-## Building 🔨
-
-This repository intentionally does not publish its own QEMU binary or container image. The authoritative build and runtime validation should happen in the downstream QEMU projects that consume this source, so the VMVGA code is tested together with the exact QEMU version and build configuration in which it will be used.
 
 ## Acknowledgements 🙏
 

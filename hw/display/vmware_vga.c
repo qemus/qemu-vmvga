@@ -3597,6 +3597,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       flags = vmsvga_fifo_read(s);
       offset_pages = vmsvga_fifo_read(s);
       num_pages = vmsvga_fifo_read(s);
+      (void)gmr_id;
+      (void)offset_pages;
       if (flags & ~(SVGA_REMAP_GMR2_VIA_GMR | SVGA_REMAP_GMR2_PPN64 |
                     SVGA_REMAP_GMR2_SINGLE_PPN)) {
         s->fifo_stop = fifo_start;
@@ -3667,6 +3669,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       };
       nsid = vmsvga_fifo_read(s);
       size = vmsvga_fifo_read(s);
+      (void)nsid;
       payload_words = ((uint64_t)size + 3) >> 2;
       total_words = sizeof(SVGAFifoCmdEscape) / sizeof(uint32_t) + 1 +
                     payload_words;

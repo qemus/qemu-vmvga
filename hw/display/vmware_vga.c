@@ -93,6 +93,7 @@
 #define SVGA_PIXMAP_SIZE(w, h, bpp) (((((w) * (bpp)) + 31) >> 5) * (h))
 #define VMSVGA_MAX_WIDTH 8192
 #define VMSVGA_MAX_HEIGHT 8192
+#define VMSVGA_HOST_BITS_PER_PIXEL 32
 #define VMSVGA_CURSOR_MAX_DIMENSION 64
 #define VMSVGA_FIFO_SIZE (2 * 1024 * 1024)
 #define VMSVGA_SCRATCH_SIZE 32
@@ -2378,8 +2379,7 @@ static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
                                      uint32_t foreground, uint32_t background,
                                      bool clipped, uint32_t clip_x,
                                      uint32_t clip_y, uint32_t clip_w,
-                                     uint32_t clip_h, uint32_t stride_bytes,
-                                     uint32_t payload_words) {
+                                     uint32_t clip_h, uint32_t payload_words) {
   DisplaySurface *surface = qemu_console_surface(s->vga.con);
   uint32_t bypl = surface_stride(surface);
   uint32_t bypp = surface_bytes_per_pixel(surface);
@@ -2428,16 +2428,19 @@ static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
   background_col[3] = background >> 24;
   for (row = 0; row < h; row++) {
     uint64_t dst_y = (uint64_t)y + row;
-    vmsvga_fifo_peek_raw_data(s, (size_t)row * stride_bytes, scanline,
-                              stride_bytes);
+    uint64_t row_bit_offset = (uint64_t)row * w;
+    uint32_t bit_shift = row_bit_offset & 7;
+    size_t row_bytes = ((uint64_t)bit_shift + w + 7) >> 3;
+    vmsvga_fifo_peek_raw_data(s, (size_t)(row_bit_offset >> 3), scanline,
+                              row_bytes);
     if (dst_y < top || dst_y >= bottom) {
       continue;
     };
     {
       uint32_t first_x = (uint32_t)left;
       uint32_t last_x = (uint32_t)right;
-      uint32_t first_bit = first_x - x;
-      uint32_t last_bit = last_x - x;
+      uint32_t first_bit = bit_shift + first_x - x;
+      uint32_t last_bit = bit_shift + last_x - x;
       uint8_t *dst = s->vga.vram_ptr + (size_t)bypl * (uint32_t)dst_y +
                      (size_t)bypp * first_x;
       if (!background_transparent) {
@@ -2890,7 +2893,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       uint32_t width;
       uint32_t height;
       uint32_t foreground;
-      uint64_t stride_bytes;
+      uint64_t payload_bits;
       uint64_t payload_bytes;
       uint64_t payload_words;
       uint64_t total_words;
@@ -2906,8 +2909,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       width = vmsvga_fifo_read(s);
       height = vmsvga_fifo_read(s);
       foreground = vmsvga_fifo_read(s);
-      stride_bytes = ((uint64_t)width + 7) >> 3;
-      payload_bytes = stride_bytes * height;
+      payload_bits = (uint64_t)width * height;
+      payload_bytes = (payload_bits + 7) >> 3;
       payload_words = (payload_bytes + 3) >> 2;
       total_words = 6 + payload_words;
       if (payload_words > INT32_MAX || total_words > (uint64_t)len) {
@@ -2919,8 +2922,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       };
       len -= (int32_t)total_words;
       vmsvga_draw_glyph(s, x, y, width, height, foreground, UINT32_MAX, false,
-                        0, 0, 0, 0, (uint32_t)stride_bytes,
-                        (uint32_t)payload_words);
+                        0, 0, 0, 0, (uint32_t)payload_words);
       VPRINT("SVGA_CMD_DRAW_GLYPH command %u in SVGA command FIFO\n", cmd);
       break;
     }
@@ -2935,7 +2937,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       uint32_t clip_y;
       uint32_t clip_width;
       uint32_t clip_height;
-      uint64_t stride_bytes;
+      uint64_t payload_bits;
       uint64_t payload_bytes;
       uint64_t payload_words;
       uint64_t total_words;
@@ -2956,8 +2958,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       clip_y = vmsvga_fifo_read(s);
       clip_width = vmsvga_fifo_read(s);
       clip_height = vmsvga_fifo_read(s);
-      stride_bytes = ((uint64_t)width + 7) >> 3;
-      payload_bytes = stride_bytes * height;
+      payload_bits = (uint64_t)width * height;
+      payload_bytes = (payload_bits + 7) >> 3;
       payload_words = (payload_bytes + 3) >> 2;
       total_words = 11 + payload_words;
       if (payload_words > INT32_MAX || total_words > (uint64_t)len) {
@@ -2970,7 +2972,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       len -= (int32_t)total_words;
       vmsvga_draw_glyph(s, x, y, width, height, foreground, background, true,
                         clip_x, clip_y, clip_width, clip_height,
-                        (uint32_t)stride_bytes, (uint32_t)payload_words);
+                        (uint32_t)payload_words);
       VPRINT("SVGA_CMD_DRAW_GLYPH_CLIPPED command %u in SVGA command FIFO\n",
              cmd);
       break;
@@ -7867,12 +7869,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
         s->index, ret);
     break;
   case SVGA_REG_BITS_PER_PIXEL:
-    ret = s->new_depth ? s->new_depth : 32;
+    ret = s->new_depth ? s->new_depth : VMSVGA_HOST_BITS_PER_PIXEL;
     VPRINT("SVGA_REG_BITS_PER_PIXEL register %u with the return of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_HOST_BITS_PER_PIXEL:
-    ret = 32;
+    ret = VMSVGA_HOST_BITS_PER_PIXEL;
     VPRINT("SVGA_REG_HOST_BITS_PER_PIXEL register %u with the return of %u\n",
            s->index, ret);
     break;
@@ -7995,7 +7997,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     caps = SVGA_CAP_RECT_FILL | SVGA_CAP_RECT_COPY | SVGA_CAP_RECT_PAT_FILL |
            SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
            SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
-           SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH | SVGA_CAP_GLYPH_CLIPPING |
+           SVGA_CAP_8BIT_EMULATION | SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH |
+           SVGA_CAP_GLYPH_CLIPPING |
            SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_EXTENDED_FIFO |
            SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK;
 #endif
@@ -8288,7 +8291,8 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_BITS_PER_PIXEL:
-    if (vmsvga_mode_valid(s, s->new_width, s->new_height, value,
+    if ((value == 8 || value == VMSVGA_HOST_BITS_PER_PIXEL) &&
+        vmsvga_mode_valid(s, s->new_width, s->new_height, value,
                           s->pitchlock)) {
       s->new_depth = value;
       s->invalidated = true;

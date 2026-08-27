@@ -2659,13 +2659,25 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   struct vmsvga_cursor_definition_s cursor;
   len = vmsvga_fifo_length(s);
   if (len < 1) {
+    bool pending = vmsvga_fifo_pending(s);
     if (flush_damage) {
       vmsvga_damage_flush(s);
     };
     cursor_update_from_fifo(s);
-    s->sync = 0;
-    if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-      s->fifo[SVGA_FIFO_BUSY] = 0;
+    /*
+     * A zero local length does not necessarily mean the FIFO is empty:
+     * validation can fail, or a partially committed command can be rewound.
+     * Only NEXT_CMD == STOP is allowed to complete an explicit SYNC.
+     */
+    if (pending) {
+      if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+        s->fifo[SVGA_FIFO_BUSY] = 1;
+      };
+    } else {
+      s->sync = 0;
+      if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+        s->fifo[SVGA_FIFO_BUSY] = 0;
+      };
     };
     return;
   };
@@ -7528,12 +7540,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     vmsvga_damage_flush(s);
   };
   cursor_update_from_fifo(s);
-  if (len >= 1 && maxloop == 0 && vmsvga_fifo_pending(s)) {
+  if (vmsvga_fifo_pending(s)) {
     /*
-     * The fairness budget expired while valid FIFO work remains. Keep the
-     * FIFO-side busy hint asserted so normal polling continues draining it,
-     * but do not invent an architected SVGA_REG_BUSY state. If an explicit
-     * SYNC is active, s->sync is intentionally left set until the FIFO drains.
+     * NEXT_CMD != STOP is the authoritative indication that FIFO work remains.
+     * This includes both a fairness-budget exit and a parser rewind for a
+     * partially committed command. Never report an explicit SYNC complete
+     * while such work is still pending.
      */
     if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
       s->fifo[SVGA_FIFO_BUSY] = 1;

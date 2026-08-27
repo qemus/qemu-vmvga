@@ -2650,42 +2650,21 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   uint32_t fence_arg;
   uint32_t irq_status;
   uint32_t fifo_start;
-  /*
-   * Keep each processing pass bounded. FIFO processing itself is independent
-   * of SVGA_REG_BUSY; an explicit SYNC request is tracked separately in
-   * s->sync and BUSY polling merely asks us to run another bounded pass.
-   */
   uint32_t maxloop = 1024;
   struct vmsvga_cursor_definition_s cursor;
   len = vmsvga_fifo_length(s);
   if (len < 1) {
-    bool pending = vmsvga_fifo_pending(s);
     if (flush_damage) {
       vmsvga_damage_flush(s);
     };
     cursor_update_from_fifo(s);
-    /*
-     * A zero local length does not necessarily mean the FIFO is empty:
-     * validation can fail, or a partially committed command can be rewound.
-     * Only NEXT_CMD == STOP is allowed to complete an explicit SYNC.
-     */
-    if (pending) {
-      if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-        s->fifo[SVGA_FIFO_BUSY] = 1;
-      };
-    } else {
-      s->sync = 0;
-      if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-        s->fifo[SVGA_FIFO_BUSY] = 0;
-      };
-    };
+    s->sync = 0;
     return;
   };
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
     s->fifo[SVGA_FIFO_BUSY] = 1;
   };
-  while ((len >= 1) && maxloop > 0) {
-    maxloop--;
+  while ((len >= 1) && (s->sync >= 1) && (maxloop-- > 0)) {
     fifo_start = s->fifo_stop;
     cmd = vmsvga_fifo_read(s);
     irq_status = 0;
@@ -7540,21 +7519,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     vmsvga_damage_flush(s);
   };
   cursor_update_from_fifo(s);
-  if (vmsvga_fifo_pending(s)) {
-    /*
-     * NEXT_CMD != STOP is the authoritative indication that FIFO work remains.
-     * This includes both a fairness-budget exit and a parser rewind for a
-     * partially committed command. Never report an explicit SYNC complete
-     * while such work is still pending.
-     */
-    if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-      s->fifo[SVGA_FIFO_BUSY] = 1;
-    };
-  } else {
-    s->sync = 0;
-    if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-      s->fifo[SVGA_FIFO_BUSY] = 0;
-    };
+  s->sync = 0;
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+    s->fifo[SVGA_FIFO_BUSY] = 0;
   };
 };
 static uint32_t vmsvga_index_read(void *opaque, uint32_t address) {
@@ -7775,7 +7742,7 @@ static inline void vmsvga_update_fifo_registers(struct vmsvga_state_s *s) {
     s->fifo[SVGA_FIFO_PITCHLOCK] = vmsvga_stride(s);
   };
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-    s->fifo[SVGA_FIFO_BUSY] = 0;
+    s->fifo[SVGA_FIFO_BUSY] = s->sync;
   };
 };
 #ifdef CONFIG_PIXMAN
@@ -8067,9 +8034,6 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     VPRINT("SVGA_REG_SYNC register %u with the return of %u\n", s->index, ret);
     break;
   case SVGA_REG_BUSY:
-    if (s->sync) {
-      vmsvga_fifo_run(s, false);
-    };
     ret = s->sync;
     VPRINT("SVGA_REG_BUSY register %u with the return of %u\n", s->index, ret);
     break;
@@ -8350,7 +8314,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_SYNC:
-    if (s->enable && s->config &&
+    if (s->enable && s->config && value && !s->sync &&
         vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
                           s->pitchlock)) {
       s->sync = 1;
@@ -8810,8 +8774,9 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
      * Keep servicing the FIFO while it is configured, but suppress scanout
      * and preserve invalidated so unhide forces a full redraw.
      */
-    if (s->config && mode_valid) {
+    if (s->config && mode_valid && !s->sync) {
       if (vmsvga_fifo_pending(s)) {
+        s->sync = 1;
         vmsvga_fifo_run(s, false);
       } else {
         cursor_update_from_fifo(s);
@@ -8827,10 +8792,13 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
                       "(test marker enabled)\n");
       s->marker_logged = true;
     };
-    if (vmsvga_fifo_pending(s)) {
-      vmsvga_fifo_run(s, false);
-    } else {
-      cursor_update_from_fifo(s);
+    if (!s->sync) {
+      if (vmsvga_fifo_pending(s)) {
+        s->sync = 1;
+        vmsvga_fifo_run(s, false);
+      } else {
+        cursor_update_from_fifo(s);
+      };
     };
     explicit_count = s->damage_count;
     if (explicit_count != 0) {

@@ -2650,6 +2650,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   uint32_t fence_arg;
   uint32_t irq_status;
   uint32_t fifo_start;
+  uint32_t trace_next;
+  bool trace_suppress_repeat;
+  static uint32_t trace_last_rewind_cmd = UINT32_MAX;
+  static uint32_t trace_last_rewind_stop = UINT32_MAX;
+  static uint32_t trace_last_rewind_next = UINT32_MAX;
   /*
    * Keep each processing pass bounded. FIFO processing itself is independent
    * of SVGA_REG_BUSY; an explicit SYNC request is tracked separately in
@@ -2657,14 +2662,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
    */
   uint32_t maxloop = 1024;
   struct vmsvga_cursor_definition_s cursor;
-  bool sync_diag = s->sync;
   len = vmsvga_fifo_length(s);
-  if (sync_diag) {
-    fprintf(stderr,
-            "VMVGA-SYNC run begin stop=0x%08x next=0x%08x words=%d\n",
-            s->fifo_stop, s->fifo_next, len);
-    fflush(stderr);
-  };
   if (len < 1) {
     if (flush_damage) {
       vmsvga_damage_flush(s);
@@ -2673,10 +2671,6 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     s->sync = 0;
     if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
       s->fifo[SVGA_FIFO_BUSY] = 0;
-    };
-    if (sync_diag) {
-      fprintf(stderr, "VMVGA-SYNC run empty -> BUSY=0\n");
-      fflush(stderr);
     };
     return;
   };
@@ -2687,11 +2681,15 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     maxloop--;
     fifo_start = s->fifo_stop;
     cmd = vmsvga_fifo_read(s);
-    if (sync_diag) {
+    trace_next = le32_to_cpu(s->fifo[SVGA_FIFO_NEXT_CMD]);
+    trace_suppress_repeat =
+        cmd == trace_last_rewind_cmd && fifo_start == trace_last_rewind_stop &&
+        trace_next == trace_last_rewind_next;
+    if (!trace_suppress_repeat) {
       fprintf(stderr,
-              "VMVGA-SYNC cmd BEGIN id=%u stop=0x%08x next=0x%08x words=%d\n",
-              cmd, fifo_start, s->fifo_next, len);
-      fflush(stderr);
+              "VMVGA-FIFO BEGIN cmd=%u stop=0x%08x next=0x%08x words=%d "
+              "sync=%u\n",
+              cmd, fifo_start, trace_next, len, s->sync);
     };
     irq_status = 0;
 #ifndef EXPCAPS
@@ -2807,9 +2805,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       uint32_t width;
       uint32_t height;
       uint32_t depth;
-      uint32_t stride;
-      size_t size;
+      uint32_t stride = 0;
+      size_t size = 0;
       uint32_t payload_words;
+      bool layout_ok;
+      uint64_t required_words;
       struct vmsvga_object_s *object;
       if (len < 5) {
         s->fifo_stop = fifo_start;
@@ -2821,9 +2821,23 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       width = vmsvga_fifo_read(s);
       height = vmsvga_fifo_read(s);
       depth = vmsvga_fifo_read(s);
-      if (!vmsvga_object_layout(VMSVGA_OBJECT_PIXMAP, width, height, depth,
-                                &stride, &size) || size / 4 > INT32_MAX ||
+      layout_ok = vmsvga_object_layout(VMSVGA_OBJECT_PIXMAP, width, height,
+                                       depth, &stride, &size);
+      required_words = layout_ok ? 5 + (uint64_t)(size / 4) : 0;
+      if (!layout_ok || size / 4 > INT32_MAX ||
           len < 5 + (int32_t)(size / 4)) {
+        const char *reason =
+            !layout_ok ? "layout"
+                       : (size / 4 > INT32_MAX ? "size-int32" : "incomplete");
+        if (!trace_suppress_repeat) {
+          fprintf(stderr,
+                  "VMVGA-PIXMAP REWIND reason=%s id=%u width=%u height=%u "
+                  "depth=%u stride=%u bytes=%zu avail=%d required=%llu "
+                  "stop=0x%08x next=0x%08x min=0x%08x max=0x%08x\n",
+                  reason, id, width, height, depth, stride, size, len,
+                  (unsigned long long)required_words, fifo_start, trace_next,
+                  s->fifo_min, s->fifo_max);
+        };
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
@@ -7526,12 +7540,26 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       VPRINT("default command %u in SVGA command FIFO\n", cmd);
       break;
     };
-    if (sync_diag) {
-      fprintf(stderr,
-              "VMVGA-SYNC cmd %s id=%u stop=0x%08x next=0x%08x words=%d\n",
-              s->fifo_stop == fifo_start ? "REWIND" : "END", cmd,
-              s->fifo_stop, s->fifo_next, len);
-      fflush(stderr);
+    if (len == 0 && s->fifo_stop == fifo_start) {
+      if (!trace_suppress_repeat) {
+        fprintf(stderr,
+                "VMVGA-FIFO REWIND cmd=%u stop=0x%08x next=0x%08x "
+                "sync=%u\n",
+                cmd, fifo_start, trace_next, s->sync);
+      };
+      trace_last_rewind_cmd = cmd;
+      trace_last_rewind_stop = fifo_start;
+      trace_last_rewind_next = trace_next;
+    } else {
+      if (!trace_suppress_repeat) {
+        fprintf(stderr,
+                "VMVGA-FIFO END cmd=%u start=0x%08x stop=0x%08x "
+                "next=0x%08x words=%d sync=%u\n",
+                cmd, fifo_start, s->fifo_stop, trace_next, len, s->sync);
+      };
+      trace_last_rewind_cmd = UINT32_MAX;
+      trace_last_rewind_stop = UINT32_MAX;
+      trace_last_rewind_next = UINT32_MAX;
     };
     if (s->fifo_stop != fifo_start) {
       irq_status |= SVGA_IRQFLAG_FIFO_PROGRESS;
@@ -7567,13 +7595,6 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
       s->fifo[SVGA_FIFO_BUSY] = 0;
     };
-  };
-  if (sync_diag) {
-    fprintf(stderr,
-            "VMVGA-SYNC run end stop=0x%08x next=0x%08x words=%d BUSY=%u\n",
-            s->fifo_stop, le32_to_cpu(s->fifo[SVGA_FIFO_NEXT_CMD]), len,
-            s->sync);
-    fflush(stderr);
   };
 };
 static uint32_t vmsvga_index_read(void *opaque, uint32_t address) {
@@ -8372,11 +8393,6 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     if (s->enable && s->config &&
         vmsvga_mode_valid(s, s->new_width, s->new_height, s->new_depth,
                           s->pitchlock)) {
-      fprintf(stderr,
-              "VMVGA-SYNC write value=%u stop=0x%08x next=0x%08x\n",
-              value, le32_to_cpu(s->fifo[SVGA_FIFO_STOP]),
-              le32_to_cpu(s->fifo[SVGA_FIFO_NEXT_CMD]));
-      fflush(stderr);
       s->sync = 1;
       vmsvga_fifo_run(s, false);
     };

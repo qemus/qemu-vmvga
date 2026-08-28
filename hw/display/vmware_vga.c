@@ -454,10 +454,13 @@ static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
   s->damage[s->damage_count++] = rect;
 };
 
-static inline bool vmsvga_verify_rect(DisplaySurface *surface, uint32_t x,
+static inline uint32_t vmsvga_bytes_per_pixel(uint32_t bpp);
+static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s);
+
+static inline bool vmsvga_verify_rect(struct vmsvga_state_s *s, uint32_t x,
                                       uint32_t y, uint32_t w, uint32_t h) {
-  uint32_t surface_width_px = surface_width(surface);
-  uint32_t surface_height_px = surface_height(surface);
+  uint32_t surface_width_px = s->new_width;
+  uint32_t surface_height_px = s->new_height;
   if (x > 8192 || w > 8192 || x > surface_width_px ||
       w > surface_width_px - x) {
     return false;
@@ -469,13 +472,12 @@ static inline bool vmsvga_verify_rect(DisplaySurface *surface, uint32_t x,
   return true;
 };
 static inline bool vmsvga_verify_vram_rect(struct vmsvga_state_s *s,
-                                           DisplaySurface *surface, uint32_t x,
-                                           uint32_t y, uint32_t w,
+                                           uint32_t x, uint32_t y, uint32_t w,
                                            uint32_t h) {
-  uint32_t bypl = surface_stride(surface);
-  uint32_t bypp = surface_bytes_per_pixel(surface);
-  uint64_t surface_width_px = surface_width(surface);
-  uint64_t surface_height_px = surface_height(surface);
+  uint32_t bypl = vmsvga_stride(s);
+  uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
+  uint64_t surface_width_px = s->new_width;
+  uint64_t surface_height_px = s->new_height;
   uint64_t x_bytes;
   uint64_t width_bytes;
   uint64_t rows;
@@ -501,9 +503,8 @@ static inline bool vmsvga_verify_vram_rect(struct vmsvga_state_s *s,
 static inline void vmsvga_damage_add_visible(struct vmsvga_state_s *s,
                                              uint32_t x, uint32_t y,
                                              uint32_t w, uint32_t h) {
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
-  uint64_t surface_width_px = surface_width(surface);
-  uint64_t surface_height_px = surface_height(surface);
+  uint64_t surface_width_px = s->new_width;
+  uint64_t surface_height_px = s->new_height;
   uint64_t right;
   uint64_t bottom;
   if ((uint64_t)x >= surface_width_px || (uint64_t)y >= surface_height_px ||
@@ -517,12 +518,11 @@ static inline void vmsvga_damage_add_visible(struct vmsvga_state_s *s,
 };
 static inline void vmsvga_update_rect(struct vmsvga_state_s *s, uint32_t x,
                                       uint32_t y, uint32_t w, uint32_t h) {
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
-  if (!vmsvga_verify_rect(surface, x, y, w, h)) {
+  if (!vmsvga_verify_rect(s, x, y, w, h)) {
     x = 0;
     y = 0;
-    w = surface_width(surface);
-    h = surface_height(surface);
+    w = s->new_width;
+    h = s->new_height;
   };
   if (w == 0 || h == 0) {
     return;
@@ -533,16 +533,15 @@ static inline bool vmsvga_copy_rect(struct vmsvga_state_s *s, uint32_t x0,
                                     uint32_t y0, uint32_t x1, uint32_t y1,
                                     uint32_t w, uint32_t h) {
   VPRINT("vmsvga_copy_rect was just executed\n");
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
   uint8_t *vram = s->vga.vram_ptr;
-  uint32_t bypl = surface_stride(surface);
-  uint32_t bypp = surface_bytes_per_pixel(surface);
+  uint32_t bypl = vmsvga_stride(s);
+  uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
   size_t width = (size_t)bypp * w;
   uint32_t line = h;
   uint8_t *src;
   uint8_t *dst;
-  if (!vmsvga_verify_vram_rect(s, surface, x0, y0, w, h) ||
-      !vmsvga_verify_vram_rect(s, surface, x1, y1, w, h)) {
+  if (!vmsvga_verify_vram_rect(s, x0, y0, w, h) ||
+      !vmsvga_verify_vram_rect(s, x1, y1, w, h)) {
     return false;
   };
   if (w == 0 || h == 0) {
@@ -596,15 +595,14 @@ static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
                                     uint32_t x, uint32_t y, uint32_t w,
                                     uint32_t h) {
   VPRINT("vmsvga_fill_rect was just executed\n");
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
-  uint32_t bypl = surface_stride(surface);
-  uint32_t bypp = surface_bytes_per_pixel(surface);
+  uint32_t bypl = vmsvga_stride(s);
+  uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
   size_t width = (size_t)bypp * w;
   uint32_t line = h;
   uint8_t *first;
   uint8_t *dst;
   uint8_t col[4];
-  if (!vmsvga_verify_vram_rect(s, surface, x, y, w, h) || bypp < 1 ||
+  if (!vmsvga_verify_vram_rect(s, x, y, w, h) || bypp < 1 ||
       bypp > 4) {
     return false;
   };
@@ -914,16 +912,15 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
                                         uint32_t x, uint32_t y, uint32_t w,
                                         uint32_t h, uint32_t rop) {
   VPRINT("vmsvga_rop_fill_rect was just executed\n");
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
-  uint32_t bypl = surface_stride(surface);
-  uint32_t bypp = surface_bytes_per_pixel(surface);
+  uint32_t bypl = vmsvga_stride(s);
+  uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
   size_t width = (size_t)bypp * w;
   uint8_t col[4];
   uint32_t row;
   if (rop == VMSVGA_ROP_COPY) {
     return vmsvga_fill_rect(s, c, x, y, w, h);
   };
-  if (!vmsvga_verify_vram_rect(s, surface, x, y, w, h) || bypp < 1 ||
+  if (!vmsvga_verify_vram_rect(s, x, y, w, h) || bypp < 1 ||
       bypp > 4 || rop > VMSVGA_ROP_SET) {
     return false;
   };
@@ -995,10 +992,9 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
                                         uint32_t y1, uint32_t w, uint32_t h,
                                         uint32_t rop) {
   VPRINT("vmsvga_rop_copy_rect was just executed\n");
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
   uint8_t *vram = s->vga.vram_ptr;
-  uint32_t bypl = surface_stride(surface);
-  uint32_t bypp = surface_bytes_per_pixel(surface);
+  uint32_t bypl = vmsvga_stride(s);
+  uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
   size_t width = (size_t)bypp * w;
   bool reverse_rows;
   bool reverse_columns;
@@ -1006,8 +1002,8 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
   if (rop == VMSVGA_ROP_COPY) {
     return vmsvga_copy_rect(s, x0, y0, x1, y1, w, h);
   };
-  if (!vmsvga_verify_vram_rect(s, surface, x0, y0, w, h) ||
-      !vmsvga_verify_vram_rect(s, surface, x1, y1, w, h) || bypp < 1 ||
+  if (!vmsvga_verify_vram_rect(s, x0, y0, w, h) ||
+      !vmsvga_verify_vram_rect(s, x1, y1, w, h) || bypp < 1 ||
       bypp > 4 || rop > VMSVGA_ROP_SET) {
     return false;
   };
@@ -1063,8 +1059,6 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
   vmsvga_damage_add_visible(s, x1, y1, w, h);
   return true;
 };
-static inline uint32_t vmsvga_bytes_per_pixel(uint32_t bpp);
-
 static inline uint32_t vmsvga_vram_read_u32(struct vmsvga_state_s *s,
                                                uint32_t offset) {
   uint32_t value;
@@ -1131,12 +1125,11 @@ static inline void vmsvga_surface_update_display(struct vmsvga_state_s *s,
                                                  const struct vmsvga_surface_s *surface,
                                                  uint32_t x, uint32_t y,
                                                  uint32_t w, uint32_t h) {
-  DisplaySurface *display = qemu_console_surface(s->vga.con);
-  uint32_t display_stride = surface_stride(display);
-  uint32_t display_bypp = surface_bytes_per_pixel(display);
-  uint32_t display_width = surface_width(display);
-  uint32_t display_height = surface_height(display);
-  uint64_t fb_size = (uint64_t)display_stride * surface_height(display);
+  uint32_t display_stride = vmsvga_stride(s);
+  uint32_t display_bypp = vmsvga_bytes_per_pixel(s->new_depth);
+  uint32_t display_width = s->new_width;
+  uint32_t display_height = s->new_height;
+  uint64_t fb_size = (uint64_t)display_stride * display_height;
   uint64_t surface_start = surface->data_offset;
   uint64_t rect_start;
   if (w == 0 || h == 0 || surface_start >= fb_size || display_stride == 0 ||
@@ -2004,21 +1997,20 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
                                       uint32_t foreground,
                                       uint32_t background, uint32_t rop) {
   struct vmsvga_object_s *object = vmsvga_object_get(s, id, type);
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
   VMVGA_TRACE_LOCAL(
       VMVGA_TRACE_OBJECT,
       "OBJECT_BLIT id=%u type=%u pattern=%u src=%u,%u dst=%u,%u w=%u h=%u "
       "fg=0x%08x bg=0x%08x rop=0x%02x",
       id, type, pattern, src_x, src_y, dst_x, dst_y, width, height,
       foreground, background, rop);
-  uint32_t bypl = surface_stride(surface);
-  uint32_t bypp = surface_bytes_per_pixel(surface);
+  uint32_t bypl = vmsvga_stride(s);
+  uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
   size_t row_bytes;
   uint8_t *source_row = s->blit_scratch;
   uint32_t row;
   uint32_t column;
   if (object == NULL || rop > VMSVGA_ROP_SET || bypp < 1 || bypp > 4 ||
-      !vmsvga_verify_rect(surface, dst_x, dst_y, width, height)) {
+      !vmsvga_verify_rect(s, dst_x, dst_y, width, height)) {
     return false;
   };
   if (width == 0 || height == 0 || rop == VMSVGA_ROP_NOOP) {
@@ -2539,11 +2531,10 @@ static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
                                      bool clipped, uint32_t clip_x,
                                      uint32_t clip_y, uint32_t clip_w,
                                      uint32_t clip_h, uint32_t payload_words) {
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
-  uint32_t bypl = surface_stride(surface);
-  uint32_t bypp = surface_bytes_per_pixel(surface);
-  uint32_t surface_width_px = surface_width(surface);
-  uint32_t surface_height_px = surface_height(surface);
+  uint32_t bypl = vmsvga_stride(s);
+  uint32_t bypp = vmsvga_bytes_per_pixel(s->new_depth);
+  uint32_t surface_width_px = s->new_width;
+  uint32_t surface_height_px = s->new_height;
   uint64_t left = x;
   uint64_t top = y;
   uint64_t right = (uint64_t)x + w;
@@ -4033,10 +4024,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       uint32_t front_rop_w = vmsvga_fifo_read(s);
       uint32_t front_rop_h = vmsvga_fifo_read(s);
       uint32_t front_rop_rop = vmsvga_fifo_read(s);
-      DisplaySurface *front_rop_surface = qemu_console_surface(s->vga.con);
       if (front_rop_rop == VMSVGA_ROP_COPY &&
-          vmsvga_verify_rect(front_rop_surface, front_rop_x, front_rop_y,
-                             front_rop_w, front_rop_h)) {
+          vmsvga_verify_rect(s, front_rop_x, front_rop_y, front_rop_w,
+                             front_rop_h)) {
         vmsvga_update_rect(s, front_rop_x, front_rop_y, front_rop_w,
                            front_rop_h);
       } else {

@@ -89,7 +89,7 @@
 #define SVGA_CMD_SURFACE_COPY 27
 #define SVGA_CMD_SURFACE_FILL 26
 #define SVGA_PALETTE_SIZE 768
-#define VMSVGA_PALETTE_STORAGE_SIZE 769
+#define VMSVGA_PALETTE_STORAGE_SIZE 768
 #define SVGA_PIXMAP_SIZE(w, h, bpp) (((((w) * (bpp)) + 31) >> 5) * (h))
 #define VMSVGA_MAX_WIDTH 8192
 #define VMSVGA_MAX_HEIGHT 8192
@@ -310,6 +310,9 @@ struct vmsvga_cursor_source_s {
 
 struct vmsvga_state_s {
   uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
+  /* Preserve the historical 769-DWORD migration layout without exposing an
+   * extra guest palette register. */
+  uint32_t palette_compat_pad;
 #ifdef CONFIG_PIXMAN
   pixman_indexed_t indexed_palette;
 #endif
@@ -8013,12 +8016,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     vmsvga_damage_flush(s);
   };
   cursor_update_from_fifo(s);
-  if (len >= 1 && maxloop == 0 && vmsvga_fifo_pending(s)) {
+  if (vmsvga_fifo_pending(s)) {
     /*
-     * The fairness budget expired while valid FIFO work remains. Keep the
-     * FIFO-side busy hint asserted so normal polling continues draining it,
-     * but do not invent an architected SVGA_REG_BUSY state. If an explicit
-     * SYNC is active, s->sync is intentionally left set until the FIFO drains.
+     * Pending work includes both fairness-budget exhaustion and a command
+     * which was rewound/stalled. In either case the FIFO is not drained, so
+     * preserve an explicit SYNC and keep the FIFO-side busy hint asserted.
      */
     if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
       s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(1);
@@ -8549,12 +8551,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            s->index, ret);
     break;
   case SVGA_REG_GBOBJECT_MEM_SIZE_KB:
-    ret = 0;
+    ret = (uint32_t)(vmsvga_surface_memory_size(s) / 1024);
     VPRINT("SVGA_REG_GBOBJECT_MEM_SIZE_KB register %u with the return of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB:
-    ret = 0;
+    ret = (uint32_t)(vmsvga_surface_memory_size(s) / 1024);
     VPRINT("SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB register %u with the "
            "return of %u\n",
            s->index, ret);
@@ -9422,6 +9424,7 @@ static void vmsvga_reset(DeviceState *dev) {
       "RESET enable=%u config=%u hidden=%u sync=%u",
       s->enable, s->config, s->hidden, s->sync);
   s->index = 0;
+  s->palette_compat_pad = 0;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
   if (s->enable) {
@@ -9858,6 +9861,7 @@ static VMStateDescription vmstate_vmware_vga_internal = {
     .fields = (const VMStateField[]){
         VMSTATE_UINT32_ARRAY(svgapalettebase, struct vmsvga_state_s,
                              VMSVGA_PALETTE_STORAGE_SIZE),
+        VMSTATE_UINT32(palette_compat_pad, struct vmsvga_state_s),
         VMSTATE_UINT32(enable, struct vmsvga_state_s),
         VMSTATE_BOOL_V(hidden, struct vmsvga_state_s, 3),
         VMSTATE_UINT32(config, struct vmsvga_state_s),
@@ -9933,6 +9937,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                         MemoryRegion *address_space, MemoryRegion *io) {
   VPRINT("vmsvga_init was just executed\n");
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
+  s->palette_compat_pad = 0;
   memset(s->scratch, 0, sizeof(s->scratch));
   memset(s->cursor_cache, 0, sizeof(s->cursor_cache));
   memset(s->cursor_source, 0, sizeof(s->cursor_source));

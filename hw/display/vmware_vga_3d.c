@@ -50,6 +50,31 @@ typedef struct vmsvga3d_state_value_s {
   bool valid;
 } VMSVGA3DStateValue;
 
+/* Matches the legacy SVGA3D_DEVCAP_MAX_CLIP_PLANES value we advertise. */
+#define VMSVGA3D_MAX_CLIP_PLANES 8
+
+typedef struct vmsvga3d_transform_state_s {
+  float matrix[16];
+  bool valid;
+} VMSVGA3DTransformState;
+
+typedef struct vmsvga3d_material_state_s {
+  SVGA3dMaterial material;
+  bool valid;
+} VMSVGA3DMaterialState;
+
+typedef struct vmsvga3d_light_state_s {
+  SVGA3dLightData data;
+  uint32_t enabled;
+  bool data_valid;
+  bool enabled_valid;
+} VMSVGA3DLightState;
+
+typedef struct vmsvga3d_clip_plane_state_s {
+  float plane[4];
+  bool valid;
+} VMSVGA3DClipPlaneState;
+
 typedef struct vmsvga3d_context_s {
   uint32_t cid;
   SVGA3dSurfaceImageId render_targets[SVGA3D_RT_MAX];
@@ -57,8 +82,14 @@ typedef struct vmsvga3d_context_s {
   SVGA3dRect scissor;
   VMSVGA3DStateValue render_state[SVGA3D_RS_MAX];
   VMSVGA3DStateValue texture_state[VMSVGA3D_MAX_TEXTURE_STAGES][SVGA3D_TS_MAX];
+  VMSVGA3DTransformState transform[SVGA3D_TRANSFORM_MAX];
+  SVGA3dZRange z_range;
+  VMSVGA3DMaterialState material[SVGA3D_FACE_MAX];
+  VMSVGA3DLightState light[SVGA3D_NUM_LIGHTS];
+  VMSVGA3DClipPlaneState clip_plane[VMSVGA3D_MAX_CLIP_PLANES];
   bool viewport_valid;
   bool scissor_valid;
+  bool z_range_valid;
 } VMSVGA3DContext;
 
 #define VMSVGA3D_MAX_MIP_LEVELS 16
@@ -137,10 +168,16 @@ static bool vmsvga3d_fifo_supported_command(uint32_t cmd) {
   case SVGA_3D_CMD_SURFACE_DMA:
   case SVGA_3D_CMD_CONTEXT_DEFINE:
   case SVGA_3D_CMD_CONTEXT_DESTROY:
+  case SVGA_3D_CMD_SETTRANSFORM:
+  case SVGA_3D_CMD_SETZRANGE:
   case SVGA_3D_CMD_SETRENDERSTATE:
   case SVGA_3D_CMD_SETRENDERTARGET:
   case SVGA_3D_CMD_SETTEXTURESTATE:
+  case SVGA_3D_CMD_SETMATERIAL:
+  case SVGA_3D_CMD_SETLIGHTDATA:
+  case SVGA_3D_CMD_SETLIGHTENABLED:
   case SVGA_3D_CMD_SETVIEWPORT:
+  case SVGA_3D_CMD_SETCLIPPLANE:
   case SVGA_3D_CMD_CLEAR:
   case SVGA_3D_CMD_PRESENT:
   case SVGA_3D_CMD_SETSCISSORRECT:
@@ -641,6 +678,163 @@ static VMSVGA3DContext *vmsvga3d_context(struct vmsvga_state_s *s,
     return NULL;
   };
   return s->svga3d->contexts[cid];
+};
+
+static bool vmsvga3d_handle_set_transform(struct vmsvga_state_s *s,
+                                           uint32_t cmd, int32_t *len,
+                                           uint32_t fifo_start) {
+  VMSVGA3DContext *context;
+  SVGA3dCmdSetTransform *body;
+  void *payload;
+  uint32_t size;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size == sizeof(*body)) {
+    body = payload;
+    context = vmsvga3d_context(s, body->cid);
+    if (context != NULL && body->type >= SVGA3D_TRANSFORM_MIN &&
+        body->type < SVGA3D_TRANSFORM_MAX) {
+      memcpy(context->transform[body->type].matrix, body->matrix,
+             sizeof(body->matrix));
+      context->transform[body->type].valid = true;
+    };
+  };
+  g_free(payload);
+  return true;
+};
+
+static bool vmsvga3d_handle_set_z_range(struct vmsvga_state_s *s,
+                                         uint32_t cmd, int32_t *len,
+                                         uint32_t fifo_start) {
+  VMSVGA3DContext *context;
+  SVGA3dCmdSetZRange *body;
+  void *payload;
+  uint32_t size;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size == sizeof(*body)) {
+    body = payload;
+    context = vmsvga3d_context(s, body->cid);
+    if (context != NULL) {
+      context->z_range = body->zRange;
+      context->z_range_valid = true;
+    };
+  };
+  g_free(payload);
+  return true;
+};
+
+static bool vmsvga3d_handle_set_material(struct vmsvga_state_s *s,
+                                          uint32_t cmd, int32_t *len,
+                                          uint32_t fifo_start) {
+  VMSVGA3DContext *context;
+  SVGA3dCmdSetMaterial *body;
+  void *payload;
+  uint32_t size;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size == sizeof(*body)) {
+    body = payload;
+    context = vmsvga3d_context(s, body->cid);
+    if (context != NULL) {
+      if (body->face == SVGA3D_FACE_FRONT ||
+          body->face == SVGA3D_FACE_FRONT_BACK) {
+        context->material[SVGA3D_FACE_FRONT].material = body->material;
+        context->material[SVGA3D_FACE_FRONT].valid = true;
+      };
+      if (body->face == SVGA3D_FACE_BACK ||
+          body->face == SVGA3D_FACE_FRONT_BACK) {
+        context->material[SVGA3D_FACE_BACK].material = body->material;
+        context->material[SVGA3D_FACE_BACK].valid = true;
+      };
+    };
+  };
+  g_free(payload);
+  return true;
+};
+
+static bool vmsvga3d_handle_set_light_data(struct vmsvga_state_s *s,
+                                            uint32_t cmd, int32_t *len,
+                                            uint32_t fifo_start) {
+  VMSVGA3DContext *context;
+  SVGA3dCmdSetLightData *body;
+  void *payload;
+  uint32_t size;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size == sizeof(*body)) {
+    body = payload;
+    context = vmsvga3d_context(s, body->cid);
+    if (context != NULL && body->index < SVGA3D_NUM_LIGHTS &&
+        body->data.type >= SVGA3D_LIGHTTYPE_MIN &&
+        body->data.type < SVGA3D_LIGHTTYPE_MAX) {
+      context->light[body->index].data = body->data;
+      context->light[body->index].data_valid = true;
+    };
+  };
+  g_free(payload);
+  return true;
+};
+
+static bool vmsvga3d_handle_set_light_enabled(struct vmsvga_state_s *s,
+                                               uint32_t cmd, int32_t *len,
+                                               uint32_t fifo_start) {
+  VMSVGA3DContext *context;
+  SVGA3dCmdSetLightEnabled *body;
+  void *payload;
+  uint32_t size;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size == sizeof(*body)) {
+    body = payload;
+    context = vmsvga3d_context(s, body->cid);
+    if (context != NULL && body->index < SVGA3D_NUM_LIGHTS) {
+      context->light[body->index].enabled = body->enabled;
+      context->light[body->index].enabled_valid = true;
+    };
+  };
+  g_free(payload);
+  return true;
+};
+
+static bool vmsvga3d_handle_set_clip_plane(struct vmsvga_state_s *s,
+                                            uint32_t cmd, int32_t *len,
+                                            uint32_t fifo_start) {
+  VMSVGA3DContext *context;
+  SVGA3dCmdSetClipPlane *body;
+  void *payload;
+  uint32_t size;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size == sizeof(*body)) {
+    body = payload;
+    context = vmsvga3d_context(s, body->cid);
+    if (context != NULL && body->index < VMSVGA3D_MAX_CLIP_PLANES) {
+      memcpy(context->clip_plane[body->index].plane, body->plane,
+             sizeof(body->plane));
+      context->clip_plane[body->index].valid = true;
+    };
+  };
+  g_free(payload);
+  return true;
 };
 
 static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
@@ -2293,16 +2487,16 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SURFACE_DMA, vmsvga3d_handle_surface_dma),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_CONTEXT_DEFINE, vmsvga3d_handle_context_define),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_CONTEXT_DESTROY, vmsvga3d_handle_context_destroy),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SETTRANSFORM),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SETZRANGE),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SETTRANSFORM, vmsvga3d_handle_set_transform),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SETZRANGE, vmsvga3d_handle_set_z_range),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SETRENDERSTATE, vmsvga3d_handle_set_render_state),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SETRENDERTARGET, vmsvga3d_handle_set_render_target),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SETTEXTURESTATE, vmsvga3d_handle_set_texture_state),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SETMATERIAL),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SETLIGHTDATA),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SETLIGHTENABLED),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SETMATERIAL, vmsvga3d_handle_set_material),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SETLIGHTDATA, vmsvga3d_handle_set_light_data),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SETLIGHTENABLED, vmsvga3d_handle_set_light_enabled),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SETVIEWPORT, vmsvga3d_handle_set_viewport),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SETCLIPPLANE),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SETCLIPPLANE, vmsvga3d_handle_set_clip_plane),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_CLEAR, vmsvga3d_handle_clear),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_PRESENT, vmsvga3d_handle_present),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_SHADER_DEFINE),

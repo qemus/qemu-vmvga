@@ -8606,7 +8606,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_CURSOR_ON:
-    if (value <= SVGA_CURSOR_ON_RESTORE_TO_FB && s->cursor_on != value) {
+    if (value <= SVGA_CURSOR_ON_SHOW && s->cursor_on != value) {
       s->cursor_on = value;
       s->cursor_dirty = true;
     };

@@ -96,6 +96,7 @@
 #define VMSVGA_HOST_BITS_PER_PIXEL 32
 #define VMSVGA_CURSOR_MAX_DIMENSION 64
 #define VMSVGA_FIFO_SIZE (2 * 1024 * 1024)
+#define VMSVGA_VGA_FB_BACKUP_SIZE (512 * 1024)
 #define VMSVGA_SCRATCH_SIZE 32
 #define VMSVGA_CURSOR_MAX_BYTE_SIZE \
   (VMSVGA_CURSOR_MAX_DIMENSION * VMSVGA_CURSOR_MAX_DIMENSION * 8)
@@ -349,12 +350,78 @@ struct vmsvga_state_s {
   bool marker_logged;
   uint32_t trace_display_path;
   MemoryRegion fifo_ram;
+  MemoryRegion legacy_vga_mem;
+  MemoryRegion legacy_vga_backup;
+  uint8_t *legacy_vga_ptr;
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMWARE_SVGA, "vmware-svga")
 struct pci_vmsvga_state_s {
   PCIDevice parent_obj;
   struct vmsvga_state_s chip;
   MemoryRegion io_bar;
+};
+
+/*
+ * VMware SVGA keeps legacy VGA framebuffer accesses separate while SVGA is
+ * enabled.  Legacy VGA state can therefore be saved/restored or updated
+ * concurrently without corrupting the active SVGA framebuffer.
+ */
+static inline size_t vmsvga_legacy_vga_backup_size(
+    const struct vmsvga_state_s *s) {
+  return MIN((size_t)VMSVGA_VGA_FB_BACKUP_SIZE,
+             (size_t)s->vga.vram_size);
+};
+
+static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
+  size_t size = vmsvga_legacy_vga_backup_size(s);
+  memcpy(s->legacy_vga_ptr, s->vga.vram_ptr, size);
+  VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW enter size=%zu", size);
+};
+
+static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s) {
+  size_t size = vmsvga_legacy_vga_backup_size(s);
+  memcpy(s->vga.vram_ptr, s->legacy_vga_ptr, size);
+  memory_region_set_dirty(&s->vga.vram, 0, size);
+  VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW leave size=%zu", size);
+};
+
+static uint64_t vmsvga_legacy_vga_read(void *opaque, hwaddr addr,
+                                       unsigned size) {
+  struct vmsvga_state_s *s = opaque;
+  uint8_t *vram_ptr = s->vga.vram_ptr;
+  uint32_t value;
+
+  (void)size;
+  if (s->enable) {
+    s->vga.vram_ptr = s->legacy_vga_ptr;
+  };
+  value = vga_mem_readb(&s->vga, addr);
+  s->vga.vram_ptr = vram_ptr;
+  return value;
+};
+
+static void vmsvga_legacy_vga_write(void *opaque, hwaddr addr, uint64_t data,
+                                    unsigned size) {
+  struct vmsvga_state_s *s = opaque;
+  uint8_t *vram_ptr = s->vga.vram_ptr;
+
+  (void)size;
+  if (s->enable) {
+    s->vga.vram_ptr = s->legacy_vga_ptr;
+  };
+  vga_mem_writeb(&s->vga, addr, data);
+  s->vga.vram_ptr = vram_ptr;
+};
+
+static const MemoryRegionOps vmsvga_legacy_vga_ops = {
+    .read = vmsvga_legacy_vga_read,
+    .write = vmsvga_legacy_vga_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl =
+        {
+            .min_access_size = 1,
+            .max_access_size = 1,
+        },
 };
 static void cursor_update_from_fifo(struct vmsvga_state_s *s) {
   VPRINT("cursor_update_from_fifo was just executed\n");
@@ -8228,7 +8295,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     caps = 0xffffffff;
 #else
     caps = SVGA_CAP_RECT_FILL | SVGA_CAP_RECT_COPY | SVGA_CAP_RECT_PAT_FILL |
-           SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP |
+           SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
+           SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
            SVGA_CAP_8BIT_EMULATION | SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH |
            SVGA_CAP_GLYPH_CLIPPING |
            SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_EXTENDED_FIFO |
@@ -8496,8 +8564,15 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_ENABLE: {
+    bool was_enabled = s->enable;
     bool was_hidden = s->hidden;
-    s->enable = !!(value & SVGA_REG_ENABLE_ENABLE);
+    bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
+    if (!was_enabled && enabled) {
+      vmsvga_legacy_vga_enter(s);
+    } else if (was_enabled && !enabled) {
+      vmsvga_legacy_vga_leave(s);
+    };
+    s->enable = enabled;
     s->hidden = s->enable && !!(value & SVGA_REG_ENABLE_HIDE);
     if (was_hidden != s->hidden) {
       s->cursor_dirty = true;
@@ -9097,6 +9172,9 @@ static void vmsvga_reset(DeviceState *dev) {
   s->index = 0;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
+  if (s->enable) {
+    vmsvga_legacy_vga_leave(s);
+  };
   s->enable = 0;
   s->hidden = false;
   s->config = 0;
@@ -9516,6 +9594,21 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
   vga_common_init(&s->vga, OBJECT(dev), &error_fatal);
   vga_init(&s->vga, OBJECT(dev), address_space, io, true);
+  memory_region_init_ram(&s->legacy_vga_backup, OBJECT(dev),
+                         "vmsvga.vga-backup", VMSVGA_VGA_FB_BACKUP_SIZE,
+                         &error_fatal);
+  s->legacy_vga_ptr = memory_region_get_ram_ptr(&s->legacy_vga_backup);
+  memory_region_init_io(&s->legacy_vga_mem, OBJECT(dev),
+                        &vmsvga_legacy_vga_ops, s, "vmsvga.vga-lowmem",
+                        0x20000);
+  memory_region_set_flush_coalesced(&s->legacy_vga_mem);
+  memory_region_add_subregion_overlap(address_space, 0x000a0000,
+                                      &s->legacy_vga_mem, 2);
+  /*
+   * vga_update_memory_access() otherwise installs a chain-4 alias directly
+   * onto s->vga.vram and bypasses the VMSVGA-specific VGA shadow above.
+   */
+  s->vga.legacy_address_space = NULL;
   VMVGA_REGISTER_VGA_VMSTATE(&s->vga);
   s->thread = 0;
   s->svgaid = SVGA_ID_2;

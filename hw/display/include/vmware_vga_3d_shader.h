@@ -44,6 +44,7 @@ typedef enum vmsvga_shader_backend_e {
 } VMSVGAShaderBackend;
 
 typedef enum vmsvga_shader_stage_e {
+  VMSVGA_SHADER_STAGE_INVALID = -1,
   VMSVGA_SHADER_STAGE_VERTEX = 0,
   VMSVGA_SHADER_STAGE_PIXEL,
 } VMSVGAShaderStage;
@@ -53,7 +54,9 @@ typedef enum vmsvga_shader_status_e {
   VMSVGA_SHADER_UNAVAILABLE,
   VMSVGA_SHADER_INVALID_ARGUMENT,
   VMSVGA_SHADER_NO_MEMORY,
+  VMSVGA_SHADER_UNSUPPORTED,
   VMSVGA_SHADER_TRANSLATION_FAILED,
+  VMSVGA_SHADER_LINK_FAILED,
 } VMSVGAShaderStatus;
 
 typedef enum vmsvga_shader_resource_type_e {
@@ -64,6 +67,45 @@ typedef enum vmsvga_shader_resource_type_e {
   VMSVGA_SHADER_RESOURCE_SAMPLED_IMAGE,
   VMSVGA_SHADER_RESOURCE_SAMPLER,
 } VMSVGAShaderResourceType;
+
+typedef enum vmsvga_shader_semantic_e {
+  VMSVGA_SHADER_SEMANTIC_POSITION = 0,
+  VMSVGA_SHADER_SEMANTIC_BLEND_WEIGHT,
+  VMSVGA_SHADER_SEMANTIC_BLEND_INDICES,
+  VMSVGA_SHADER_SEMANTIC_NORMAL,
+  VMSVGA_SHADER_SEMANTIC_POINT_SIZE,
+  VMSVGA_SHADER_SEMANTIC_TEXCOORD,
+  VMSVGA_SHADER_SEMANTIC_TANGENT,
+  VMSVGA_SHADER_SEMANTIC_BINORMAL,
+  VMSVGA_SHADER_SEMANTIC_TESS_FACTOR,
+  VMSVGA_SHADER_SEMANTIC_POSITIONT,
+  VMSVGA_SHADER_SEMANTIC_COLOR,
+  VMSVGA_SHADER_SEMANTIC_FOG,
+  VMSVGA_SHADER_SEMANTIC_DEPTH,
+  VMSVGA_SHADER_SEMANTIC_SAMPLE,
+  VMSVGA_SHADER_SEMANTIC_MAX,
+} VMSVGAShaderSemantic;
+
+typedef enum vmsvga_shader_vertex_format_e {
+  VMSVGA_SHADER_VERTEX_FORMAT_FLOAT1 = 0,
+  VMSVGA_SHADER_VERTEX_FORMAT_FLOAT2,
+  VMSVGA_SHADER_VERTEX_FORMAT_FLOAT3,
+  VMSVGA_SHADER_VERTEX_FORMAT_FLOAT4,
+  VMSVGA_SHADER_VERTEX_FORMAT_D3DCOLOR,
+  VMSVGA_SHADER_VERTEX_FORMAT_UBYTE4,
+  VMSVGA_SHADER_VERTEX_FORMAT_SHORT2,
+  VMSVGA_SHADER_VERTEX_FORMAT_SHORT4,
+  VMSVGA_SHADER_VERTEX_FORMAT_UBYTE4N,
+  VMSVGA_SHADER_VERTEX_FORMAT_SHORT2N,
+  VMSVGA_SHADER_VERTEX_FORMAT_SHORT4N,
+  VMSVGA_SHADER_VERTEX_FORMAT_USHORT2N,
+  VMSVGA_SHADER_VERTEX_FORMAT_USHORT4N,
+  VMSVGA_SHADER_VERTEX_FORMAT_UDEC3,
+  VMSVGA_SHADER_VERTEX_FORMAT_DEC3N,
+  VMSVGA_SHADER_VERTEX_FORMAT_FLOAT16_2,
+  VMSVGA_SHADER_VERTEX_FORMAT_FLOAT16_4,
+  VMSVGA_SHADER_VERTEX_FORMAT_MAX,
+} VMSVGAShaderVertexFormat;
 
 typedef struct vmsvga_shader_resource_s {
   VMSVGAShaderResourceType type;
@@ -82,11 +124,17 @@ typedef struct vmsvga_shader_reflection_s {
   uint32_t bool_constant_mask;
 } VMSVGAShaderReflection;
 
-typedef struct vmsvga_shader_compile_request_s {
+typedef struct vmsvga_shader_translate_request_s {
   VMSVGAShaderStage stage;
   const uint32_t *bytecode;
   size_t bytecode_size;
-} VMSVGAShaderCompileRequest;
+} VMSVGAShaderTranslateRequest;
+
+typedef struct vmsvga_shader_vertex_input_s {
+  VMSVGAShaderSemantic semantic;
+  uint32_t semantic_index;
+  VMSVGAShaderVertexFormat format;
+} VMSVGAShaderVertexInput;
 
 typedef struct vmsvga_shader_binary_s {
   uint32_t *spirv;
@@ -96,15 +144,44 @@ typedef struct vmsvga_shader_binary_s {
   size_t resource_count;
 } VMSVGAShaderBinary;
 
+typedef struct vmsvga_shader_program_s {
+  VMSVGAShaderBinary vertex;
+  VMSVGAShaderBinary pixel;
+} VMSVGAShaderProgram;
+
+/*
+ * A translation is backend-private and immutable after creation. It can be
+ * linked repeatedly with different shader pairs and vertex declarations.
+ */
+typedef struct vmsvga_shader_translation_s VMSVGAShaderTranslation;
+
+/*
+ * Link/finalize a translated vertex/pixel pair. The returned program contains
+ * final SPIR-V only; backend-private patch/link data must not be exposed here.
+ */
+typedef struct vmsvga_shader_link_request_s {
+  const VMSVGAShaderTranslation *vertex;
+  const VMSVGAShaderTranslation *pixel;
+  const VMSVGAShaderVertexInput *vertex_inputs;
+  size_t vertex_input_count;
+} VMSVGAShaderLinkRequest;
+
 typedef struct vmsvga_shader_backend_ops_s {
   VMSVGAShaderBackend backend;
   const char *name;
   bool available;
   VMSVGAShaderStatus (*create)(void **backend_data);
   void (*destroy)(void *backend_data);
-  VMSVGAShaderStatus (*compile)(void *backend_data,
-                                const VMSVGAShaderCompileRequest *request,
-                                VMSVGAShaderBinary *binary);
+  VMSVGAShaderStatus (*translate)(void *backend_data,
+                                  const VMSVGAShaderTranslateRequest *request,
+                                  void **translation_data);
+  void (*free_translation)(void *translation_data);
+  VMSVGAShaderStatus (*link)(void *backend_data,
+                             const void *vertex_translation,
+                             const void *pixel_translation,
+                             const VMSVGAShaderVertexInput *vertex_inputs,
+                             size_t vertex_input_count,
+                             VMSVGAShaderProgram *program);
 } VMSVGAShaderBackendOps;
 
 typedef struct vmsvga_shader_compiler_s VMSVGAShaderCompiler;
@@ -125,12 +202,22 @@ VMSVGAShaderCompiler *vmsvga_shader_compiler_new(VMSVGAShaderBackend backend);
 void vmsvga_shader_compiler_free(VMSVGAShaderCompiler *compiler);
 VMSVGAShaderBackend
 vmsvga_shader_compiler_backend(const VMSVGAShaderCompiler *compiler);
+
 VMSVGAShaderStatus
-vmsvga_shader_compile(VMSVGAShaderCompiler *compiler,
-                      const VMSVGAShaderCompileRequest *request,
-                      VMSVGAShaderBinary *binary);
+vmsvga_shader_translate(VMSVGAShaderCompiler *compiler,
+                        const VMSVGAShaderTranslateRequest *request,
+                        VMSVGAShaderTranslation **translation);
+VMSVGAShaderStage
+vmsvga_shader_translation_stage(const VMSVGAShaderTranslation *translation);
+void vmsvga_shader_translation_free(VMSVGAShaderTranslation *translation);
+
+VMSVGAShaderStatus
+vmsvga_shader_link(VMSVGAShaderCompiler *compiler,
+                   const VMSVGAShaderLinkRequest *request,
+                   VMSVGAShaderProgram *program);
 
 void vmsvga_shader_binary_reset(VMSVGAShaderBinary *binary);
+void vmsvga_shader_program_reset(VMSVGAShaderProgram *program);
 const char *vmsvga_shader_status_name(VMSVGAShaderStatus status);
 
 #ifdef __cplusplus

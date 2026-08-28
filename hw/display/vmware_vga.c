@@ -94,7 +94,7 @@
 #define VMSVGA_MAX_WIDTH 8192
 #define VMSVGA_MAX_HEIGHT 8192
 #define VMSVGA_HOST_BITS_PER_PIXEL 32
-#define VMSVGA_CURSOR_MAX_DIMENSION 64
+#define VMSVGA_CURSOR_MAX_DIMENSION 512
 #define VMSVGA_FIFO_SIZE (2 * 1024 * 1024)
 #define VMSVGA_VGA_FB_BACKUP_SIZE (512 * 1024)
 #define VMSVGA_SCRATCH_SIZE 32
@@ -510,17 +510,77 @@ static const MemoryRegionOps vmsvga_legacy_vga_ops = {
             .max_access_size = 1,
         },
 };
+static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
+                                       uint32_t reg);
+static inline bool vmsvga_cursor_bypass3_fetch(struct vmsvga_state_s *s,
+                                                uint32_t *generation) {
+  uint32_t count;
+  uint32_t last_updated;
+  uint32_t x = 0;
+  uint32_t y = 0;
+  uint32_t on = 0;
+  uint32_t i;
+  if (!s->enable || !s->config || s->fifo == NULL ||
+      !(s->fc & SVGA_FIFO_CAP_CURSOR_BYPASS_3) ||
+      !vmsvga_fifo_has_reg(s, SVGA_FIFO_CURSOR_LAST_UPDATED)) {
+    return false;
+  };
+  count = le32_to_cpu(s->fifo[SVGA_FIFO_CURSOR_COUNT]);
+  last_updated = le32_to_cpu(s->fifo[SVGA_FIFO_CURSOR_LAST_UPDATED]);
+  if (count == last_updated) {
+    return false;
+  };
+  /*
+   * Cursor Bypass 3 is intentionally lock-free shared state. Read X/Y/ON
+   * against one generation and retry a few times if the guest changes the
+   * generation while we are sampling, matching VMware's generation protocol
+   * and VirtualBox's bounded retry strategy. If all samples race, leave the
+   * generation unacknowledged and retry on the next refresh.
+   */
+  for (i = 0; i < 4; i++) {
+    uint32_t after;
+    x = le32_to_cpu(s->fifo[SVGA_FIFO_CURSOR_X]);
+    y = le32_to_cpu(s->fifo[SVGA_FIFO_CURSOR_Y]);
+    on = le32_to_cpu(s->fifo[SVGA_FIFO_CURSOR_ON]);
+    after = le32_to_cpu(s->fifo[SVGA_FIFO_CURSOR_COUNT]);
+    if (after == count) {
+      break;
+    };
+    count = after;
+  };
+  if (i == 4) {
+    return false;
+  };
+  if (s->cursor_x != x || s->cursor_y != y ||
+      s->cursor_on != (on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE)) {
+    s->cursor_x = x;
+    s->cursor_y = y;
+    s->cursor_on = on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
+    s->cursor_dirty = true;
+  };
+  *generation = count;
+  return true;
+};
 static void cursor_update_from_fifo(struct vmsvga_state_s *s) {
+  uint32_t bypass3_generation = 0;
+  bool bypass3_update;
   VPRINT("cursor_update_from_fifo was just executed\n");
-  if (!s->cursor_dirty) {
-    return;
+  bypass3_update = vmsvga_cursor_bypass3_fetch(s, &bypass3_generation);
+  if (s->cursor_dirty) {
+    if (s->enable && !s->hidden && s->cursor_on != SVGA_CURSOR_ON_HIDE) {
+      vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y,
+                              SVGA_CURSOR_ON_SHOW);
+    } else {
+      vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y,
+                              SVGA_CURSOR_ON_HIDE);
+    };
+    s->cursor_dirty = false;
   };
-  if (s->enable && !s->hidden && s->cursor_on != SVGA_CURSOR_ON_HIDE) {
-    vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_SHOW);
-  } else {
-    vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y, SVGA_CURSOR_ON_HIDE);
+  if (bypass3_update) {
+    /* Acknowledge only after the sampled cursor state has been consumed. */
+    s->fifo[SVGA_FIFO_CURSOR_LAST_UPDATED] =
+        cpu_to_le32(bypass3_generation);
   };
-  s->cursor_dirty = false;
 };
 static inline void vmsvga_damage_flush(struct vmsvga_state_s *s) {
   uint32_t i;
@@ -2517,8 +2577,14 @@ struct vmsvga_cursor_definition_s {
   uint32_t xor_mask_bpp;
   uint32_t and_words;
   uint32_t xor_words;
-  uint32_t and_mask[4096];
-  uint32_t xor_mask[4096];
+  uint8_t *and_mask;
+  uint8_t *xor_mask;
+};
+static inline void
+vmsvga_cursor_definition_clear(struct vmsvga_cursor_definition_s *cursor) {
+  g_clear_pointer(&cursor->and_mask, g_free);
+  g_clear_pointer(&cursor->xor_mask, g_free);
+  memset(cursor, 0, sizeof(*cursor));
 };
 static inline uint32_t vmsvga_cursor_row_bytes(uint32_t width, uint32_t bpp) {
   uint64_t storage_bpp = bpp == 15 ? 16 : bpp;
@@ -3164,8 +3230,6 @@ typedef struct {
 typedef struct {
   SVGA3dSize size;
 } SVGA3dCmdSize;
-static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
-                                       uint32_t reg);
 static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   VPRINT("vmsvga_fifo_run was just executed\n");
   int32_t len;
@@ -3180,7 +3244,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
    * s->sync and BUSY polling merely asks us to run another bounded pass.
    */
   uint32_t maxloop = 1024;
-  struct vmsvga_cursor_definition_s cursor;
+  struct vmsvga_cursor_definition_s cursor = {0};
   len = vmsvga_fifo_length(s);
   if (len < 1) {
     if (flush_damage) {
@@ -4004,7 +4068,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      memset(&cursor, 0, sizeof(cursor));
+      vmsvga_cursor_definition_clear(&cursor);
       cursor.id = vmsvga_fifo_read(s);
       cursor.hot_x = vmsvga_fifo_read(s);
       cursor.hot_y = vmsvga_fifo_read(s);
@@ -4032,20 +4096,46 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
                                    cursor.xor_mask_bpp);
       cursor.and_words = and_words;
       cursor.xor_words = xor_words;
-      if (and_words > ARRAY_SIZE(cursor.and_mask) ||
-          xor_words > ARRAY_SIZE(cursor.xor_mask) ||
-          (uint64_t)header_words + and_words + xor_words + 1 >
-              (uint64_t)len) {
-        s->fifo_stop = fifo_start;
-        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
-        len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+      if ((uint64_t)header_words + and_words + xor_words + 1 >
+          (uint64_t)len) {
+        uint64_t command_bytes =
+            ((uint64_t)header_words + and_words + xor_words + 1) *
+            sizeof(uint32_t);
+        uint64_t ring_bytes = s->fifo_max > s->fifo_min
+                                  ? (uint64_t)s->fifo_max - s->fifo_min
+                                  : 0;
+        if (ring_bytes != 0 && command_bytes >= ring_bytes) {
+          /* This command can never fit in the configured FIFO ring. Drop the
+           * queued malformed submission instead of rewinding forever. */
+          s->fifo_stop = s->fifo_next;
+          s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+          len = 0;
+          VPRINT("oversized SVGA_CMD_DEFINE_CURSOR command %u discarded\n",
+                 cmd);
+        } else {
+          s->fifo_stop = fifo_start;
+          s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+          len = 0;
+          VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        };
+        break;
+      };
+      cursor.and_mask = g_try_malloc((size_t)and_words * sizeof(uint32_t));
+      cursor.xor_mask = g_try_malloc((size_t)xor_words * sizeof(uint32_t));
+      if ((and_words != 0 && cursor.and_mask == NULL) ||
+          (xor_words != 0 && cursor.xor_mask == NULL)) {
+        len -= header_words + and_words + xor_words + 1;
+        vmsvga_fifo_skip(s, and_words + xor_words);
+        vmsvga_cursor_definition_clear(&cursor);
+        VPRINT("SVGA_CMD_DEFINE_CURSOR command %u dropped: allocation failed\n",
+               cmd);
         break;
       };
       len -= header_words + and_words + xor_words + 1;
       vmsvga_fifo_read_raw_data(s, cursor.and_mask, and_words);
       vmsvga_fifo_read_raw_data(s, cursor.xor_mask, xor_words);
       vmsvga_cursor_define(s, &cursor);
+      vmsvga_cursor_definition_clear(&cursor);
       VPRINT("SVGA_CMD_DEFINE_CURSOR command %u in SVGA command FIFO\n", cmd);
       break;
     }
@@ -4060,7 +4150,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
         break;
       };
-      memset(&cursor, 0, sizeof(cursor));
+      vmsvga_cursor_definition_clear(&cursor);
       cursor.id = vmsvga_fifo_read(s);
       cursor.hot_x = vmsvga_fifo_read(s);
       cursor.hot_y = vmsvga_fifo_read(s);
@@ -4079,20 +4169,41 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         break;
       };
       pixels = (size_t)cursor.width * cursor.height;
-      if (pixels > ARRAY_SIZE(cursor.and_mask) ||
-          pixels > ARRAY_SIZE(cursor.xor_mask) ||
-          (uint64_t)header_words + pixels + 1 > (uint64_t)len) {
-        s->fifo_stop = fifo_start;
-        s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
-        len = 0;
-        VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+      if ((uint64_t)header_words + pixels + 1 > (uint64_t)len) {
+        uint64_t command_bytes =
+            ((uint64_t)header_words + pixels + 1) * sizeof(uint32_t);
+        uint64_t ring_bytes = s->fifo_max > s->fifo_min
+                                  ? (uint64_t)s->fifo_max - s->fifo_min
+                                  : 0;
+        if (ring_bytes != 0 && command_bytes >= ring_bytes) {
+          s->fifo_stop = s->fifo_next;
+          s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+          len = 0;
+          VPRINT("oversized SVGA_CMD_DEFINE_ALPHA_CURSOR command %u discarded\n",
+                 cmd);
+        } else {
+          s->fifo_stop = fifo_start;
+          s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+          len = 0;
+          VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
+        };
+        break;
+      };
+      cursor.and_words = 0;
+      cursor.xor_words = pixels;
+      cursor.xor_mask = g_try_malloc(pixels * sizeof(uint32_t));
+      if (pixels != 0 && cursor.xor_mask == NULL) {
+        len -= header_words + pixels + 1;
+        vmsvga_fifo_skip(s, pixels);
+        vmsvga_cursor_definition_clear(&cursor);
+        VPRINT("SVGA_CMD_DEFINE_ALPHA_CURSOR command %u dropped: allocation failed\n",
+               cmd);
         break;
       };
       len -= header_words + pixels + 1;
-      cursor.and_words = 0;
-      cursor.xor_words = pixels;
       vmsvga_fifo_read_raw_data(s, cursor.xor_mask, pixels);
       vmsvga_rgba_cursor_define(s, &cursor);
+      vmsvga_cursor_definition_clear(&cursor);
       VPRINT("SVGA_CMD_DEFINE_ALPHA_CURSOR command %u in SVGA command FIFO\n",
              cmd);
       break;
@@ -8090,6 +8201,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   if (flush_damage) {
     vmsvga_damage_flush(s);
   };
+  vmsvga_cursor_definition_clear(&cursor);
   cursor_update_from_fifo(s);
   if (vmsvga_fifo_pending(s)) {
     /*
@@ -8381,8 +8493,8 @@ static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s) {
   s->fc = 0xffffffff;
 #else
   s->ff = SVGA_FIFO_FLAG_NONE;
-  s->fc =
-      SVGA_FIFO_CAP_FENCE | SVGA_FIFO_CAP_ACCELFRONT | SVGA_FIFO_CAP_PITCHLOCK;
+  s->fc = SVGA_FIFO_CAP_FENCE | SVGA_FIFO_CAP_ACCELFRONT |
+          SVGA_FIFO_CAP_PITCHLOCK | SVGA_FIFO_CAP_CURSOR_BYPASS_3;
 #endif
 };
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
@@ -8400,7 +8512,13 @@ static inline void vmsvga_publish_fifo_registers(struct vmsvga_state_s *s) {
     return;
   };
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_CAPABILITIES)) {
-    s->fifo[SVGA_FIFO_CAPABILITIES] = cpu_to_le32(s->fc);
+    uint32_t fifo_caps = s->fc;
+#ifndef EXPCAPS
+    if (!vmsvga_fifo_has_reg(s, SVGA_FIFO_CURSOR_LAST_UPDATED)) {
+      fifo_caps &= ~SVGA_FIFO_CAP_CURSOR_BYPASS_3;
+    };
+#endif
+    s->fifo[SVGA_FIFO_CAPABILITIES] = cpu_to_le32(fifo_caps);
   };
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FLAGS)) {
     s->fifo[SVGA_FIFO_FLAGS] = cpu_to_le32(s->ff);

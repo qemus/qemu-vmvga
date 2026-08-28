@@ -75,6 +75,18 @@ typedef struct vmsvga3d_clip_plane_state_s {
   bool valid;
 } VMSVGA3DClipPlaneState;
 
+typedef struct vmsvga3d_shader_s {
+  uint32_t shid;
+  SVGA3dShaderType type;
+  uint32_t bytecode_size;
+  uint32_t *bytecode;
+} VMSVGA3DShader;
+
+typedef struct vmsvga3d_shader_constant_s {
+  uint32_t values[4];
+  bool valid;
+} VMSVGA3DShaderConstant;
+
 typedef struct vmsvga3d_context_s {
   uint32_t cid;
   SVGA3dSurfaceImageId render_targets[SVGA3D_RT_MAX];
@@ -87,6 +99,11 @@ typedef struct vmsvga3d_context_s {
   VMSVGA3DMaterialState material[SVGA3D_FACE_MAX];
   VMSVGA3DLightState light[SVGA3D_NUM_LIGHTS];
   VMSVGA3DClipPlaneState clip_plane[VMSVGA3D_MAX_CLIP_PLANES];
+  VMSVGA3DShader *shader[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_MAX_SHADERIDS];
+  uint32_t bound_shader[SVGA3D_NUM_SHADERTYPE_PREDX];
+  VMSVGA3DShaderConstant shader_float[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTREG_MAX];
+  VMSVGA3DShaderConstant shader_int[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTINTREG_MAX];
+  VMSVGA3DShaderConstant shader_bool[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTBOOLREG_MAX];
   bool viewport_valid;
   bool scissor_valid;
   bool z_range_valid;
@@ -118,6 +135,50 @@ struct vmsvga3d_state_s {
   VMSVGA3DContext *contexts[SVGA3D_MAX_CONTEXT_IDS];
   VMSVGA3DSurface *surfaces[SVGA3D_MAX_SURFACE_IDS];
   size_t surface_bytes;
+  size_t shader_bytes;
+};
+
+static bool vmsvga3d_shader_type_index(SVGA3dShaderType type,
+                                       uint32_t *index) {
+  if (type < SVGA3D_SHADERTYPE_MIN ||
+      type >= SVGA3D_SHADERTYPE_PREDX_MAX) {
+    return false;
+  };
+  *index = (uint32_t)type - SVGA3D_SHADERTYPE_MIN;
+  return true;
+};
+
+static void vmsvga3d_shader_free(VMSVGA3DShader *shader) {
+  if (shader == NULL) {
+    return;
+  };
+  g_free(shader->bytecode);
+  g_free(shader);
+};
+
+static void vmsvga3d_context_free(struct vmsvga3d_state_s *state,
+                                  VMSVGA3DContext *context) {
+  uint32_t type;
+  uint32_t shid;
+
+  if (context == NULL) {
+    return;
+  };
+  for (type = 0; type < SVGA3D_NUM_SHADERTYPE_PREDX; type++) {
+    for (shid = 0; shid < SVGA3D_MAX_SHADERIDS; shid++) {
+      VMSVGA3DShader *shader = context->shader[type][shid];
+
+      if (shader != NULL) {
+        if (state != NULL && state->shader_bytes >= shader->bytecode_size) {
+          state->shader_bytes -= shader->bytecode_size;
+        } else if (state != NULL) {
+          state->shader_bytes = 0;
+        };
+        vmsvga3d_shader_free(shader);
+      };
+    };
+  };
+  g_free(context);
 };
 
 static void vmsvga3d_surface_free(VMSVGA3DSurface *surface) {
@@ -149,7 +210,7 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s) {
     return;
   };
   for (i = 0; i < SVGA3D_MAX_CONTEXT_IDS; i++) {
-    g_free(state->contexts[i]);
+    vmsvga3d_context_free(state, state->contexts[i]);
   };
   for (i = 0; i < SVGA3D_MAX_SURFACE_IDS; i++) {
     vmsvga3d_surface_free(state->surfaces[i]);
@@ -180,6 +241,10 @@ static bool vmsvga3d_fifo_supported_command(uint32_t cmd) {
   case SVGA_3D_CMD_SETCLIPPLANE:
   case SVGA_3D_CMD_CLEAR:
   case SVGA_3D_CMD_PRESENT:
+  case SVGA_3D_CMD_SHADER_DEFINE:
+  case SVGA_3D_CMD_SHADER_DESTROY:
+  case SVGA_3D_CMD_SET_SHADER:
+  case SVGA_3D_CMD_SET_SHADER_CONST:
   case SVGA_3D_CMD_SETSCISSORRECT:
     return true;
   default:
@@ -631,7 +696,10 @@ static bool vmsvga3d_handle_context_define(struct vmsvga_state_s *s,
           for (i = 0; i < SVGA3D_RT_MAX; i++) {
             context->render_targets[i].sid = SVGA3D_INVALID_ID;
           };
-          g_free(state->contexts[body->cid]);
+          for (i = 0; i < SVGA3D_NUM_SHADERTYPE_PREDX; i++) {
+            context->bound_shader[i] = SVGA3D_INVALID_ID;
+          };
+          vmsvga3d_context_free(state, state->contexts[body->cid]);
           state->contexts[body->cid] = context;
           context = NULL;
         };
@@ -659,7 +727,7 @@ static bool vmsvga3d_handle_context_destroy(struct vmsvga_state_s *s,
     body = payload;
     state = s->svga3d;
     if (state != NULL && body->cid < SVGA3D_MAX_CONTEXT_IDS) {
-      g_free(state->contexts[body->cid]);
+      vmsvga3d_context_free(state, state->contexts[body->cid]);
       state->contexts[body->cid] = NULL;
     };
   };
@@ -1014,6 +1082,234 @@ static bool vmsvga3d_handle_set_scissor(struct vmsvga_state_s *s,
       context->scissor_valid = true;
     };
   };
+  g_free(payload);
+  return true;
+};
+
+static bool vmsvga3d_handle_shader_define(struct vmsvga_state_s *s,
+                                           uint32_t cmd, int32_t *len,
+                                           uint32_t fifo_start) {
+  struct vmsvga3d_state_s *state;
+  VMSVGA3DContext *context;
+  VMSVGA3DShader *shader = NULL;
+  VMSVGA3DShader *old_shader;
+  SVGA3dCmdDefineShader *body;
+  void *payload;
+  uint32_t size;
+  uint32_t bytecode_size;
+  uint32_t type_index;
+  size_t new_shader_bytes;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size <= sizeof(*body)) {
+    g_free(payload);
+    return true;
+  };
+
+  body = payload;
+  context = vmsvga3d_context(s, body->cid);
+  if (context == NULL || !vmsvga3d_shader_type_index(body->type, &type_index) ||
+      body->shid >= SVGA3D_MAX_SHADERIDS) {
+    g_free(payload);
+    return true;
+  };
+  bytecode_size = size - sizeof(*body);
+  if (bytecode_size > SVGA3D_MAX_SHADER_MEMORY_BYTES) {
+    g_free(payload);
+    return true;
+  };
+
+  state = s->svga3d;
+  old_shader = context->shader[type_index][body->shid];
+  new_shader_bytes = state->shader_bytes;
+  if (old_shader != NULL) {
+    if (new_shader_bytes < old_shader->bytecode_size) {
+      g_free(payload);
+      return true;
+    };
+    new_shader_bytes -= old_shader->bytecode_size;
+  };
+  if (new_shader_bytes > SVGA3D_MAX_SHADER_MEMORY_BYTES ||
+      bytecode_size > SVGA3D_MAX_SHADER_MEMORY_BYTES - new_shader_bytes) {
+    g_free(payload);
+    return true;
+  };
+
+  shader = g_try_new0(VMSVGA3DShader, 1);
+  if (shader != NULL) {
+    shader->bytecode = g_try_malloc(bytecode_size);
+  };
+  if (shader == NULL || shader->bytecode == NULL) {
+    vmsvga3d_shader_free(shader);
+    g_free(payload);
+    return true;
+  };
+
+  shader->shid = body->shid;
+  shader->type = body->type;
+  shader->bytecode_size = bytecode_size;
+  memcpy(shader->bytecode, body + 1, bytecode_size);
+
+  if (old_shader != NULL) {
+    vmsvga3d_shader_free(old_shader);
+  };
+  context->shader[type_index][body->shid] = shader;
+  state->shader_bytes = new_shader_bytes + bytecode_size;
+
+  g_free(payload);
+  return true;
+};
+
+static bool vmsvga3d_handle_shader_destroy(struct vmsvga_state_s *s,
+                                            uint32_t cmd, int32_t *len,
+                                            uint32_t fifo_start) {
+  struct vmsvga3d_state_s *state;
+  VMSVGA3DContext *context;
+  VMSVGA3DShader *shader;
+  SVGA3dCmdDestroyShader *body;
+  void *payload;
+  uint32_t size;
+  uint32_t type_index;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size == sizeof(*body)) {
+    body = payload;
+    context = vmsvga3d_context(s, body->cid);
+    if (context != NULL &&
+        vmsvga3d_shader_type_index(body->type, &type_index) &&
+        body->shid < SVGA3D_MAX_SHADERIDS) {
+      shader = context->shader[type_index][body->shid];
+      if (shader != NULL) {
+        state = s->svga3d;
+        if (state->shader_bytes >= shader->bytecode_size) {
+          state->shader_bytes -= shader->bytecode_size;
+        } else {
+          state->shader_bytes = 0;
+        };
+        vmsvga3d_shader_free(shader);
+        context->shader[type_index][body->shid] = NULL;
+      };
+    };
+  };
+  g_free(payload);
+  return true;
+};
+
+static bool vmsvga3d_handle_set_shader(struct vmsvga_state_s *s,
+                                        uint32_t cmd, int32_t *len,
+                                        uint32_t fifo_start) {
+  VMSVGA3DContext *context;
+  SVGA3dCmdSetShader *body;
+  void *payload;
+  uint32_t size;
+  uint32_t type_index;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size == sizeof(*body)) {
+    body = payload;
+    context = vmsvga3d_context(s, body->cid);
+    if (context != NULL &&
+        vmsvga3d_shader_type_index(body->type, &type_index)) {
+      if (body->shid == SVGA3D_INVALID_ID) {
+        context->bound_shader[type_index] = SVGA3D_INVALID_ID;
+      } else if (body->shid < SVGA3D_MAX_SHADERIDS &&
+                 context->shader[type_index][body->shid] != NULL) {
+        context->bound_shader[type_index] = body->shid;
+      };
+    };
+  };
+  g_free(payload);
+  return true;
+};
+
+static uint32_t vmsvga3d_shader_const_limit(SVGA3dShaderConstType ctype) {
+  switch (ctype) {
+  case SVGA3D_CONST_TYPE_FLOAT:
+    return SVGA3D_CONSTREG_MAX;
+  case SVGA3D_CONST_TYPE_INT:
+    return SVGA3D_CONSTINTREG_MAX;
+  case SVGA3D_CONST_TYPE_BOOL:
+    return SVGA3D_CONSTBOOLREG_MAX;
+  default:
+    return 0;
+  };
+};
+
+static VMSVGA3DShaderConstant *
+vmsvga3d_shader_const_array(VMSVGA3DContext *context, uint32_t type_index,
+                            SVGA3dShaderConstType ctype) {
+  switch (ctype) {
+  case SVGA3D_CONST_TYPE_FLOAT:
+    return context->shader_float[type_index];
+  case SVGA3D_CONST_TYPE_INT:
+    return context->shader_int[type_index];
+  case SVGA3D_CONST_TYPE_BOOL:
+    return context->shader_bool[type_index];
+  default:
+    return NULL;
+  };
+};
+
+static bool vmsvga3d_handle_set_shader_const(struct vmsvga_state_s *s,
+                                              uint32_t cmd, int32_t *len,
+                                              uint32_t fifo_start) {
+  VMSVGA3DContext *context;
+  VMSVGA3DShaderConstant *constants;
+  SVGA3dCmdSetShaderConst *body;
+  uint32_t (*values)[4];
+  void *payload;
+  uint32_t size;
+  uint32_t trailing;
+  uint32_t count;
+  uint32_t limit;
+  uint32_t type_index;
+  uint32_t i;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size < sizeof(*body)) {
+    g_free(payload);
+    return true;
+  };
+  trailing = size - sizeof(*body);
+  if (trailing % sizeof(body->values) != 0) {
+    g_free(payload);
+    return true;
+  };
+
+  body = payload;
+  context = vmsvga3d_context(s, body->cid);
+  limit = vmsvga3d_shader_const_limit(body->ctype);
+  if (context == NULL || limit == 0 ||
+      !vmsvga3d_shader_type_index(body->type, &type_index)) {
+    g_free(payload);
+    return true;
+  };
+  count = 1 + trailing / sizeof(body->values);
+  if (body->reg >= limit || count > limit - body->reg) {
+    g_free(payload);
+    return true;
+  };
+
+  constants = vmsvga3d_shader_const_array(context, type_index, body->ctype);
+  values = (uint32_t (*)[4])body->values;
+  for (i = 0; i < count; i++) {
+    memcpy(constants[body->reg + i].values, values[i],
+           sizeof(constants[body->reg + i].values));
+    constants[body->reg + i].valid = true;
+  };
+
   g_free(payload);
   return true;
 };
@@ -2499,10 +2795,10 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SETCLIPPLANE, vmsvga3d_handle_set_clip_plane),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_CLEAR, vmsvga3d_handle_clear),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_PRESENT, vmsvga3d_handle_present),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SHADER_DEFINE),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SHADER_DESTROY),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SET_SHADER),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_SET_SHADER_CONST),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SHADER_DEFINE, vmsvga3d_handle_shader_define),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SHADER_DESTROY, vmsvga3d_handle_shader_destroy),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SET_SHADER, vmsvga3d_handle_set_shader),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_SET_SHADER_CONST, vmsvga3d_handle_set_shader_const),
   VMSVGA3D_STALL(SVGA_3D_CMD_DRAW_PRIMITIVES),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SETSCISSORRECT, vmsvga3d_handle_set_scissor),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_BEGIN_QUERY),

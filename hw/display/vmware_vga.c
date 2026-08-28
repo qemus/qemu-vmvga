@@ -355,10 +355,17 @@ struct vmsvga_state_s {
   uint32_t irq_status;
   uint32_t display_id;
   uint32_t pitchlock;
+  /* Indexed cursor registers are guest-visible pending state. The active
+   * tuple changes only at the protocol commit point (CURSOR_ON), or when a
+   * Cursor Bypass 3 generation is consumed. */
   uint32_t cursor;
   uint32_t cursor_x;
   uint32_t cursor_y;
   uint32_t cursor_on;
+  uint32_t active_cursor;
+  uint32_t active_cursor_x;
+  uint32_t active_cursor_y;
+  uint32_t active_cursor_on;
   uint32_t fence;
   uint32_t fence_goal;
   uint32_t fc;
@@ -512,6 +519,22 @@ static const MemoryRegionOps vmsvga_legacy_vga_ops = {
 };
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
                                        uint32_t reg);
+static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
+                                        uint32_t id);
+static inline void vmsvga_cursor_apply(struct vmsvga_state_s *s) {
+  if (!s->cursor_dirty) {
+    return;
+  };
+  if (s->enable && !s->hidden &&
+      s->active_cursor_on != SVGA_CURSOR_ON_HIDE) {
+    vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
+                            s->active_cursor_y, SVGA_CURSOR_ON_SHOW);
+  } else {
+    vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
+                            s->active_cursor_y, SVGA_CURSOR_ON_HIDE);
+  };
+  s->cursor_dirty = false;
+};
 static inline bool vmsvga_cursor_bypass3_fetch(struct vmsvga_state_s *s,
                                                 uint32_t *generation) {
   uint32_t count;
@@ -551,11 +574,20 @@ static inline bool vmsvga_cursor_bypass3_fetch(struct vmsvga_state_s *s,
   if (i == 4) {
     return false;
   };
-  if (s->cursor_x != x || s->cursor_y != y ||
-      s->cursor_on != (on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE)) {
-    s->cursor_x = x;
-    s->cursor_y = y;
-    s->cursor_on = on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
+  /* Bypass 3 replaces the indexed position/visibility commit with a FIFO
+   * generation. There is no FIFO cursor-ID register, so consume the current
+   * pending indexed ID together with that generation. */
+  if (s->active_cursor != s->cursor) {
+    s->active_cursor = s->cursor;
+    vmsvga_cursor_select(s, s->active_cursor);
+    s->cursor_dirty = true;
+  };
+  if (s->active_cursor_x != x || s->active_cursor_y != y ||
+      s->active_cursor_on !=
+          (on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE)) {
+    s->active_cursor_x = x;
+    s->active_cursor_y = y;
+    s->active_cursor_on = on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
     s->cursor_dirty = true;
   };
   *generation = count;
@@ -566,16 +598,7 @@ static void cursor_update_from_fifo(struct vmsvga_state_s *s) {
   bool bypass3_update;
   VPRINT("cursor_update_from_fifo was just executed\n");
   bypass3_update = vmsvga_cursor_bypass3_fetch(s, &bypass3_generation);
-  if (s->cursor_dirty) {
-    if (s->enable && !s->hidden && s->cursor_on != SVGA_CURSOR_ON_HIDE) {
-      vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y,
-                              SVGA_CURSOR_ON_SHOW);
-    } else {
-      vmvga_console_mouse_set(s->vga.con, s->cursor_x, s->cursor_y,
-                              SVGA_CURSOR_ON_HIDE);
-    };
-    s->cursor_dirty = false;
-  };
+  vmsvga_cursor_apply(s);
   if (bypass3_update) {
     /* Acknowledge only after the sampled cursor state has been consumed. */
     s->fifo[SVGA_FIFO_CURSOR_LAST_UPDATED] =
@@ -737,6 +760,51 @@ static inline void vmsvga_damage_add_visible(struct vmsvga_state_s *s,
   vmsvga_damage_add(s, x, y, (uint32_t)(right - x),
                     (uint32_t)(bottom - y));
 };
+static inline void vmsvga_mark_vram_dirty_range(
+    struct vmsvga_state_s *s, uint64_t offset, uint64_t size) {
+  uint64_t vram_size = s->vga.vram_size;
+  if (size == 0 || offset >= vram_size) {
+    return;
+  };
+  size = MIN(size, vram_size - offset);
+  memory_region_set_dirty(&s->vga.vram, (hwaddr)offset, (hwaddr)size);
+};
+static inline void vmsvga_mark_vram_dirty_rect(
+    struct vmsvga_state_s *s, uint64_t base_offset, uint32_t pitch,
+    uint32_t bypp, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+  uint64_t row_offset;
+  uint64_t x_offset;
+  uint64_t start;
+  uint64_t width_bytes;
+  uint64_t tail;
+  uint64_t span;
+  if (pitch == 0 || bypp == 0 || w == 0 || h == 0) {
+    return;
+  };
+  row_offset = (uint64_t)pitch * y;
+  x_offset = (uint64_t)bypp * x;
+  width_bytes = (uint64_t)bypp * w;
+  tail = (uint64_t)pitch * (h - 1);
+  if (base_offset > UINT64_MAX - row_offset ||
+      base_offset + row_offset > UINT64_MAX - x_offset ||
+      tail > UINT64_MAX - width_bytes) {
+    return;
+  };
+  start = base_offset + row_offset + x_offset;
+  span = tail + width_bytes;
+  if (start >= s->vga.vram_size || span > s->vga.vram_size - start) {
+    return;
+  };
+  vmsvga_mark_vram_dirty_range(s, start, span);
+};
+static inline void vmsvga_mark_active_rect_dirty(
+    struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t w,
+    uint32_t h) {
+  vmsvga_mark_vram_dirty_rect(
+      s, 0, vmsvga_stride(s),
+      vmsvga_bytes_per_pixel(vmsvga_active_depth(s)), x, y, w, h);
+};
+
 static inline void vmsvga_update_rect(struct vmsvga_state_s *s, uint32_t x,
                                       uint32_t y, uint32_t w, uint32_t h) {
   uint64_t right;
@@ -772,6 +840,7 @@ static inline bool vmsvga_copy_rect(struct vmsvga_state_s *s, uint32_t x0,
     src = vram + (size_t)bypl * y0;
     dst = vram + (size_t)bypl * y1;
     memmove(dst, src, width * h);
+    vmsvga_mark_active_rect_dirty(s, x1, y1, w, h);
     vmsvga_damage_add_visible(s, x1, y1, w, h);
     return true;
   };
@@ -788,6 +857,7 @@ static inline bool vmsvga_copy_rect(struct vmsvga_state_s *s, uint32_t x0,
       memmove(dst, src, width);
     };
   };
+  vmsvga_mark_active_rect_dirty(s, x1, y1, w, h);
   vmsvga_damage_add_visible(s, x1, y1, w, h);
   return true;
 };
@@ -837,6 +907,7 @@ static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
   first = s->vga.vram_ptr + (size_t)bypp * x + (size_t)bypl * y;
   if (x == 0 && width == bypl) {
     vmsvga_fill_pattern(first, width * h, col, bypp);
+    vmsvga_mark_active_rect_dirty(s, x, y, w, h);
     vmsvga_damage_add_visible(s, x, y, w, h);
     return true;
   };
@@ -846,6 +917,7 @@ static inline bool vmsvga_fill_rect(struct vmsvga_state_s *s, uint32_t c,
     dst += bypl;
     memcpy(dst, first, width);
   };
+  vmsvga_mark_active_rect_dirty(s, x, y, w, h);
   vmsvga_damage_add_visible(s, x, y, w, h);
   return true;
 };
@@ -1154,6 +1226,7 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
   if (rop == VMSVGA_ROP_CLEAR) {
     if (x == 0 && width == bypl) {
       memset(s->vga.vram_ptr + (size_t)bypl * y, 0, width * h);
+      vmsvga_mark_active_rect_dirty(s, x, y, w, h);
       vmsvga_damage_add_visible(s, x, y, w, h);
       return true;
     };
@@ -1162,12 +1235,14 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
                      (size_t)bypl * (y + row);
       memset(dst, 0, width);
     };
+    vmsvga_mark_active_rect_dirty(s, x, y, w, h);
     vmsvga_damage_add_visible(s, x, y, w, h);
     return true;
   };
   if (rop == VMSVGA_ROP_SET) {
     if (x == 0 && width == bypl) {
       memset(s->vga.vram_ptr + (size_t)bypl * y, 0xff, width * h);
+      vmsvga_mark_active_rect_dirty(s, x, y, w, h);
       vmsvga_damage_add_visible(s, x, y, w, h);
       return true;
     };
@@ -1176,6 +1251,7 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
                      (size_t)bypl * (y + row);
       memset(dst, 0xff, width);
     };
+    vmsvga_mark_active_rect_dirty(s, x, y, w, h);
     vmsvga_damage_add_visible(s, x, y, w, h);
     return true;
   };
@@ -1193,6 +1269,7 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
     } else {
       vmsvga_rop_fill_buffer(dst, width * h, col, bypp, rop);
     };
+    vmsvga_mark_active_rect_dirty(s, x, y, w, h);
     vmsvga_damage_add_visible(s, x, y, w, h);
     return true;
   };
@@ -1205,6 +1282,7 @@ static inline bool vmsvga_rop_fill_rect(struct vmsvga_state_s *s, uint32_t c,
       vmsvga_rop_fill_buffer(dst, width, col, bypp, rop);
     };
   };
+  vmsvga_mark_active_rect_dirty(s, x, y, w, h);
   vmsvga_damage_add_visible(s, x, y, w, h);
   return true;
 };
@@ -1235,6 +1313,7 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
     uint8_t value = rop == VMSVGA_ROP_CLEAR ? 0 : 0xff;
     if (x1 == 0 && width == bypl) {
       memset(vram + (size_t)bypl * y1, value, width * h);
+      vmsvga_mark_active_rect_dirty(s, x1, y1, w, h);
       vmsvga_damage_add_visible(s, x1, y1, w, h);
       return true;
     };
@@ -1243,6 +1322,7 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
                      (size_t)bypl * (y1 + row_count);
       memset(dst, value, width);
     };
+    vmsvga_mark_active_rect_dirty(s, x1, y1, w, h);
     vmsvga_damage_add_visible(s, x1, y1, w, h);
     return true;
   };
@@ -1258,6 +1338,7 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
     } else {
       vmsvga_rop_buffer(dst, src, length, rop, reverse);
     };
+    vmsvga_mark_active_rect_dirty(s, x1, y1, w, h);
     vmsvga_damage_add_visible(s, x1, y1, w, h);
     return true;
   };
@@ -1277,6 +1358,7 @@ static inline bool vmsvga_rop_copy_rect(struct vmsvga_state_s *s,
       vmsvga_rop_buffer(dst_row, src_row, width, rop, reverse_columns);
     };
   };
+  vmsvga_mark_active_rect_dirty(s, x1, y1, w, h);
   vmsvga_damage_add_visible(s, x1, y1, w, h);
   return true;
 };
@@ -1290,6 +1372,7 @@ static inline void vmsvga_vram_write_u32(struct vmsvga_state_s *s,
                                          uint32_t offset, uint32_t value) {
   value = cpu_to_le32(value);
   memcpy(s->vga.vram_ptr + offset, &value, sizeof(value));
+  vmsvga_mark_vram_dirty_range(s, offset, sizeof(value));
 };
 static inline bool vmsvga_surface_load(struct vmsvga_state_s *s,
                                        uint32_t descriptor_offset,
@@ -1453,6 +1536,8 @@ static inline bool vmsvga_surface_fill(struct vmsvga_state_s *s, uint32_t color,
       };
     };
   };
+  vmsvga_mark_vram_dirty_rect(s, surface.data_offset, surface.pitch,
+                               surface.bypp, x, y, w, h);
   vmsvga_surface_update_display(s, &surface, x, y, w, h);
   vmsvga_surface_dequeue(s, &surface);
   return true;
@@ -1540,6 +1625,9 @@ static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
     } else {
       vmsvga_rop_invert_buffer(dst, span_bytes);
     };
+    vmsvga_mark_vram_dirty_rect(
+        s, dst_surface.data_offset, dst_surface.pitch, dst_surface.bypp,
+        dst_x, dst_y, w, h);
     vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
     vmsvga_surface_dequeue(s, &src_surface);
     vmsvga_surface_dequeue(s, &dst_surface);
@@ -1556,6 +1644,9 @@ static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
     } else {
       vmsvga_rop_buffer(dst, src, span_bytes, rop, reverse);
     };
+    vmsvga_mark_vram_dirty_rect(
+        s, dst_surface.data_offset, dst_surface.pitch, dst_surface.bypp,
+        dst_x, dst_y, w, h);
     vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
     vmsvga_surface_dequeue(s, &src_surface);
     vmsvga_surface_dequeue(s, &dst_surface);
@@ -1583,6 +1674,9 @@ static inline bool vmsvga_surface_copy(struct vmsvga_state_s *s,
       vmsvga_rop_buffer(dst, src, width_bytes, rop, reverse_columns);
     };
   };
+  vmsvga_mark_vram_dirty_rect(
+      s, dst_surface.data_offset, dst_surface.pitch, dst_surface.bypp, dst_x,
+      dst_y, w, h);
   vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
   vmsvga_surface_dequeue(s, &src_surface);
   vmsvga_surface_dequeue(s, &dst_surface);
@@ -1863,6 +1957,9 @@ static inline bool vmsvga_surface_alpha_blend(
         memset(dst, 0, dst_width_bytes);
       };
     };
+    vmsvga_mark_vram_dirty_rect(
+        s, dst_surface.data_offset, dst_surface.pitch, dst_surface.bypp,
+        dst_x, dst_y, w, h);
     vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
     vmsvga_surface_dequeue(s, &src_surface);
     vmsvga_surface_dequeue(s, &dst_surface);
@@ -1881,6 +1978,9 @@ static inline bool vmsvga_surface_alpha_blend(
                      (size_t)dst_surface.bypp * dst_x;
       memmove(dst, src, src_width_bytes);
     };
+    vmsvga_mark_vram_dirty_rect(
+        s, dst_surface.data_offset, dst_surface.pitch, dst_surface.bypp,
+        dst_x, dst_y, w, h);
     vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
     vmsvga_surface_dequeue(s, &src_surface);
     vmsvga_surface_dequeue(s, &dst_surface);
@@ -1913,6 +2013,9 @@ static inline bool vmsvga_surface_alpha_blend(
         dst[3] = 255;
       };
     };
+    vmsvga_mark_vram_dirty_rect(
+        s, dst_surface.data_offset, dst_surface.pitch, dst_surface.bypp,
+        dst_x, dst_y, w, h);
     vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
     vmsvga_surface_dequeue(s, &src_surface);
     vmsvga_surface_dequeue(s, &dst_surface);
@@ -1948,6 +2051,9 @@ static inline bool vmsvga_surface_alpha_blend(
           dst_opaque, out);
     };
   };
+  vmsvga_mark_vram_dirty_rect(
+      s, dst_surface.data_offset, dst_surface.pitch, dst_surface.bypp, dst_x,
+      dst_y, w, h);
   vmsvga_surface_update_display(s, &dst_surface, dst_x, dst_y, w, h);
   vmsvga_surface_dequeue(s, &src_surface);
   vmsvga_surface_dequeue(s, &dst_surface);
@@ -2262,6 +2368,7 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
       } else {
         vmsvga_rop_invert_buffer(dst, length);
       };
+      vmsvga_mark_active_rect_dirty(s, dst_x, dst_y, width, height);
       vmsvga_damage_add(s, dst_x, dst_y, width, height);
       return true;
     };
@@ -2276,6 +2383,7 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
         vmsvga_rop_invert_buffer(dst, row_bytes);
       };
     };
+    vmsvga_mark_active_rect_dirty(s, dst_x, dst_y, width, height);
     vmsvga_damage_add(s, dst_x, dst_y, width, height);
     return true;
   };
@@ -2320,6 +2428,7 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
         vmsvga_rop_buffer(dst, source_row, row_bytes, rop, false);
       };
     };
+    vmsvga_mark_active_rect_dirty(s, dst_x, dst_y, width, height);
     vmsvga_damage_add(s, dst_x, dst_y, width, height);
     return true;
   };
@@ -2340,6 +2449,7 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
       } else {
         vmsvga_rop_buffer(dst, src, length, rop, false);
       };
+      vmsvga_mark_active_rect_dirty(s, dst_x, dst_y, width, height);
       vmsvga_damage_add(s, dst_x, dst_y, width, height);
       return true;
     };
@@ -2381,6 +2491,7 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
         };
       };
     };
+    vmsvga_mark_active_rect_dirty(s, dst_x, dst_y, width, height);
     vmsvga_damage_add(s, dst_x, dst_y, width, height);
     return true;
   };
@@ -2418,6 +2529,7 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
       vmsvga_rop_buffer(dst, source_row, row_bytes, rop, false);
     };
   };
+  vmsvga_mark_active_rect_dirty(s, dst_x, dst_y, width, height);
   vmsvga_damage_add(s, dst_x, dst_y, width, height);
   return true;
 };
@@ -2633,6 +2745,21 @@ static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
     vmvga_console_set_cursor(s->vga.con, qc);
   };
 };
+static inline void vmsvga_cursor_commit_indexed(struct vmsvga_state_s *s) {
+  bool id_changed = s->active_cursor != s->cursor;
+  s->active_cursor = s->cursor;
+  s->active_cursor_x = s->cursor_x;
+  s->active_cursor_y = s->cursor_y;
+  s->active_cursor_on = s->cursor_on;
+  if (id_changed) {
+    vmsvga_cursor_select(s, s->active_cursor);
+  };
+  /* CURSOR_ON is the indexed bypass commit point. Applying it immediately
+   * preserves the asynchronous cursor-bypass contract even if the ON value
+   * itself did not change. */
+  s->cursor_dirty = true;
+  vmsvga_cursor_apply(s);
+};
 static inline void vmsvga_cursor_test_flip(struct vmsvga_state_s *s,
                                              QEMUCursor *qc, uint32_t width,
                                              uint32_t height) {
@@ -2662,7 +2789,7 @@ static inline void vmsvga_cursor_cache_put(struct vmsvga_state_s *s,
   };
   vmsvga_cursor_cache_remove(s, id);
   s->cursor_cache[id] = qc;
-  if (s->cursor == id) {
+  if (s->active_cursor == id) {
     vmvga_console_set_cursor(s->vga.con, qc);
   };
 };
@@ -3044,6 +3171,9 @@ static inline void vmsvga_draw_glyph(struct vmsvga_state_s *s, uint32_t x,
   };
   vmsvga_fifo_skip(s, payload_words);
   if (changed) {
+    vmsvga_mark_active_rect_dirty(
+        s, (uint32_t)left, (uint32_t)top, (uint32_t)(right - left),
+        (uint32_t)(bottom - top));
     vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top,
                       (uint32_t)(right - left), (uint32_t)(bottom - top));
   };
@@ -3485,11 +3615,14 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       len -= sizeof(SVGAFifoCmdDisplayCursor) / sizeof(uint32_t) + 1;
       id = vmsvga_fifo_read(s);
       display = vmsvga_fifo_read(s);
-      s->cursor = id;
-      vmsvga_cursor_select(s, id);
       display = display ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
-      if (s->cursor_on != display) {
+      if (s->cursor != id || s->active_cursor != id ||
+          s->cursor_on != display || s->active_cursor_on != display) {
+        s->cursor = id;
+        s->active_cursor = id;
         s->cursor_on = display;
+        s->active_cursor_on = display;
+        vmsvga_cursor_select(s, id);
         s->cursor_dirty = true;
       };
       VPRINT("SVGA_CMD_DISPLAY_CURSOR command %u in SVGA command FIFO\n", cmd);
@@ -3612,9 +3745,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       {
         uint32_t x = vmsvga_fifo_read(s);
         uint32_t y = vmsvga_fifo_read(s);
-        if (s->cursor_x != x || s->cursor_y != y) {
+        if (s->cursor_x != x || s->cursor_y != y ||
+            s->active_cursor_x != x || s->active_cursor_y != y) {
           s->cursor_x = x;
           s->cursor_y = y;
+          s->active_cursor_x = x;
+          s->active_cursor_y = y;
           s->cursor_dirty = true;
         };
       };
@@ -8494,7 +8630,8 @@ static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s) {
 #else
   s->ff = SVGA_FIFO_FLAG_NONE;
   s->fc = SVGA_FIFO_CAP_FENCE | SVGA_FIFO_CAP_ACCELFRONT |
-          SVGA_FIFO_CAP_PITCHLOCK | SVGA_FIFO_CAP_CURSOR_BYPASS_3;
+          SVGA_FIFO_CAP_PITCHLOCK | SVGA_FIFO_CAP_CURSOR_BYPASS_3 |
+          SVGA_FIFO_CAP_RESERVE;
 #endif
 };
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
@@ -8516,6 +8653,9 @@ static inline void vmsvga_publish_fifo_registers(struct vmsvga_state_s *s) {
 #ifndef EXPCAPS
     if (!vmsvga_fifo_has_reg(s, SVGA_FIFO_CURSOR_LAST_UPDATED)) {
       fifo_caps &= ~SVGA_FIFO_CAP_CURSOR_BYPASS_3;
+    };
+    if (!vmsvga_fifo_has_reg(s, SVGA_FIFO_RESERVED)) {
+      fifo_caps &= ~SVGA_FIFO_CAP_RESERVE;
     };
 #endif
     s->fifo[SVGA_FIFO_CAPABILITIES] = cpu_to_le32(fifo_caps);
@@ -9181,33 +9321,24 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            value);
     break;
   case SVGA_REG_CURSOR_ID:
-    if (s->cursor != value) {
-      s->cursor = value;
-      vmsvga_cursor_select(s, value);
-    };
+    s->cursor = value;
     VPRINT("SVGA_REG_CURSOR_ID register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_CURSOR_X:
-    if (s->cursor_x != value) {
-      s->cursor_x = value;
-      s->cursor_dirty = true;
-    };
+    s->cursor_x = value;
     VPRINT("SVGA_REG_CURSOR_X register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_CURSOR_Y:
-    if (s->cursor_y != value) {
-      s->cursor_y = value;
-      s->cursor_dirty = true;
-    };
+    s->cursor_y = value;
     VPRINT("SVGA_REG_CURSOR_Y register %u with the value of %u\n", s->index,
            value);
     break;
   case SVGA_REG_CURSOR_ON:
-    if (value <= SVGA_CURSOR_ON_RESTORE_TO_FB && s->cursor_on != value) {
+    if (value <= SVGA_CURSOR_ON_RESTORE_TO_FB) {
       s->cursor_on = value;
-      s->cursor_dirty = true;
+      vmsvga_cursor_commit_indexed(s);
     };
     VPRINT("SVGA_REG_CURSOR_ON register %u with the value of %u\n", s->index,
            value);
@@ -9765,6 +9896,10 @@ static void vmsvga_reset(DeviceState *dev) {
   s->cursor_x = 0;
   s->cursor_y = 0;
   s->cursor_on = SVGA_CURSOR_ON_SHOW;
+  s->active_cursor = 0;
+  s->active_cursor_x = 0;
+  s->active_cursor_y = 0;
+  s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
   s->cursor_dirty = true;
   s->marker_logged = false;
   s->damage_count = 0;
@@ -10115,6 +10250,18 @@ static int vmsvga_post_load(void *opaque, int version_id) {
     };
   };
 
+  if (version_id < 7) {
+    /* Old streams exposed one cursor tuple, so pending and active state were
+     * necessarily identical. */
+    s->active_cursor = s->cursor;
+    s->active_cursor_x = s->cursor_x;
+    s->active_cursor_y = s->cursor_y;
+    s->active_cursor_on = s->cursor_on;
+  } else if (s->active_cursor_on > SVGA_CURSOR_ON_RESTORE_TO_FB) {
+    ret = -EINVAL;
+    goto fail;
+  };
+
   s->cursor_dirty = true;
   s->damage_count = 0;
   s->invalidated = true;
@@ -10230,7 +10377,7 @@ static bool vmsvga_legacy_vga_size_valid(void *opaque, int version_id) {
 
 static VMStateDescription vmstate_vmware_vga_internal = {
     .name = "vmware_vga_internal",
-    .version_id = 6,
+    .version_id = 7,
     .minimum_version_id = 2,
     .pre_load = vmsvga_pre_load,
     .post_load = vmsvga_post_load,
@@ -10281,6 +10428,10 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32(cursor_x, struct vmsvga_state_s),
         VMSTATE_UINT32(cursor_y, struct vmsvga_state_s),
         VMSTATE_UINT32(cursor_on, struct vmsvga_state_s),
+        VMSTATE_UINT32_V(active_cursor, struct vmsvga_state_s, 7),
+        VMSTATE_UINT32_V(active_cursor_x, struct vmsvga_state_s, 7),
+        VMSTATE_UINT32_V(active_cursor_y, struct vmsvga_state_s, 7),
+        VMSTATE_UINT32_V(active_cursor_on, struct vmsvga_state_s, 7),
         VMSTATE_UINT32(fence, struct vmsvga_state_s),
         VMSTATE_UINT32(fence_goal, struct vmsvga_state_s),
         VMSTATE_UINT32(fc, struct vmsvga_state_s),
@@ -10309,7 +10460,7 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_END_OF_LIST()}};
 static VMStateDescription vmstate_vmware_vga = {
     .name = "vmware_vga",
-    .version_id = 6,
+    .version_id = 7,
     .minimum_version_id = 2,
     .fields = (const VMStateField[]){
         VMSTATE_PCI_DEVICE(parent_obj, struct pci_vmsvga_state_s),
@@ -10376,9 +10527,14 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->guest = 0;
   s->bios = 0;
   s->sync = 0;
+  s->cursor = 0;
   s->cursor_x = 0;
   s->cursor_y = 0;
   s->cursor_on = SVGA_CURSOR_ON_SHOW;
+  s->active_cursor = 0;
+  s->active_cursor_x = 0;
+  s->active_cursor_y = 0;
+  s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
   s->cursor_dirty = true;
   s->marker_logged = false;
   s->damage_count = 0;

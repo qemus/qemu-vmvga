@@ -36,6 +36,8 @@
 #include "include/svga3d_shaderdefs.h"
 #include "include/svga3d_surfacedefs.h"
 #include "include/svga3d_types.h"
+#include "include/vmware_vga_3d_shader.h"
+#include "vmware_vga_3d_shader.c"
 #include "include/VGPU10ShaderTokens.h" // Required to be the last #include
 
 typedef struct {

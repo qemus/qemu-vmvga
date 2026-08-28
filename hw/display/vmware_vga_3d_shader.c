@@ -2,9 +2,6 @@
 
  QEMU VMware Super Video Graphics Array 2 [SVGA-II]
 
- Copyright (c) 2023-2026 Christopher Eric Lentocha
- <christopherericlentocha@gmail.com>
-
  Copyright (c) 2026 QEMU VMVGA (https://github.com/qemus/qemu-vmvga)
 
  Permission is hereby granted, free of charge, to any person obtaining a copy

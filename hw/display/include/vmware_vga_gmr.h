@@ -24,3 +24,17 @@
 
 */
 
+
+#ifndef HW_DISPLAY_VMWARE_VGA_GMR_H
+#define HW_DISPLAY_VMWARE_VGA_GMR_H
+
+struct vmsvga_state_s;
+
+bool vmsvga_gmr_validate_range(struct vmsvga_state_s *s, uint32_t gmr_id,
+                               uint32_t offset, size_t size);
+bool vmsvga_gmr_read(struct vmsvga_state_s *s, uint32_t gmr_id,
+                     uint32_t offset, void *buffer, size_t size);
+bool vmsvga_gmr_write(struct vmsvga_state_s *s, uint32_t gmr_id,
+                      uint32_t offset, const void *buffer, size_t size);
+
+#endif

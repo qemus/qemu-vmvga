@@ -37,6 +37,7 @@
 #include "exec/target_page.h"
 #include "trace.h"
 #include "include/vmware_vga_compat.h"
+#include "include/vmware_vga_gmr.h"
 #include "include/includeCheck.h"
 #include "include/svga_types.h"
 #include "include/svga_escape.h"
@@ -298,6 +299,9 @@ struct vmsvga_cursor_source_s {
     };                                                                   \
   } while (0)
 
+struct vmsvga_gmr_s;
+struct vmsvga3d_state_s;
+
 struct vmsvga_state_s {
   uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
   /* Preserve the historical 769-DWORD migration layout without exposing an
@@ -362,6 +366,8 @@ struct vmsvga_state_s {
   uint32_t ff;
   uint32_t *fifo;
   uint32_t scratch[VMSVGA_SCRATCH_SIZE];
+  struct vmsvga_gmr_s *gmrs[64];
+  struct vmsvga3d_state_s *svga3d;
   struct vmsvga_object_s *objects[VMSVGA_MAX_OBJECTS];
   struct vmsvga_fifo_upload_s fifo_upload;
   QEMUCursor *cursor_cache[VMSVGA_MAX_CURSORS];
@@ -3347,6 +3353,7 @@ typedef struct {
   uint32 param1;
   uint32 param2;
 } SVGAFifoCmdSurfaceAlphaBlend;
+#include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
 static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   VPRINT("vmsvga_fifo_run was just executed\n");
@@ -3408,7 +3415,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         cmd, fifo_start, s->fifo_next, len, s->sync);
     irq_status = 0;
 #ifndef EXPCAPS
-    if (cmd > SVGA_CMD_FENCE) {
+    if (cmd > SVGA_CMD_FENCE && !vmsvga3d_fifo_supported_command(cmd)) {
       s->fifo_stop = fifo_start;
       s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
       len = 0;
@@ -5082,6 +5089,16 @@ static inline void vmsvga_publish_fifo_registers(struct vmsvga_state_s *s) {
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FLAGS)) {
     s->fifo[SVGA_FIFO_FLAGS] = cpu_to_le32(s->ff);
   };
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_HWVERSION)) {
+    uint32_t guest_hwversion = 0;
+    if (vmsvga_fifo_has_reg(s, SVGA_FIFO_GUEST_3D_HWVERSION)) {
+      guest_hwversion =
+          le32_to_cpu(s->fifo[SVGA_FIFO_GUEST_3D_HWVERSION]);
+    };
+    s->fifo[SVGA_FIFO_3D_HWVERSION] =
+        cpu_to_le32(vmsvga3d_negotiate_hwversion(guest_hwversion));
+  };
+  vmsvga3d_publish_fifo_caps(s);
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
     s->fifo[SVGA_FIFO_FENCE] = cpu_to_le32(s->fence);
   };
@@ -5397,7 +5414,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
            SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
            SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH | SVGA_CAP_GLYPH_CLIPPING |
-           SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_EXTENDED_FIFO |
+           SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_3D |
+           SVGA_CAP_GMR | SVGA_CAP_EXTENDED_FIFO |
            SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK | SVGA_CAP_TRACES;
 #ifdef CONFIG_PIXMAN
     caps |= SVGA_CAP_8BIT_EMULATION;
@@ -5539,12 +5557,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_GMR_MAX_IDS:
-    ret = 64;
+    ret = (uint32_t)ARRAY_SIZE(s->gmrs);
     VPRINT("SVGA_REG_GMR_MAX_IDS register %u with the return of %u\n", s->index,
            ret);
     break;
   case SVGA_REG_GMR_MAX_DESCRIPTOR_LENGTH:
-    ret = 4096;
+    ret = VMSVGA_GMR_MAX_DESCRIPTOR_LENGTH;
     VPRINT("SVGA_REG_GMR_MAX_DESCRIPTOR_LENGTH register %u with the return of "
            "%u\n",
            s->index, ret);
@@ -5854,6 +5872,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     break;
   case SVGA_REG_GMR_DESCRIPTOR:
     s->gmrdesc = value;
+    vmsvga_gmr_descriptor_write(s, value);
     VPRINT("SVGA_REG_GMR_DESCRIPTOR register %u with the value of %u\n",
            s->index, value);
     break;
@@ -6003,6 +6022,8 @@ static void vmsvga_reset(DeviceState *dev) {
       VMVGA_TRACE_STATE,
       "RESET enable=%u config=%u hidden=%u sync=%u",
       s->enable, s->config, s->hidden, s->sync);
+  vmsvga3d_reset(s);
+  vmsvga_gmr_reset(s);
   s->index = 0;
   s->palette_compat_pad = 0;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;

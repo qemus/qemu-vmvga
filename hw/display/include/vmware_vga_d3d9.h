@@ -378,6 +378,25 @@ typedef struct vmsvga3d_d3d9_clear_plan_s {
   uint32_t active_render_target_mask;
 } VMSVGA3DD3D9ClearPlan;
 
+typedef struct vmsvga3d_d3d9_present_plan_s {
+  VMSVGA3DD3D9ExecutionPreference execution;
+  bool cpu_fallback_allowed;
+  uint32_t destination_screen;
+  uint32_t source_face;
+  uint32_t source_mipmap;
+  uint32_t input_rect_count;
+  uint32_t effective_rect_count;
+  bool synthesize_full_screen_rect;
+  SVGA3dCopyRect full_screen_rect;
+  bool legacy_d3d9_screen_blit_unimplemented;
+  bool use_surface_dma_readback;
+  SVGA3dTransferType transfer;
+  bool one_dma_per_rect;
+  bool dma_first_box_each_rect;
+  VMSVGA3DD3D9DmaPlan dma;
+  bool update_screen_after_each_rect;
+} VMSVGA3DD3D9PresentPlan;
+
 typedef enum vmsvga3d_d3d9_shader_stage_e {
   VMSVGA3D_D3D9_SHADER_STAGE_INVALID = 0,
   VMSVGA3D_D3D9_SHADER_STAGE_VERTEX,
@@ -466,6 +485,12 @@ bool vmsvga3d_d3d9_dma_plan(
     const VMSVGA3DD3D9TransferSurface *surface,
     SVGA3dTransferType transfer, bool first_box,
     VMSVGA3DD3D9DmaPlan *plan);
+bool vmsvga3d_d3d9_present_plan(
+    const VMSVGA3DD3D9TransferSurface *surface, uint32_t rect_count,
+    uint32_t screen_width, uint32_t screen_height,
+    VMSVGA3DD3D9PresentPlan *plan);
+bool vmsvga3d_d3d9_present_dma_box(const SVGA3dCopyRect *rect,
+                                     SVGA3dCopyBox *box);
 bool vmsvga3d_d3d9_query_plan(SVGA3dQueryType type,
                                VMSVGA3DD3D9QueryPlan *plan);
 bool vmsvga3d_d3d9_primitive_type(SVGA3dPrimitiveType type,

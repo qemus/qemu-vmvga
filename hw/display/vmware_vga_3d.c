@@ -186,7 +186,8 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     const VMSVGA3DD3D9ClearPlan *plan);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
     struct vmsvga_state_s *s, const SVGA3dCmdPresent *command,
-    const SVGA3dCopyRect *rects, uint32_t rect_count);
+    const SVGA3dCopyRect *rects, uint32_t rect_count,
+    const VMSVGA3DD3D9PresentPlan *plan);
 #endif
 
 static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_clear(
@@ -195,6 +196,9 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_clear(
 static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_present(
     struct vmsvga_state_s *s, const SVGA3dCmdPresent *command,
     const SVGA3dCopyRect *rects, uint32_t rect_count);
+static bool vmsvga3d_d3d9_transfer_surface_info(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DD3D9TransferSurface *info);
 
 static bool vmsvga3d_shader_type_index(SVGA3dShaderType type,
                                        uint32_t *index) {
@@ -1821,7 +1825,28 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_present(
     struct vmsvga_state_s *s, const SVGA3dCmdPresent *command,
     const SVGA3dCopyRect *rects, uint32_t rect_count) {
 #ifdef CONFIG_VMSVGA_DXVK
-  return vmsvga3d_d3d9_runtime_present(s, command, rects, rect_count);
+  VMSVGA3DD3D9TransferSurface surface_info;
+  VMSVGA3DD3D9PresentPlan plan;
+  VMSVGA3DSurface *surface;
+  uint32_t width;
+  uint32_t height;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      command->sid >= SVGA3D_MAX_SURFACE_IDS) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  surface = s->svga3d->surfaces[command->sid];
+  width = vmsvga_active_width(s);
+  height = vmsvga_active_height(s);
+  if (surface == NULL || width == 0 || height == 0 ||
+      !vmsvga3d_d3d9_transfer_surface_info(s, surface, &surface_info) ||
+      !vmsvga3d_d3d9_present_plan(&surface_info, rect_count, width, height,
+                                  &plan) ||
+      plan.execution != VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  return vmsvga3d_d3d9_runtime_present(s, command, rects, rect_count,
+                                        &plan);
 #else
   (void)s;
   (void)command;
@@ -2698,6 +2723,7 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
   struct vmsvga3d_state_s *state;
   SVGA3dCmdPresent *body;
   SVGA3dCopyRect *rects;
+  SVGA3dCopyRect full_screen_rect;
   VMSVGA3DSurface *surface;
   VMSVGA3DSurfaceImage *image;
   const struct svga3d_surface_desc *desc = NULL;
@@ -2736,6 +2762,14 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
     valid = false;
   };
   image = surface != NULL && surface->mip_count != 0 ? &surface->mips[0] : NULL;
+  if (valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
+      rect_count == 0) {
+    memset(&full_screen_rect, 0, sizeof(full_screen_rect));
+    full_screen_rect.w = vmsvga_active_width(s);
+    full_screen_rect.h = vmsvga_active_height(s);
+    rects = &full_screen_rect;
+    rect_count = 1;
+  };
   if (valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
       (!vmsvga3d_present_format(surface, &desc) || image == NULL)) {
     valid = false;

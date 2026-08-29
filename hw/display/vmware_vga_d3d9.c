@@ -1690,6 +1690,71 @@ bool vmsvga3d_d3d9_dma_plan(
   return true;
 }
 
+bool vmsvga3d_d3d9_present_plan(
+    const VMSVGA3DD3D9TransferSurface *surface, uint32_t rect_count,
+    uint32_t screen_width, uint32_t screen_height,
+    VMSVGA3DD3D9PresentPlan *plan) {
+  if (surface == NULL || plan == NULL || screen_width == 0 ||
+      screen_height == 0) {
+    return false;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->cpu_fallback_allowed = true;
+  plan->destination_screen = 0;
+  plan->source_face = 0;
+  plan->source_mipmap = 0;
+  plan->input_rect_count = rect_count;
+  plan->effective_rect_count = rect_count != 0 ? rect_count : 1;
+  plan->synthesize_full_screen_rect = rect_count == 0;
+  if (plan->synthesize_full_screen_rect) {
+    plan->full_screen_rect.x = 0;
+    plan->full_screen_rect.y = 0;
+    plan->full_screen_rect.w = screen_width;
+    plan->full_screen_rect.h = screen_height;
+    plan->full_screen_rect.srcx = 0;
+    plan->full_screen_rect.srcy = 0;
+  }
+
+  /* VBox's legacy D3D9 SurfaceBlitToScreen callback returns
+   * VERR_NOT_IMPLEMENTED.  The generic path therefore presents through a
+   * READ_HOST_VRAM SurfaceDMA to screen 0's framebuffer. */
+  plan->legacy_d3d9_screen_blit_unimplemented = true;
+  plan->use_surface_dma_readback = true;
+  plan->transfer = SVGA3D_READ_HOST_VRAM;
+  plan->one_dma_per_rect = true;
+  plan->dma_first_box_each_rect = true;
+  plan->update_screen_after_each_rect = true;
+
+  if (!vmsvga3d_d3d9_dma_plan(surface, SVGA3D_READ_HOST_VRAM, true,
+                               &plan->dma)) {
+    return false;
+  }
+  plan->execution = plan->dma.execution;
+  return true;
+}
+
+bool vmsvga3d_d3d9_present_dma_box(const SVGA3dCopyRect *rect,
+                                     SVGA3dCopyBox *box) {
+  if (rect == NULL || box == NULL) {
+    return false;
+  }
+  memset(box, 0, sizeof(*box));
+  /* SurfaceDMA names its copy-box source after the guest image even for a
+   * READ_HOST_VRAM transfer.  PRESENT therefore places the host source in
+   * x/y and the screen destination in srcx/srcy, exactly as VBox does. */
+  box->x = rect->srcx;
+  box->y = rect->srcy;
+  box->z = 0;
+  box->w = rect->w;
+  box->h = rect->h;
+  box->d = 1;
+  box->srcx = rect->x;
+  box->srcy = rect->y;
+  box->srcz = 0;
+  return true;
+}
+
 bool vmsvga3d_d3d9_query_plan(SVGA3dQueryType type,
                                VMSVGA3DD3D9QueryPlan *plan) {
   if (plan == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {

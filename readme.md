@@ -1,20 +1,53 @@
 # QEMU VMVGA 🖥️
   
-Enhanced VMware SVGA II (`vmware-svga`) device implementation for QEMU.
+Enhanced VMware SVGA II (`vmware-svga`) graphics device implementation for QEMU.
 
 ## Purpose 🎯
 
-QEMU’s stock VMware SVGA II device provides only a minimal implementation of the hardware, and most legacy 2D FIFO commands are missing. This fork provides a substantially more complete and compatible VMware SVGA II device.
+QEMU’s stock VMware SVGA II device provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, and 3D acceleration is also absent.
 
-It implements the full legacy 2D command stack used by VMware display drivers, including rectangle operations, raster operations, bitmap and pixmap patterns, glyph rendering, offscreen surfaces, alpha blending, hardware cursors, and display updates.
+This fork provides a substantially more complete and compatible VMware SVGA II device,
+ with both 2D and 3D graphics acceleration.
 
-It also improves the parts surrounding those commands: PCI compatibility, register and FIFO behavior, VRAM and surface-memory calculations, bounds checking, dirty-memory scanning, damage tracking, command batching, and optimized pixel operations.
+### 3D acceleration
 
-The result is better driver compatibility, more reliable rendering, and more efficient display updates—particularly when QEMU’s VNC output is used.
+The device supports accelerated Direct3D workloads from Direct3D 9 through Direct3D 11.
+
+VMware SVGA 3D commands submitted by the guest are processed by the QEMU device and rendered through [DXVK](https://github.com/doitsujin/dxvk), which translates the Direct3D graphics operations to Vulkan on the host.
+
+This extends the device beyond basic framebuffer and desktop acceleration, allowing compatible VMware display drivers to expose modern Direct3D functionality to the guest.
+
+### Legacy 2D acceleration
+
+The implementation also provides the full legacy 2D command stack used by VMware display drivers, including:
+
+- Rectangle operations
+- Raster operations
+- Bitmap and pixmap patterns
+- Glyph rendering
+- Offscreen surfaces
+- Alpha blending
+- Hardware cursors
+- Display updates
+
+The surrounding VMware SVGA II implementation has also been improved substantially, including:
+
+- PCI compatibility
+- Register and FIFO behavior
+- VRAM and surface-memory calculations
+- Bounds checking
+- Dirty-memory scanning
+- Damage tracking
+- Command batching
+- Optimized pixel operations
+
+Together, these improvements provide better VMware driver compatibility, more reliable rendering, accelerated 2D and 3D graphics, and more efficient display updates—particularly when QEMU’s VNC output is used.
 
 ## Building 🔨
 
 The source is designed to be overlaid onto a QEMU source tree before QEMU is built. Downstream projects can therefore fetch or vendor this repository, copy the files into their QEMU source tree, and then run their existing QEMU build process.
+
+The 3D implementation requires [DXVK](https://github.com/doitsujin/dxvk) and a Vulkan-capable host graphics stack.
 
 ## Usage 🚀
 
@@ -30,7 +63,7 @@ or:
 -device vmware-svga
 ```
 
-The guest still requires a compatible VMware SVGA display driver to use device-specific features.
+The guest still requires a compatible VMware SVGA display driver to use the device-specific acceleration features.
 
 ## Acknowledgements 🙏
 

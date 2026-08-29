@@ -35,6 +35,7 @@
 #include "include/svga3d_types.h"
 #include "include/vmware_vga_3d_state.h"
 #include "include/vmware_vga_d3d9.h"
+#include "include/vmware_vga_dxvk.h"
 
 typedef struct {
   SVGA3dSize size;
@@ -143,6 +144,7 @@ typedef struct vmsvga3d_surface_s {
   uint32_t mip_count;
   size_t storage_bytes;
   VMSVGA3DSurfaceImage *mips;
+  VMSVGA3DDxvkSurface *dxvk_surface;
 } VMSVGA3DSurface;
 
 struct vmsvga3d_state_s {
@@ -160,15 +162,13 @@ typedef enum vmsvga3d_d3d9_accel_result_e {
 } VMSVGA3DD3D9AccelResult;
 
 /*
- * Direct D3D9 execution bridge.  It is intentionally dormant until the final
- * DXVK runtime is compiled in.  These are concrete D3D9 entry points, not a
+ * Direct D3D9 execution bridge.  Surface DMA is live through the DXVK
+ * runtime; the remaining guarded hooks stay dormant until their execution
+ * paths are implemented.  These are concrete D3D9 entry points, not a
  * renderer/backend callback table: an unavailable operation simply falls
  * through to the existing CPU implementation.
  */
 #ifdef CONFIG_VMSVGA_DXVK
-bool vmsvga3d_d3d9_runtime_surface_info(
-    struct vmsvga_state_s *s, uint32_t sid,
-    VMSVGA3DD3D9TransferSurface *surface);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceCopy *command,
     const SVGA3dCopyBox *boxes, uint32_t box_count,
@@ -176,10 +176,12 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceStretchBlt *command,
     const VMSVGA3DD3D9StretchBltPlan *plan);
+#endif
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_dma(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceDMA *command,
     const SVGA3dCopyBox *boxes, uint32_t box_count, uint32_t maximum_offset,
     const VMSVGA3DD3D9DmaPlan *plan);
+#ifdef CONFIG_VMSVGA_DXVK
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     struct vmsvga_state_s *s, const SVGA3dCmdClear *command,
     const SVGA3dRect *rects, uint32_t rect_count,
@@ -262,6 +264,8 @@ static void vmsvga3d_surface_free(VMSVGA3DSurface *surface) {
   if (surface == NULL) {
     return;
   };
+  vmsvga3d_dxvk_surface_destroy(surface->dxvk_surface);
+  surface->dxvk_surface = NULL;
   for (i = 0; i < surface->mip_count; i++) {
     g_free(surface->mips[i].data);
   };
@@ -275,6 +279,29 @@ vmsvga3d_state_ensure(struct vmsvga_state_s *s) {
     s->svga3d = g_try_new0(struct vmsvga3d_state_s, 1);
   };
   return s->svga3d;
+};
+
+static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s) {
+  Error *local_err = NULL;
+
+  s->svga3d_capable = false;
+  vmsvga3d_dxvk_destroy(s->dxvk);
+  s->dxvk = vmsvga3d_dxvk_create(
+      s->active_valid ? s->active_width : 0,
+      s->active_valid ? s->active_height : 0, &local_err);
+  if (vmsvga3d_dxvk_ready(s->dxvk)) {
+    s->svga3d_capable = true;
+  } else {
+    vmsvga3d_dxvk_destroy(s->dxvk);
+    s->dxvk = NULL;
+  };
+  error_free(local_err);
+};
+
+static void vmsvga3d_renderer_unrealize(struct vmsvga_state_s *s) {
+  s->svga3d_capable = false;
+  vmsvga3d_dxvk_destroy(s->dxvk);
+  s->dxvk = NULL;
 };
 
 static void vmsvga3d_reset(struct vmsvga_state_s *s) {
@@ -646,6 +673,11 @@ static void vmsvga3d_surface_install(
       vmsvga3d_surface_free(surface);
       return;
     };
+  };
+  surface->dxvk_surface = vmsvga3d_dxvk_surface_create(s->dxvk, sid);
+  if (surface->dxvk_surface == NULL) {
+    vmsvga3d_surface_free(surface);
+    return;
   };
 
   state->surface_bytes -= old_bytes;
@@ -1962,17 +1994,15 @@ static bool vmsvga3d_d3d9_transfer_surface_info(
   }
 
   memset(info, 0, sizeof(*info));
-  info->surface_flags = surface->surface_flags;
+  info->surface_flags =
+      vmsvga3d_d3d9_normalize_surface_flags(surface->surface_flags,
+                                             surface->format);
   info->block_width = desc->block_size.width;
   info->block_height = desc->block_size.height;
   info->block_depth = desc->block_size.depth;
   info->bytes_per_block = desc->bytes_per_block;
-#ifdef CONFIG_VMSVGA_DXVK
-  (void)vmsvga3d_d3d9_runtime_surface_info(s, surface->sid, info);
-#else
   (void)s;
-#endif
-  return true;
+  return vmsvga3d_dxvk_surface_info(surface->dxvk_surface, info);
 }
 
 static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_surface_copy(
@@ -2013,19 +2043,10 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_surface_dma(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceDMA *command,
     const SVGA3dCopyBox *boxes, uint32_t box_count, uint32_t maximum_offset,
     const VMSVGA3DD3D9DmaPlan *plan) {
-#ifdef CONFIG_VMSVGA_DXVK
   if (plan->execution == VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED) {
     return vmsvga3d_d3d9_runtime_surface_dma(s, command, boxes, box_count,
                                              maximum_offset, plan);
   }
-#else
-  (void)s;
-  (void)command;
-  (void)boxes;
-  (void)box_count;
-  (void)maximum_offset;
-  (void)plan;
-#endif
   return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
 }
 
@@ -3316,8 +3337,161 @@ typedef struct {
 } VMSVGA3DCommandInfo;
 
 #include "vmware_vga_dxvk_wsi.c"
+#include "vmware_vga_dxvk.c"
 #include "vmware_vga_d3d9.c"
 #include "vmware_vga_3d_state.c"
+
+static bool vmsvga3d_dxvk_texture_plan(
+    VMSVGA3DSurface *surface, VMSVGA3DD3D9ResourcePlan *plan) {
+  VMSVGA3DD3D9SurfaceInfo info = { 0 };
+  VMSVGA3DD3D9ResourceCaps caps = { 0 };
+
+  if (surface == NULL || plan == NULL || surface->mip_count == 0 ||
+      surface->mips == NULL || surface->multisample_count > 1 ||
+      surface->storage_bytes > UINT32_MAX ||
+      (surface->surface_flags &
+       (SVGA3D_SURFACE_CUBEMAP | SVGA3D_SURFACE_VOLUME)) != 0) {
+    return false;
+  }
+
+  info.surface_flags = surface->surface_flags;
+  info.format = surface->format;
+  info.size = surface->mips[0].size;
+  info.mip_levels = surface->mip_count;
+  info.multisample_count = surface->multisample_count;
+  info.autogen_filter = surface->autogen_filter;
+  info.surface_bytes = (uint32_t)surface->storage_bytes;
+  if (!vmsvga3d_d3d9_resource_plan(&info,
+                                    VMSVGA3D_D3D9_RESOURCE_USE_TEXTURE,
+                                    &caps, plan) ||
+      plan->needs_format_conversion || plan->has_emulated) {
+    return false;
+  }
+  return true;
+}
+
+static bool vmsvga3d_dxvk_upload_image(VMSVGA3DDxvk *dxvk,
+                                        VMSVGA3DDxvkSurface *dxvk_surface,
+                                        uint32_t level,
+                                        VMSVGA3DSurfaceImage *image) {
+  uint32_t rows;
+
+  if (image == NULL || image->data == NULL || image->pitch == 0 ||
+      image->plane_size == 0 || image->size.depth != 1 ||
+      image->plane_size % image->pitch != 0) {
+    return false;
+  }
+  rows = image->plane_size / image->pitch;
+  return vmsvga3d_dxvk_surface_upload_level(
+      dxvk, dxvk_surface, level, image->data, image->pitch, rows);
+}
+
+static bool vmsvga3d_dxvk_readback_image(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *dxvk_surface, uint32_t level,
+    VMSVGA3DSurfaceImage *image) {
+  uint32_t rows;
+
+  if (image == NULL || image->data == NULL || image->pitch == 0 ||
+      image->plane_size == 0 || image->size.depth != 1 ||
+      image->plane_size % image->pitch != 0) {
+    return false;
+  }
+  rows = image->plane_size / image->pitch;
+  return vmsvga3d_dxvk_surface_readback_level(
+      dxvk, dxvk_surface, level, image->data, image->pitch, rows);
+}
+
+static bool vmsvga3d_dxvk_materialize_texture(struct vmsvga_state_s *s,
+                                               VMSVGA3DSurface *surface) {
+  VMSVGA3DD3D9ResourcePlan plan;
+  uint32_t level;
+
+  if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
+      !vmsvga3d_dxvk_texture_plan(surface, &plan) ||
+      !vmsvga3d_dxvk_surface_materialize(s->dxvk, surface->dxvk_surface,
+                                         &plan)) {
+    return false;
+  }
+  for (level = 0; level < surface->mip_count; level++) {
+    if (!vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, level,
+                                     &surface->mips[level])) {
+      vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+      return false;
+    }
+  }
+  return true;
+}
+
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_dma(
+    struct vmsvga_state_s *s, const SVGA3dCmdSurfaceDMA *command,
+    const SVGA3dCopyBox *boxes, uint32_t box_count, uint32_t maximum_offset,
+    const VMSVGA3DD3D9DmaPlan *plan) {
+  struct vmsvga3d_state_s *state;
+  VMSVGA3DSurface *surface;
+  VMSVGA3DSurfaceImage *image;
+  VMSVGA3DD3D9TransferSurface info;
+  uint32_t level;
+  uint32_t i;
+
+  if (s == NULL || command == NULL || plan == NULL ||
+      plan->execution != VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED ||
+      plan->path != VMSVGA3D_D3D9_DMA_PATH_GPU_SURFACE ||
+      !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  state = s->svga3d;
+  if (state == NULL || command->host.sid >= SVGA3D_MAX_SURFACE_IDS) {
+    return VMSVGA3D_D3D9_ACCEL_FAILED;
+  }
+  surface = state->surfaces[command->host.sid];
+  if (!vmsvga3d_surface_image(surface, &command->host, &image) ||
+      !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
+      image < surface->mips || image >= surface->mips + surface->mip_count) {
+    return VMSVGA3D_D3D9_ACCEL_FAILED;
+  }
+  level = (uint32_t)(image - surface->mips);
+
+  if (command->transfer == SVGA3D_WRITE_HOST_VRAM) {
+    for (i = 0; i < box_count; i++) {
+      if (!vmsvga3d_surface_dma_box(s, surface, image, &command->guest,
+                                     command->transfer, &boxes[i],
+                                     maximum_offset, true)) {
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
+      }
+    }
+    if (!info.resident) {
+      if (!vmsvga3d_dxvk_materialize_texture(s, surface)) {
+        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+      }
+    } else if (!vmsvga3d_dxvk_upload_image(
+                   s->dxvk, surface->dxvk_surface, level, image)) {
+      /* The CPU shadow already contains the guest write, so dropping a
+       * failed GPU copy preserves a correct fallback path. */
+      vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+      return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
+    return VMSVGA3D_D3D9_ACCEL_COMPLETE;
+  }
+
+  if (command->transfer == SVGA3D_READ_HOST_VRAM) {
+    if (!info.resident ||
+        !vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, level,
+                                       image)) {
+      return info.resident ? VMSVGA3D_D3D9_ACCEL_FAILED
+                           : VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
+    for (i = 0; i < box_count; i++) {
+      if (!vmsvga3d_surface_dma_box(s, surface, image, &command->guest,
+                                     command->transfer, &boxes[i],
+                                     maximum_offset, true)) {
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
+      }
+    }
+    return VMSVGA3D_D3D9_ACCEL_COMPLETE;
+  }
+
+  return VMSVGA3D_D3D9_ACCEL_FAILED;
+}
 
 #define VMSVGA3D_STALL(cmd) \
   { (cmd), VMSVGA3D_COMMAND_STALL, NULL, #cmd }
@@ -3587,6 +3761,9 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
                                    int32_t *len, uint32_t fifo_start) {
   const VMSVGA3DCommandInfo *info;
 
+  if (!s->svga3d_capable) {
+    return false;
+  };
   if (cmd < SVGA_3D_CMD_LEGACY_BASE || cmd > SVGA_3D_CMD_FUTURE_MAX) {
     return false;
   };
@@ -3908,6 +4085,9 @@ static void vmsvga3d_publish_fifo_caps(struct vmsvga_state_s *s) {
 
   caps = &s->fifo[SVGA_FIFO_3D_CAPS];
   memset(caps, 0, SVGA_FIFO_3D_CAPS_SIZE * sizeof(*caps));
+  if (!s->svga3d_capable) {
+    return;
+  };
 
   length = (sizeof(SVGA3dCapsRecordHeader) +
             SVGA3D_DEVCAP_DEAD1 * sizeof(SVGA3dCapPair)) /

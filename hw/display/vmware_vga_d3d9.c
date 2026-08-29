@@ -1710,6 +1710,16 @@ bool vmsvga3d_d3d9_dma_plan(
   plan->reject_volume_texture = true;
 
   if (!surface->resident) {
+    if (transfer == SVGA3D_WRITE_HOST_VRAM &&
+        (surface->surface_flags & SVGA3D_SURFACE_HINT_TEXTURE) != 0 &&
+        (surface->surface_flags &
+         (SVGA3D_SURFACE_CUBEMAP | SVGA3D_SURFACE_VOLUME)) == 0) {
+      plan->execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
+      plan->path = VMSVGA3D_D3D9_DMA_PATH_GPU_SURFACE;
+      plan->mark_mipmap_dirty = true;
+      plan->mark_surface_dirty = true;
+      return true;
+    }
     plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
     plan->path = VMSVGA3D_D3D9_DMA_PATH_CPU_SHADOW;
     if (transfer == SVGA3D_WRITE_HOST_VRAM) {

@@ -34,11 +34,77 @@
 #include "svga_reg.h"
 #include "svga3d_cmd.h"
 #include "svga3d_types.h"
+#include "vmware_vga_d3d10.h"
 
 struct vmsvga_state_s;
 
 static bool vmsvga3d_state_context_define(struct vmsvga_state_s *s, uint32_t cid);
 static bool vmsvga3d_state_context_destroy(struct vmsvga_state_s *s, uint32_t cid);
+static bool vmsvga3d_state_dx_context_define(struct vmsvga_state_s *s,
+                                             uint32_t cid);
+static bool vmsvga3d_state_dx_context_destroy(struct vmsvga_state_s *s,
+                                              uint32_t cid);
+static bool vmsvga3d_state_dx_context_bind(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGADXContextMobFormat *valid_contents);
+static bool vmsvga3d_state_dx_context_readback(
+    struct vmsvga_state_s *s, uint32_t cid,
+    SVGADXContextMobFormat *contents);
+static bool vmsvga3d_state_dx_context_invalidate(struct vmsvga_state_s *s,
+                                                 uint32_t cid);
+static bool vmsvga3d_state_dx_render_target_count(
+    struct vmsvga_state_s *s, uint32_t cid, uint32_t *count);
+static bool vmsvga3d_state_dx_apply_constant_buffer(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ConstantBufferPlan *plan);
+static bool vmsvga3d_state_dx_apply_shader_resources(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ShaderResourceSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_shader(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ShaderSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_samplers(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10SamplerSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_input_layout(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10InputLayoutSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_vertex_buffers(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10VertexBufferSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_index_buffer(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10IndexBufferSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_viewports(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ViewportsSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_topology(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10TopologySetPlan *plan);
+static bool vmsvga3d_state_dx_apply_blend_state(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10BlendStateSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_depth_stencil_state(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10DepthStencilStateSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_rasterizer_state(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10RasterizerStateSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_scissors(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ScissorPlan *plan);
+static bool vmsvga3d_state_dx_apply_render_targets(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10RenderTargetsSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_so_targets(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10SOTargetsPlan *plan);
+static bool vmsvga3d_state_dx_apply_stream_output(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10StreamOutputSetPlan *plan);
+static bool vmsvga3d_state_dx_clear_rtv_references(
+    struct vmsvga_state_s *s, uint32_t cid,
+    SVGA3dRenderTargetViewId destroyed_id);
 static bool vmsvga3d_state_set_transform(struct vmsvga_state_s *s, uint32_t cid,
                                   SVGA3dTransformType type,
                                   const float matrix[16]);

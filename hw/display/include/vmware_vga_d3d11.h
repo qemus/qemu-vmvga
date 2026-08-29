@@ -59,6 +59,7 @@ typedef VMSVGA3DD3D10DepthStencilDesc VMSVGA3DD3D11DepthStencilDesc;
 typedef VMSVGA3DD3D10SamplerDesc VMSVGA3DD3D11SamplerDesc;
 typedef VMSVGA3DD3D10RTVDesc VMSVGA3DD3D11RTVDesc;
 typedef VMSVGA3DD3D10QueryInfo VMSVGA3DD3D11QueryInfo;
+typedef VMSVGA3DD3D10ShaderCreatePlan VMSVGA3DD3D11ShaderCreatePlan;
 
 typedef struct vmsvga3d_d3d11_rt_blend_s {
   uint32_t blend_enable;
@@ -140,6 +141,22 @@ extern "C" {
 #endif
 
 VMSVGA3DD3D11Format vmsvga3d_d3d11_surface_format(SVGA3dSurfaceFormat format);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_shader_define_entry(
+    const SVGA3dCmdDXDefineShader *src, SVGACOTableDXShaderEntry *dst);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_shader_create_plan(
+    SVGA3dShaderType type, uint32_t stream_output_id,
+    VMSVGA3DD3D11ShaderCreatePlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_stream_output_mob_entry(
+    const SVGA3dCmdDXDefineStreamOutputWithMob *src,
+    SVGACOTableDXStreamOutputEntry *dst);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_stream_output_bind(
+    SVGACOTableDXStreamOutputEntry *entry, uint32_t mobid,
+    uint32_t offset_in_bytes, uint32_t size_in_bytes);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_rasterizer_define_entry(
+    const SVGA3dCmdDXDefineRasterizerState_v2 *src,
+    SVGACOTableDXRasterizerStateEntry *entry);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_query_define_entry(
+    const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(
     SVGA3dSurfaceAllFlags flags, bool texture_resource,
     uint32_t buffer_byte_stride, VMSVGA3DD3D11ResourcePolicy *policy);

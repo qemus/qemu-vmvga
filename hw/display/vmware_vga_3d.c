@@ -124,6 +124,12 @@ typedef struct vmsvga3d_context_s {
   bool z_range_valid;
 } VMSVGA3DContext;
 
+typedef struct vmsvga3d_dx_context_s {
+  uint32_t cid;
+  uint32_t render_target_count;
+  SVGADXContextMobFormat shadow;
+} VMSVGA3DDXContext;
+
 #define VMSVGA3D_MAX_MIP_LEVELS 16
 
 typedef struct vmsvga3d_surface_image_s {
@@ -149,6 +155,7 @@ typedef struct vmsvga3d_surface_s {
 
 struct vmsvga3d_state_s {
   VMSVGA3DContext *contexts[SVGA3D_MAX_CONTEXT_IDS];
+  VMSVGA3DDXContext *dx_contexts[SVGA3D_MAX_CONTEXT_IDS];
   VMSVGA3DSurface *surfaces[SVGA3D_MAX_SURFACE_IDS];
   size_t surface_bytes;
   size_t shader_bytes;
@@ -267,6 +274,10 @@ static void vmsvga3d_context_free(struct vmsvga3d_state_s *state,
   g_free(context);
 };
 
+static void vmsvga3d_dx_context_free(VMSVGA3DDXContext *context) {
+  g_free(context);
+}
+
 static void vmsvga3d_surface_free(VMSVGA3DSurface *surface) {
   uint32_t i;
 
@@ -322,6 +333,7 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s) {
   };
   for (i = 0; i < SVGA3D_MAX_CONTEXT_IDS; i++) {
     vmsvga3d_context_free(state, state->contexts[i]);
+    vmsvga3d_dx_context_free(state->dx_contexts[i]);
   };
   for (i = 0; i < SVGA3D_MAX_SURFACE_IDS; i++) {
     vmsvga3d_surface_free(state->surfaces[i]);
@@ -842,6 +854,14 @@ static VMSVGA3DContext *vmsvga3d_context(struct vmsvga_state_s *s,
     return NULL;
   };
   return s->svga3d->contexts[cid];
+};
+
+static VMSVGA3DDXContext *vmsvga3d_dx_context(struct vmsvga_state_s *s,
+                                               uint32_t cid) {
+  if (s->svga3d == NULL || cid >= SVGA3D_MAX_CONTEXT_IDS) {
+    return NULL;
+  };
+  return s->svga3d->dx_contexts[cid];
 };
 
 static bool vmsvga3d_handle_set_transform(struct vmsvga_state_s *s,

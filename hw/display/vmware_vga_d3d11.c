@@ -68,6 +68,152 @@ static VMSVGA3DD3D11Level d3d11_level(VMSVGA3DD3D10Level level)
   return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
+VMSVGA3DD3D11Level vmsvga3d_d3d11_shader_define_entry(
+    const SVGA3dCmdDXDefineShader *src, SVGACOTableDXShaderEntry *dst)
+{
+  if (!src || !dst || src->sizeInBytes < 8 ||
+      src->type < SVGA3D_SHADERTYPE_MIN || src->type >= SVGA3D_SHADERTYPE_MAX) {
+    return VMSVGA3D_D3D11_LEVEL_INVALID;
+  }
+
+  dst->type = src->type;
+  dst->sizeInBytes = src->sizeInBytes;
+  dst->offsetInBytes = 0;
+  dst->mobid = SVGA3D_INVALID_ID;
+  return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_shader_create_plan(
+    SVGA3dShaderType type, uint32_t stream_output_id,
+    VMSVGA3DD3D11ShaderCreatePlan *plan)
+{
+  if (!plan || type < SVGA3D_SHADERTYPE_MIN || type >= SVGA3D_SHADERTYPE_MAX) {
+    return VMSVGA3D_D3D11_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->stage_index = (uint32_t)type - (uint32_t)SVGA3D_SHADERTYPE_MIN;
+  plan->stream_output_id = SVGA3D_INVALID_ID;
+  switch (type) {
+  case SVGA3D_SHADERTYPE_VS:
+    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_VERTEX;
+    break;
+  case SVGA3D_SHADERTYPE_PS:
+    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_PIXEL;
+    break;
+  case SVGA3D_SHADERTYPE_GS:
+    if (stream_output_id == SVGA3D_INVALID_ID) {
+      plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_GEOMETRY;
+    } else {
+      plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_GEOMETRY_STREAM_OUTPUT;
+      plan->stream_output_id = stream_output_id;
+      plan->use_stream_output = true;
+    }
+    break;
+  case SVGA3D_SHADERTYPE_HS:
+    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_HULL;
+    break;
+  case SVGA3D_SHADERTYPE_DS:
+    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_DOMAIN;
+    break;
+  case SVGA3D_SHADERTYPE_CS:
+    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_COMPUTE;
+    break;
+  default:
+    return VMSVGA3D_D3D11_LEVEL_INVALID;
+  }
+  return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_stream_output_mob_entry(
+    const SVGA3dCmdDXDefineStreamOutputWithMob *src,
+    SVGACOTableDXStreamOutputEntry *dst)
+{
+  if (!src || !dst ||
+      src->numOutputStreamEntries >= SVGA3D_MAX_STREAMOUT_DECLS) {
+    return VMSVGA3D_D3D11_LEVEL_INVALID;
+  }
+
+  memset(dst, 0, sizeof(*dst));
+  dst->numOutputStreamEntries = src->numOutputStreamEntries;
+  memcpy(dst->streamOutputStrideInBytes, src->streamOutputStrideInBytes,
+         sizeof(dst->streamOutputStrideInBytes));
+  dst->rasterizedStream = src->rasterizedStream;
+  dst->numOutputStreamStrides = src->numOutputStreamStrides;
+  dst->mobid = SVGA3D_INVALID_ID;
+  dst->usesMob = 1;
+  return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_stream_output_bind(
+    SVGACOTableDXStreamOutputEntry *entry, uint32_t mobid,
+    uint32_t offset_in_bytes, uint32_t size_in_bytes)
+{
+  uint64_t required_size;
+
+  if (!entry) {
+    return VMSVGA3D_D3D11_LEVEL_INVALID;
+  }
+
+  required_size = (uint64_t)entry->numOutputStreamEntries *
+                  sizeof(SVGA3dStreamOutputDeclarationEntry);
+  if (size_in_bytes < required_size) {
+    return VMSVGA3D_D3D11_LEVEL_INVALID;
+  }
+
+  entry->mobid = mobid;
+  entry->offsetInBytes = offset_in_bytes;
+  entry->usesMob = 1;
+  return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_rasterizer_define_entry(
+    const SVGA3dCmdDXDefineRasterizerState_v2 *src,
+    SVGACOTableDXRasterizerStateEntry *entry)
+{
+  if (!src || !entry) {
+    return VMSVGA3D_D3D11_LEVEL_INVALID;
+  }
+  entry->fillMode = src->fillMode;
+  entry->cullMode = src->cullMode;
+  entry->frontCounterClockwise = src->frontCounterClockwise;
+  entry->provokingVertexLast = src->provokingVertexLast;
+  entry->depthBias = src->depthBias;
+  entry->depthBiasClamp = src->depthBiasClamp;
+  entry->slopeScaledDepthBias = src->slopeScaledDepthBias;
+  entry->depthClipEnable = src->depthClipEnable;
+  entry->scissorEnable = src->scissorEnable;
+  entry->multisampleEnable = src->multisampleEnable;
+  entry->antialiasedLineEnable = src->antialiasedLineEnable;
+  entry->lineWidth = src->lineWidth;
+  entry->lineStippleEnable = src->lineStippleEnable;
+  entry->lineStippleFactor = src->lineStippleFactor;
+  entry->lineStipplePattern = src->lineStipplePattern;
+  entry->forcedSampleCount = (uint8_t)src->forcedSampleCount;
+  memset(entry->mustBeZero, 0, sizeof(entry->mustBeZero));
+  return VMSVGA3D_D3D11_LEVEL_11_1;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_query_define_entry(
+    const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst)
+{
+  VMSVGA3DD3D11QueryInfo info;
+
+  if (!src || !dst || src->type < SVGA3D_QUERYTYPE_MIN ||
+      src->type >= SVGA3D_QUERYTYPE_MAX ||
+      vmsvga3d_d3d11_query_info(src->type, src->flags, &info) ==
+          VMSVGA3D_D3D11_LEVEL_INVALID) {
+    return VMSVGA3D_D3D11_LEVEL_INVALID;
+  }
+
+  dst->type = src->type;
+  dst->state = SVGADX_QDSTATE_IDLE;
+  dst->flags = src->flags;
+  dst->mobid = SVGA3D_INVALID_ID;
+  dst->offset = 0;
+  return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
 VMSVGA3DD3D11Format vmsvga3d_d3d11_surface_format(SVGA3dSurfaceFormat format)
 {
   VMSVGA3DD3D10Format base = vmsvga3d_d3d10_surface_format(format);

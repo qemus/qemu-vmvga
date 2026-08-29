@@ -25,13 +25,13 @@
 */
 
 /*
- * Legacy VGPU9 protocol and shadow state.
+ * Guest-visible 3D protocol shadow state.
  *
  * FIFO handlers own packet framing and call these operations directly.  This
- * file keeps the guest-visible VGPU9 state, validation and CPU-side fallback
- * behavior separate from FIFO decoding without introducing renderer dispatch.
- * The D3D9 implementation can consume this state directly when execution is
- * connected.
+ * file keeps legacy VGPU9 state and VGPU10 DX-context shadow state separate
+ * from FIFO decoding and renderer dispatch.  DX helpers here only mutate or
+ * copy protocol state; renderer-side bind/restore work is intentionally left
+ * to the shared execution layer.
  */
 
 static bool vmsvga3d_state_context_define(struct vmsvga_state_s *s,
@@ -76,6 +76,363 @@ static bool vmsvga3d_state_context_destroy(struct vmsvga_state_s *s,
   state->contexts[cid] = NULL;
   return true;
 };
+
+#if defined(__GNUC__)
+#define VMSVGA3D_DX_STATE_UNUSED __attribute__((unused))
+#else
+#define VMSVGA3D_DX_STATE_UNUSED
+#endif
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_define(struct vmsvga_state_s *s,
+                                             uint32_t cid) {
+  struct vmsvga3d_state_s *state;
+  VMSVGA3DDXContext *context;
+
+  if (cid >= SVGA3D_MAX_CONTEXT_IDS) {
+    return false;
+  };
+  context = g_try_new0(VMSVGA3DDXContext, 1);
+  if (context == NULL) {
+    return false;
+  };
+  state = vmsvga3d_state_ensure(s);
+  if (state == NULL) {
+    g_free(context);
+    return false;
+  };
+
+  context->cid = cid;
+  memset(&context->shadow, 0xff, sizeof(context->shadow));
+  context->shadow.inputAssembly.topology = SVGA3D_PRIMITIVE_INVALID;
+  context->shadow.numViewports = 0;
+  context->shadow.numScissorRects = 0;
+
+  vmsvga3d_dx_context_free(state->dx_contexts[cid]);
+  state->dx_contexts[cid] = context;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_destroy(struct vmsvga_state_s *s,
+                                              uint32_t cid) {
+  struct vmsvga3d_state_s *state = s->svga3d;
+
+  if (state == NULL || cid >= SVGA3D_MAX_CONTEXT_IDS ||
+      state->dx_contexts[cid] == NULL) {
+    return false;
+  };
+  vmsvga3d_dx_context_free(state->dx_contexts[cid]);
+  state->dx_contexts[cid] = NULL;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_bind(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGADXContextMobFormat *valid_contents) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL) {
+    return false;
+  };
+  if (valid_contents != NULL) {
+    memcpy(&context->shadow, valid_contents, sizeof(context->shadow));
+  };
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_readback(
+    struct vmsvga_state_s *s, uint32_t cid,
+    SVGADXContextMobFormat *contents) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || contents == NULL) {
+    return false;
+  };
+  memcpy(contents, &context->shadow, sizeof(*contents));
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_invalidate(struct vmsvga_state_s *s,
+                                                 uint32_t cid) {
+  /* The protocol shadow is unchanged; renderer invalidation is a later step. */
+  return vmsvga3d_dx_context(s, cid) != NULL;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_render_target_count(
+    struct vmsvga_state_s *s, uint32_t cid, uint32_t *count) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || count == NULL) {
+    return false;
+  };
+  *count = context->render_target_count;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_constant_buffer(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ConstantBufferPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+  SVGA3dConstantBufferBinding *binding;
+
+  if (context == NULL || plan == NULL || !plan->shadow_update ||
+      plan->stage_index >= SVGA3D_NUM_SHADERTYPE ||
+      plan->slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+    return false;
+  };
+  binding = &context->shadow.shaderState[plan->stage_index]
+                 .constantBuffers[plan->slot];
+  binding->sid = plan->sid;
+  binding->offsetInBytes = plan->offset_in_bytes;
+  binding->sizeInBytes = plan->size_in_bytes;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader_resources(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ShaderResourceSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+  uint32_t i;
+
+  if (context == NULL || plan == NULL || !plan->shadow_update_atomic ||
+      plan->stage_index >= SVGA3D_NUM_SHADERTYPE ||
+      plan->start_view > SVGA3D_DX_MAX_SRVIEWS ||
+      plan->shadow_update_count >
+          SVGA3D_DX_MAX_SRVIEWS - plan->start_view) {
+    return false;
+  };
+  for (i = 0; i < plan->shadow_update_count; i++) {
+    context->shadow.shaderState[plan->stage_index]
+        .shaderResources[plan->start_view + i] = plan->ids[i];
+  };
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ShaderSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update ||
+      plan->stage_index >= SVGA3D_NUM_SHADERTYPE) {
+    return false;
+  };
+  context->shadow.shaderState[plan->stage_index].shaderId = plan->shader_id;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_samplers(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10SamplerSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+  uint32_t i;
+
+  if (context == NULL || plan == NULL ||
+      plan->stage_index >= SVGA3D_NUM_SHADERTYPE ||
+      plan->start_sampler > SVGA3D_DX_MAX_SAMPLERS ||
+      plan->shadow_update_count >
+          SVGA3D_DX_MAX_SAMPLERS - plan->start_sampler) {
+    return false;
+  };
+  for (i = 0; i < plan->shadow_update_count; i++) {
+    context->shadow.shaderState[plan->stage_index]
+        .samplers[plan->start_sampler + i] = plan->ids[i];
+  };
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_input_layout(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10InputLayoutSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update) {
+    return false;
+  };
+  context->shadow.inputAssembly.layoutId = plan->layout_id;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_vertex_buffers(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10VertexBufferSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+  uint32_t i;
+
+  if (context == NULL || plan == NULL ||
+      plan->start_buffer > SVGA3D_DX_MAX_VERTEXBUFFERS ||
+      plan->shadow_update_count >
+          SVGA3D_DX_MAX_VERTEXBUFFERS - plan->start_buffer) {
+    return false;
+  };
+  for (i = 0; i < plan->shadow_update_count; i++) {
+    SVGA3dBufferBinding *binding =
+        &context->shadow.inputAssembly.vertexBuffers[plan->start_buffer + i];
+
+    binding->bufferId = plan->bindings[i].sid;
+    binding->stride = plan->bindings[i].stride;
+    binding->offset = plan->bindings[i].offset;
+  };
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_index_buffer(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10IndexBufferSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update) {
+    return false;
+  };
+  context->shadow.inputAssembly.indexBufferSid = plan->sid;
+  context->shadow.inputAssembly.indexBufferOffset = plan->offset;
+  context->shadow.inputAssembly.indexBufferFormat = plan->format;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_viewports(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ViewportsSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update ||
+      plan->count > SVGA3D_DX_MAX_VIEWPORTS) {
+    return false;
+  };
+  context->shadow.numViewports = (uint8_t)plan->count;
+  if (plan->count != 0) {
+    memcpy(context->shadow.viewports, plan->viewports,
+           plan->count * sizeof(plan->viewports[0]));
+  };
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_topology(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10TopologySetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update) {
+    return false;
+  };
+  context->shadow.inputAssembly.topology = plan->topology;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_blend_state(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10BlendStateSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update) {
+    return false;
+  };
+  context->shadow.renderState.blendStateId = plan->blend_id;
+  memcpy(context->shadow.renderState.blendFactor, plan->blend_factor,
+         sizeof(context->shadow.renderState.blendFactor));
+  context->shadow.renderState.sampleMask = plan->sample_mask;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_depth_stencil_state(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10DepthStencilStateSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update) {
+    return false;
+  };
+  context->shadow.renderState.depthStencilStateId = plan->depth_stencil_id;
+  context->shadow.renderState.stencilRef = plan->stencil_ref;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_rasterizer_state(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10RasterizerStateSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update) {
+    return false;
+  };
+  context->shadow.renderState.rasterizerStateId = plan->rasterizer_id;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_scissors(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ScissorPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update ||
+      plan->count > SVGA3D_DX_MAX_SCISSORRECTS) {
+    return false;
+  };
+  context->shadow.numScissorRects = (uint8_t)plan->count;
+  if (plan->count != 0) {
+    memcpy(context->shadow.scissorRects, plan->rects,
+           plan->count * sizeof(plan->rects[0]));
+  };
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_render_targets(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10RenderTargetsSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+  uint32_t i;
+
+  if (context == NULL || plan == NULL || !plan->shadow_update_atomic ||
+      plan->shadow_update_count > SVGA3D_MAX_RENDER_TARGETS) {
+    return false;
+  };
+  context->shadow.renderState.depthStencilViewId =
+      plan->depth_stencil_view_id;
+  for (i = 0; i < plan->shadow_update_count; i++) {
+    context->shadow.renderState.renderTargetViewIds[i] = plan->ids[i];
+  };
+  context->render_target_count = plan->remembered_count;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_so_targets(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10SOTargetsPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update) {
+    return false;
+  };
+  memcpy(context->shadow.streamOut.targets, plan->shadow_targets,
+         sizeof(context->shadow.streamOut.targets));
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_stream_output(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10StreamOutputSetPlan *plan) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL || plan == NULL || !plan->shadow_update) {
+    return false;
+  };
+  context->shadow.streamOut.soid = plan->stream_output_id;
+  return true;
+};
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_clear_rtv_references(
+    struct vmsvga_state_s *s, uint32_t cid,
+    SVGA3dRenderTargetViewId destroyed_id) {
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+  if (context == NULL) {
+    return false;
+  };
+  return vmsvga3d_d3d10_rtv_destroy_shadow_refs(
+             destroyed_id, context->shadow.renderState.renderTargetViewIds) !=
+         VMSVGA3D_D3D10_LEVEL_INVALID;
+};
+
+#undef VMSVGA3D_DX_STATE_UNUSED
 
 static bool vmsvga3d_state_set_transform(struct vmsvga_state_s *s,
                                             uint32_t cid,

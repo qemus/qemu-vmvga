@@ -26,6 +26,8 @@
 
 #include "include/vmware_vga_d3d10.h"
 
+#include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Public DXGI ABI values. */
@@ -758,6 +760,1533 @@ static uint32_t blend_alpha(uint8_t value)
   }
 }
 
+VMSVGA3DD3D10Level vmsvga3d_d3d10_index_format(
+    SVGA3dSurfaceFormat format, uint32_t *dxgi_format,
+    uint32_t *bytes_per_index)
+{
+  VMSVGA3DD3D10Format translated;
+
+  if (!dxgi_format || !bytes_per_index) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  translated = vmsvga3d_d3d10_surface_format(format);
+  if (translated.min_level == VMSVGA3D_D3D10_LEVEL_INVALID ||
+      (translated.dxgi_format != DXGI_R16_UINT &&
+       translated.dxgi_format != DXGI_R32_UINT)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  *dxgi_format = translated.dxgi_format;
+  *bytes_per_index = translated.dxgi_format == DXGI_R16_UINT ? 2u : 4u;
+  return translated.min_level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_box(
+    const SVGA3dBox *src, VMSVGA3DD3D10Box *dst)
+{
+  if (!src || !dst) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  dst->left = src->x;
+  dst->top = src->y;
+  dst->front = src->z;
+  dst->right = src->x + src->w;
+  dst->bottom = src->y + src->h;
+  dst->back = src->z + src->d;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+static void copy_box_clip(const SVGA3dSize *src_size,
+                          const SVGA3dSize *dst_size,
+                          SVGA3dCopyBox *box)
+{
+  /* Keep the established clipping order and strict > comparisons. */
+  if (box->srcx > src_size->width) {
+    box->srcx = src_size->width;
+  }
+  if (box->w > src_size->width - box->srcx) {
+    box->w = src_size->width - box->srcx;
+  }
+
+  if (box->srcy > src_size->height) {
+    box->srcy = src_size->height;
+  }
+  if (box->h > src_size->height - box->srcy) {
+    box->h = src_size->height - box->srcy;
+  }
+
+  if (box->srcz > src_size->depth) {
+    box->srcz = src_size->depth;
+  }
+  if (box->d > src_size->depth - box->srcz) {
+    box->d = src_size->depth - box->srcz;
+  }
+
+  if (box->x > dst_size->width) {
+    box->x = dst_size->width;
+  }
+  if (box->w > dst_size->width - box->x) {
+    box->w = dst_size->width - box->x;
+  }
+
+  if (box->y > dst_size->height) {
+    box->y = dst_size->height;
+  }
+  if (box->h > dst_size->height - box->y) {
+    box->h = dst_size->height - box->y;
+  }
+
+  if (box->z > dst_size->depth) {
+    box->z = dst_size->depth;
+  }
+  if (box->d > dst_size->depth - box->z) {
+    box->d = dst_size->depth - box->z;
+  }
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_copy_region_plan(
+    const SVGA3dSize *src_size, const SVGA3dSize *dst_size,
+    const SVGA3dCopyBox *box, VMSVGA3DD3D10CopyRegionPlan *plan)
+{
+  if (!src_size || !dst_size || !box || !plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  plan->clipped_box = *box;
+  copy_box_clip(src_size, dst_size, &plan->clipped_box);
+  plan->destination_x = plan->clipped_box.x;
+  plan->destination_y = plan->clipped_box.y;
+  plan->destination_z = plan->clipped_box.z;
+  plan->source_box.left = plan->clipped_box.srcx;
+  plan->source_box.top = plan->clipped_box.srcy;
+  plan->source_box.front = plan->clipped_box.srcz;
+  plan->source_box.right = plan->clipped_box.srcx + plan->clipped_box.w;
+  plan->source_box.bottom = plan->clipped_box.srcy + plan->clipped_box.h;
+  plan->source_box.back = plan->clipped_box.srcz + plan->clipped_box.d;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_so_targets_plan(
+    uint32_t count, const SVGA3dSoTarget *targets,
+    VMSVGA3DD3D10SOTargetsPlan *plan)
+{
+  uint32_t i;
+
+  if (!plan || count > SVGA3D_DX_MAX_SOTARGETS || (count && !targets)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->guest_count = count;
+  plan->native_target_count = SVGA3D_DX_MAX_SOTARGETS;
+  plan->backend_remembered_count = count;
+  plan->shadow_update = true;
+  plan->shadow_update_before_backend = true;
+  plan->shadow_stores_only_surface_ids = true;
+  plan->shadow_clears_unspecified_slots = true;
+  plan->prepare_targets_sequentially = true;
+  plan->size_in_bytes_ignored = true;
+  plan->bind_full_native_table = true;
+  plan->immediate_bind = true;
+
+  for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+    VMSVGA3DD3D10SOTargetBinding *binding = &plan->bindings[i];
+
+    if (i < count) {
+      plan->shadow_targets[i] = targets[i].sid;
+      binding->sid = targets[i].sid;
+      binding->size_in_bytes = targets[i].sizeInBytes;
+      if (targets[i].sid != SVGA_ID_INVALID) {
+        binding->active = true;
+        binding->ensure_stream_output_buffer = true;
+        binding->offset = targets[i].offset;
+      }
+    } else {
+      plan->shadow_targets[i] = SVGA3D_INVALID_ID;
+      binding->sid = SVGA3D_INVALID_ID;
+    }
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_so_targets_restore_plan(
+    const SVGA3dSurfaceId targets[SVGA3D_DX_MAX_SOTARGETS],
+    VMSVGA3DD3D10SOTargetsPlan *plan)
+{
+  SVGA3dSoTarget restore_targets[SVGA3D_DX_MAX_SOTARGETS];
+  uint32_t i;
+
+  if (!targets || !plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(restore_targets, 0, sizeof(restore_targets));
+  for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+    restore_targets[i].sid = targets[i];
+  }
+  if (vmsvga3d_d3d10_so_targets_plan(
+          SVGA3D_DX_MAX_SOTARGETS, restore_targets, plan) ==
+      VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  plan->shadow_update = false;
+  plan->shadow_update_before_backend = false;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_set_plan(
+    SVGA3dStreamOutputId stream_output_id, uint32_t table_count,
+    VMSVGA3DD3D10StreamOutputSetPlan *plan)
+{
+  if (!plan || (stream_output_id != SVGA_ID_INVALID &&
+                stream_output_id >= table_count)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->stream_output_id = stream_output_id;
+  plan->shadow_update = true;
+  plan->backend_set_is_noop = true;
+  plan->affects_geometry_shader_creation = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_destroy_entry(
+    SVGACOTableDXStreamOutputEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(entry, 0, sizeof(*entry));
+  entry->mobid = SVGA3D_INVALID_ID;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_rtv_destroy_shadow_refs(
+    SVGA3dRenderTargetViewId destroyed_id,
+    SVGA3dRenderTargetViewId ids[SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS])
+{
+  uint32_t i;
+
+  if (!ids) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  for (i = 0; i < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS; i++) {
+    if (ids[i] == destroyed_id) {
+      ids[i] = SVGA3D_INVALID_ID;
+    }
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_object_lifecycle_plan(
+    VMSVGA3DD3D10ObjectKind kind,
+    VMSVGA3DD3D10ObjectLifecyclePlan *plan)
+{
+  if (!plan || kind >= VMSVGA3D_D3D10_OBJECT_COUNT) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->kind = kind;
+  plan->define_calls_backend = true;
+  plan->destroy_calls_backend = true;
+  plan->destroy_releases_native = true;
+  plan->destroy_entry_reset_after_backend = true;
+
+  switch (kind) {
+  case VMSVGA3D_D3D10_OBJECT_SRV:
+    plan->define_creates_native_immediately = true;
+    plan->define_backend_expects_empty_slot = true;
+    plan->define_may_create_surface_resource = true;
+    plan->define_surface_kind_depends_on_surface_format = true;
+    plan->destroy_entry_reset_before_backend = true;
+    plan->destroy_entry_reset_after_backend = false;
+    plan->destroy_result_propagates = true;
+    break;
+  case VMSVGA3D_D3D10_OBJECT_RTV:
+  case VMSVGA3D_D3D10_OBJECT_DSV:
+    plan->define_creates_native_immediately = true;
+    plan->define_backend_expects_empty_slot = true;
+    plan->define_may_create_surface_resource = true;
+    plan->define_surface_create_kind = VMSVGA3D_D3D10_CREATE_TEXTURE;
+    plan->destroy_entry_reset_before_backend = true;
+    plan->destroy_entry_reset_after_backend = false;
+    plan->destroy_result_propagates = true;
+    plan->destroy_clears_bound_references =
+        kind == VMSVGA3D_D3D10_OBJECT_RTV;
+    break;
+  case VMSVGA3D_D3D10_OBJECT_ELEMENT_LAYOUT:
+    plan->define_native_object_is_lazy = true;
+    plan->backend_define_resets_existing_cached_object = true;
+    break;
+  case VMSVGA3D_D3D10_OBJECT_BLEND_STATE:
+  case VMSVGA3D_D3D10_OBJECT_DEPTH_STENCIL_STATE:
+  case VMSVGA3D_D3D10_OBJECT_RASTERIZER_STATE:
+  case VMSVGA3D_D3D10_OBJECT_SAMPLER_STATE:
+    plan->define_creates_native_immediately = true;
+    plan->define_can_replace_existing_native_without_release = true;
+    if (kind == VMSVGA3D_D3D10_OBJECT_RASTERIZER_STATE) {
+      plan->destroy_result_propagates = true;
+    }
+    break;
+  case VMSVGA3D_D3D10_OBJECT_SHADER:
+    plan->define_native_object_is_lazy = true;
+    plan->define_releases_existing_before_entry_update = true;
+    break;
+  case VMSVGA3D_D3D10_OBJECT_STREAM_OUTPUT:
+    plan->define_native_object_is_lazy = true;
+    plan->backend_define_resets_existing_cached_object = true;
+    plan->destroy_result_propagates = true;
+    break;
+  case VMSVGA3D_D3D10_OBJECT_QUERY:
+    plan->define_creates_native_immediately = true;
+    plan->define_releases_existing_before_entry_update = true;
+    break;
+  case VMSVGA3D_D3D10_OBJECT_COUNT:
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+static VMSVGA3DD3D10Level cotable_info(
+    SVGACOTableType type, uint32_t *entry_size,
+    VMSVGA3DD3D10COTableReplayMode *replay_mode,
+    bool *state_replay_overwrites_preserved_pointer)
+{
+  if (!entry_size || !replay_mode || !state_replay_overwrites_preserved_pointer) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  *state_replay_overwrites_preserved_pointer = false;
+  switch (type) {
+  case SVGA_COTABLE_RTVIEW:
+    *entry_size = sizeof(SVGACOTableDXRTViewEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_VIEW;
+    break;
+  case SVGA_COTABLE_DSVIEW:
+    *entry_size = sizeof(SVGACOTableDXDSViewEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_VIEW;
+    break;
+  case SVGA_COTABLE_SRVIEW:
+    *entry_size = sizeof(SVGACOTableDXSRViewEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_VIEW;
+    break;
+  case SVGA_COTABLE_ELEMENTLAYOUT:
+    *entry_size = sizeof(SVGACOTableDXElementLayoutEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_ELEMENT_LAYOUT;
+    break;
+  case SVGA_COTABLE_BLENDSTATE:
+    *entry_size = sizeof(SVGACOTableDXBlendStateEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_STATE;
+    *state_replay_overwrites_preserved_pointer = true;
+    break;
+  case SVGA_COTABLE_DEPTHSTENCIL:
+    *entry_size = sizeof(SVGACOTableDXDepthStencilEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_STATE;
+    *state_replay_overwrites_preserved_pointer = true;
+    break;
+  case SVGA_COTABLE_RASTERIZERSTATE:
+    *entry_size = sizeof(SVGACOTableDXRasterizerStateEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_STATE;
+    *state_replay_overwrites_preserved_pointer = true;
+    break;
+  case SVGA_COTABLE_SAMPLER:
+    *entry_size = sizeof(SVGACOTableDXSamplerEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_STATE;
+    *state_replay_overwrites_preserved_pointer = true;
+    break;
+  case SVGA_COTABLE_STREAMOUTPUT:
+    *entry_size = sizeof(SVGACOTableDXStreamOutputEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_STREAM_OUTPUT;
+    break;
+  case SVGA_COTABLE_DXQUERY:
+    *entry_size = sizeof(SVGACOTableDXQueryEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_QUERY;
+    break;
+  case SVGA_COTABLE_DXSHADER:
+    *entry_size = sizeof(SVGACOTableDXShaderEntry);
+    *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_SHADER;
+    break;
+  default:
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_cotable_plan(
+    SVGACOTableType type, bool has_mob, uint32_t mob_size,
+    uint32_t valid_size_in_bytes, bool grow, bool had_previous_mob,
+    VMSVGA3DD3D10COTablePlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+  bool overwrite_preserved_pointer;
+
+  if (!plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  level = cotable_info(type, &plan->entry_size, &plan->replay_mode,
+                       &overwrite_preserved_pointer);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+
+  plan->type = type;
+  if (has_mob) {
+    if (valid_size_in_bytes > mob_size) {
+      return VMSVGA3D_D3D10_LEVEL_INVALID;
+    }
+    plan->create_backing_store = true;
+  } else {
+    valid_size_in_bytes = 0;
+    mob_size = 0;
+    plan->unbind = true;
+  }
+
+  plan->capacity_entries = mob_size / plan->entry_size;
+  plan->valid_entries = valid_size_in_bytes / plan->entry_size;
+  plan->replace_frontend_table_before_backend = true;
+  plan->grow_copies_valid_size_bytes = grow && had_previous_mob &&
+                                       plan->valid_entries != 0;
+  plan->grow_copy_bytes = plan->grow_copies_valid_size_bytes
+                        ? valid_size_in_bytes : 0;
+  plan->backend_reallocates_to_capacity = true;
+  plan->backend_preserves_prefix_up_to_valid_count = true;
+  plan->backend_zeroes_after_preserved_prefix = true;
+  plan->backend_releases_truncated_entries = true;
+  plan->skip_all_zero_entries_during_replay = true;
+  plan->state_replay_can_replace_preserved_pointer_without_release =
+      overwrite_preserved_pointer;
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_srv_define_entry(
+    const SVGA3dCmdDXDefineShaderResourceView *src,
+    SVGACOTableDXSRViewEntry *dst)
+{
+  if (!src || !dst) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  dst->sid = src->sid;
+  dst->format = src->format;
+  dst->resourceDimension = src->resourceDimension;
+  dst->desc = src->desc;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_srv_destroy_entry(
+    SVGACOTableDXSRViewEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(entry, 0, sizeof(*entry));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_rtv_define_entry(
+    const SVGA3dCmdDXDefineRenderTargetView *src,
+    SVGACOTableDXRTViewEntry *dst)
+{
+  if (!src || !dst) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  dst->sid = src->sid;
+  dst->format = src->format;
+  dst->resourceDimension = src->resourceDimension;
+  dst->desc = src->desc;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_rtv_destroy_entry(
+    SVGACOTableDXRTViewEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(entry, 0, sizeof(*entry));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_dsv_define_entry(
+    const SVGA3dCmdDXDefineDepthStencilView_v2 *src,
+    SVGACOTableDXDSViewEntry *dst)
+{
+  if (!src || !dst) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  dst->sid = src->sid;
+  dst->format = src->format;
+  dst->resourceDimension = src->resourceDimension;
+  dst->mipSlice = src->mipSlice;
+  dst->firstArraySlice = src->firstArraySlice;
+  dst->arraySize = src->arraySize;
+  dst->flags = src->flags;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_dsv_destroy_entry(
+    SVGACOTableDXDSViewEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(entry, 0, sizeof(*entry));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_element_layout_define_entry(
+    SVGA3dElementLayoutId layout_id, uint32_t count,
+    const SVGA3dInputElementDesc *descs,
+    SVGACOTableDXElementLayoutEntry *entry)
+{
+  uint32_t copy_count;
+
+  if (!entry || (count && !descs)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  copy_count = count;
+  if (copy_count > sizeof(entry->descs) / sizeof(entry->descs[0])) {
+    copy_count = sizeof(entry->descs) / sizeof(entry->descs[0]);
+  }
+  entry->elid = layout_id;
+  entry->numDescs = copy_count;
+  if (copy_count) {
+    memcpy(entry->descs, descs, copy_count * sizeof(entry->descs[0]));
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_element_layout_destroy_entry(
+    SVGACOTableDXElementLayoutEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(entry, 0, sizeof(*entry));
+  entry->elid = SVGA3D_INVALID_ID;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_blend_define_entry(
+    const SVGA3dCmdDXDefineBlendState *src,
+    SVGACOTableDXBlendStateEntry *entry)
+{
+  if (!src || !entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  entry->alphaToCoverageEnable = src->alphaToCoverageEnable;
+  entry->independentBlendEnable = src->independentBlendEnable;
+  memcpy(entry->perRT, src->perRT, sizeof(entry->perRT));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_blend_destroy_entry(
+    SVGACOTableDXBlendStateEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(entry, 0, sizeof(*entry));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_depth_stencil_define_entry(
+    const SVGA3dCmdDXDefineDepthStencilState *src,
+    SVGACOTableDXDepthStencilEntry *entry)
+{
+  if (!src || !entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  entry->depthEnable = src->depthEnable;
+  entry->depthWriteMask = src->depthWriteMask;
+  entry->depthFunc = src->depthFunc;
+  entry->stencilEnable = src->stencilEnable;
+  entry->frontEnable = src->frontEnable;
+  entry->backEnable = src->backEnable;
+  entry->stencilReadMask = src->stencilReadMask;
+  entry->stencilWriteMask = src->stencilWriteMask;
+  entry->frontStencilFailOp = src->frontStencilFailOp;
+  entry->frontStencilDepthFailOp = src->frontStencilDepthFailOp;
+  entry->frontStencilPassOp = src->frontStencilPassOp;
+  entry->frontStencilFunc = src->frontStencilFunc;
+  entry->backStencilFailOp = src->backStencilFailOp;
+  entry->backStencilDepthFailOp = src->backStencilDepthFailOp;
+  entry->backStencilPassOp = src->backStencilPassOp;
+  entry->backStencilFunc = src->backStencilFunc;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_depth_stencil_destroy_entry(
+    SVGACOTableDXDepthStencilEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(entry, 0, sizeof(*entry));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_rasterizer_define_entry(
+    const SVGA3dCmdDXDefineRasterizerState *src,
+    SVGACOTableDXRasterizerStateEntry *entry)
+{
+  if (!src || !entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  entry->fillMode = src->fillMode;
+  entry->cullMode = src->cullMode;
+  entry->frontCounterClockwise = src->frontCounterClockwise;
+  entry->provokingVertexLast = src->provokingVertexLast;
+  entry->depthBias = src->depthBias;
+  entry->depthBiasClamp = src->depthBiasClamp;
+  entry->slopeScaledDepthBias = src->slopeScaledDepthBias;
+  entry->depthClipEnable = src->depthClipEnable;
+  entry->scissorEnable = src->scissorEnable;
+  entry->multisampleEnable = src->multisampleEnable;
+  entry->antialiasedLineEnable = src->antialiasedLineEnable;
+  entry->lineWidth = src->lineWidth;
+  entry->lineStippleEnable = src->lineStippleEnable;
+  entry->lineStippleFactor = src->lineStippleFactor;
+  entry->lineStipplePattern = src->lineStipplePattern;
+  entry->forcedSampleCount = 0;
+  memset(entry->mustBeZero, 0, sizeof(entry->mustBeZero));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_rasterizer_destroy_entry(
+    SVGACOTableDXRasterizerStateEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(entry, 0, sizeof(*entry));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_sampler_define_entry(
+    const SVGA3dCmdDXDefineSamplerState *src,
+    SVGACOTableDXSamplerEntry *entry)
+{
+  if (!src || !entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  entry->filter = src->filter;
+  entry->addressU = src->addressU;
+  entry->addressV = src->addressV;
+  entry->addressW = src->addressW;
+  entry->mipLODBias = src->mipLODBias;
+  entry->maxAnisotropy = src->maxAnisotropy;
+  entry->comparisonFunc = src->comparisonFunc;
+  entry->borderColor = src->borderColor;
+  entry->minLOD = src->minLOD;
+  entry->maxLOD = src->maxLOD;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_sampler_destroy_entry(
+    SVGACOTableDXSamplerEntry *entry)
+{
+  if (!entry) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(entry, 0, sizeof(*entry));
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+static VMSVGA3DD3D10Level vgpu10_shader_stage(
+    SVGA3dShaderType type, uint32_t *stage_index)
+{
+  if (type < SVGA3D_SHADERTYPE_MIN || type >= SVGA3D_SHADERTYPE_DX10_MAX) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  return vmsvga3d_d3d10_shader_stage(type, stage_index);
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_constant_buffer_plan(
+    uint32_t slot, SVGA3dShaderType type, SVGA3dSurfaceId sid,
+    uint32_t offset_in_bytes, uint32_t size_in_bytes, bool surface_available,
+    uint32_t surface_bytes, bool has_surface_data,
+    VMSVGA3DD3D10ConstantBufferPlan *plan)
+{
+  VMSVGA3DD3D10Level stage_level;
+  uint32_t stage_index;
+
+  if (!plan || slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  stage_level = vgpu10_shader_stage(type, &stage_index);
+  if (stage_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->stage_index = stage_index;
+  plan->slot = slot;
+  plan->sid = sid;
+  plan->offset_in_bytes = offset_in_bytes;
+  plan->size_in_bytes = size_in_bytes;
+  plan->shadow_update = true;
+  plan->bind_only_if_pipeline_differs = true;
+  plan->bind_timing = VMSVGA3D_D3D10_BIND_DRAW_SETUP;
+
+  if (sid == SVGA_ID_INVALID) {
+    plan->unbind = true;
+    return stage_level;
+  }
+
+  if (!surface_available || offset_in_bytes >= surface_bytes ||
+      size_in_bytes > surface_bytes - offset_in_bytes) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  plan->create_buffer = true;
+  plan->has_initial_data = has_surface_data;
+  plan->initial_data_offset = offset_in_bytes;
+  plan->replace_only_on_create_success = true;
+  plan->preserve_old_buffer_on_create_failure = true;
+  plan->create_failure_is_success = true;
+  plan->bind_only_if_pipeline_differs = true;
+  plan->create_desc.valid = true;
+  plan->create_desc.resource_dimension = D3D10_RESOURCE_DIMENSION_BUFFER;
+  plan->create_desc.byte_width = size_in_bytes;
+  plan->create_desc.usage = D3D10_USAGE_DEFAULT;
+  plan->create_desc.bind_flags = D3D10_BIND_CONSTANT_BUFFER;
+  plan->create_desc.initial_subresource_count = has_surface_data ? 1u : 0u;
+  return stage_level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resources_set_plan(
+    uint32_t start_view, SVGA3dShaderType type, uint32_t count,
+    const SVGA3dShaderResourceViewId *ids, uint32_t view_table_count,
+    VMSVGA3DD3D10ShaderResourceSetPlan *plan)
+{
+  VMSVGA3DD3D10Level stage_level;
+  uint32_t stage_index;
+  uint32_t i;
+
+  if (!plan || start_view >= SVGA3D_DX_MAX_SRVIEWS ||
+      count > SVGA3D_DX_MAX_SRVIEWS - start_view || (count && !ids)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  stage_level = vgpu10_shader_stage(type, &stage_index);
+  if (stage_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->stage_index = stage_index;
+  plan->start_view = start_view;
+  plan->count = count;
+  plan->shadow_update_atomic = true;
+  plan->ensure_views_at_draw = true;
+  plan->bind_full_table_at_draw = true;
+  plan->bind_every_draw = true;
+  plan->bind_timing = VMSVGA3D_D3D10_BIND_DRAW_SETUP;
+
+  for (i = 0; i < count; i++) {
+    if (ids[i] >= view_table_count && ids[i] != SVGA3D_INVALID_ID) {
+      return VMSVGA3D_D3D10_LEVEL_INVALID;
+    }
+  }
+  for (i = 0; i < count; i++) {
+    plan->ids[i] = ids[i];
+  }
+  plan->shadow_update_count = count;
+  return stage_level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_set_plan(
+    SVGA3dShaderId shader_id, SVGA3dShaderType type,
+    uint32_t shader_table_count, VMSVGA3DD3D10ShaderSetPlan *plan)
+{
+  VMSVGA3DD3D10Level stage_level;
+  uint32_t stage_index;
+
+  if (!plan ||
+      (shader_id >= shader_table_count && shader_id != SVGA_ID_INVALID)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  stage_level = vgpu10_shader_stage(type, &stage_index);
+  if (stage_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->stage_index = stage_index;
+  plan->shader_id = shader_id;
+  plan->shadow_update = true;
+  plan->unbind = shader_id == SVGA_ID_INVALID;
+  plan->create_if_missing_at_draw = !plan->unbind;
+  plan->patch_pixel_resources_on_create =
+      !plan->unbind && type == SVGA3D_SHADERTYPE_PS;
+  plan->update_vs_input_signature_on_create =
+      !plan->unbind && type == SVGA3D_SHADERTYPE_VS;
+  plan->match_signatures_on_create = !plan->unbind;
+  plan->stream_output_affects_geometry_creation =
+      !plan->unbind && type == SVGA3D_SHADERTYPE_GS;
+  plan->bind_every_draw = true;
+  plan->bind_timing = VMSVGA3D_D3D10_BIND_DRAW_SETUP;
+  return stage_level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_samplers_set_plan(
+    uint32_t start_sampler, SVGA3dShaderType type, uint32_t count,
+    const SVGA3dSamplerId *ids, uint32_t sampler_table_count,
+    VMSVGA3DD3D10SamplerSetPlan *plan)
+{
+  VMSVGA3DD3D10Level stage_level;
+  uint32_t stage_index;
+  uint32_t i;
+
+  if (!plan || start_sampler >= SVGA3D_DX_MAX_SAMPLERS ||
+      count > SVGA3D_DX_MAX_SAMPLERS - start_sampler || (count && !ids)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  stage_level = vgpu10_shader_stage(type, &stage_index);
+  if (stage_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->stage_index = stage_index;
+  plan->start_sampler = start_sampler;
+  plan->count = count;
+  plan->partial_shadow_update_on_failure = true;
+  plan->bind_timing = VMSVGA3D_D3D10_BIND_IMMEDIATE;
+
+  for (i = 0; i < count; i++) {
+    if (ids[i] >= sampler_table_count && ids[i] != SVGA3D_INVALID_ID) {
+      plan->shadow_update_count = i;
+      return VMSVGA3D_D3D10_LEVEL_INVALID;
+    }
+    plan->ids[i] = ids[i];
+    plan->shadow_update_count = i + 1u;
+  }
+  return stage_level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_input_layout_set_plan(
+    SVGA3dElementLayoutId layout_id, uint32_t layout_table_count,
+    VMSVGA3DD3D10InputLayoutSetPlan *plan)
+{
+  if (!plan || (layout_id >= layout_table_count &&
+                layout_id != SVGA3D_INVALID_ID)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->layout_id = layout_id;
+  plan->shadow_update = true;
+  plan->unbind = layout_id == SVGA3D_INVALID_ID;
+  plan->create_lazily_at_draw = !plan->unbind;
+  plan->requires_vertex_shader_dxbc = !plan->unbind;
+  plan->bind_every_draw = true;
+  plan->bind_timing = VMSVGA3D_D3D10_BIND_DRAW_SETUP;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_vertex_buffers_set_plan(
+    uint32_t start_buffer, uint32_t count, const SVGA3dVertexBuffer *buffers,
+    VMSVGA3DD3D10VertexBufferSetPlan *plan)
+{
+  uint32_t i;
+
+  if (!plan || start_buffer >= SVGA3D_DX_MAX_VERTEXBUFFERS ||
+      count > SVGA3D_DX_MAX_VERTEXBUFFERS - start_buffer ||
+      (count && !buffers)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->start_buffer = start_buffer;
+  plan->count = count;
+  plan->shadow_update_count = count;
+  plan->prepare_backend_on_set = true;
+  plan->backend_updates_sequentially = true;
+  plan->bind_from_slot_zero_at_draw = true;
+  plan->bind_only_if_pipeline_differs = true;
+  plan->bind_timing = VMSVGA3D_D3D10_BIND_DRAW_SETUP;
+
+  for (i = 0; i < count; i++) {
+    plan->bindings[i].sid = buffers[i].sid;
+    plan->bindings[i].stride = buffers[i].stride;
+    plan->bindings[i].offset = buffers[i].offset;
+    plan->bindings[i].unbind = buffers[i].sid == SVGA_ID_INVALID;
+    plan->bindings[i].ensure_buffer_on_set = !plan->bindings[i].unbind;
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_vertex_buffer_pipeline_binding(
+    bool has_buffer, uint32_t surface_bytes, uint32_t stride, uint32_t offset,
+    VMSVGA3DD3D10VertexBufferPipelineBinding *binding)
+{
+  uint32_t pipeline_stride;
+
+  if (!binding) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(binding, 0, sizeof(*binding));
+  if (!has_buffer) {
+    return VMSVGA3D_D3D10_LEVEL_10_0;
+  }
+
+  /* Ignore the large strides emitted by some guests. */
+  pipeline_stride = stride <= 2048u ? stride : 0u;
+  if (pipeline_stride <= surface_bytes &&
+      offset <= surface_bytes - pipeline_stride) {
+    binding->stride = pipeline_stride;
+    binding->offset = offset;
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_index_buffer_set_plan(
+    SVGA3dSurfaceId sid, SVGA3dSurfaceFormat format, uint32_t offset,
+    VMSVGA3DD3D10IndexBufferSetPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  if (!plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->sid = sid;
+  plan->format = format;
+  plan->offset = offset;
+  plan->backend_offset = offset;
+  plan->shadow_update = true;
+  plan->bind_timing = VMSVGA3D_D3D10_BIND_DRAW_SETUP;
+
+  if (sid == SVGA_ID_INVALID) {
+    plan->unbind = true;
+    plan->backend_offset = 0;
+    return VMSVGA3D_D3D10_LEVEL_10_0;
+  }
+
+  plan->ensure_buffer_on_set = true;
+  level = vmsvga3d_d3d10_index_format(format, &plan->dxgi_format,
+                                      &plan->bytes_per_index);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    plan->backend_reject = true;
+    return level;
+  }
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_viewports_set_plan(
+    uint32_t count, const SVGA3dViewport *viewports,
+    VMSVGA3DD3D10ViewportsSetPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  if (!plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(plan, 0, sizeof(*plan));
+  level = vmsvga3d_d3d10_viewports(viewports, count, plan->viewports);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+  plan->count = count;
+  plan->shadow_update = true;
+  plan->preserve_unspecified_slots = true;
+  plan->immediate_bind = true;
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_topology_set_plan(
+    SVGA3dPrimitiveType topology, VMSVGA3DD3D10TopologySetPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  if (!plan || topology < SVGA3D_PRIMITIVE_MIN ||
+      topology >= SVGA3D_PRIMITIVE_DX10_MAX) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(plan, 0, sizeof(*plan));
+  level = vmsvga3d_d3d10_primitive_topology(topology,
+                                             &plan->native_topology);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+  plan->topology = topology;
+  plan->shadow_update = true;
+  plan->immediate_bind = true;
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_blend_state_set_plan(
+    const SVGA3dCmdDXSetBlendState *command, uint32_t table_count,
+    VMSVGA3DD3D10BlendStateSetPlan *plan)
+{
+  if (!command || !plan ||
+      (command->blendId >= table_count &&
+       command->blendId != SVGA3D_INVALID_ID)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(plan, 0, sizeof(*plan));
+  plan->blend_id = command->blendId;
+  memcpy(plan->blend_factor, command->blendFactor,
+         sizeof(plan->blend_factor));
+  plan->sample_mask = command->sampleMask;
+  plan->shadow_update = true;
+  plan->immediate_bind = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_depth_stencil_state_set_plan(
+    const SVGA3dCmdDXSetDepthStencilState *command, uint32_t table_count,
+    VMSVGA3DD3D10DepthStencilStateSetPlan *plan)
+{
+  if (!command || !plan ||
+      (command->depthStencilId >= table_count &&
+       command->depthStencilId != SVGA3D_INVALID_ID)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(plan, 0, sizeof(*plan));
+  plan->depth_stencil_id = command->depthStencilId;
+  plan->stencil_ref = command->stencilRef;
+  plan->shadow_update = true;
+  plan->immediate_bind = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_rasterizer_state_set_plan(
+    SVGA3dRasterizerStateId rasterizer_id, uint32_t table_count,
+    VMSVGA3DD3D10RasterizerStateSetPlan *plan)
+{
+  if (!plan ||
+      (rasterizer_id >= table_count && rasterizer_id != SVGA3D_INVALID_ID)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(plan, 0, sizeof(*plan));
+  plan->rasterizer_id = rasterizer_id;
+  plan->shadow_update = true;
+  plan->immediate_bind = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_pipeline_setup_plan(
+    VMSVGA3DD3D10PipelineSetupPlan *plan)
+{
+  static const VMSVGA3DD3D10PipelineStep steps[] = {
+    VMSVGA3D_D3D10_PIPELINE_UNBIND_OUTPUTS,
+    VMSVGA3D_D3D10_PIPELINE_CONSTANT_BUFFERS,
+    VMSVGA3D_D3D10_PIPELINE_VERTEX_BUFFERS,
+    VMSVGA3D_D3D10_PIPELINE_INDEX_BUFFER,
+    VMSVGA3D_D3D10_PIPELINE_SHADER_RESOURCES,
+    VMSVGA3D_D3D10_PIPELINE_RENDER_TARGETS,
+    VMSVGA3D_D3D10_PIPELINE_SHADERS,
+    VMSVGA3D_D3D10_PIPELINE_INPUT_LAYOUT,
+  };
+
+  if (!plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  memcpy(plan->steps, steps, sizeof(steps));
+  plan->step_count = (uint32_t)(sizeof(steps) / sizeof(steps[0]));
+  plan->ensure_all_shader_resource_views = true;
+  plan->wait_for_shader_resource_surfaces = true;
+  plan->bind_full_shader_resource_table_per_stage = true;
+  plan->ensure_depth_stencil_view = true;
+  plan->ensure_render_target_views = true;
+  plan->create_shaders_lazily = true;
+  plan->recreate_input_layout_from_vs_dxbc = true;
+  /* dxSetupPipeline is void: asserts/early returns never abort the draw caller. */
+  plan->failures_do_not_abort_draw = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+static VMSVGA3DD3D10Level draw_plan_init(
+    SVGA3dPrimitiveType primitive, VMSVGA3DD3D10DrawKind kind,
+    VMSVGA3DD3D10DrawPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  if (!plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  level = vmsvga3d_d3d10_primitive_topology(primitive,
+                                             &plan->native_topology);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+  if (vmsvga3d_d3d10_pipeline_setup_plan(&plan->pipeline) ==
+      VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  plan->requested_kind = kind;
+  plan->native_kind = kind;
+  plan->primitive = primitive;
+  plan->track_render_targets_after_draw = true;
+  return level;
+}
+
+static void triangle_fan_common(uint32_t count,
+                                VMSVGA3DD3D10TriangleFanPlan *fan)
+{
+  fan->enabled = true;
+  fan->reject_count_over_65535 = true;
+  fan->temporary_index_buffer_is_immutable = true;
+  fan->temporary_buffer_create_failure_assert_only = true;
+  fan->generated_indices_are_u16 = true;
+  fan->generated_index_count = 3u * (count - 2u);
+  fan->generated_buffer_bytes = fan->generated_index_count * 2u;
+  fan->generated_start_index = 0;
+  fan->temporary_topology = D3D10_TOPOLOGY_TRIANGLELIST;
+  fan->restored_topology = D3D10_TOPOLOGY_TRIANGLESTRIP;
+  fan->backend_reject = count > 65535u;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_scissor_plan(
+    uint32_t count, const SVGASignedRect *rects,
+    VMSVGA3DD3D10ScissorPlan *plan)
+{
+  if (!plan || count > SVGA3D_DX_MAX_SCISSORRECTS ||
+      (count != 0 && !rects)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->count = count;
+  if (count != 0) {
+    memcpy(plan->rects, rects, count * sizeof(*rects));
+  }
+  plan->shadow_update = true;
+  plan->native_layout_identical = true;
+  plan->immediate_bind = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_render_targets_set_plan(
+    SVGA3dDepthStencilViewId depth_stencil_view_id, uint32_t count,
+    const SVGA3dRenderTargetViewId *ids, uint32_t dsv_table_count,
+    uint32_t rtv_table_count, uint32_t previous_remembered_count,
+    VMSVGA3DD3D10RenderTargetsSetPlan *plan)
+{
+  uint32_t i;
+
+  if (!plan || count > SVGA3D_MAX_RENDER_TARGETS ||
+      previous_remembered_count > SVGA3D_MAX_RENDER_TARGETS ||
+      (count != 0 && !ids) ||
+      (depth_stencil_view_id >= dsv_table_count &&
+       depth_stencil_view_id != SVGA3D_INVALID_ID)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  for (i = 0; i < count; ++i) {
+    if (ids[i] >= rtv_table_count && ids[i] != SVGA3D_INVALID_ID) {
+      return VMSVGA3D_D3D10_LEVEL_INVALID;
+    }
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->depth_stencil_view_id = depth_stencil_view_id;
+  plan->supplied_count = count;
+  plan->previous_remembered_count = previous_remembered_count;
+  plan->remembered_count = previous_remembered_count > count
+      ? previous_remembered_count : count;
+  if (count != 0) {
+    memcpy(plan->ids, ids, count * sizeof(*ids));
+  }
+  plan->shadow_update_count = count;
+  plan->shadow_update_atomic = true;
+  plan->preserve_unspecified_slots = true;
+  plan->backend_set_is_noop = true;
+  plan->ensure_dsv_at_draw = true;
+  plan->ensure_all_rtv_slots_at_draw = true;
+  plan->bind_at_draw_setup = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_render_targets_pipeline_plan(
+    SVGA3dDepthStencilViewId depth_stencil_view_id,
+    const SVGA3dRenderTargetViewId ids[SVGA3D_MAX_RENDER_TARGETS],
+    uint32_t remembered_count,
+    VMSVGA3DD3D10RenderTargetsPipelinePlan *plan)
+{
+  uint32_t i;
+
+  if (!plan || !ids || remembered_count > SVGA3D_MAX_RENDER_TARGETS) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->depth_stencil_view_id = depth_stencil_view_id;
+  plan->remembered_count = remembered_count;
+  for (i = 0; i < remembered_count; ++i) {
+    plan->ids[i] = ids[i];
+    if (ids[i] != SVGA3D_INVALID_ID) {
+      ++plan->native_rtv_count;
+    }
+  }
+  plan->native_count_is_number_of_valid_ids = true;
+  plan->sparse_slot_bug_preserved = true;
+  plan->use_render_targets_and_uavs_call = true;
+  plan->vgpu10_uav_count_is_zero = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_gen_mips_plan(
+    SVGA3dShaderResourceViewId view_id, uint32_t srv_table_count,
+    VMSVGA3DD3D10GenMipsPlan *plan)
+{
+  if (!plan || view_id >= srv_table_count) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->view_id = view_id;
+  plan->require_existing_backend_view = true;
+  plan->do_not_create_view_on_call = true;
+  plan->require_view_entry = true;
+  plan->require_surface = true;
+  plan->require_backend_surface = true;
+  plan->immediate_generate_mips = true;
+  plan->mark_surface_drawing_context = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_clear_rtv_plan(
+    SVGA3dRenderTargetViewId view_id, const SVGA3dRGBAFloat *rgba,
+    uint32_t rtv_table_count, VMSVGA3DD3D10ClearRTVPlan *plan)
+{
+  if (!rgba || !plan || view_id >= rtv_table_count) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->view_id = view_id;
+  memcpy(plan->color, rgba->value, sizeof(plan->color));
+  plan->ensure_view_on_clear = true;
+  plan->immediate_clear = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_clear_dsv_plan(
+    uint32_t flags, SVGA3dDepthStencilViewId view_id, float depth,
+    uint32_t stencil, uint32_t dsv_table_count,
+    VMSVGA3DD3D10ClearDSVPlan *plan)
+{
+  if (!plan || view_id >= dsv_table_count) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->view_id = view_id;
+  plan->guest_flags = flags;
+  plan->depth = depth;
+  plan->stencil = (uint8_t)stencil;
+  plan->ensure_view_on_clear = true;
+  plan->immediate_clear = true;
+  if (flags & SVGA3D_CLEAR_DEPTH) {
+    plan->d3d_clear_flags |= 0x1u;
+  }
+  if (flags & SVGA3D_CLEAR_STENCIL) {
+    plan->d3d_clear_flags |= 0x2u;
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+static VMSVGA3DD3D10ResourceCreateKind copy_resource_create_kind(
+    SVGA3dSurfaceFormat source_format)
+{
+  return source_format == SVGA3D_BUFFER ? VMSVGA3D_D3D10_CREATE_BUFFER
+                                        : VMSVGA3D_D3D10_CREATE_TEXTURE;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_copy_resource_plan(
+    SVGA3dSurfaceFormat source_format, bool source_resource_exists,
+    bool destination_resource_exists, VMSVGA3DD3D10CopyResourcePlan *plan)
+{
+  VMSVGA3DD3D10ResourceCreateKind kind;
+
+  if (!plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  kind = copy_resource_create_kind(source_format);
+  plan->ensure_source_resource = !source_resource_exists;
+  plan->ensure_destination_resource = !destination_resource_exists;
+  plan->source_create_kind = kind;
+  plan->destination_create_kind = kind;
+  plan->destination_create_kind_uses_source_format = true;
+  plan->issue_copy_resource = true;
+  plan->mark_destination_drawing_context = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_copy_subresource_plan(
+    SVGA3dSurfaceFormat source_format, bool source_resource_exists,
+    bool destination_resource_exists, uint32_t destination_subresource,
+    uint32_t source_subresource, const SVGA3dSize *source_size,
+    const SVGA3dSize *destination_size, const SVGA3dCopyBox *box,
+    VMSVGA3DD3D10CopySubresourcePlan *plan)
+{
+  VMSVGA3DD3D10ResourceCreateKind kind;
+  VMSVGA3DD3D10Level level;
+
+  if (!plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  kind = copy_resource_create_kind(source_format);
+  plan->ensure_source_resource = !source_resource_exists;
+  plan->ensure_destination_resource = !destination_resource_exists;
+  plan->source_create_kind = kind;
+  plan->destination_create_kind = kind;
+  plan->destination_create_kind_uses_source_format = true;
+  plan->destination_subresource = destination_subresource;
+  plan->source_subresource = source_subresource;
+  level = vmsvga3d_d3d10_copy_region_plan(source_size, destination_size,
+                                          box, &plan->region);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+  plan->issue_copy_subresource_region = true;
+  plan->mark_destination_drawing_context = true;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_draw_plan(
+    SVGA3dPrimitiveType primitive, uint32_t vertex_count,
+    uint32_t start_vertex_location, VMSVGA3DD3D10DrawPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  level = draw_plan_init(primitive, VMSVGA3D_D3D10_DRAW, plan);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+
+  plan->count0 = vertex_count;
+  plan->start0 = start_vertex_location;
+  if (primitive == SVGA3D_PRIMITIVE_TRIANGLEFAN) {
+    triangle_fan_common(vertex_count, &plan->triangle_fan);
+    plan->triangle_fan.save_restore_index_buffer = true;
+    plan->triangle_fan.generated_base_vertex =
+        (int32_t)start_vertex_location;
+    plan->native_kind = VMSVGA3D_D3D10_DRAW_INDEXED;
+    plan->backend_reject = plan->triangle_fan.backend_reject;
+    plan->skip_render_target_tracking_on_backend_reject = true;
+    plan->skip_render_target_tracking_on_emulation_failure = true;
+  }
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_draw_indexed_plan(
+    SVGA3dPrimitiveType primitive, uint32_t index_count,
+    uint32_t start_index_location, int32_t base_vertex_location,
+    VMSVGA3DD3D10DrawPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  level = draw_plan_init(primitive, VMSVGA3D_D3D10_DRAW_INDEXED, plan);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+
+  plan->count0 = index_count;
+  plan->start0 = start_index_location;
+  plan->base_vertex = base_vertex_location;
+  if (primitive == SVGA3D_PRIMITIVE_TRIANGLEFAN) {
+    triangle_fan_common(index_count, &plan->triangle_fan);
+    plan->triangle_fan.indexed_source = true;
+    plan->triangle_fan.helper_failure_ignored = true;
+    plan->triangle_fan.save_restore_index_buffer = true;
+    plan->triangle_fan.generated_base_vertex = base_vertex_location;
+    plan->triangle_fan.source_read_offset = start_index_location;
+    plan->triangle_fan.source_read_offset_is_raw_start_index = true;
+    plan->triangle_fan.ignore_bound_index_buffer_offset = true;
+    /* The caller ignores every error from dxDrawIndexedTriangleFan. */
+    plan->backend_reject = false;
+  }
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_draw_instanced_plan(
+    SVGA3dPrimitiveType primitive, uint32_t vertex_count_per_instance,
+    uint32_t instance_count, uint32_t start_vertex_location,
+    uint32_t start_instance_location, VMSVGA3DD3D10DrawPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  level = draw_plan_init(primitive, VMSVGA3D_D3D10_DRAW_INSTANCED, plan);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+
+  plan->count0 = vertex_count_per_instance;
+  plan->count1 = instance_count;
+  plan->start0 = start_vertex_location;
+  plan->start1 = start_instance_location;
+  plan->triangle_fan_assert_only = primitive == SVGA3D_PRIMITIVE_TRIANGLEFAN;
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_draw_indexed_instanced_plan(
+    SVGA3dPrimitiveType primitive, uint32_t index_count_per_instance,
+    uint32_t instance_count, uint32_t start_index_location,
+    int32_t base_vertex_location, uint32_t start_instance_location,
+    VMSVGA3DD3D10DrawPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  level = draw_plan_init(primitive, VMSVGA3D_D3D10_DRAW_INDEXED_INSTANCED,
+                         plan);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+
+  plan->count0 = index_count_per_instance;
+  plan->count1 = instance_count;
+  plan->start0 = start_index_location;
+  plan->start1 = start_instance_location;
+  plan->base_vertex = base_vertex_location;
+  plan->triangle_fan_assert_only = primitive == SVGA3D_PRIMITIVE_TRIANGLEFAN;
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_draw_auto_plan(
+    SVGA3dPrimitiveType primitive, VMSVGA3DD3D10DrawPlan *plan)
+{
+  VMSVGA3DD3D10Level level;
+
+  level = draw_plan_init(primitive, VMSVGA3D_D3D10_DRAW_AUTO, plan);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+  plan->triangle_fan_assert_only = primitive == SVGA3D_PRIMITIVE_TRIANGLEFAN;
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_indexed_triangle_fan_plan(
+    uint32_t index_count, uint32_t start_index_location,
+    int32_t base_vertex_location, uint32_t bound_dxgi_format,
+    uint32_t bound_index_buffer_bytes, uint32_t bound_index_buffer_offset,
+    VMSVGA3DD3D10TriangleFanPlan *plan)
+{
+  uint32_t bytes_per_index;
+
+  if (!plan) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  triangle_fan_common(index_count, plan);
+  plan->indexed_source = true;
+  plan->helper_failure_ignored = true;
+  plan->save_restore_index_buffer = true;
+  plan->generated_base_vertex = base_vertex_location;
+  plan->source_read_offset = start_index_location;
+  plan->source_read_offset_is_raw_start_index = true;
+  plan->ignore_bound_index_buffer_offset = true;
+  plan->bound_index_buffer_offset = bound_index_buffer_offset;
+  plan->source_index_format = bound_dxgi_format;
+
+  if (plan->backend_reject) {
+    return VMSVGA3D_D3D10_LEVEL_10_0;
+  }
+  if (bound_dxgi_format == DXGI_R16_UINT) {
+    bytes_per_index = 2;
+  } else if (bound_dxgi_format == DXGI_R32_UINT) {
+    bytes_per_index = 4;
+    plan->truncate_u32_source_indices_to_u16 = true;
+  } else {
+    plan->backend_reject = true;
+    return VMSVGA3D_D3D10_LEVEL_10_0;
+  }
+
+  plan->source_bytes_per_index = bytes_per_index;
+  plan->source_read_bytes = bytes_per_index * index_count;
+  if (start_index_location >= bound_index_buffer_bytes ||
+      plan->source_read_bytes > bound_index_buffer_bytes - start_index_location ||
+      plan->source_read_bytes < bytes_per_index) {
+    plan->backend_reject = true;
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_triangle_fan_generate_u16(
+    bool indexed_source, uint32_t count, uint32_t source_dxgi_format,
+    const void *source_indices, uint32_t source_bytes,
+    uint16_t *generated_indices, uint32_t generated_capacity,
+    uint32_t *generated_count)
+{
+  uint32_t count_out;
+  uint32_t source_bytes_per_index = 0;
+  uint32_t i_vertex = 1;
+  uint32_t i;
+
+  if (!generated_count || count > 65535u) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  count_out = 3u * (count - 2u);
+  *generated_count = count_out;
+  if (count_out > generated_capacity || (count_out && !generated_indices)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  if (indexed_source) {
+    if (source_dxgi_format == DXGI_R16_UINT) {
+      source_bytes_per_index = 2;
+    } else if (source_dxgi_format == DXGI_R32_UINT) {
+      source_bytes_per_index = 4;
+    } else {
+      return VMSVGA3D_D3D10_LEVEL_INVALID;
+    }
+    if (!source_indices || source_bytes_per_index * count > source_bytes) {
+      return VMSVGA3D_D3D10_LEVEL_INVALID;
+    }
+  }
+
+  for (i = 0; i < count_out; i += 3) {
+    uint16_t center;
+    uint16_t second;
+    uint16_t third;
+
+    if (!indexed_source) {
+      center = 0;
+      second = (uint16_t)i_vertex;
+      third = (uint16_t)(i_vertex + 1u);
+    } else if (source_dxgi_format == DXGI_R16_UINT) {
+      const uint16_t *src = source_indices;
+      center = src[0];
+      second = src[i_vertex];
+      third = src[i_vertex + 1u];
+    } else {
+      const uint32_t *src = source_indices;
+      center = (uint16_t)src[0];
+      second = (uint16_t)src[i_vertex];
+      third = (uint16_t)src[i_vertex + 1u];
+    }
+
+    generated_indices[i] = center;
+    generated_indices[i + 1u] = second;
+    generated_indices[i + 2u] = third;
+    i_vertex++;
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
 VMSVGA3DD3D10Level vmsvga3d_d3d10_input_element(
     const SVGA3dInputElementDesc *src, VMSVGA3DD3D10InputElement *dst)
 {
@@ -970,7 +2499,9 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_define_entry(
 {
   VMSVGA3DD3D10Level level;
 
-  if (src == NULL || dst == NULL || src->sizeInBytes < 8) {
+  if (src == NULL || dst == NULL || src->sizeInBytes < 8 ||
+      src->type < SVGA3D_SHADERTYPE_MIN ||
+      src->type >= SVGA3D_SHADERTYPE_DX10_MAX) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
@@ -979,7 +2510,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_define_entry(
     return level;
   }
 
-  /* VBox updates these fields without clearing the COTable padding. */
+  /* Update these fields without clearing the COTable padding. */
   dst->type = src->type;
   dst->sizeInBytes = src->sizeInBytes;
   dst->offsetInBytes = 0;
@@ -994,7 +2525,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_destroy_entry(
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
-  /* VBox deliberately leaves the padding words alone. */
+  /* Leave the padding words unchanged. */
   entry->type = SVGA3D_SHADERTYPE_INVALID;
   entry->sizeInBytes = 0;
   entry->offsetInBytes = 0;
@@ -1112,7 +2643,7 @@ static void shader_generate_semantics(VMSVGA3DD3D10ShaderInfo *info,
     uint32_t j;
 
     if (signature[i].semanticName >= SVGADX_SIGNATURE_SEMANTIC_NAME_MAX) {
-      /* VBox's void helper asserts and returns, without failing shader bind. */
+      /* The void helper may return early without failing shader bind. */
       info->semantics_complete = false;
       return;
     }
@@ -1235,6 +2766,1523 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_guest_signatures(
   return vmsvga3d_d3d10_shader_finalize_signatures(info);
 }
 
+/* VGPU10 token values used by the shader parser. */
+enum {
+  SHADER_OPCODE_CUSTOMDATA = 53,
+  SHADER_OPCODE_MOV = 54,
+  SHADER_OPCODE_RET = 62,
+  SHADER_OPCODE_UDIV = 78,
+  SHADER_OPCODE_DCL_RESOURCE = 88,
+  SHADER_OPCODE_DCL_INDEX_RANGE = 91,
+  SHADER_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT = 94,
+  SHADER_OPCODE_DCL_INPUT = 95,
+  SHADER_OPCODE_DCL_INPUT_SGV = 96,
+  SHADER_OPCODE_DCL_INPUT_SIV = 97,
+  SHADER_OPCODE_DCL_INPUT_PS = 98,
+  SHADER_OPCODE_DCL_INPUT_PS_SGV = 99,
+  SHADER_OPCODE_DCL_INPUT_PS_SIV = 100,
+  SHADER_OPCODE_DCL_OUTPUT = 101,
+  SHADER_OPCODE_DCL_OUTPUT_SGV = 102,
+  SHADER_OPCODE_DCL_OUTPUT_SIV = 103,
+  SHADER_OPCODE_DCL_TEMPS = 104,
+  SHADER_OPCODE_DCL_INDEXABLE_TEMP = 105,
+  SHADER_OPCODE_VMWARE = 107,
+  SHADER_OPCODE_INTERFACE_CALL = 120,
+  SHADER_OPCODE_DCL_FUNCTION_BODY = 144,
+  SHADER_OPCODE_DCL_FUNCTION_TABLE = 145,
+  SHADER_OPCODE_DCL_INTERFACE = 146,
+  SHADER_OPCODE_DCL_HS_MAX_TESSFACTOR = 152,
+  SHADER_OPCODE_DCL_HS_FORK_PHASE_INSTANCE_COUNT = 153,
+  SHADER_OPCODE_DCL_HS_JOIN_PHASE_INSTANCE_COUNT = 154,
+  SHADER_OPCODE_DCL_THREAD_GROUP = 155,
+  SHADER_OPCODE_DCL_UAV_TYPED = 156,
+  SHADER_OPCODE_DCL_UAV_STRUCTURED = 158,
+  SHADER_OPCODE_DCL_TGSM_RAW = 159,
+  SHADER_OPCODE_DCL_TGSM_STRUCTURED = 160,
+  SHADER_OPCODE_DCL_RESOURCE_STRUCTURED = 162,
+  SHADER_OPCODE_DCL_GS_INSTANCE_COUNT = 206,
+  SHADER_OPCODE_COUNT = 218,
+};
+
+enum {
+  SHADER_VMWARE_IDIV = 0,
+  SHADER_VMWARE_DFRC = 1,
+  SHADER_VMWARE_DRSQ = 2,
+};
+
+enum {
+  SHADER_OPERAND_1_COMPONENT = 1,
+  SHADER_OPERAND_4_COMPONENT = 2,
+  SHADER_OPERAND_MASK_MODE = 0,
+  SHADER_OPERAND_SELECT_1_MODE = 2,
+  SHADER_OPERAND_TYPE_IMMEDIATE32 = 4,
+  SHADER_OPERAND_TYPE_IMMEDIATE64 = 5,
+  SHADER_OPERAND_TYPE_LABEL = 10,
+  SHADER_OPERAND_TYPE_INPUT_PRIMITIVEID = 11,
+  SHADER_OPERAND_TYPE_OUTPUT_DEPTH = 12,
+  SHADER_OPERAND_TYPE_SM50_MAX = 40,
+  SHADER_OPERAND_TYPE_COUNT = 41,
+  SHADER_OPERAND_INDEX_0D = 0,
+  SHADER_OPERAND_INDEX_1D = 1,
+  SHADER_OPERAND_INDEX_2D = 2,
+  SHADER_OPERAND_INDEX_3D = 3,
+  SHADER_OPERAND_INDEX_IMMEDIATE32 = 0,
+  SHADER_OPERAND_INDEX_IMMEDIATE64 = 1,
+  SHADER_OPERAND_INDEX_RELATIVE = 2,
+  SHADER_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE = 3,
+  SHADER_OPERAND_INDEX_IMMEDIATE64_PLUS_RELATIVE = 4,
+};
+
+#define SHADER_OPCODE_SPECIAL 255u
+#define SHADER_WRITER_MAX_BYTES (2u * SVGA3D_MAX_SHADER_MEMORY_BYTES)
+#define SHADER_DXBC_MAGIC UINT32_C(0x43425844)
+#define SHADER_DXBC_ISGN UINT32_C(0x4e475349)
+#define SHADER_DXBC_OSGN UINT32_C(0x4e47534f)
+#define SHADER_DXBC_PCSG UINT32_C(0x47534350)
+#define SHADER_DXBC_SHDR UINT32_C(0x52444853)
+
+static const uint8_t shader_opcode_operand_count[SHADER_OPCODE_COUNT] = {
+  3u, 3u, 0u, 1u, 1u, 2u, 1u, 0u, 1u, 0u, 0u, 2u, 2u, 1u, 3u, 3u,
+  3u, 3u, 0u, 0u, 0u, 0u, 0u, 0u, 3u, 2u, 2u, 2u, 2u, 3u, 3u, 1u,
+  3u, 3u, 3u, 4u, 3u, 3u, 4u, 3u, 2u, 3u, 3u, 2u, 1u, 3u, 4u, 2u,
+  0u, 3u, 4u, 3u, 3u, 255u, 2u, 4u, 3u, 3u, 0u, 2u, 3u, 3u, 0u, 1u,
+  2u, 2u, 2u, 2u, 2u, 4u, 5u, 5u, 5u, 6u, 5u, 2u, 1u, 3u, 4u, 3u,
+  3u, 4u, 4u, 3u, 3u, 3u, 2u, 3u, 1u, 1u, 1u, 1u, 0u, 0u, 0u, 1u,
+  1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 0u, 0u, 0u, 255u, 4u, 4u, 3u, 2u,
+  255u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 1u, 2u, 2u, 2u, 2u, 2u, 5u, 5u,
+  6u, 2u, 2u, 2u, 4u, 4u, 2u, 2u, 2u, 2u, 4u, 4u, 5u, 2u, 5u, 1u,
+  0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u, 1u, 1u, 1u,
+  1u, 1u, 1u, 3u, 3u, 3u, 3u, 4u, 4u, 3u, 3u, 3u, 4u, 3u, 3u, 3u,
+  3u, 3u, 2u, 2u, 4u, 4u, 4u, 4u, 4u, 5u, 4u, 4u, 4u, 4u, 0u, 3u,
+  3u, 3u, 3u, 3u, 3u, 3u, 3u, 2u, 4u, 2u, 2u, 3u, 3u, 2u, 0u, 0u,
+  0u, 0u, 3u, 4u, 2u, 4u, 2u, 2u, 2u, 2u,
+};
+
+typedef struct shader_token_reader_s {
+  const uint32_t *token;
+  uint32_t total;
+  uint32_t remaining;
+} ShaderTokenReader;
+
+typedef struct shader_operand_index_s {
+  uint32_t representation;
+  uint64_t immediate;
+} ShaderOperandIndex;
+
+typedef struct shader_operand_s {
+  uint32_t num_components;
+  uint32_t selection_mode;
+  uint32_t mask;
+  uint32_t operand_type;
+  uint32_t index_dimension;
+  ShaderOperandIndex index[SHADER_OPERAND_INDEX_3D];
+  const uint32_t *tokens;
+  uint32_t token_count;
+} ShaderOperand;
+
+typedef struct shader_opcode_s {
+  const uint32_t *tokens;
+  uint32_t token_count;
+  uint32_t opcode_type;
+  uint32_t opcode_subtype;
+  uint32_t semantic_name;
+  uint32_t operand_count;
+  uint32_t operand_index[8];
+  ShaderOperand operands[16];
+} ShaderOpcode;
+
+typedef struct shader_byte_writer_s {
+  uint8_t *data;
+  uint32_t capacity;
+  uint32_t offset;
+  uint32_t written;
+  bool failed;
+} ShaderByteWriter;
+
+typedef struct shader_writer_state_s {
+  uint32_t offset;
+} ShaderWriterState;
+
+typedef struct shader_output_context_s {
+  uint32_t program_token;
+  uint32_t original_token_count;
+  uint32_t subroutine_offset;
+} ShaderOutputContext;
+
+typedef struct shader_dxbc_header_s {
+  uint32_t magic;
+  uint8_t hash[16];
+  uint32_t version;
+  uint32_t total_size;
+  uint32_t blob_count;
+  uint32_t blob_offsets[1];
+} ShaderDXBCHeader;
+
+typedef struct shader_dxbc_blob_header_s {
+  uint32_t type;
+  uint32_t size;
+} ShaderDXBCBlobHeader;
+
+typedef struct shader_dxbc_signature_element_s {
+  uint32_t name_offset;
+  uint32_t semantic_index;
+  uint32_t system_value;
+  uint32_t component_type;
+  uint32_t register_index;
+  uint32_t mask;
+} ShaderDXBCSignatureElement;
+
+static uint32_t shader_align_up(uint32_t value, uint32_t alignment)
+{
+  return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+static bool shader_reader_can_read(const ShaderTokenReader *reader,
+                                   uint32_t count)
+{
+  return count <= reader->remaining;
+}
+
+static const uint32_t *shader_reader_ptr(const ShaderTokenReader *reader)
+{
+  return reader->token;
+}
+
+static uint32_t shader_reader_read32(ShaderTokenReader *reader)
+{
+  uint32_t value;
+
+  if (reader->remaining == 0) {
+    return 0;
+  }
+  value = *reader->token++;
+  reader->remaining--;
+  return value;
+}
+
+static uint64_t shader_reader_read64(ShaderTokenReader *reader)
+{
+  uint64_t low = shader_reader_read32(reader);
+  uint64_t high = shader_reader_read32(reader);
+
+  return low | (high << 32);
+}
+
+static void shader_reader_skip(ShaderTokenReader *reader, uint32_t count)
+{
+  reader->token += count;
+  reader->remaining -= count;
+}
+
+static bool shader_writer_realloc(ShaderByteWriter *writer, uint32_t capacity)
+{
+  uint8_t *data;
+
+  data = calloc(1, capacity);
+  if (data == NULL) {
+    writer->failed = true;
+    return false;
+  }
+  if (writer->data != NULL) {
+    if (writer->offset != 0) {
+      memcpy(data, writer->data, writer->offset);
+    }
+    free(writer->data);
+  }
+  writer->data = data;
+  writer->capacity = capacity;
+  return true;
+}
+
+static bool shader_writer_can_write(ShaderByteWriter *writer, uint32_t more)
+{
+  uint32_t remaining;
+  uint32_t growth;
+
+  if (writer->failed) {
+    return false;
+  }
+  remaining = writer->capacity - writer->offset;
+  if (more <= remaining) {
+    return true;
+  }
+  if (more >= SHADER_WRITER_MAX_BYTES) {
+    writer->failed = true;
+    return false;
+  }
+  growth = shader_align_up(more, 4096u);
+  if (growth > SHADER_WRITER_MAX_BYTES - writer->capacity) {
+    writer->failed = true;
+    return false;
+  }
+  return shader_writer_realloc(writer, writer->capacity + growth);
+}
+
+static bool shader_writer_init(ShaderByteWriter *writer, uint32_t initial)
+{
+  memset(writer, 0, sizeof(*writer));
+  return shader_writer_can_write(writer, initial);
+}
+
+static void shader_writer_reset(ShaderByteWriter *writer)
+{
+  free(writer->data);
+  memset(writer, 0, sizeof(*writer));
+}
+
+static uint32_t shader_writer_size(const ShaderByteWriter *writer)
+{
+  return writer->offset;
+}
+
+static void *shader_writer_ptr(const ShaderByteWriter *writer)
+{
+  return writer->data + writer->offset;
+}
+
+static void shader_writer_commit(ShaderByteWriter *writer, uint32_t amount)
+{
+  uint32_t remaining;
+
+  if (writer->failed) {
+    return;
+  }
+  remaining = writer->capacity - writer->offset;
+  if (amount > remaining) {
+    amount = remaining;
+  }
+  writer->offset += amount;
+  if (writer->offset > writer->written) {
+    writer->written = writer->offset;
+  }
+}
+
+static bool shader_writer_add_tokens(ShaderByteWriter *writer,
+                                     const uint32_t *tokens, uint32_t count)
+{
+  uint32_t bytes;
+
+  if (count > UINT32_MAX / sizeof(*tokens)) {
+    writer->failed = true;
+    return false;
+  }
+  bytes = count * sizeof(*tokens);
+  if (!shader_writer_can_write(writer, bytes)) {
+    return false;
+  }
+  memcpy(shader_writer_ptr(writer), tokens, bytes);
+  shader_writer_commit(writer, bytes);
+  return true;
+}
+
+static bool shader_writer_set_offset(ShaderByteWriter *writer, uint32_t offset,
+                                     ShaderWriterState *state)
+{
+  uint32_t capacity;
+
+  if (writer->failed || offset >= SHADER_WRITER_MAX_BYTES) {
+    writer->failed = true;
+    return false;
+  }
+  capacity = shader_align_up(offset, 1024u);
+  if (capacity >= SHADER_WRITER_MAX_BYTES) {
+    writer->failed = true;
+    return false;
+  }
+  if (capacity > writer->capacity && !shader_writer_realloc(writer, capacity)) {
+    return false;
+  }
+  state->offset = writer->offset;
+  writer->offset = offset;
+  return true;
+}
+
+static void shader_writer_restore(ShaderByteWriter *writer,
+                                  const ShaderWriterState *state)
+{
+  writer->offset = state->offset;
+}
+
+static bool shader_parse_operand(ShaderTokenReader *reader,
+                                 ShaderOperand *operands, uint32_t *used,
+                                 uint32_t *operand_index)
+{
+  ShaderOperand *operand;
+  uint32_t token0;
+  uint32_t num_components;
+  uint32_t operand_type;
+  uint32_t index_dimension;
+  uint32_t i;
+
+  if (*used >= 16 || !shader_reader_can_read(reader, 1)) {
+    return false;
+  }
+  *operand_index = (*used)++;
+  operand = &operands[*operand_index];
+  memset(operand, 0, sizeof(*operand));
+  operand->tokens = shader_reader_ptr(reader);
+  token0 = shader_reader_read32(reader);
+
+  num_components = token0 & 0x3u;
+  operand->num_components = num_components;
+  operand->selection_mode = (token0 >> 2) & 0x3u;
+  operand->mask = (token0 >> 4) & 0x0fu;
+  operand_type = (token0 >> 12) & 0xffu;
+  operand->operand_type = operand_type;
+  index_dimension = (token0 >> 20) & 0x3u;
+  operand->index_dimension = index_dimension;
+
+  if (num_components > SHADER_OPERAND_4_COMPONENT ||
+      operand_type >= SHADER_OPERAND_TYPE_COUNT) {
+    return false;
+  }
+  if (operand_type != SHADER_OPERAND_TYPE_IMMEDIATE32 &&
+      operand_type != SHADER_OPERAND_TYPE_IMMEDIATE64 &&
+      num_components == SHADER_OPERAND_4_COMPONENT &&
+      operand->selection_mode > SHADER_OPERAND_SELECT_1_MODE) {
+    return false;
+  }
+
+  if ((token0 >> 31) != 0) {
+    if (!shader_reader_can_read(reader, 1)) {
+      return false;
+    }
+    shader_reader_read32(reader);
+  }
+
+  if (operand_type == SHADER_OPERAND_TYPE_IMMEDIATE32 ||
+      operand_type == SHADER_OPERAND_TYPE_IMMEDIATE64) {
+    uint32_t component_count = 0;
+
+    if (num_components == SHADER_OPERAND_4_COMPONENT) {
+      component_count = 4;
+    } else if (num_components == SHADER_OPERAND_1_COMPONENT) {
+      component_count = 1;
+    }
+    if (!shader_reader_can_read(reader, component_count)) {
+      return false;
+    }
+    shader_reader_skip(reader, component_count);
+  }
+
+  for (i = 0; i < index_dimension; i++) {
+    uint32_t representation;
+    uint32_t relative_index;
+
+    if (i == 0) {
+      representation = (token0 >> 22) & 0x7u;
+    } else if (i == 1) {
+      representation = (token0 >> 25) & 0x7u;
+    } else {
+      /* Deliberately do not parse the third index dimension. */
+      continue;
+    }
+    operand->index[i].representation = representation;
+    switch (representation) {
+    case SHADER_OPERAND_INDEX_IMMEDIATE32:
+      if (!shader_reader_can_read(reader, 1)) {
+        return false;
+      }
+      operand->index[i].immediate = shader_reader_read32(reader);
+      break;
+    case SHADER_OPERAND_INDEX_IMMEDIATE64:
+      if (!shader_reader_can_read(reader, 2)) {
+        return false;
+      }
+      operand->index[i].immediate = shader_reader_read64(reader);
+      break;
+    case SHADER_OPERAND_INDEX_RELATIVE:
+      if (!shader_reader_can_read(reader, 1) ||
+          !shader_parse_operand(reader, operands, used, &relative_index)) {
+        return false;
+      }
+      break;
+    case SHADER_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE:
+      if (!shader_reader_can_read(reader, 2)) {
+        return false;
+      }
+      operand->index[i].immediate = shader_reader_read32(reader);
+      if (!shader_parse_operand(reader, operands, used, &relative_index)) {
+        return false;
+      }
+      break;
+    case SHADER_OPERAND_INDEX_IMMEDIATE64_PLUS_RELATIVE:
+      if (!shader_reader_can_read(reader, 3)) {
+        return false;
+      }
+      operand->index[i].immediate = shader_reader_read64(reader);
+      if (!shader_parse_operand(reader, operands, used, &relative_index)) {
+        return false;
+      }
+      break;
+    default:
+      return false;
+    }
+  }
+
+  operand->token_count = (uint32_t)(shader_reader_ptr(reader) - operand->tokens);
+  return true;
+}
+
+static bool shader_opcode_has_long_length(uint32_t opcode)
+{
+  return opcode == SHADER_OPCODE_DCL_FUNCTION_BODY ||
+         opcode == SHADER_OPCODE_DCL_FUNCTION_TABLE ||
+         opcode == SHADER_OPCODE_DCL_INTERFACE ||
+         opcode == SHADER_OPCODE_INTERFACE_CALL ||
+         opcode == SHADER_OPCODE_DCL_THREAD_GROUP;
+}
+
+static bool shader_parse_opcode(ShaderTokenReader *reader, ShaderOpcode *opcode)
+{
+  uint32_t token0;
+  uint32_t operand_count;
+  uint32_t opcode_tokens;
+  uint32_t consumed;
+  uint32_t used = 0;
+  uint32_t i;
+
+  memset(opcode, 0, sizeof(*opcode));
+  if (!shader_reader_can_read(reader, 1)) {
+    return false;
+  }
+  opcode->tokens = shader_reader_ptr(reader);
+  token0 = shader_reader_read32(reader);
+  opcode->opcode_type = token0 & 0x7ffu;
+  if (opcode->opcode_type >= SHADER_OPCODE_COUNT) {
+    return false;
+  }
+
+  operand_count = shader_opcode_operand_count[opcode->opcode_type];
+  if (operand_count != SHADER_OPCODE_SPECIAL) {
+    opcode_tokens = (token0 >> 24) & 0x7fu;
+    consumed = 1;
+    if ((token0 >> 31) != 0) {
+      if (shader_opcode_has_long_length(opcode->opcode_type)) {
+        if (!shader_reader_can_read(reader, 1)) {
+          return false;
+        }
+        opcode_tokens = shader_reader_read32(reader);
+        consumed++;
+      } else {
+        uint32_t extended;
+
+        do {
+          if (!shader_reader_can_read(reader, 1)) {
+            return false;
+          }
+          extended = shader_reader_read32(reader);
+          consumed++;
+        } while ((extended >> 31) != 0);
+      }
+    }
+    if (opcode_tokens < 1 || opcode_tokens >= 256 || opcode_tokens < consumed ||
+        !shader_reader_can_read(reader, opcode_tokens - consumed) ||
+        operand_count >= 8) {
+      return false;
+    }
+    opcode->token_count = opcode_tokens;
+
+    if (opcode->opcode_type == SHADER_OPCODE_INTERFACE_CALL) {
+      if (!shader_reader_can_read(reader, 1)) {
+        return false;
+      }
+      shader_reader_skip(reader, 1);
+    }
+
+    for (i = 0; i < operand_count; i++) {
+      if (!shader_parse_operand(reader, opcode->operands, &used,
+                                &opcode->operand_index[i])) {
+        return false;
+      }
+    }
+    opcode->operand_count = operand_count;
+
+    switch (opcode->opcode_type) {
+    case SHADER_OPCODE_DCL_INPUT_SIV:
+    case SHADER_OPCODE_DCL_INPUT_SGV:
+    case SHADER_OPCODE_DCL_INPUT_PS_SIV:
+    case SHADER_OPCODE_DCL_INPUT_PS_SGV:
+    case SHADER_OPCODE_DCL_OUTPUT_SIV:
+    case SHADER_OPCODE_DCL_OUTPUT_SGV:
+      if (!shader_reader_can_read(reader, 1)) {
+        return false;
+      }
+      opcode->semantic_name = shader_reader_read32(reader) & 0xffffu;
+      break;
+    case SHADER_OPCODE_DCL_RESOURCE:
+    case SHADER_OPCODE_DCL_TEMPS:
+    case SHADER_OPCODE_DCL_INDEX_RANGE:
+    case SHADER_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT:
+    case SHADER_OPCODE_DCL_GS_INSTANCE_COUNT:
+    case SHADER_OPCODE_DCL_HS_MAX_TESSFACTOR:
+    case SHADER_OPCODE_DCL_HS_FORK_PHASE_INSTANCE_COUNT:
+    case SHADER_OPCODE_DCL_HS_JOIN_PHASE_INSTANCE_COUNT:
+    case SHADER_OPCODE_DCL_UAV_TYPED:
+    case SHADER_OPCODE_DCL_UAV_STRUCTURED:
+    case SHADER_OPCODE_DCL_TGSM_RAW:
+    case SHADER_OPCODE_DCL_RESOURCE_STRUCTURED:
+      if (!shader_reader_can_read(reader, 1)) {
+        return false;
+      }
+      shader_reader_skip(reader, 1);
+      break;
+    case SHADER_OPCODE_DCL_INDEXABLE_TEMP:
+    case SHADER_OPCODE_DCL_THREAD_GROUP:
+      if (!shader_reader_can_read(reader, 3)) {
+        return false;
+      }
+      shader_reader_skip(reader, 3);
+      break;
+    case SHADER_OPCODE_DCL_TGSM_STRUCTURED:
+      if (!shader_reader_can_read(reader, 2)) {
+        return false;
+      }
+      shader_reader_skip(reader, 2);
+      break;
+    default:
+      break;
+    }
+    return true;
+  }
+
+  if (opcode->opcode_type == SHADER_OPCODE_CUSTOMDATA) {
+    if (!shader_reader_can_read(reader, 1)) {
+      return false;
+    }
+    opcode->token_count = shader_reader_read32(reader);
+    if (opcode->token_count < 2) {
+      opcode->token_count = 2;
+    }
+    if (!shader_reader_can_read(reader, opcode->token_count - 2)) {
+      return false;
+    }
+    shader_reader_skip(reader, opcode->token_count - 2);
+    return true;
+  }
+
+  if (opcode->opcode_type != SHADER_OPCODE_VMWARE) {
+    return false;
+  }
+  opcode->token_count = (token0 >> 24) & 0x7fu;
+  if (opcode->token_count < 3 ||
+      !shader_reader_can_read(reader, opcode->token_count - 1)) {
+    return false;
+  }
+  opcode->opcode_subtype = (token0 >> 11) & 0x0fu;
+  switch (opcode->opcode_subtype) {
+  case SHADER_VMWARE_IDIV:
+    operand_count = 4;
+    break;
+  case SHADER_VMWARE_DFRC:
+  case SHADER_VMWARE_DRSQ:
+    operand_count = 2;
+    break;
+  default:
+    return false;
+  }
+  for (i = 0; i < operand_count; i++) {
+    if (!shader_parse_operand(reader, opcode->operands, &used,
+                              &opcode->operand_index[i])) {
+      return false;
+    }
+  }
+  opcode->operand_count = operand_count;
+  return true;
+}
+
+static uint32_t shader_make_opcode(uint32_t opcode, uint32_t length)
+{
+  return (opcode & 0x7ffu) | ((length & 0x7fu) << 24);
+}
+
+static uint32_t shader_make_label_operand(void)
+{
+  return SHADER_OPERAND_1_COMPONENT |
+         (SHADER_OPERAND_TYPE_LABEL << 12) |
+         (SHADER_OPERAND_INDEX_1D << 20) |
+         (SHADER_OPERAND_INDEX_IMMEDIATE32 << 22);
+}
+
+static bool shader_emit_call(ShaderByteWriter *writer,
+                             const ShaderOpcode *opcode, uint32_t label)
+{
+  uint32_t tokens[3];
+  uint32_t nop;
+  uint32_t i;
+
+  tokens[0] = shader_make_opcode(4u, 3u);
+  tokens[1] = shader_make_label_operand();
+  tokens[2] = label;
+  if (!shader_writer_add_tokens(writer, tokens, 3)) {
+    return false;
+  }
+  nop = shader_make_opcode(58u, 1u);
+  for (i = 3; i < opcode->token_count; i++) {
+    if (!shader_writer_add_tokens(writer, &nop, 1)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool shader_emit_label(ShaderByteWriter *writer, uint32_t label)
+{
+  uint32_t tokens[3];
+
+  tokens[0] = shader_make_opcode(44u, 3u);
+  tokens[1] = shader_make_label_operand();
+  tokens[2] = label;
+  return shader_writer_add_tokens(writer, tokens, 3);
+}
+
+static bool shader_emit_ret(ShaderByteWriter *writer)
+{
+  uint32_t token = shader_make_opcode(SHADER_OPCODE_RET, 1u);
+
+  return shader_writer_add_tokens(writer, &token, 1);
+}
+
+static bool shader_emit_vmware_subroutine(ShaderOutputContext *context,
+                                          ShaderByteWriter *writer,
+                                          const ShaderOpcode *opcode,
+                                          uint32_t replacement_opcode)
+{
+  ShaderWriterState state;
+  uint32_t label;
+  uint32_t token;
+
+  label = (context->subroutine_offset - shader_writer_size(writer)) / 4u;
+  if (!shader_emit_call(writer, opcode, label) ||
+      !shader_writer_set_offset(writer, context->subroutine_offset, &state) ||
+      !shader_emit_label(writer, label)) {
+    return false;
+  }
+
+  token = shader_make_opcode(replacement_opcode, opcode->token_count);
+  if (!shader_writer_add_tokens(writer, &token, 1) ||
+      !shader_writer_add_tokens(writer, &opcode->tokens[1],
+                                opcode->token_count - 1) ||
+      !shader_emit_ret(writer)) {
+    return false;
+  }
+  context->subroutine_offset = shader_writer_size(writer);
+  shader_writer_restore(writer, &state);
+  return true;
+}
+
+static bool shader_output_opcode(ShaderOutputContext *context,
+                                 ShaderByteWriter *writer,
+                                 const ShaderOpcode *opcode)
+{
+  if ((context->program_token >> 16) == VMSVGA3D_D3D10_SHADER_PROGRAM_PIXEL &&
+      opcode->opcode_type == SHADER_OPCODE_DCL_RESOURCE) {
+    uint32_t token0;
+    uint32_t return_type;
+
+    if (opcode->token_count != 4) {
+      return false;
+    }
+    token0 = opcode->tokens[0];
+    if (((token0 >> 11) & 0x1fu) == VMSVGA3D_D3D10_SHADER_RESOURCE_BUFFER) {
+      token0 &= ~(UINT32_C(0x1f) << 11);
+      token0 |= VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2D << 11;
+      return_type = UINT32_C(0x5555);
+      return shader_writer_add_tokens(writer, &token0, 1) &&
+             shader_writer_add_tokens(writer, &opcode->tokens[1], 2) &&
+             shader_writer_add_tokens(writer, &return_type, 1);
+    }
+  } else if (opcode->opcode_type == SHADER_OPCODE_VMWARE) {
+    switch (opcode->opcode_subtype) {
+    case SHADER_VMWARE_IDIV:
+      return shader_emit_vmware_subroutine(context, writer, opcode,
+                                           SHADER_OPCODE_UDIV);
+    case SHADER_VMWARE_DFRC:
+    case SHADER_VMWARE_DRSQ:
+      return shader_emit_vmware_subroutine(context, writer, opcode,
+                                           SHADER_OPCODE_MOV);
+    default:
+      return false;
+    }
+  }
+
+  return shader_writer_add_tokens(writer, opcode->tokens, opcode->token_count);
+}
+
+static bool shader_opcode_signature_target(const ShaderOpcode *opcode,
+                                           bool *input)
+{
+  switch (opcode->opcode_type) {
+  case SHADER_OPCODE_DCL_INPUT:
+  case SHADER_OPCODE_DCL_INPUT_SIV:
+  case SHADER_OPCODE_DCL_INPUT_PS:
+    *input = true;
+    return true;
+  case SHADER_OPCODE_DCL_OUTPUT:
+  case SHADER_OPCODE_DCL_OUTPUT_SIV:
+  case SHADER_OPCODE_DCL_OUTPUT_SGV:
+    *input = false;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool shader_extract_signature(VMSVGA3DD3D10ShaderInfo *info,
+                                     const ShaderOpcode *opcode)
+{
+  const ShaderOperand *operand;
+  SVGA3dDXShaderSignatureEntry *entry;
+  bool input;
+  uint32_t index_dimension;
+
+  if (!shader_opcode_signature_target(opcode, &input)) {
+    return true;
+  }
+  if (opcode->operand_count == 0) {
+    return false;
+  }
+  operand = &opcode->operands[opcode->operand_index[0]];
+  if (input) {
+    if (info->input_signature_count >= VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES) {
+      return false;
+    }
+    entry = &info->input_signature[info->input_signature_count++];
+  } else {
+    if (info->output_signature_count >= VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES) {
+      return false;
+    }
+    entry = &info->output_signature[info->output_signature_count++];
+  }
+  memset(entry, 0, sizeof(*entry));
+
+  if (operand->index[0].representation != SHADER_OPERAND_INDEX_IMMEDIATE32 &&
+      operand->index[0].representation != SHADER_OPERAND_INDEX_IMMEDIATE64) {
+    return false;
+  }
+
+  index_dimension = operand->index_dimension;
+  if (index_dimension == SHADER_OPERAND_INDEX_0D) {
+    if (operand->operand_type == SHADER_OPERAND_TYPE_INPUT_PRIMITIVEID) {
+      entry->registerIndex = 0;
+      entry->semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_PRIMITIVE_ID;
+    } else if (operand->operand_type == SHADER_OPERAND_TYPE_OUTPUT_DEPTH) {
+      entry->registerIndex = UINT32_MAX;
+      entry->semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED;
+    } else if (operand->operand_type <= SHADER_OPERAND_TYPE_SM50_MAX) {
+      entry->registerIndex = 0;
+      entry->semanticName = opcode->semantic_name;
+    } else {
+      return false;
+    }
+  } else if (index_dimension <= SHADER_OPERAND_INDEX_3D) {
+    entry->registerIndex =
+        (uint32_t)operand->index[index_dimension - SHADER_OPERAND_INDEX_1D]
+            .immediate;
+    entry->semanticName = opcode->semantic_name;
+  } else {
+    return false;
+  }
+
+  entry->mask = operand->mask;
+  entry->componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN;
+  entry->minPrecision = SVGADX_SIGNATURE_MIN_PRECISION_DEFAULT;
+  return true;
+}
+
+static void shader_record_resource(VMSVGA3DD3D10ShaderInfo *info,
+                                   const ShaderOpcode *opcode,
+                                   uint32_t output_offset)
+{
+  const ShaderOperand *operand;
+  uint32_t resource_index;
+
+  if (info->program_type != VMSVGA3D_D3D10_SHADER_PROGRAM_PIXEL ||
+      opcode->opcode_type != SHADER_OPCODE_DCL_RESOURCE ||
+      opcode->operand_count != 1) {
+    return;
+  }
+  operand = &opcode->operands[opcode->operand_index[0]];
+  if (operand->index_dimension != SHADER_OPERAND_INDEX_1D ||
+      operand->index[0].representation != SHADER_OPERAND_INDEX_IMMEDIATE32) {
+    return;
+  }
+  resource_index = (uint32_t)operand->index[0].immediate;
+  if (resource_index >= SVGA3D_DX_MAX_SRVIEWS) {
+    return;
+  }
+  info->resource_declaration_offsets[resource_index] = output_offset;
+  if (info->resource_declaration_count < resource_index + 1) {
+    info->resource_declaration_count = resource_index + 1;
+  }
+}
+
+static bool shader_parse_and_rewrite(const uint32_t *tokens,
+                                     uint32_t shader_object_size,
+                                     VMSVGA3DD3D10ShaderInfo *info)
+{
+  ShaderTokenReader reader;
+  ShaderByteWriter writer;
+  ShaderOutputContext context;
+  uint32_t initial_size;
+
+  if (info->token_count < 2 ||
+      shader_object_size > UINT32_MAX - 4096u) {
+    return false;
+  }
+  /* Size the writer from the complete shader object, signatures included. */
+  initial_size = 4096u + shader_object_size;
+  if (!shader_writer_init(&writer, initial_size) ||
+      !shader_writer_add_tokens(&writer, tokens, 2)) {
+    shader_writer_reset(&writer);
+    return false;
+  }
+
+  reader.token = &tokens[2];
+  reader.total = info->token_count - 2;
+  reader.remaining = reader.total;
+  context.program_token = tokens[0];
+  context.original_token_count = info->token_count;
+  context.subroutine_offset = info->token_count * 4u;
+
+  while (shader_reader_can_read(&reader, 1)) {
+    ShaderOpcode opcode;
+    uint32_t output_offset = shader_writer_size(&writer);
+
+    if (!shader_parse_opcode(&reader, &opcode) ||
+        !shader_output_opcode(&context, &writer, &opcode)) {
+      shader_writer_reset(&writer);
+      return false;
+    }
+    shader_record_resource(info, &opcode, output_offset);
+    if (!shader_extract_signature(info, &opcode)) {
+      shader_writer_reset(&writer);
+      return false;
+    }
+  }
+
+  info->rewritten_bytecode = writer.data;
+  info->rewritten_bytecode_size = writer.written;
+  writer.data = NULL;
+  shader_writer_reset(&writer);
+  if (info->rewritten_bytecode_size < 8 ||
+      (info->rewritten_bytecode_size & 3u) != 0) {
+    return false;
+  }
+  ((uint32_t *)info->rewritten_bytecode)[1] =
+      info->rewritten_bytecode_size / 4u;
+  return true;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_parse(
+    const void *blob, uint32_t size_in_bytes, VMSVGA3DD3D10ShaderInfo *info)
+{
+  VMSVGA3DD3D10Level level;
+
+  if (info == NULL) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  level = vmsvga3d_d3d10_shader_blob_info(blob, size_in_bytes, info);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+  if (!shader_parse_and_rewrite(blob, size_in_bytes, info)) {
+    vmsvga3d_d3d10_shader_release(info);
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  level = vmsvga3d_d3d10_shader_finalize_signatures(info);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    vmsvga3d_d3d10_shader_release(info);
+    return level;
+  }
+  level = vmsvga3d_d3d10_shader_guest_signatures(blob, size_in_bytes, info);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    vmsvga3d_d3d10_shader_release(info);
+  }
+  return level;
+}
+
+void vmsvga3d_d3d10_shader_release(VMSVGA3DD3D10ShaderInfo *info)
+{
+  if (info == NULL) {
+    return;
+  }
+  free(info->rewritten_bytecode);
+  memset(info, 0, sizeof(*info));
+}
+
+uint32_t vmsvga3d_d3d10_shader_resource_return_type(
+    SVGA3dSurfaceFormat format)
+{
+  switch (format) {
+  case SVGA3D_R32G32B32A32_UINT:
+  case SVGA3D_R32G32B32_UINT:
+  case SVGA3D_R16G16B16A16_UINT:
+  case SVGA3D_R32G32_UINT:
+  case SVGA3D_D32_FLOAT_S8X24_UINT:
+  case SVGA3D_X32_G8X24_UINT:
+  case SVGA3D_R10G10B10A2_UINT:
+  case SVGA3D_R8G8B8A8_UINT:
+  case SVGA3D_R16G16_UINT:
+  case SVGA3D_R32_UINT:
+  case SVGA3D_X24_G8_UINT:
+  case SVGA3D_R8G8_UINT:
+  case SVGA3D_R16_UINT:
+  case SVGA3D_R8_UINT:
+    return VMSVGA3D_D3D10_SHADER_RETURN_UINT;
+  case SVGA3D_R32G32B32A32_SINT:
+  case SVGA3D_R32G32B32_SINT:
+  case SVGA3D_R16G16B16A16_SINT:
+  case SVGA3D_R32G32_SINT:
+  case SVGA3D_R8G8B8A8_SINT:
+  case SVGA3D_R16G16_SINT:
+  case SVGA3D_R32_SINT:
+  case SVGA3D_R8G8_SINT:
+  case SVGA3D_R16_SINT:
+  case SVGA3D_R8_SINT:
+    return VMSVGA3D_D3D10_SHADER_RETURN_SINT;
+  case SVGA3D_R16G16B16A16_SNORM:
+  case SVGA3D_R16_SNORM:
+  case SVGA3D_R8_SNORM:
+  case SVGA3D_BC4_SNORM:
+  case SVGA3D_BC5_SNORM:
+  case SVGA3D_R8G8B8A8_SNORM:
+  case SVGA3D_R16G16_SNORM:
+  case SVGA3D_R8G8_SNORM:
+    return VMSVGA3D_D3D10_SHADER_RETURN_SNORM;
+  case SVGA3D_R8G8B8A8_UNORM:
+  case SVGA3D_R8G8B8A8_UNORM_SRGB:
+  case SVGA3D_D24_UNORM_S8_UINT:
+  case SVGA3D_R24_UNORM_X8:
+  case SVGA3D_R8G8_UNORM:
+  case SVGA3D_R16_UNORM:
+  case SVGA3D_R8_UNORM:
+  case SVGA3D_R8G8_B8G8_UNORM:
+  case SVGA3D_G8R8_G8B8_UNORM:
+  case SVGA3D_BC1_UNORM_SRGB:
+  case SVGA3D_BC2_UNORM_SRGB:
+  case SVGA3D_BC3_UNORM_SRGB:
+  case SVGA3D_R10G10B10_XR_BIAS_A2_UNORM:
+  case SVGA3D_B8G8R8A8_UNORM_SRGB:
+  case SVGA3D_B8G8R8X8_UNORM_SRGB:
+  case SVGA3D_R16G16B16A16_UNORM:
+  case SVGA3D_R10G10B10A2_UNORM:
+  case SVGA3D_R16G16_UNORM:
+  case SVGA3D_D16_UNORM:
+  case SVGA3D_A8_UNORM:
+  case SVGA3D_BC1_UNORM:
+  case SVGA3D_BC2_UNORM:
+  case SVGA3D_BC3_UNORM:
+  case SVGA3D_B5G6R5_UNORM:
+  case SVGA3D_B5G5R5A1_UNORM:
+  case SVGA3D_B8G8R8A8_UNORM:
+  case SVGA3D_B8G8R8X8_UNORM:
+  case SVGA3D_BC4_UNORM:
+  case SVGA3D_BC5_UNORM:
+  case SVGA3D_B4G4R4A4_UNORM:
+  case SVGA3D_BC7_UNORM:
+  case SVGA3D_BC7_UNORM_SRGB:
+    return VMSVGA3D_D3D10_SHADER_RETURN_UNORM;
+  case SVGA3D_R32G32B32_FLOAT:
+  case SVGA3D_R32_FLOAT_X8X24:
+  case SVGA3D_R11G11B10_FLOAT:
+  case SVGA3D_D32_FLOAT:
+  case SVGA3D_R32G32B32A32_FLOAT:
+  case SVGA3D_R16G16B16A16_FLOAT:
+  case SVGA3D_R32G32_FLOAT:
+  case SVGA3D_R16G16_FLOAT:
+  case SVGA3D_R32_FLOAT:
+  case SVGA3D_R16_FLOAT:
+  case SVGA3D_R9G9B9E5_SHAREDEXP:
+    return VMSVGA3D_D3D10_SHADER_RETURN_FLOAT;
+  default:
+    /* Deliberately default unrecognized formats to UNORM. */
+    return VMSVGA3D_D3D10_SHADER_RETURN_UNORM;
+  }
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resource_binding(
+    const SVGACOTableDXSRViewEntry *view, uint32_t array_elements,
+    VMSVGA3DD3D10ShaderResourceBinding *binding)
+{
+  if (view == NULL || binding == NULL) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  memset(binding, 0, sizeof(*binding));
+  binding->format = view->format;
+  binding->return_type = vmsvga3d_d3d10_shader_resource_return_type(view->format);
+  switch (view->resourceDimension) {
+  case SVGA3D_RESOURCE_BUFFEREX:
+    binding->resource_dimension = VMSVGA3D_D3D10_SHADER_RESOURCE_BUFFER;
+    return VMSVGA3D_D3D10_LEVEL_11_0;
+  case SVGA3D_RESOURCE_BUFFER:
+    binding->resource_dimension = VMSVGA3D_D3D10_SHADER_RESOURCE_BUFFER;
+    break;
+  case SVGA3D_RESOURCE_TEXTURE1D:
+    binding->resource_dimension = array_elements <= 1 ?
+        VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE1D :
+        VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE1DARRAY;
+    break;
+  case SVGA3D_RESOURCE_TEXTURE2D:
+    binding->resource_dimension = array_elements <= 1 ?
+        VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2D :
+        VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2DARRAY;
+    break;
+  case SVGA3D_RESOURCE_TEXTURE3D:
+    binding->resource_dimension = VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE3D;
+    break;
+  case SVGA3D_RESOURCE_TEXTURECUBE:
+    binding->resource_dimension = array_elements <= 6 ?
+        VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURECUBE :
+        VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURECUBEARRAY;
+    break;
+  default:
+    /* Continue with TEXTURE2D for an unexpected dimension. */
+    binding->resource_dimension = VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2D;
+    break;
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_update_resources(
+    VMSVGA3DD3D10ShaderInfo *info,
+    const VMSVGA3DD3D10ShaderResourceBinding *bindings,
+    uint32_t binding_count)
+{
+  uint32_t i;
+
+  if (info == NULL || info->rewritten_bytecode == NULL ||
+      binding_count > SVGA3D_DX_MAX_SRVIEWS ||
+      (binding_count != 0 && bindings == NULL)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  if (info->program_type == VMSVGA3D_D3D10_SHADER_PROGRAM_PIXEL) {
+    for (i = 0; i < binding_count; i++) {
+      if (bindings[i].resource_dimension != VMSVGA3D_D3D10_SHADER_RESOURCE_UNKNOWN &&
+          i < info->output_signature_count) {
+        info->output_signature[i].componentType =
+            vmsvga3d_d3d10_shader_component_type_from_format(bindings[i].format);
+      }
+    }
+  }
+
+  for (i = 0; i < info->resource_declaration_count; i++) {
+    uint32_t dimension = VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2D;
+    uint32_t return_type = VMSVGA3D_D3D10_SHADER_RETURN_FLOAT;
+    uint32_t offset;
+    uint32_t *tokens;
+
+    if (i < binding_count) {
+      dimension = bindings[i].resource_dimension;
+      return_type = bindings[i].return_type;
+    }
+    if (dimension > VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURECUBEARRAY ||
+        return_type > VMSVGA3D_D3D10_SHADER_RETURN_MIXED) {
+      /* Skip only this declaration when its patch values are invalid. */
+      continue;
+    }
+
+    offset = info->resource_declaration_offsets[i];
+    if (offset == 0 || offset >= info->rewritten_bytecode_size ||
+        info->rewritten_bytecode_size - offset < 16) {
+      continue;
+    }
+    tokens = (uint32_t *)((uint8_t *)info->rewritten_bytecode + offset);
+    if (dimension != VMSVGA3D_D3D10_SHADER_RESOURCE_UNKNOWN) {
+      tokens[0] &= ~(UINT32_C(0x1f) << 11);
+      tokens[0] |= (dimension & 0x1fu) << 11;
+    }
+    if ((uint8_t)return_type != 0) {
+      tokens[3] &= UINT32_C(0xffff0000);
+      tokens[3] |= (return_type & 0x0fu) |
+                   ((return_type & 0x0fu) << 4) |
+                   ((return_type & 0x0fu) << 8) |
+                   ((return_type & 0x0fu) << 12);
+    }
+  }
+  return shader_program_level(info->program_type);
+}
+
+static uint32_t shader_load_le32(const uint8_t *bytes)
+{
+  return (uint32_t)bytes[0] |
+         ((uint32_t)bytes[1] << 8) |
+         ((uint32_t)bytes[2] << 16) |
+         ((uint32_t)bytes[3] << 24);
+}
+
+static void shader_store_le32(uint8_t *bytes, uint32_t value)
+{
+  bytes[0] = (uint8_t)value;
+  bytes[1] = (uint8_t)(value >> 8);
+  bytes[2] = (uint8_t)(value >> 16);
+  bytes[3] = (uint8_t)(value >> 24);
+}
+
+#define SHADER_MD5_F1(x, y, z) ((z) ^ ((x) & ((y) ^ (z))))
+#define SHADER_MD5_F2(x, y, z) SHADER_MD5_F1((z), (x), (y))
+#define SHADER_MD5_F3(x, y, z) ((x) ^ (y) ^ (z))
+#define SHADER_MD5_F4(x, y, z) ((y) ^ ((x) | ~(z)))
+#define SHADER_MD5_STEP(f, w, x, y, z, data, shift) do { \
+  (w) += f((x), (y), (z)) + (data); \
+  (w) = ((w) << (shift)) | ((w) >> (32u - (shift))); \
+  (w) += (x); \
+} while (0)
+
+static void shader_md5_transform(uint32_t state[4], const uint8_t block[64])
+{
+  uint32_t in[16];
+  uint32_t a = state[0];
+  uint32_t b = state[1];
+  uint32_t c = state[2];
+  uint32_t d = state[3];
+  uint32_t i;
+
+  for (i = 0; i < 16; i++) {
+    in[i] = shader_load_le32(block + i * 4u);
+  }
+
+  SHADER_MD5_STEP(SHADER_MD5_F1, a, b, c, d, in[0] + UINT32_C(0xd76aa478), 7);
+  SHADER_MD5_STEP(SHADER_MD5_F1, d, a, b, c, in[1] + UINT32_C(0xe8c7b756), 12);
+  SHADER_MD5_STEP(SHADER_MD5_F1, c, d, a, b, in[2] + UINT32_C(0x242070db), 17);
+  SHADER_MD5_STEP(SHADER_MD5_F1, b, c, d, a, in[3] + UINT32_C(0xc1bdceee), 22);
+  SHADER_MD5_STEP(SHADER_MD5_F1, a, b, c, d, in[4] + UINT32_C(0xf57c0faf), 7);
+  SHADER_MD5_STEP(SHADER_MD5_F1, d, a, b, c, in[5] + UINT32_C(0x4787c62a), 12);
+  SHADER_MD5_STEP(SHADER_MD5_F1, c, d, a, b, in[6] + UINT32_C(0xa8304613), 17);
+  SHADER_MD5_STEP(SHADER_MD5_F1, b, c, d, a, in[7] + UINT32_C(0xfd469501), 22);
+  SHADER_MD5_STEP(SHADER_MD5_F1, a, b, c, d, in[8] + UINT32_C(0x698098d8), 7);
+  SHADER_MD5_STEP(SHADER_MD5_F1, d, a, b, c, in[9] + UINT32_C(0x8b44f7af), 12);
+  SHADER_MD5_STEP(SHADER_MD5_F1, c, d, a, b, in[10] + UINT32_C(0xffff5bb1), 17);
+  SHADER_MD5_STEP(SHADER_MD5_F1, b, c, d, a, in[11] + UINT32_C(0x895cd7be), 22);
+  SHADER_MD5_STEP(SHADER_MD5_F1, a, b, c, d, in[12] + UINT32_C(0x6b901122), 7);
+  SHADER_MD5_STEP(SHADER_MD5_F1, d, a, b, c, in[13] + UINT32_C(0xfd987193), 12);
+  SHADER_MD5_STEP(SHADER_MD5_F1, c, d, a, b, in[14] + UINT32_C(0xa679438e), 17);
+  SHADER_MD5_STEP(SHADER_MD5_F1, b, c, d, a, in[15] + UINT32_C(0x49b40821), 22);
+
+  SHADER_MD5_STEP(SHADER_MD5_F2, a, b, c, d, in[1] + UINT32_C(0xf61e2562), 5);
+  SHADER_MD5_STEP(SHADER_MD5_F2, d, a, b, c, in[6] + UINT32_C(0xc040b340), 9);
+  SHADER_MD5_STEP(SHADER_MD5_F2, c, d, a, b, in[11] + UINT32_C(0x265e5a51), 14);
+  SHADER_MD5_STEP(SHADER_MD5_F2, b, c, d, a, in[0] + UINT32_C(0xe9b6c7aa), 20);
+  SHADER_MD5_STEP(SHADER_MD5_F2, a, b, c, d, in[5] + UINT32_C(0xd62f105d), 5);
+  SHADER_MD5_STEP(SHADER_MD5_F2, d, a, b, c, in[10] + UINT32_C(0x02441453), 9);
+  SHADER_MD5_STEP(SHADER_MD5_F2, c, d, a, b, in[15] + UINT32_C(0xd8a1e681), 14);
+  SHADER_MD5_STEP(SHADER_MD5_F2, b, c, d, a, in[4] + UINT32_C(0xe7d3fbc8), 20);
+  SHADER_MD5_STEP(SHADER_MD5_F2, a, b, c, d, in[9] + UINT32_C(0x21e1cde6), 5);
+  SHADER_MD5_STEP(SHADER_MD5_F2, d, a, b, c, in[14] + UINT32_C(0xc33707d6), 9);
+  SHADER_MD5_STEP(SHADER_MD5_F2, c, d, a, b, in[3] + UINT32_C(0xf4d50d87), 14);
+  SHADER_MD5_STEP(SHADER_MD5_F2, b, c, d, a, in[8] + UINT32_C(0x455a14ed), 20);
+  SHADER_MD5_STEP(SHADER_MD5_F2, a, b, c, d, in[13] + UINT32_C(0xa9e3e905), 5);
+  SHADER_MD5_STEP(SHADER_MD5_F2, d, a, b, c, in[2] + UINT32_C(0xfcefa3f8), 9);
+  SHADER_MD5_STEP(SHADER_MD5_F2, c, d, a, b, in[7] + UINT32_C(0x676f02d9), 14);
+  SHADER_MD5_STEP(SHADER_MD5_F2, b, c, d, a, in[12] + UINT32_C(0x8d2a4c8a), 20);
+
+  SHADER_MD5_STEP(SHADER_MD5_F3, a, b, c, d, in[5] + UINT32_C(0xfffa3942), 4);
+  SHADER_MD5_STEP(SHADER_MD5_F3, d, a, b, c, in[8] + UINT32_C(0x8771f681), 11);
+  SHADER_MD5_STEP(SHADER_MD5_F3, c, d, a, b, in[11] + UINT32_C(0x6d9d6122), 16);
+  SHADER_MD5_STEP(SHADER_MD5_F3, b, c, d, a, in[14] + UINT32_C(0xfde5380c), 23);
+  SHADER_MD5_STEP(SHADER_MD5_F3, a, b, c, d, in[1] + UINT32_C(0xa4beea44), 4);
+  SHADER_MD5_STEP(SHADER_MD5_F3, d, a, b, c, in[4] + UINT32_C(0x4bdecfa9), 11);
+  SHADER_MD5_STEP(SHADER_MD5_F3, c, d, a, b, in[7] + UINT32_C(0xf6bb4b60), 16);
+  SHADER_MD5_STEP(SHADER_MD5_F3, b, c, d, a, in[10] + UINT32_C(0xbebfbc70), 23);
+  SHADER_MD5_STEP(SHADER_MD5_F3, a, b, c, d, in[13] + UINT32_C(0x289b7ec6), 4);
+  SHADER_MD5_STEP(SHADER_MD5_F3, d, a, b, c, in[0] + UINT32_C(0xeaa127fa), 11);
+  SHADER_MD5_STEP(SHADER_MD5_F3, c, d, a, b, in[3] + UINT32_C(0xd4ef3085), 16);
+  SHADER_MD5_STEP(SHADER_MD5_F3, b, c, d, a, in[6] + UINT32_C(0x04881d05), 23);
+  SHADER_MD5_STEP(SHADER_MD5_F3, a, b, c, d, in[9] + UINT32_C(0xd9d4d039), 4);
+  SHADER_MD5_STEP(SHADER_MD5_F3, d, a, b, c, in[12] + UINT32_C(0xe6db99e5), 11);
+  SHADER_MD5_STEP(SHADER_MD5_F3, c, d, a, b, in[15] + UINT32_C(0x1fa27cf8), 16);
+  SHADER_MD5_STEP(SHADER_MD5_F3, b, c, d, a, in[2] + UINT32_C(0xc4ac5665), 23);
+
+  SHADER_MD5_STEP(SHADER_MD5_F4, a, b, c, d, in[0] + UINT32_C(0xf4292244), 6);
+  SHADER_MD5_STEP(SHADER_MD5_F4, d, a, b, c, in[7] + UINT32_C(0x432aff97), 10);
+  SHADER_MD5_STEP(SHADER_MD5_F4, c, d, a, b, in[14] + UINT32_C(0xab9423a7), 15);
+  SHADER_MD5_STEP(SHADER_MD5_F4, b, c, d, a, in[5] + UINT32_C(0xfc93a039), 21);
+  SHADER_MD5_STEP(SHADER_MD5_F4, a, b, c, d, in[12] + UINT32_C(0x655b59c3), 6);
+  SHADER_MD5_STEP(SHADER_MD5_F4, d, a, b, c, in[3] + UINT32_C(0x8f0ccc92), 10);
+  SHADER_MD5_STEP(SHADER_MD5_F4, c, d, a, b, in[10] + UINT32_C(0xffeff47d), 15);
+  SHADER_MD5_STEP(SHADER_MD5_F4, b, c, d, a, in[1] + UINT32_C(0x85845dd1), 21);
+  SHADER_MD5_STEP(SHADER_MD5_F4, a, b, c, d, in[8] + UINT32_C(0x6fa87e4f), 6);
+  SHADER_MD5_STEP(SHADER_MD5_F4, d, a, b, c, in[15] + UINT32_C(0xfe2ce6e0), 10);
+  SHADER_MD5_STEP(SHADER_MD5_F4, c, d, a, b, in[6] + UINT32_C(0xa3014314), 15);
+  SHADER_MD5_STEP(SHADER_MD5_F4, b, c, d, a, in[13] + UINT32_C(0x4e0811a1), 21);
+  SHADER_MD5_STEP(SHADER_MD5_F4, a, b, c, d, in[4] + UINT32_C(0xf7537e82), 6);
+  SHADER_MD5_STEP(SHADER_MD5_F4, d, a, b, c, in[11] + UINT32_C(0xbd3af235), 10);
+  SHADER_MD5_STEP(SHADER_MD5_F4, c, d, a, b, in[2] + UINT32_C(0x2ad7d2bb), 15);
+  SHADER_MD5_STEP(SHADER_MD5_F4, b, c, d, a, in[9] + UINT32_C(0xeb86d391), 21);
+
+  state[0] += a;
+  state[1] += b;
+  state[2] += c;
+  state[3] += d;
+}
+
+static void shader_dxbc_hash(const void *data, uint32_t size, uint8_t digest[16])
+{
+  const uint8_t *bytes = data;
+  uint32_t state[4] = {
+    UINT32_C(0x67452301), UINT32_C(0xefcdab89),
+    UINT32_C(0x98badcfe), UINT32_C(0x10325476)
+  };
+  uint8_t block[64];
+  uint32_t complete = size & ~UINT32_C(63);
+  uint32_t remaining = size - complete;
+  uint32_t offset;
+  uint32_t i;
+
+  for (offset = 0; offset < complete; offset += 64) {
+    shader_md5_transform(state, bytes + offset);
+  }
+  bytes += complete;
+
+  memset(block, 0, sizeof(block));
+  if (remaining >= 56) {
+    memcpy(block, bytes, remaining);
+    block[remaining] = 0x80;
+    shader_md5_transform(state, block);
+    memset(block, 0, sizeof(block));
+  } else {
+    memcpy(block + 4, bytes, remaining);
+    block[4 + remaining] = 0x80;
+  }
+  shader_store_le32(block, size << 3);
+  shader_store_le32(block + 60, (size << 1) | 1u);
+  shader_md5_transform(state, block);
+
+  for (i = 0; i < 4; i++) {
+    shader_store_le32(digest + i * 4u, state[i]);
+  }
+}
+
+static uint32_t shader_system_value(uint32_t semantic)
+{
+  switch (semantic) {
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED:
+    return 0;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_POSITION:
+    return 1;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_CLIP_DISTANCE:
+    return 2;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_CULL_DISTANCE:
+    return 3;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_RENDER_TARGET_ARRAY_INDEX:
+    return 4;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_VIEWPORT_ARRAY_INDEX:
+    return 5;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_VERTEX_ID:
+    return 6;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_PRIMITIVE_ID:
+    return 7;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_INSTANCE_ID:
+    return 8;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_IS_FRONT_FACE:
+    return 9;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_SAMPLE_INDEX:
+    return 10;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_QUAD_U_EQ_0_EDGE_TESSFACTOR:
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_QUAD_V_EQ_0_EDGE_TESSFACTOR:
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_QUAD_U_EQ_1_EDGE_TESSFACTOR:
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_QUAD_V_EQ_1_EDGE_TESSFACTOR:
+    return 11;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_QUAD_U_INSIDE_TESSFACTOR:
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_QUAD_V_INSIDE_TESSFACTOR:
+    return 12;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_TRI_U_EQ_0_EDGE_TESSFACTOR:
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_TRI_V_EQ_0_EDGE_TESSFACTOR:
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_TRI_W_EQ_0_EDGE_TESSFACTOR:
+    return 13;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_TRI_INSIDE_TESSFACTOR:
+    return 14;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_LINE_DETAIL_TESSFACTOR:
+    return 15;
+  case SVGADX_SIGNATURE_SEMANTIC_NAME_FINAL_LINE_DENSITY_TESSFACTOR:
+    return 16;
+  default:
+    return 0;
+  }
+}
+
+static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
+                                         ShaderDXBCHeader *header,
+                                         uint32_t blob_type, uint32_t count,
+                                         const SVGA3dDXShaderSignatureEntry *signature,
+                                         const VMSVGA3DD3D10ShaderSemantic *semantic,
+                                         ShaderByteWriter *writer)
+{
+  ShaderDXBCBlobHeader *blob;
+  uint8_t *blob_data;
+  ShaderDXBCSignatureElement *elements;
+  uint32_t blob_size;
+  uint32_t i;
+
+  (void)info;
+  if (count > SVGA3D_DX_SM41_MAX_VERTEXINPUTREGISTERS) {
+    return false;
+  }
+  blob_size = 8u + count * sizeof(*elements);
+  if (!shader_writer_can_write(writer, sizeof(*blob) + blob_size)) {
+    return false;
+  }
+  blob = shader_writer_ptr(writer);
+  blob->type = blob_type;
+  blob->size = 0;
+  blob_data = (uint8_t *)(blob + 1);
+  ((uint32_t *)blob_data)[0] = count;
+  ((uint32_t *)blob_data)[1] = 8u;
+  elements = (ShaderDXBCSignatureElement *)(blob_data + 8u);
+
+  for (i = 0; i < count; i++) {
+    uint32_t j;
+    uint32_t name_offset = 0;
+    uint32_t name_size;
+
+    for (j = 0; j < i; j++) {
+      const char *prior_name = (const char *)blob_data + elements[j].name_offset;
+
+      if (strcmp(prior_name, semantic[i].semantic_name) == 0) {
+        name_offset = elements[j].name_offset;
+        break;
+      }
+    }
+    elements[i].name_offset = name_offset;
+    elements[i].semantic_index = semantic[i].semantic_index;
+    elements[i].system_value = shader_system_value(signature[i].semanticName);
+    elements[i].component_type = signature[i].componentType;
+    elements[i].register_index = signature[i].registerIndex;
+    elements[i].mask = signature[i].mask;
+
+    if (name_offset == 0) {
+      name_size = (uint32_t)strlen(semantic[i].semantic_name) + 1u;
+      elements[i].name_offset = blob_size;
+      if (!shader_writer_can_write(writer,
+                                   sizeof(*blob) + blob_size + name_size)) {
+        return false;
+      }
+      memcpy(blob_data + blob_size, semantic[i].semantic_name, name_size);
+      blob_size += name_size;
+    }
+  }
+
+  blob_size = shader_align_up(blob_size, 4u);
+  blob->size = blob_size;
+  header->total_size += sizeof(*blob) + blob_size;
+  shader_writer_commit(writer, sizeof(*blob) + blob_size);
+  return true;
+}
+
+static bool shader_create_code_blob(ShaderDXBCHeader *header,
+                                    const void *bytecode, uint32_t bytecode_size,
+                                    ShaderByteWriter *writer)
+{
+  ShaderDXBCBlobHeader *blob;
+  uint32_t blob_size = shader_align_up(bytecode_size, 4u);
+
+  if (!shader_writer_can_write(writer, sizeof(*blob) + blob_size)) {
+    return false;
+  }
+  blob = shader_writer_ptr(writer);
+  blob->type = SHADER_DXBC_SHDR;
+  blob->size = blob_size;
+  memcpy(blob + 1, bytecode, bytecode_size);
+  header->total_size += sizeof(*blob) + blob_size;
+  shader_writer_commit(writer, sizeof(*blob) + blob_size);
+  return true;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_dxbc(
+    const VMSVGA3DD3D10ShaderInfo *info, VMSVGA3DD3D10ShaderDXBC *dxbc)
+{
+  ShaderByteWriter writer;
+  ShaderDXBCHeader *header;
+  uint32_t blob_count = 3;
+  uint32_t header_size;
+  uint32_t blob_index = 0;
+  VMSVGA3DD3D10Level level;
+
+  if (info == NULL || dxbc == NULL || info->rewritten_bytecode == NULL ||
+      info->rewritten_bytecode_size == 0) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  level = shader_program_level(info->program_type);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+  memset(dxbc, 0, sizeof(*dxbc));
+  if (info->program_type == VMSVGA3D_D3D10_SHADER_PROGRAM_HULL ||
+      info->program_type == VMSVGA3D_D3D10_SHADER_PROGRAM_DOMAIN) {
+    blob_count++;
+  }
+  header_size = 32u + blob_count * sizeof(uint32_t);
+  if (!shader_writer_init(&writer, 4096u + info->rewritten_bytecode_size) ||
+      !shader_writer_can_write(&writer, header_size)) {
+    shader_writer_reset(&writer);
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  header = shader_writer_ptr(&writer);
+  header->magic = SHADER_DXBC_MAGIC;
+  header->version = 1;
+  header->total_size = header_size;
+  header->blob_count = blob_count;
+  shader_writer_commit(&writer, header_size);
+
+  header->blob_offsets[blob_index++] = shader_writer_size(&writer);
+  if (!shader_create_signature_blob(info, header, SHADER_DXBC_ISGN,
+                                    info->input_signature_count,
+                                    info->input_signature, info->input_semantic,
+                                    &writer)) {
+    shader_writer_reset(&writer);
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  header->blob_offsets[blob_index++] = shader_writer_size(&writer);
+  if (!shader_create_signature_blob(info, header, SHADER_DXBC_OSGN,
+                                    info->output_signature_count,
+                                    info->output_signature,
+                                    info->output_semantic, &writer)) {
+    shader_writer_reset(&writer);
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  if (info->program_type == VMSVGA3D_D3D10_SHADER_PROGRAM_HULL ||
+      info->program_type == VMSVGA3D_D3D10_SHADER_PROGRAM_DOMAIN) {
+    header->blob_offsets[blob_index++] = shader_writer_size(&writer);
+    if (!shader_create_signature_blob(info, header, SHADER_DXBC_PCSG,
+                                      info->patch_signature_count,
+                                      info->patch_signature,
+                                      info->patch_semantic, &writer)) {
+      shader_writer_reset(&writer);
+      return VMSVGA3D_D3D10_LEVEL_INVALID;
+    }
+  }
+
+  header->blob_offsets[blob_index++] = shader_writer_size(&writer);
+  if (!shader_create_code_blob(header, info->rewritten_bytecode,
+                               info->rewritten_bytecode_size, &writer) ||
+      blob_index != blob_count) {
+    shader_writer_reset(&writer);
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  shader_dxbc_hash(&header->version,
+                   header->total_size - offsetof(ShaderDXBCHeader, version),
+                   header->hash);
+  dxbc->data = writer.data;
+  dxbc->size = writer.written;
+  writer.data = NULL;
+  shader_writer_reset(&writer);
+  return level;
+}
+
+void vmsvga3d_d3d10_shader_dxbc_release(VMSVGA3DD3D10ShaderDXBC *dxbc)
+{
+  if (dxbc == NULL) {
+    return;
+  }
+  free(dxbc->data);
+  memset(dxbc, 0, sizeof(*dxbc));
+}
+
 uint32_t vmsvga3d_d3d10_shader_component_type_from_format(
     SVGA3dSurfaceFormat format)
 {
@@ -1266,7 +4314,7 @@ uint32_t vmsvga3d_d3d10_shader_component_type_from_format(
   case SVGA3D_R8_SINT:
     return VMSVGA3D_D3D10_SHADER_COMPONENT_SINT32;
   default:
-    /* VBox's format helper deliberately defaults unknown formats to float. */
+    /* Deliberately default unknown formats to float. */
     return VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
   }
 }
@@ -1328,7 +4376,7 @@ static bool shader_match_input(VMSVGA3DD3D10ShaderInfo *shader,
           &prior->output_semantic[(uint32_t)match];
 
       if ((output->mask & input->mask) != input->mask) {
-        /* VBox asserts this condition but still applies the semantic index. */
+        /* Apply the semantic index even when the masks are not fully covered. */
         masks_covered = false;
       }
       semantic->semantic_index = output_semantic->semantic_index;
@@ -1450,10 +4498,11 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_plan(
   if (plan == NULL) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
-  level = shader_type_level(type);
-  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
-    return level;
+  if (type < SVGA3D_SHADERTYPE_MIN ||
+      type >= SVGA3D_SHADERTYPE_DX10_MAX) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
+  level = shader_type_level(type);
 
   memset(plan, 0, sizeof(*plan));
   plan->stage_index = (uint32_t)type - (uint32_t)SVGA3D_SHADERTYPE_MIN;
@@ -1473,15 +4522,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_plan(
       plan->stream_output_id = stream_output_id;
       plan->use_stream_output = true;
     }
-    break;
-  case SVGA3D_SHADERTYPE_HS:
-    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_HULL;
-    break;
-  case SVGA3D_SHADERTYPE_DS:
-    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_DOMAIN;
-    break;
-  case SVGA3D_SHADERTYPE_CS:
-    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_COMPUTE;
     break;
   default:
     return VMSVGA3D_D3D10_LEVEL_INVALID;
@@ -1532,49 +4572,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_legacy_entry(
   dst->mobid = SVGA3D_INVALID_ID;
   dst->usesMob = 0;
   return VMSVGA3D_D3D10_LEVEL_10_0;
-}
-
-VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_mob_entry(
-    const SVGA3dCmdDXDefineStreamOutputWithMob *src,
-    SVGACOTableDXStreamOutputEntry *dst)
-{
-  if (src == NULL || dst == NULL ||
-      src->numOutputStreamEntries >= SVGA3D_MAX_STREAMOUT_DECLS) {
-    return VMSVGA3D_D3D10_LEVEL_INVALID;
-  }
-
-  memset(dst, 0, sizeof(*dst));
-  dst->numOutputStreamEntries = src->numOutputStreamEntries;
-  memcpy(dst->streamOutputStrideInBytes, src->streamOutputStrideInBytes,
-         sizeof(dst->streamOutputStrideInBytes));
-  dst->rasterizedStream = src->rasterizedStream;
-  dst->numOutputStreamStrides = src->numOutputStreamStrides;
-  dst->mobid = SVGA3D_INVALID_ID;
-  dst->usesMob = 1;
-  return VMSVGA3D_D3D10_LEVEL_11_0;
-}
-
-VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_bind(
-    SVGACOTableDXStreamOutputEntry *entry, uint32_t mobid,
-    uint32_t offset_in_bytes, uint32_t size_in_bytes)
-{
-  uint64_t required_size;
-
-  if (entry == NULL) {
-    return VMSVGA3D_D3D10_LEVEL_INVALID;
-  }
-
-  required_size = (uint64_t)entry->numOutputStreamEntries *
-                  sizeof(SVGA3dStreamOutputDeclarationEntry);
-  if (size_in_bytes < required_size) {
-    return VMSVGA3D_D3D10_LEVEL_INVALID;
-  }
-
-  /* VBox only asserts the previous usesMob value and still performs the bind. */
-  entry->mobid = mobid;
-  entry->offsetInBytes = offset_in_bytes;
-  entry->usesMob = 1;
-  return VMSVGA3D_D3D10_LEVEL_11_0;
 }
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_plan(
@@ -1638,7 +4635,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_plan(
     }
 
     if (dst->semantic_name == NULL) {
-      /* VBox asserts here but keeps the unresolved declaration for host create. */
+      /* Keep unresolved declarations for host creation. */
       plan->all_semantics_resolved = false;
     }
   }
@@ -1681,7 +4678,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_viewports(
   }
 
   /*
-   * VirtualBox stores the guest records unchanged and its D3D11 backend casts
+   * The guest records are stored unchanged and the host backend casts
    * the same bytes directly to D3D11_VIEWPORT.  Keep all float bit patterns
    * intact and leave unused destination entries untouched.
    */
@@ -1774,6 +4771,244 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_query_info(
   *info = base[type];
   info->predicate_hint = !!(flags & SVGA3D_DXQUERY_FLAG_PREDICATEHINT);
   return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_define_entry(
+    const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst)
+{
+  VMSVGA3DD3D10QueryInfo info;
+  VMSVGA3DD3D10Level level;
+
+  if (src == NULL || dst == NULL || src->type < SVGA3D_QUERYTYPE_MIN ||
+      src->type >= SVGA3D_QUERYTYPE_DX10_MAX) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  level = vmsvga3d_d3d10_query_info(src->type, src->flags, &info);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+
+  /* Update these fields without clearing the COTable padding. */
+  dst->type = src->type;
+  dst->state = SVGADX_QDSTATE_IDLE;
+  dst->flags = src->flags;
+  dst->mobid = SVGA3D_INVALID_ID;
+  dst->offset = 0;
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_destroy_entry(
+    SVGACOTableDXQueryEntry *entry)
+{
+  if (entry == NULL) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  /* Leave pad0 untouched. */
+  entry->type = SVGA3D_QUERYTYPE_INVALID;
+  entry->state = SVGADX_QDSTATE_INVALID;
+  entry->flags = 0;
+  entry->mobid = SVGA3D_INVALID_ID;
+  entry->offset = 0;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_bind_entry(
+    SVGACOTableDXQueryEntry *entry, uint32_t mobid)
+{
+  if (entry == NULL) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  /* DXBindQuery changes only the backing MOB id. */
+  entry->mobid = mobid;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_set_offset(
+    SVGACOTableDXQueryEntry *entry, uint32_t offset)
+{
+  if (entry == NULL) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  entry->offset = offset;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_bind_all(
+    SVGACOTableDXQueryEntry *entries, uint32_t count, uint32_t mobid)
+{
+  uint32_t i;
+
+  if (entries == NULL && count != 0) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  for (i = 0; i < count; ++i) {
+    if (entries[i].type != SVGA3D_QUERYTYPE_INVALID) {
+      entries[i].mobid = mobid;
+    }
+  }
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_execution_plan(
+    SVGA3dQueryType type, uint32_t flags,
+    VMSVGA3DD3D10QueryExecutionPlan *plan)
+{
+  VMSVGA3DD3D10QueryInfo info;
+  VMSVGA3DD3D10Level level;
+
+  if (plan == NULL) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  level = vmsvga3d_d3d10_query_info(type, flags, &info);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->d3d_query = info.d3d_query;
+  plan->misc_flags = info.predicate_hint
+                   ? VMSVGA3D_D3D10_QUERY_MISC_PREDICATEHINT : 0;
+  plan->svga_result_size = info.svga_result_size;
+  plan->d3d_result_size = info.d3d_result_size;
+
+  /* Skip Begin only for timestamp queries. */
+  plan->issue_begin = type != SVGA3D_QUERYTYPE_TIMESTAMP;
+  plan->issue_end = true;
+  plan->get_data_after_end = true;
+  plan->getdata_flags = 0;
+  plan->wait_until_ready = true;
+  /* Retry every non-S_OK return, not only S_FALSE. */
+  plan->retry_non_s_ok = true;
+  plan->yield_while_waiting = true;
+
+  /* Queries are completed synchronously, so explicit readback is a NOP. */
+  plan->readback_is_noop = true;
+  return level;
+}
+
+static uint32_t query_read_u32(const uint8_t *src)
+{
+  uint32_t value;
+  memcpy(&value, src, sizeof(value));
+  return value;
+}
+
+static uint64_t query_read_u64(const uint8_t *src)
+{
+  uint64_t value;
+  memcpy(&value, src, sizeof(value));
+  return value;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_result(
+    SVGA3dQueryType type, const void *d3d_result, uint32_t d3d_result_size,
+    SVGADXQueryResultUnion *svga_result, uint32_t *svga_result_size)
+{
+  const uint8_t *src = d3d_result;
+  VMSVGA3DD3D10QueryInfo info;
+  VMSVGA3DD3D10Level level;
+
+  if (src == NULL || svga_result == NULL || svga_result_size == NULL) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  level = vmsvga3d_d3d10_query_info(type, 0, &info);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID ||
+      d3d_result_size < info.d3d_result_size) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  switch (type) {
+  case SVGA3D_QUERYTYPE_OCCLUSION:
+    svga_result->occ.samplesRendered = (uint32_t)query_read_u64(src);
+    break;
+  case SVGA3D_QUERYTYPE_TIMESTAMP:
+    svga_result->ts.timestamp = query_read_u64(src);
+    break;
+  case SVGA3D_QUERYTYPE_TIMESTAMPDISJOINT:
+    svga_result->tsDisjoint.realFrequency = query_read_u64(src);
+    svga_result->tsDisjoint.disjoint = query_read_u32(src + 8);
+    break;
+  case SVGA3D_QUERYTYPE_PIPELINESTATS:
+    svga_result->pipelineStats.inputAssemblyVertices = query_read_u64(src);
+    svga_result->pipelineStats.inputAssemblyPrimitives = query_read_u64(src + 8);
+    svga_result->pipelineStats.vertexShaderInvocations = query_read_u64(src + 16);
+    svga_result->pipelineStats.geometryShaderInvocations = query_read_u64(src + 24);
+    svga_result->pipelineStats.geometryShaderPrimitives = query_read_u64(src + 32);
+    svga_result->pipelineStats.clipperInvocations = query_read_u64(src + 40);
+    svga_result->pipelineStats.clipperPrimitives = query_read_u64(src + 48);
+    svga_result->pipelineStats.pixelShaderInvocations = query_read_u64(src + 56);
+    svga_result->pipelineStats.hullShaderInvocations = query_read_u64(src + 64);
+    svga_result->pipelineStats.domainShaderInvocations = query_read_u64(src + 72);
+    svga_result->pipelineStats.computeShaderInvocations = query_read_u64(src + 80);
+    break;
+  case SVGA3D_QUERYTYPE_OCCLUSIONPREDICATE:
+    svga_result->occPred.anySamplesRendered = query_read_u32(src);
+    break;
+  case SVGA3D_QUERYTYPE_STREAMOUTPUTSTATS:
+  case SVGA3D_QUERYTYPE_SOSTATS_STREAM0:
+  case SVGA3D_QUERYTYPE_SOSTATS_STREAM1:
+  case SVGA3D_QUERYTYPE_SOSTATS_STREAM2:
+  case SVGA3D_QUERYTYPE_SOSTATS_STREAM3:
+    svga_result->soStats.numPrimitivesWritten = query_read_u64(src);
+    svga_result->soStats.numPrimitivesRequired = query_read_u64(src + 8);
+    break;
+  case SVGA3D_QUERYTYPE_STREAMOVERFLOWPREDICATE:
+  case SVGA3D_QUERYTYPE_SOP_STREAM0:
+  case SVGA3D_QUERYTYPE_SOP_STREAM1:
+  case SVGA3D_QUERYTYPE_SOP_STREAM2:
+  case SVGA3D_QUERYTYPE_SOP_STREAM3:
+    svga_result->soPred.overflowed = query_read_u32(src);
+    break;
+  case SVGA3D_QUERYTYPE_OCCLUSION64:
+    svga_result->occ64.samplesRendered = query_read_u64(src);
+    break;
+  default:
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  *svga_result_size = info.svga_result_size;
+  return level;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_predication_plan(
+    bool enabled, SVGA3dQueryType type, uint32_t flags,
+    uint32_t predicate_value, VMSVGA3DD3D10PredicationPlan *plan)
+{
+  VMSVGA3DD3D10QueryInfo info;
+  VMSVGA3DD3D10Level level;
+
+  if (plan == NULL) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  if (!enabled) {
+    /* SVGA3D_INVALID_ID maps directly to SetPredication(NULL, FALSE). */
+    return VMSVGA3D_D3D10_LEVEL_10_0;
+  }
+
+  level = vmsvga3d_d3d10_query_info(type, flags, &info);
+  if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return level;
+  }
+
+  plan->enabled = true;
+  plan->release_existing_query = true;
+  plan->create_predicate = true;
+  plan->d3d_query = info.d3d_query;
+  plan->misc_flags = info.predicate_hint
+                   ? VMSVGA3D_D3D10_QUERY_MISC_PREDICATEHINT : 0;
+  plan->predicate_value = predicate_value != 0;
+
+  /* Do not pre-check whether the query type is predicate-compatible. */
+  return level;
 }
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_srv_desc(

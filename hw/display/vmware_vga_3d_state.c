@@ -331,7 +331,7 @@ static bool vmsvga3d_state_draw_primitives(
     };
   };
 
-  /* Rendering stops after protocol validation until D3D9 execution is connected. */
+  /* Protocol validation completes here; the FIFO handler executes D3D9. */
   return true;
 };
 

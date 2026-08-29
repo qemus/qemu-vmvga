@@ -5355,10 +5355,11 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_BYTES_PER_LINE:
-    if (s->enable) {
-      vmsvga_try_commit_mode(s);
+    if (vmsvga_pending_mode_valid(s)) {
+      ret = vmsvga_pending_stride(s);
+    } else {
+      ret = vmsvga_stride(s);
     };
-    ret = vmsvga_stride(s);
     VPRINT("SVGA_REG_BYTES_PER_LINE register %u with the return of %u\n",
            s->index, ret);
     break;

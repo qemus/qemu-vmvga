@@ -266,6 +266,99 @@ typedef struct vmsvga3d_d3d9_resource_plan_s {
   uint32_t autogen_filter;
 } VMSVGA3DD3D9ResourcePlan;
 
+typedef enum vmsvga3d_d3d9_host_resource_type_e {
+  VMSVGA3D_D3D9_HOST_RESOURCE_NONE = 0,
+  VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE,
+  VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE,
+  VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE,
+  VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE,
+  VMSVGA3D_D3D9_HOST_RESOURCE_VERTEX_BUFFER,
+  VMSVGA3D_D3D9_HOST_RESOURCE_INDEX_BUFFER,
+} VMSVGA3DD3D9HostResourceType;
+
+typedef enum vmsvga3d_d3d9_execution_preference_e {
+  VMSVGA3D_D3D9_EXECUTION_CPU_ONLY = 0,
+  VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED,
+} VMSVGA3DD3D9ExecutionPreference;
+
+typedef struct vmsvga3d_d3d9_transfer_surface_s {
+  VMSVGA3DD3D9HostResourceType resource_type;
+  SVGA3dSurface1Flags surface_flags;
+  uint32_t usage;
+  uint32_t block_width;
+  uint32_t block_height;
+  uint32_t block_depth;
+  uint32_t bytes_per_block;
+  bool resident;
+  bool has_bounce;
+} VMSVGA3DD3D9TransferSurface;
+
+typedef enum vmsvga3d_d3d9_copy_fallback_e {
+  VMSVGA3D_D3D9_COPY_FALLBACK_NONE = 0,
+  VMSVGA3D_D3D9_COPY_FALLBACK_READBACK_UPDATE,
+  VMSVGA3D_D3D9_COPY_FALLBACK_LOCK_BOTH,
+} VMSVGA3DD3D9CopyFallback;
+
+typedef struct vmsvga3d_d3d9_surface_copy_plan_s {
+  VMSVGA3DD3D9ExecutionPreference execution;
+  VMSVGA3DD3D9CopyFallback gpu_failure_fallback;
+  bool cpu_fallback_allowed;
+  bool create_destination_texture;
+  bool reject_volume_texture;
+  bool require_identical_layout;
+  bool flush_source;
+  bool flush_destination;
+  bool stretch_rect;
+  uint32_t stretch_filter;
+  bool lock_single_gpu_surface;
+  bool lock_source_readonly;
+  bool mark_cpu_destination_dirty;
+  bool update_destination_texture;
+  bool track_source;
+  bool track_destination;
+  bool skip_identical_self_copy;
+  bool require_zero_z;
+} VMSVGA3DD3D9SurfaceCopyPlan;
+
+typedef struct vmsvga3d_d3d9_stretch_blt_plan_s {
+  VMSVGA3DD3D9ExecutionPreference execution;
+  bool cpu_fallback_allowed;
+  bool require_existing_context;
+  bool create_source_texture;
+  bool create_destination_texture;
+  bool reject_volume_texture;
+  bool flush_source;
+  bool flush_destination;
+  bool stretch_rect;
+  uint32_t filter;
+  bool filter_debug_assert;
+  bool require_zero_z;
+  bool track_source;
+  bool track_destination;
+} VMSVGA3DD3D9StretchBltPlan;
+
+typedef enum vmsvga3d_d3d9_dma_path_e {
+  VMSVGA3D_D3D9_DMA_PATH_CPU_SHADOW = 0,
+  VMSVGA3D_D3D9_DMA_PATH_GPU_SURFACE,
+  VMSVGA3D_D3D9_DMA_PATH_BUFFER_SHADOW,
+} VMSVGA3DD3D9DmaPath;
+
+typedef struct vmsvga3d_d3d9_dma_plan_s {
+  VMSVGA3DD3D9ExecutionPreference execution;
+  VMSVGA3DD3D9DmaPath path;
+  bool cpu_fallback_allowed;
+  bool reject_volume_texture;
+  bool flush_surface;
+  bool use_bounce_surface;
+  bool readback_render_target_first_box;
+  bool lock_readonly;
+  bool gmr_transfer;
+  bool update_texture_after_write;
+  bool track_after_update;
+  bool mark_mipmap_dirty;
+  bool mark_surface_dirty;
+} VMSVGA3DD3D9DmaPlan;
+
 typedef enum vmsvga3d_d3d9_shader_stage_e {
   VMSVGA3D_D3D9_SHADER_STAGE_INVALID = 0,
   VMSVGA3D_D3D9_SHADER_STAGE_VERTEX,
@@ -338,6 +431,18 @@ bool vmsvga3d_d3d9_indexed_draw(const SVGA3dVertexDecl *first_decl,
 uint32_t vmsvga3d_d3d9_texture_filter(SVGA3dTextureFilter filter);
 bool vmsvga3d_d3d9_mipmap_plan(SVGA3dTextureFilter filter,
                                  VMSVGA3DD3D9MipmapPlan *plan);
+bool vmsvga3d_d3d9_surface_copy_plan(
+    const VMSVGA3DD3D9TransferSurface *source,
+    const VMSVGA3DD3D9TransferSurface *destination,
+    VMSVGA3DD3D9SurfaceCopyPlan *plan);
+bool vmsvga3d_d3d9_stretch_blt_plan(
+    const VMSVGA3DD3D9TransferSurface *source,
+    const VMSVGA3DD3D9TransferSurface *destination,
+    SVGA3dStretchBltMode mode, VMSVGA3DD3D9StretchBltPlan *plan);
+bool vmsvga3d_d3d9_dma_plan(
+    const VMSVGA3DD3D9TransferSurface *surface,
+    SVGA3dTransferType transfer, bool first_box,
+    VMSVGA3DD3D9DmaPlan *plan);
 bool vmsvga3d_d3d9_query_plan(SVGA3dQueryType type,
                                VMSVGA3DD3D9QueryPlan *plan);
 bool vmsvga3d_d3d9_primitive_type(SVGA3dPrimitiveType type,

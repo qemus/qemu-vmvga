@@ -1463,6 +1463,201 @@ bool vmsvga3d_d3d9_mipmap_plan(SVGA3dTextureFilter filter,
   return true;
 }
 
+static bool vmsvga3d_d3d9_transfer_texture(
+    const VMSVGA3DD3D9TransferSurface *surface) {
+  return surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE ||
+         surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE;
+}
+
+static bool vmsvga3d_d3d9_transfer_volume(
+    const VMSVGA3DD3D9TransferSurface *surface) {
+  return surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE ||
+         (surface->surface_flags & SVGA3D_SURFACE_VOLUME) != 0;
+}
+
+static bool vmsvga3d_d3d9_transfer_buffer(
+    const VMSVGA3DD3D9TransferSurface *surface) {
+  return surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_VERTEX_BUFFER ||
+         surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_INDEX_BUFFER;
+}
+
+bool vmsvga3d_d3d9_surface_copy_plan(
+    const VMSVGA3DD3D9TransferSurface *source,
+    const VMSVGA3DD3D9TransferSurface *destination,
+    VMSVGA3DD3D9SurfaceCopyPlan *plan) {
+  bool source_gpu;
+  bool destination_gpu;
+
+  if (source == NULL || destination == NULL || plan == NULL) {
+    return false;
+  }
+  memset(plan, 0, sizeof(*plan));
+  plan->cpu_fallback_allowed = true;
+  plan->reject_volume_texture = true;
+  plan->require_identical_layout = true;
+  plan->skip_identical_self_copy = true;
+  plan->require_zero_z = true;
+
+  if (vmsvga3d_d3d9_transfer_volume(source) ||
+      vmsvga3d_d3d9_transfer_volume(destination)) {
+    plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+    return true;
+  }
+  if (source->block_width != destination->block_width ||
+      source->block_height != destination->block_height ||
+      source->block_depth != destination->block_depth ||
+      source->bytes_per_block != destination->bytes_per_block) {
+    return false;
+  }
+
+  source_gpu = source->resident;
+  destination_gpu = destination->resident;
+  if (source_gpu && !destination_gpu &&
+      (destination->surface_flags & SVGA3D_SURFACE_HINT_TEXTURE)) {
+    plan->create_destination_texture = true;
+    destination_gpu = true;
+  }
+
+  if (source_gpu && destination_gpu) {
+    plan->execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
+    plan->flush_source = true;
+    plan->flush_destination = true;
+    plan->stretch_rect = true;
+    plan->stretch_filter = 0; /* D3DTEXF_NONE */
+    plan->track_source = true;
+    plan->track_destination = true;
+    if (source->has_bounce &&
+        (source->usage & D3D9_USAGE_RENDERTARGET)) {
+      plan->gpu_failure_fallback =
+          VMSVGA3D_D3D9_COPY_FALLBACK_READBACK_UPDATE;
+    } else if ((source->usage & D3D9_USAGE_RENDERTARGET) == 0 &&
+               (destination->usage & D3D9_USAGE_RENDERTARGET) == 0) {
+      plan->gpu_failure_fallback = VMSVGA3D_D3D9_COPY_FALLBACK_LOCK_BOTH;
+    }
+    return true;
+  }
+
+  plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+  if (source_gpu || destination_gpu) {
+    plan->lock_single_gpu_surface = true;
+    plan->lock_source_readonly = source_gpu;
+    plan->flush_source = source_gpu;
+    plan->flush_destination = destination_gpu;
+  }
+  plan->mark_cpu_destination_dirty = !destination_gpu;
+  if (destination_gpu && vmsvga3d_d3d9_transfer_texture(destination) &&
+      destination->has_bounce) {
+    plan->update_destination_texture = true;
+    plan->track_destination = true;
+  }
+  return true;
+}
+
+bool vmsvga3d_d3d9_stretch_blt_plan(
+    const VMSVGA3DD3D9TransferSurface *source,
+    const VMSVGA3DD3D9TransferSurface *destination,
+    SVGA3dStretchBltMode mode, VMSVGA3DD3D9StretchBltPlan *plan) {
+  if (source == NULL || destination == NULL || plan == NULL) {
+    return false;
+  }
+  memset(plan, 0, sizeof(*plan));
+  plan->execution = source->resident || destination->resident
+                        ? VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED
+                        : VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+  plan->cpu_fallback_allowed = true;
+  plan->require_existing_context = true;
+  plan->create_source_texture = !source->resident && destination->resident;
+  plan->create_destination_texture = !destination->resident && source->resident;
+  plan->reject_volume_texture = true;
+  plan->flush_source = true;
+  plan->flush_destination = true;
+  plan->stretch_rect = true;
+  plan->require_zero_z = true;
+  plan->track_source = true;
+  plan->track_destination = true;
+
+  switch (mode) {
+  case SVGA3D_STRETCH_BLT_POINT:
+    plan->filter = 1; /* D3DTEXF_POINT */
+    break;
+  case SVGA3D_STRETCH_BLT_LINEAR:
+    plan->filter = 2; /* D3DTEXF_LINEAR */
+    break;
+  default:
+    plan->filter = 0; /* D3DTEXF_NONE */
+    plan->filter_debug_assert = true;
+    break;
+  }
+
+  if (vmsvga3d_d3d9_transfer_volume(source) ||
+      vmsvga3d_d3d9_transfer_volume(destination)) {
+    plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+  }
+  return true;
+}
+
+bool vmsvga3d_d3d9_dma_plan(
+    const VMSVGA3DD3D9TransferSurface *surface,
+    SVGA3dTransferType transfer, bool first_box,
+    VMSVGA3DD3D9DmaPlan *plan) {
+  bool texture;
+
+  if (surface == NULL || plan == NULL ||
+      (transfer != SVGA3D_WRITE_HOST_VRAM &&
+       transfer != SVGA3D_READ_HOST_VRAM)) {
+    return false;
+  }
+  memset(plan, 0, sizeof(*plan));
+  plan->cpu_fallback_allowed = true;
+  plan->gmr_transfer = true;
+  plan->reject_volume_texture = true;
+
+  if (!surface->resident) {
+    plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+    plan->path = VMSVGA3D_D3D9_DMA_PATH_CPU_SHADOW;
+    if (transfer == SVGA3D_WRITE_HOST_VRAM) {
+      plan->mark_mipmap_dirty = true;
+      plan->mark_surface_dirty = true;
+    }
+    return true;
+  }
+
+  if (vmsvga3d_d3d9_transfer_buffer(surface)) {
+    plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+    plan->path = VMSVGA3D_D3D9_DMA_PATH_BUFFER_SHADOW;
+    if (transfer == SVGA3D_WRITE_HOST_VRAM) {
+      plan->mark_mipmap_dirty = true;
+      plan->mark_surface_dirty = true;
+    }
+    return true;
+  }
+
+  if (vmsvga3d_d3d9_transfer_volume(surface)) {
+    plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+    plan->path = VMSVGA3D_D3D9_DMA_PATH_CPU_SHADOW;
+    return true;
+  }
+
+  if (surface->resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&
+      !vmsvga3d_d3d9_transfer_texture(surface)) {
+    return false;
+  }
+
+  texture = vmsvga3d_d3d9_transfer_texture(surface);
+  plan->execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
+  plan->path = VMSVGA3D_D3D9_DMA_PATH_GPU_SURFACE;
+  plan->flush_surface = true;
+  plan->use_bounce_surface = texture && surface->has_bounce;
+  plan->lock_readonly = transfer == SVGA3D_READ_HOST_VRAM;
+  plan->readback_render_target_first_box =
+      transfer == SVGA3D_READ_HOST_VRAM && texture && surface->has_bounce &&
+      first_box && (surface->surface_flags & SVGA3D_SURFACE_HINT_RENDERTARGET);
+  plan->update_texture_after_write =
+      transfer == SVGA3D_WRITE_HOST_VRAM && texture && surface->has_bounce;
+  plan->track_after_update = plan->update_texture_after_write;
+  return true;
+}
+
 bool vmsvga3d_d3d9_query_plan(SVGA3dQueryType type,
                                VMSVGA3DD3D9QueryPlan *plan) {
   if (plan == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {

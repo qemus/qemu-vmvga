@@ -58,7 +58,7 @@
 static inline void vmvga_console_mouse_set(QemuConsole *con, int x, int y,
                                             bool on)
 {
-#if QEMU_VERSION_MAJOR == 11
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
     qemu_console_set_mouse(con, x, y, on);
 #else
     dpy_mouse_set(con, x, y, on);
@@ -68,7 +68,7 @@ static inline void vmvga_console_mouse_set(QemuConsole *con, int x, int y,
 static inline void vmvga_console_update(QemuConsole *con, int x, int y,
                                         int w, int h)
 {
-#if QEMU_VERSION_MAJOR == 11
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
     qemu_console_update(con, x, y, w, h);
 #else
     dpy_gfx_update(con, x, y, w, h);
@@ -78,7 +78,7 @@ static inline void vmvga_console_update(QemuConsole *con, int x, int y,
 static inline void vmvga_console_set_cursor(QemuConsole *con,
                                             QEMUCursor *cursor)
 {
-#if QEMU_VERSION_MAJOR == 11
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
     qemu_console_set_cursor(con, cursor);
 #else
     dpy_cursor_define(con, cursor);
@@ -88,7 +88,7 @@ static inline void vmvga_console_set_cursor(QemuConsole *con,
 static inline void vmvga_console_set_surface(QemuConsole *con,
                                              DisplaySurface *surface)
 {
-#if QEMU_VERSION_MAJOR == 11
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
     qemu_console_set_surface(con, surface);
 #else
     dpy_gfx_replace_surface(con, surface);
@@ -98,7 +98,7 @@ static inline void vmvga_console_set_surface(QemuConsole *con,
 static inline QemuConsole *vmvga_graphic_console_create(
     DeviceState *dev, uint32_t head, const GraphicHwOps *ops, void *opaque)
 {
-#if QEMU_VERSION_MAJOR == 11
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
     return qemu_graphic_console_create(dev, head, ops, opaque);
 #else
     return graphic_console_init(dev, head, ops, opaque);
@@ -125,7 +125,7 @@ static inline void vmvga_cursor_unref(QEMUCursor *cursor)
     device_class_set_legacy_reset((_dc), (_reset))
 #endif
 
-#if QEMU_VERSION_MAJOR == 11
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
 #define VMVGA_PROPERTY_QUALIFIER const
 #define VMVGA_PROPERTY_END
 #define VMVGA_CLASS_INIT_DATA const void *

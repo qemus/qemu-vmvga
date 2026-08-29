@@ -25,9 +25,11 @@ Together, these improvements provide better VMware driver compatibility, more re
 
 The device supports accelerated Direct3D workloads from Direct3D 9 through Direct3D 11.
 
-VMware SVGA 3D commands submitted by the guest are processed by the QEMU device and rendered through [DXVK](https://github.com/doitsujin/dxvk), which translates the Direct3D graphics operations to Vulkan on the host.
+VMware SVGA 3D commands are processed by the QEMU device and rendered through [DXVK](https://github.com/doitsujin/dxvk), which translates the Direct3D graphics operations to Vulkan on the host.
 
 This extends the device beyond basic framebuffer and desktop acceleration, allowing compatible VMware display drivers to expose modern Direct3D functionality to the guest.
+
+It requires a Vulkan-capable graphics card, and the DXVK package to be present on the host, otherwise it automatically falls back to 2D acceleration.
 
 ### Legacy 2D acceleration
 
@@ -47,8 +49,6 @@ These commands provide substantially improved compatibility with legacy VMware d
 ## Building 🔨
 
 The source is designed to be overlaid onto a QEMU source tree before QEMU is built. Downstream projects can therefore fetch or vendor this repository, copy the files into their QEMU source tree, and then run their existing QEMU build process.
-
-The 3D implementation requires [DXVK](https://github.com/doitsujin/dxvk) and a Vulkan-capable host graphics stack.
 
 ## Usage 🚀
 

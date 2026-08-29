@@ -1,0 +1,251 @@
+/*
+
+ QEMU VMware Super Video Graphics Array 2 [SVGA-II]
+
+ Copyright (c) 2026 QEMU VMVGA (https://github.com/qemus/qemu-vmvga)
+
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+
+*/
+
+#ifndef HW_DISPLAY_VMWARE_VGA_D3D9_H
+#define HW_DISPLAY_VMWARE_VGA_D3D9_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "svga_types.h"
+#include "svga_reg.h"
+#include "svga3d_cmd.h"
+#include "svga3d_types.h"
+
+/*
+ * This interface deliberately uses D3D9 ABI values without including D3D9
+ * headers.  The future native-D3D9 bridge can therefore live in C++ while the
+ * SVGA protocol layer remains plain C.  The bridge should static_assert these
+ * ABI values against the D3D9 headers it is compiled with.
+ */
+
+#define VMSVGA3D_D3D9_MAX_TEXTURE_STAGES 8u
+#define VMSVGA3D_D3D9_MAX_PIXEL_SAMPLERS 16u
+#define VMSVGA3D_D3D9_DMAP_SAMPLER 256u
+#define VMSVGA3D_D3D9_MAX_SAMPLERS 21u
+#define VMSVGA3D_D3D9_DECL_END_STREAM 0xffu
+
+#define VMSVGA3D_D3D9_MAKE_FOURCC(a, b, c, d) \
+  ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8) | \
+   ((uint32_t)(uint8_t)(c) << 16) | ((uint32_t)(uint8_t)(d) << 24))
+
+typedef enum vmsvga3d_d3d9_translate_result_e {
+  VMSVGA3D_D3D9_TRANSLATE_INVALID = 0,
+  VMSVGA3D_D3D9_TRANSLATE_IGNORE,
+  VMSVGA3D_D3D9_TRANSLATE_EMIT,
+} VMSVGA3DD3D9TranslateResult;
+
+typedef struct vmsvga3d_d3d9_state_op_s {
+  uint32_t state;
+  uint32_t value;
+} VMSVGA3DD3D9StateOp;
+
+typedef struct vmsvga3d_d3d9_render_state_plan_s {
+  uint32_t count;
+  VMSVGA3DD3D9StateOp ops[2];
+} VMSVGA3DD3D9RenderStatePlan;
+
+typedef enum vmsvga3d_d3d9_texture_action_e {
+  VMSVGA3D_D3D9_TEXTURE_ACTION_NONE = 0,
+  VMSVGA3D_D3D9_TEXTURE_ACTION_BIND,
+  VMSVGA3D_D3D9_TEXTURE_ACTION_STAGE_STATE,
+  VMSVGA3D_D3D9_TEXTURE_ACTION_SAMPLER_STATE,
+} VMSVGA3DD3D9TextureAction;
+
+typedef struct vmsvga3d_d3d9_texture_state_plan_s {
+  VMSVGA3DD3D9TextureAction action;
+  uint32_t stage;
+  uint32_t state;
+  uint32_t value;
+} VMSVGA3DD3D9TextureStatePlan;
+
+typedef enum vmsvga3d_d3d9_render_target_action_e {
+  VMSVGA3D_D3D9_RT_ACTION_NONE = 0,
+  VMSVGA3D_D3D9_RT_ACTION_DEPTH_STENCIL,
+  VMSVGA3D_D3D9_RT_ACTION_COLOR,
+} VMSVGA3DD3D9RenderTargetAction;
+
+typedef struct vmsvga3d_d3d9_render_target_plan_s {
+  VMSVGA3DD3D9RenderTargetAction action;
+  uint32_t color_index;
+  bool unbind;
+  bool restore_viewport_zrange_scissor;
+} VMSVGA3DD3D9RenderTargetPlan;
+
+typedef struct vmsvga3d_d3d9_color_s {
+  float r;
+  float g;
+  float b;
+  float a;
+} VMSVGA3DD3D9Color;
+
+typedef struct vmsvga3d_d3d9_vector_s {
+  float x;
+  float y;
+  float z;
+} VMSVGA3DD3D9Vector;
+
+typedef struct vmsvga3d_d3d9_material_s {
+  VMSVGA3DD3D9Color diffuse;
+  VMSVGA3DD3D9Color ambient;
+  VMSVGA3DD3D9Color specular;
+  VMSVGA3DD3D9Color emissive;
+  float power;
+} VMSVGA3DD3D9Material;
+
+typedef struct vmsvga3d_d3d9_light_s {
+  uint32_t type;
+  VMSVGA3DD3D9Color diffuse;
+  VMSVGA3DD3D9Color specular;
+  VMSVGA3DD3D9Color ambient;
+  VMSVGA3DD3D9Vector position;
+  VMSVGA3DD3D9Vector direction;
+  float range;
+  float falloff;
+  float attenuation0;
+  float attenuation1;
+  float attenuation2;
+  float theta;
+  float phi;
+} VMSVGA3DD3D9Light;
+
+typedef struct vmsvga3d_d3d9_viewport_s {
+  uint32_t x;
+  uint32_t y;
+  uint32_t width;
+  uint32_t height;
+  float min_z;
+  float max_z;
+} VMSVGA3DD3D9Viewport;
+
+typedef struct vmsvga3d_d3d9_rect_s {
+  int32_t left;
+  int32_t top;
+  int32_t right;
+  int32_t bottom;
+} VMSVGA3DD3D9Rect;
+
+typedef struct vmsvga3d_d3d9_vertex_element_s {
+  uint16_t stream;
+  uint16_t offset;
+  uint8_t type;
+  uint8_t method;
+  uint8_t usage;
+  uint8_t usage_index;
+} VMSVGA3DD3D9VertexElement;
+
+typedef struct vmsvga3d_d3d9_vertex_stream_s {
+  uint32_t surface_id;
+  uint32_t source_offset;
+  uint32_t stride;
+  uint32_t frequency;
+  uint32_t first_decl;
+  uint32_t decl_count;
+} VMSVGA3DD3D9VertexStream;
+
+typedef struct vmsvga3d_d3d9_indexed_draw_s {
+  int32_t base_vertex_index;
+  uint32_t min_vertex_index;
+  uint32_t num_vertices;
+  uint32_t start_index;
+  uint32_t primitive_count;
+} VMSVGA3DD3D9IndexedDraw;
+
+typedef enum vmsvga3d_d3d9_shader_stage_e {
+  VMSVGA3D_D3D9_SHADER_STAGE_INVALID = 0,
+  VMSVGA3D_D3D9_SHADER_STAGE_VERTEX,
+  VMSVGA3D_D3D9_SHADER_STAGE_PIXEL,
+} VMSVGA3DD3D9ShaderStage;
+
+typedef enum vmsvga3d_d3d9_shader_const_target_e {
+  VMSVGA3D_D3D9_CONST_TARGET_INVALID = 0,
+  VMSVGA3D_D3D9_CONST_TARGET_VS_FLOAT,
+  VMSVGA3D_D3D9_CONST_TARGET_VS_INT,
+  VMSVGA3D_D3D9_CONST_TARGET_VS_BOOL,
+  VMSVGA3D_D3D9_CONST_TARGET_PS_FLOAT,
+  VMSVGA3D_D3D9_CONST_TARGET_PS_INT,
+  VMSVGA3D_D3D9_CONST_TARGET_PS_BOOL,
+} VMSVGA3DD3D9ShaderConstTarget;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+uint32_t vmsvga3d_d3d9_surface_format(SVGA3dSurfaceFormat format);
+uint32_t vmsvga3d_d3d9_multisample_type(uint32_t sample_count);
+bool vmsvga3d_d3d9_transform_type(SVGA3dTransformType type,
+                                   uint32_t *d3d_transform);
+void vmsvga3d_d3d9_apply_z_range(VMSVGA3DD3D9Viewport *viewport,
+                                  const SVGA3dZRange *z_range);
+VMSVGA3DD3D9TranslateResult
+vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
+                            VMSVGA3DD3D9RenderStatePlan *plan);
+VMSVGA3DD3D9TranslateResult
+vmsvga3d_d3d9_render_target(SVGA3dRenderTargetType type,
+                             const SVGA3dSurfaceImageId *target,
+                             VMSVGA3DD3D9RenderTargetPlan *plan);
+uint32_t vmsvga3d_d3d9_sampler_index(uint32_t stage);
+VMSVGA3DD3D9TranslateResult
+vmsvga3d_d3d9_texture_state(const SVGA3dTextureState *state,
+                             VMSVGA3DD3D9TextureStatePlan *plan);
+bool vmsvga3d_d3d9_material(SVGA3dFace face,
+                             const SVGA3dMaterial *material,
+                             VMSVGA3DD3D9Material *d3d_material);
+bool vmsvga3d_d3d9_light(const SVGA3dLightData *light,
+                          VMSVGA3DD3D9Light *d3d_light);
+void vmsvga3d_d3d9_apply_viewport(VMSVGA3DD3D9Viewport *viewport,
+                                   const SVGA3dRect *rect);
+void vmsvga3d_d3d9_rect(const SVGA3dRect *rect,
+                         VMSVGA3DD3D9Rect *d3d_rect);
+uint32_t vmsvga3d_d3d9_clear_flags(SVGA3dClearFlag flags);
+bool vmsvga3d_d3d9_vertex_element(const SVGA3dVertexArrayIdentity *identity,
+                                   uint32_t stream, uint32_t offset,
+                                   VMSVGA3DD3D9VertexElement *element);
+bool vmsvga3d_d3d9_vertex_layout(
+    const SVGA3dVertexDecl *decls, uint32_t decl_count,
+    const SVGA3dVertexDivisor *divisors, uint32_t divisor_count,
+    VMSVGA3DD3D9VertexElement *elements, uint32_t element_capacity,
+    VMSVGA3DD3D9VertexStream *streams, uint32_t stream_capacity,
+    uint32_t *stream_count);
+uint32_t vmsvga3d_d3d9_index_format(uint32_t index_width);
+bool vmsvga3d_d3d9_indexed_draw(const SVGA3dVertexDecl *first_decl,
+                                 const SVGA3dPrimitiveRange *range,
+                                 uint32_t vertex_buffer_bytes,
+                                 VMSVGA3DD3D9IndexedDraw *draw);
+uint32_t vmsvga3d_d3d9_texture_filter(SVGA3dTextureFilter filter);
+bool vmsvga3d_d3d9_primitive_type(SVGA3dPrimitiveType type,
+                                   uint32_t primitive_count,
+                                   uint32_t *d3d_primitive);
+VMSVGA3DD3D9ShaderStage vmsvga3d_d3d9_shader_stage(SVGA3dShaderType type);
+VMSVGA3DD3D9ShaderConstTarget
+vmsvga3d_d3d9_shader_const_target(SVGA3dShaderType type,
+                                   SVGA3dShaderConstType ctype);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

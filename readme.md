@@ -4,10 +4,22 @@ Enhanced VMware SVGA II (`vmware-svga`) graphics device implementation for QEMU.
 
 ## Purpose 🎯
 
-QEMU’s stock VMware SVGA II device provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, and 3D acceleration is also absent.
+QEMU’s stock VMware SVGA II device provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, and VMware's 3D acceleration interfaces are not implemented.
 
-This fork provides a substantially more complete and compatible VMware SVGA II device,
- with both 2D and 3D graphics acceleration.
+This fork provides a substantially more complete and compatible VMware SVGA II device, with both 2D and 3D graphics acceleration.
+
+The core device implementation has also been improved substantially, including:
+
+- PCI compatibility
+- Register and FIFO behavior
+- VRAM and surface-memory
+- Bounds checking
+- Dirty-memory scanning
+- Damage tracking
+- Command batching
+- Optimized pixel operations
+
+Together, these improvements provide better VMware driver compatibility, more reliable rendering, and more efficient display updates.
 
 ### 3D acceleration
 
@@ -19,7 +31,7 @@ This extends the device beyond basic framebuffer and desktop acceleration, allow
 
 ### Legacy 2D acceleration
 
-The implementation also provides the full legacy 2D command stack used by VMware display drivers, including:
+The implementation provides the full legacy 2D command stack used by VMware display drivers, including:
 
 - Rectangle operations
 - Raster operations
@@ -30,18 +42,7 @@ The implementation also provides the full legacy 2D command stack used by VMware
 - Hardware cursors
 - Display updates
 
-The surrounding VMware SVGA II implementation has also been improved substantially, including:
-
-- PCI compatibility
-- Register and FIFO behavior
-- VRAM and surface-memory calculations
-- Bounds checking
-- Dirty-memory scanning
-- Damage tracking
-- Command batching
-- Optimized pixel operations
-
-Together, these improvements provide better VMware driver compatibility, more reliable rendering, accelerated 2D and 3D graphics, and more efficient display updates—particularly when QEMU’s VNC output is used.
+These commands provide substantially improved compatibility with legacy VMware display drivers and enable accelerated desktop rendering, particularly when QEMU's VNC output is used.
 
 ## Building 🔨
 

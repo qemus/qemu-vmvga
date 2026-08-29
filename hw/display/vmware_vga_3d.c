@@ -182,7 +182,8 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_dma(
     const VMSVGA3DD3D9DmaPlan *plan);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     struct vmsvga_state_s *s, const SVGA3dCmdClear *command,
-    const SVGA3dRect *rects, uint32_t rect_count);
+    const SVGA3dRect *rects, uint32_t rect_count,
+    const VMSVGA3DD3D9ClearPlan *plan);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
     struct vmsvga_state_s *s, const SVGA3dCmdPresent *command,
     const SVGA3dCopyRect *rects, uint32_t rect_count);
@@ -1746,11 +1747,67 @@ static bool vmsvga3d_u64_add_product(uint64_t *value, uint64_t count,
   return true;
 };
 
+#ifdef CONFIG_VMSVGA_DXVK
+static bool vmsvga3d_d3d9_clear_context_info(
+    struct vmsvga_state_s *s, uint32_t cid, uint32_t *target_width,
+    uint32_t *target_height, uint32_t *active_render_target_mask) {
+  VMSVGA3DContext *context;
+  VMSVGA3DSurface *surface;
+  SVGA3dSurfaceImageId *color0;
+  uint32_t type;
+  uint32_t mask = 0;
+
+  if (target_width == NULL || target_height == NULL ||
+      active_render_target_mask == NULL) {
+    return false;
+  }
+  context = vmsvga3d_context(s, cid);
+  if (context == NULL) {
+    return false;
+  }
+  color0 = &context->render_targets[SVGA3D_RT_COLOR0];
+  if (color0->sid == SVGA3D_INVALID_ID || s->svga3d == NULL ||
+      color0->sid >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  surface = s->svga3d->surfaces[color0->sid];
+  if (surface == NULL || surface->mip_count == 0 || surface->mips == NULL) {
+    return false;
+  }
+  for (type = 0; type < SVGA3D_RT_MAX; type++) {
+    if (context->render_targets[type].sid != SVGA3D_INVALID_ID) {
+      mask |= 1u << type;
+    }
+  }
+  /* VBox intentionally sizes the temporary clear scissor from mip 0 of
+   * COLOR0's surface, even if a different mip/face is currently bound. */
+  *target_width = surface->mips[0].size.width;
+  *target_height = surface->mips[0].size.height;
+  *active_render_target_mask = mask;
+  return true;
+}
+#endif
+
 static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_clear(
     struct vmsvga_state_s *s, const SVGA3dCmdClear *command,
     const SVGA3dRect *rects, uint32_t rect_count) {
 #ifdef CONFIG_VMSVGA_DXVK
-  return vmsvga3d_d3d9_runtime_clear(s, command, rects, rect_count);
+  VMSVGA3DD3D9ClearPlan plan;
+  uint32_t target_width;
+  uint32_t target_height;
+  uint32_t active_render_target_mask;
+
+  if (command == NULL ||
+      !vmsvga3d_d3d9_clear_context_info(
+          s, command->cid, &target_width, &target_height,
+          &active_render_target_mask) ||
+      !vmsvga3d_d3d9_clear_plan(
+          command->clearFlag, command->color, command->depth,
+          command->stencil, rect_count, target_width, target_height,
+          active_render_target_mask, &plan)) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  return vmsvga3d_d3d9_runtime_clear(s, command, rects, rect_count, &plan);
 #else
   (void)s;
   (void)command;

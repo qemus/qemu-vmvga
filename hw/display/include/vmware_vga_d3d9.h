@@ -359,6 +359,25 @@ typedef struct vmsvga3d_d3d9_dma_plan_s {
   bool mark_surface_dirty;
 } VMSVGA3DD3D9DmaPlan;
 
+typedef struct vmsvga3d_d3d9_clear_plan_s {
+  VMSVGA3DD3D9ExecutionPreference execution;
+  bool cpu_fallback_allowed;
+  bool require_color0;
+  uint32_t flags;
+  uint32_t color;
+  float depth;
+  uint32_t stencil;
+  uint32_t rect_count;
+  bool convert_rectangles;
+  bool save_scissor;
+  bool override_scissor;
+  VMSVGA3DD3D9Rect clear_scissor;
+  bool restore_scissor;
+  bool clear;
+  bool track_active_render_targets;
+  uint32_t active_render_target_mask;
+} VMSVGA3DD3D9ClearPlan;
+
 typedef enum vmsvga3d_d3d9_shader_stage_e {
   VMSVGA3D_D3D9_SHADER_STAGE_INVALID = 0,
   VMSVGA3D_D3D9_SHADER_STAGE_VERTEX,
@@ -414,6 +433,10 @@ void vmsvga3d_d3d9_apply_viewport(VMSVGA3DD3D9Viewport *viewport,
 void vmsvga3d_d3d9_rect(const SVGA3dRect *rect,
                          VMSVGA3DD3D9Rect *d3d_rect);
 uint32_t vmsvga3d_d3d9_clear_flags(SVGA3dClearFlag flags);
+bool vmsvga3d_d3d9_clear_plan(
+    SVGA3dClearFlag flags, uint32_t color, float depth, uint32_t stencil,
+    uint32_t rect_count, uint32_t target_width, uint32_t target_height,
+    uint32_t active_render_target_mask, VMSVGA3DD3D9ClearPlan *plan);
 bool vmsvga3d_d3d9_vertex_element(const SVGA3dVertexArrayIdentity *identity,
                                    uint32_t stream, uint32_t offset,
                                    VMSVGA3DD3D9VertexElement *element);

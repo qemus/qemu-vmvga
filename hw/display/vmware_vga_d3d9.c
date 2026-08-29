@@ -1310,6 +1310,38 @@ uint32_t vmsvga3d_d3d9_clear_flags(SVGA3dClearFlag flags) {
   return d3d_flags;
 }
 
+bool vmsvga3d_d3d9_clear_plan(
+    SVGA3dClearFlag flags, uint32_t color, float depth, uint32_t stencil,
+    uint32_t rect_count, uint32_t target_width, uint32_t target_height,
+    uint32_t active_render_target_mask, VMSVGA3DD3D9ClearPlan *plan) {
+  if (plan == NULL || target_width == 0 || target_height == 0 ||
+      target_width > INT32_MAX || target_height > INT32_MAX) {
+    return false;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
+  plan->cpu_fallback_allowed = true;
+  plan->require_color0 = true;
+  plan->flags = vmsvga3d_d3d9_clear_flags(flags);
+  plan->color = color;
+  plan->depth = depth;
+  plan->stencil = stencil;
+  plan->rect_count = rect_count;
+  plan->convert_rectangles = rect_count != 0;
+  plan->save_scissor = true;
+  plan->override_scissor = true;
+  plan->clear_scissor.left = 0;
+  plan->clear_scissor.top = 0;
+  plan->clear_scissor.right = (int32_t)target_width;
+  plan->clear_scissor.bottom = (int32_t)target_height;
+  plan->restore_scissor = true;
+  plan->clear = true;
+  plan->track_active_render_targets = true;
+  plan->active_render_target_mask = active_render_target_mask;
+  return true;
+}
+
 bool vmsvga3d_d3d9_vertex_element(const SVGA3dVertexArrayIdentity *identity,
                                    uint32_t stream, uint32_t offset,
                                    VMSVGA3DD3D9VertexElement *element) {

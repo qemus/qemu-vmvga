@@ -298,6 +298,7 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_OBJECT  0
 #define VMVGA_TRACE_STREAM  0
 #define VMVGA_TRACE_FIFO    0
+#define VMVGA_TRACE_3D      1
 #define VMVGA_TRACE_QEMU    1
 
 #define VMVGA_TRACE_LOCAL_ENABLED(category)                              \

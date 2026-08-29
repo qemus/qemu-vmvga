@@ -4853,6 +4853,37 @@ static const VMSVGA3DCommandInfo *vmsvga3d_command_info(uint32_t cmd) {
   return NULL;
 };
 
+static bool vmsvga3d_trace_fifo_command(uint32_t cmd) {
+  switch (cmd) {
+  case SVGA_3D_CMD_CONTEXT_DEFINE:
+  case SVGA_3D_CMD_SURFACE_DEFINE:
+  case SVGA_3D_CMD_SURFACE_DEFINE_V2:
+  case SVGA_3D_CMD_DRAW_PRIMITIVES:
+  case SVGA_3D_CMD_PRESENT:
+    return true;
+  default:
+    return cmd >= SVGA_3D_CMD_DX_MIN && cmd <= SVGA_3D_CMD_DX_MAX;
+  };
+};
+
+static const char *vmsvga3d_trace_command_path(uint32_t cmd) {
+  if (cmd >= SVGA_3D_CMD_DX_MIN && cmd <= SVGA_3D_CMD_DX_MAX) {
+    return "DX";
+  };
+  return "D3D9";
+};
+
+static const char *vmsvga3d_trace_command_action(
+    const VMSVGA3DCommandInfo *info) {
+  if (info->handler != NULL) {
+    return "HANDLE";
+  };
+  if (info->action == VMSVGA3D_COMMAND_STALL) {
+    return "STALL";
+  };
+  return "DISCARD";
+};
+
 static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
                                    int32_t *len, uint32_t fifo_start) {
   const VMSVGA3DCommandInfo *info;
@@ -4867,6 +4898,14 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
   info = vmsvga3d_command_info(cmd);
   if (info == NULL) {
     return false;
+  };
+
+  if (vmsvga3d_trace_fifo_command(cmd)) {
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "3D-CMD path=%s name=%s id=%u action=%s fifo=0x%08x",
+        vmsvga3d_trace_command_path(cmd), info->name, cmd,
+        vmsvga3d_trace_command_action(info), fifo_start);
   };
 
   if (info->handler != NULL) {

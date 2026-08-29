@@ -371,6 +371,82 @@ static bool vmsvga3d_state_generate_mipmaps(struct vmsvga_state_s *s,
   return true;
 };
 
+static bool vmsvga3d_state_query_begin(struct vmsvga_state_s *s,
+                                       uint32_t cid,
+                                       SVGA3dQueryType type) {
+  VMSVGA3DContext *context = vmsvga3d_context(s, cid);
+  VMSVGA3DQuery *query;
+
+  if (context == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
+    return false;
+  };
+  query = &context->occlusion;
+  query->defined = true;
+  query->state = VMSVGA3D_QUERY_BUILDING;
+  query->result = 0;
+  return true;
+};
+
+static bool vmsvga3d_state_query_end(struct vmsvga_state_s *s,
+                                     uint32_t cid,
+                                     SVGA3dQueryType type) {
+  VMSVGA3DContext *context = vmsvga3d_context(s, cid);
+  VMSVGA3DQuery *query;
+
+  if (context == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
+    return false;
+  };
+  query = &context->occlusion;
+  if (!query->defined) {
+    return false;
+  };
+  query->state = VMSVGA3D_QUERY_ISSUED;
+  return true;
+};
+
+bool vmsvga3d_state_query_complete(struct vmsvga_state_s *s,
+                                    uint32_t cid, SVGA3dQueryType type,
+                                    uint32_t result) {
+  VMSVGA3DContext *context = vmsvga3d_context(s, cid);
+  VMSVGA3DQuery *query;
+
+  if (context == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
+    return false;
+  };
+  query = &context->occlusion;
+  if (!query->defined || query->state != VMSVGA3D_QUERY_ISSUED) {
+    return false;
+  };
+  query->state = VMSVGA3D_QUERY_SIGNALED;
+  query->result += result;
+  return true;
+};
+
+static VMSVGA3DQueryWaitStatus vmsvga3d_state_query_wait(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dQueryType type,
+    uint32_t *result) {
+  VMSVGA3DContext *context = vmsvga3d_context(s, cid);
+  VMSVGA3DQuery *query;
+
+  if (result != NULL) {
+    *result = 0;
+  };
+  if (context == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
+    return VMSVGA3D_QUERY_WAIT_FAILED;
+  };
+  query = &context->occlusion;
+  if (!query->defined) {
+    return VMSVGA3D_QUERY_WAIT_FAILED;
+  };
+  if (query->state == VMSVGA3D_QUERY_ISSUED) {
+    return VMSVGA3D_QUERY_WAIT_NEEDS_RENDERER;
+  };
+  if (result != NULL) {
+    *result = query->result;
+  };
+  return VMSVGA3D_QUERY_WAIT_READY;
+};
+
 static bool vmsvga3d_state_shader_define(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t shid,
     SVGA3dShaderType type, uint32_t bytecode_size, const uint32_t *bytecode) {

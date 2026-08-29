@@ -68,6 +68,30 @@ enum {
 };
 
 enum {
+  D3D9_RTYPE_SURFACE = 1,
+  D3D9_RTYPE_TEXTURE = 3,
+  D3D9_RTYPE_VOLUME_TEXTURE = 4,
+  D3D9_RTYPE_CUBE_TEXTURE = 5,
+  D3D9_RTYPE_VERTEX_BUFFER = 6,
+  D3D9_RTYPE_INDEX_BUFFER = 7,
+};
+
+enum {
+  D3D9_USAGE_RENDERTARGET = 0x00000001u,
+  D3D9_USAGE_DEPTHSTENCIL = 0x00000002u,
+  D3D9_USAGE_WRITEONLY = 0x00000008u,
+  D3D9_USAGE_DYNAMIC = 0x00000200u,
+  D3D9_USAGE_AUTOGENMIPMAP = 0x00000400u,
+};
+
+enum {
+  D3D9_POOL_DEFAULT = 0,
+  D3D9_POOL_SYSTEMMEM = 2,
+  D3D9_FMT_INDEX16 = 101,
+  D3D9_FMT_INDEX32 = 102,
+};
+
+enum {
   D3D9_RS_ZENABLE = 7,
   D3D9_RS_FILLMODE = 8,
   D3D9_RS_SHADEMODE = 9,
@@ -514,6 +538,295 @@ uint32_t vmsvga3d_d3d9_surface_format(SVGA3dSurfaceFormat format) {
     return D3D9_FMT_UNKNOWN;
   }
   return vmsvga3d_d3d9_format_map[format];
+}
+
+static bool vmsvga3d_d3d9_depth_format(uint32_t format) {
+  return format == D3D9_FMT_D24S8 || format == D3D9_FMT_D24X8 ||
+         format == D3D9_FMT_D32 || format == D3D9_FMT_D16;
+}
+
+SVGA3dSurface1Flags vmsvga3d_d3d9_normalize_surface_flags(
+    SVGA3dSurface1Flags flags, SVGA3dSurfaceFormat format) {
+  switch (format) {
+  case SVGA3D_Z_D32:
+  case SVGA3D_Z_D16:
+  case SVGA3D_Z_D24S8:
+  case SVGA3D_Z_D15S1:
+  case SVGA3D_Z_D24X8:
+  case SVGA3D_Z_DF16:
+  case SVGA3D_Z_DF24:
+  case SVGA3D_Z_D24S8_INT:
+    flags |= (SVGA3dSurface1Flags)SVGA3D_SURFACE_HINT_DEPTHSTENCIL;
+    break;
+  case SVGA3D_DXT1:
+  case SVGA3D_DXT2:
+  case SVGA3D_DXT3:
+  case SVGA3D_DXT4:
+  case SVGA3D_DXT5:
+  case SVGA3D_BUMPU8V8:
+  case SVGA3D_BUMPL6V5U5:
+  case SVGA3D_BUMPX8L8V8U8:
+  case SVGA3D_V8U8:
+  case SVGA3D_Q8W8V8U8:
+  case SVGA3D_CxV8U8:
+  case SVGA3D_X8L8V8U8:
+  case SVGA3D_A2W10V10U10:
+  case SVGA3D_V16U16:
+  case SVGA3D_X8R8G8B8:
+  case SVGA3D_A8R8G8B8:
+  case SVGA3D_R5G6B5:
+  case SVGA3D_X1R5G5B5:
+  case SVGA3D_A1R5G5B5:
+  case SVGA3D_A4R4G4B4:
+    flags |= (SVGA3dSurface1Flags)SVGA3D_SURFACE_HINT_TEXTURE;
+    break;
+  default:
+    break;
+  }
+  return flags;
+}
+
+uint32_t vmsvga3d_d3d9_surface_usage(SVGA3dSurface1Flags flags) {
+  uint32_t usage = 0;
+
+  if (flags & SVGA3D_SURFACE_HINT_DYNAMIC) {
+    usage |= D3D9_USAGE_DYNAMIC;
+  }
+  if (flags & SVGA3D_SURFACE_HINT_RENDERTARGET) {
+    usage |= D3D9_USAGE_RENDERTARGET;
+  }
+  if (flags & SVGA3D_SURFACE_HINT_DEPTHSTENCIL) {
+    usage |= D3D9_USAGE_DEPTHSTENCIL;
+  }
+  if (flags & SVGA3D_SURFACE_HINT_WRITEONLY) {
+    usage |= D3D9_USAGE_WRITEONLY;
+  }
+  if (flags & SVGA3D_SURFACE_AUTOGENMIPMAPS) {
+    usage |= D3D9_USAGE_AUTOGENMIPMAP;
+  }
+  return usage;
+}
+
+uint32_t vmsvga3d_d3d9_actual_format(
+    uint32_t requested_format, const VMSVGA3DD3D9ResourceCaps *caps) {
+  if (caps == NULL) {
+    return requested_format;
+  }
+  if (requested_format == VMSVGA3D_D3D9_MAKE_FOURCC('U', 'Y', 'V', 'Y') &&
+      !caps->supports_uyvy) {
+    return D3D9_FMT_A8R8G8B8;
+  }
+  if (requested_format == VMSVGA3D_D3D9_MAKE_FOURCC('Y', 'U', 'Y', '2') &&
+      !caps->supports_yuy2) {
+    return D3D9_FMT_A8R8G8B8;
+  }
+  if (requested_format == D3D9_FMT_A8B8G8R8 &&
+      !caps->supports_a8b8g8r8) {
+    return D3D9_FMT_A8R8G8B8;
+  }
+  return requested_format;
+}
+
+static void vmsvga3d_d3d9_create_desc(
+    VMSVGA3DD3D9CreateDesc *desc, uint32_t resource_type,
+    const VMSVGA3DD3D9SurfaceInfo *surface, uint32_t levels,
+    uint32_t usage, uint32_t format, uint32_t pool) {
+  memset(desc, 0, sizeof(*desc));
+  desc->valid = true;
+  desc->resource_type = resource_type;
+  desc->width = surface->size.width;
+  desc->height = surface->size.height;
+  desc->depth = surface->size.depth;
+  desc->levels = levels;
+  desc->usage = usage;
+  desc->format = format;
+  desc->pool = pool;
+}
+
+static void vmsvga3d_d3d9_surface_desc(
+    VMSVGA3DD3D9CreateDesc *desc, const VMSVGA3DD3D9SurfaceInfo *surface,
+    uint32_t usage, uint32_t format, bool lockable) {
+  vmsvga3d_d3d9_create_desc(desc, D3D9_RTYPE_SURFACE, surface, 1, usage,
+                            format, D3D9_POOL_DEFAULT);
+  desc->depth = 1;
+  desc->multisample_type =
+      vmsvga3d_d3d9_multisample_type(surface->multisample_count);
+  desc->multisample_quality =
+      desc->multisample_type != 0 && surface->multisample_quality_levels > 0
+          ? surface->multisample_quality_levels - 1
+          : 0;
+  desc->lockable = lockable;
+}
+
+static void vmsvga3d_d3d9_texture_plan(
+    const VMSVGA3DD3D9SurfaceInfo *surface,
+    VMSVGA3DD3D9ResourcePlan *plan) {
+  uint32_t fallback_usage =
+      (plan->base_usage & ~D3D9_USAGE_RENDERTARGET) | D3D9_USAGE_DYNAMIC;
+
+  if (plan->normalized_surface_flags & SVGA3D_SURFACE_CUBEMAP) {
+    vmsvga3d_d3d9_create_desc(&plan->primary, D3D9_RTYPE_CUBE_TEXTURE,
+                              surface, surface->mip_levels, plan->base_usage,
+                              plan->actual_format, D3D9_POOL_DEFAULT);
+    plan->primary.height = plan->primary.width;
+    plan->primary.depth = 1;
+    plan->primary.shared_handle = true;
+    plan->bounce = plan->primary;
+    plan->bounce.usage = fallback_usage;
+    plan->bounce.pool = D3D9_POOL_SYSTEMMEM;
+    plan->bounce.shared_handle = false;
+    plan->has_bounce = true;
+    plan->fallback = plan->primary;
+    plan->fallback.usage = fallback_usage;
+    plan->has_fallback = true;
+  } else if (vmsvga3d_d3d9_depth_format(plan->actual_format)) {
+    vmsvga3d_d3d9_create_desc(&plan->primary, D3D9_RTYPE_TEXTURE, surface,
+                              1, D3D9_USAGE_DEPTHSTENCIL,
+                              VMSVGA3D_D3D9_MAKE_FOURCC('I', 'N', 'T', 'Z'),
+                              D3D9_POOL_DEFAULT);
+    plan->primary.depth = 1;
+    plan->primary.shared_handle = true;
+    plan->stencil_as_texture = true;
+    if (plan->actual_format == D3D9_FMT_D24S8 ||
+        plan->actual_format == D3D9_FMT_D24X8) {
+      plan->bounce = plan->primary;
+      plan->bounce.usage = D3D9_USAGE_DYNAMIC;
+      plan->bounce.pool = D3D9_POOL_SYSTEMMEM;
+      plan->bounce.shared_handle = false;
+      plan->has_bounce = true;
+    }
+  } else if (surface->size.depth > 1) {
+    vmsvga3d_d3d9_create_desc(&plan->primary, D3D9_RTYPE_VOLUME_TEXTURE,
+                              surface, surface->mip_levels, plan->base_usage,
+                              plan->actual_format, D3D9_POOL_DEFAULT);
+    plan->primary.shared_handle = true;
+    plan->bounce = plan->primary;
+    plan->bounce.usage = fallback_usage;
+    plan->bounce.pool = D3D9_POOL_SYSTEMMEM;
+    plan->bounce.shared_handle = false;
+    plan->has_bounce = true;
+    plan->fallback = plan->primary;
+    plan->fallback.usage = fallback_usage;
+    plan->has_fallback = true;
+  } else {
+    vmsvga3d_d3d9_create_desc(&plan->primary, D3D9_RTYPE_TEXTURE, surface,
+                              surface->mip_levels,
+                              plan->base_usage | D3D9_USAGE_RENDERTARGET,
+                              plan->actual_format, D3D9_POOL_DEFAULT);
+    plan->primary.depth = 1;
+    plan->primary.shared_handle = true;
+    plan->bounce = plan->primary;
+    plan->bounce.usage = fallback_usage;
+    plan->bounce.pool = D3D9_POOL_SYSTEMMEM;
+    plan->bounce.shared_handle = false;
+    plan->has_bounce = true;
+    plan->fallback = plan->primary;
+    plan->fallback.usage = fallback_usage;
+    plan->has_fallback = true;
+    if (plan->actual_format != plan->requested_format) {
+      plan->emulated = plan->primary;
+      plan->emulated.shared_handle = false;
+      plan->has_emulated = true;
+      plan->needs_format_conversion = true;
+    }
+  }
+  if (surface->autogen_filter != SVGA3D_TEX_FILTER_NONE) {
+    plan->set_autogen_filter = true;
+    plan->autogen_filter = (uint32_t)surface->autogen_filter;
+  }
+}
+
+bool vmsvga3d_d3d9_resource_plan(
+    const VMSVGA3DD3D9SurfaceInfo *surface, VMSVGA3DD3D9ResourceUse use,
+    const VMSVGA3DD3D9ResourceCaps *caps, VMSVGA3DD3D9ResourcePlan *plan) {
+  if (surface == NULL || caps == NULL || plan == NULL) {
+    return false;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->use = use;
+  plan->normalized_surface_flags = vmsvga3d_d3d9_normalize_surface_flags(
+      surface->surface_flags, surface->format);
+  plan->requested_format = vmsvga3d_d3d9_surface_format(surface->format);
+  plan->actual_format =
+      vmsvga3d_d3d9_actual_format(plan->requested_format, caps);
+  plan->base_usage =
+      vmsvga3d_d3d9_surface_usage(plan->normalized_surface_flags);
+  plan->post_surface_flags = plan->normalized_surface_flags;
+  plan->post_usage = plan->base_usage;
+
+  if (use == VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER ||
+      use == VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER) {
+    uint32_t type = use == VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER
+                        ? D3D9_RTYPE_VERTEX_BUFFER
+                        : D3D9_RTYPE_INDEX_BUFFER;
+    vmsvga3d_d3d9_create_desc(&plan->primary, type, surface, 1,
+                              D3D9_USAGE_DYNAMIC | D3D9_USAGE_WRITEONLY,
+                              D3D9_FMT_UNKNOWN, D3D9_POOL_DEFAULT);
+    plan->primary.length = surface->surface_bytes;
+    plan->primary.width = 0;
+    plan->primary.height = 0;
+    plan->primary.depth = 0;
+    if (use == VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER) {
+      plan->primary.format = surface->index_width == sizeof(uint16_t)
+                                 ? D3D9_FMT_INDEX16
+                                 : D3D9_FMT_INDEX32;
+      plan->post_surface_flags |=
+          (SVGA3dSurface1Flags)SVGA3D_SURFACE_HINT_INDEXBUFFER;
+    } else {
+      plan->post_surface_flags |=
+          (SVGA3dSurface1Flags)SVGA3D_SURFACE_HINT_VERTEXBUFFER;
+    }
+    return true;
+  }
+
+  if (plan->requested_format == D3D9_FMT_UNKNOWN) {
+    return false;
+  }
+
+  if (use == VMSVGA3D_D3D9_RESOURCE_USE_TEXTURE) {
+    vmsvga3d_d3d9_texture_plan(surface, plan);
+    return true;
+  }
+
+  if (use == VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET) {
+    plan->post_surface_flags |=
+        (SVGA3dSurface1Flags)SVGA3D_SURFACE_HINT_RENDERTARGET;
+    plan->post_usage |= D3D9_USAGE_RENDERTARGET;
+    if (plan->normalized_surface_flags & SVGA3D_SURFACE_HINT_TEXTURE) {
+      vmsvga3d_d3d9_texture_plan(surface, plan);
+      plan->use = use;
+    } else {
+      vmsvga3d_d3d9_surface_desc(&plan->primary, surface,
+                                 D3D9_USAGE_RENDERTARGET,
+                                 plan->actual_format, true);
+    }
+    return true;
+  }
+
+  if (use == VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET) {
+    VMSVGA3DD3D9CreateDesc depth_surface;
+    uint32_t ms = vmsvga3d_d3d9_multisample_type(surface->multisample_count);
+
+    plan->post_surface_flags |=
+        (SVGA3dSurface1Flags)SVGA3D_SURFACE_HINT_DEPTHSTENCIL;
+    plan->post_usage |= D3D9_USAGE_DEPTHSTENCIL;
+    vmsvga3d_d3d9_surface_desc(&depth_surface, surface,
+                               D3D9_USAGE_DEPTHSTENCIL,
+                               plan->actual_format, false);
+    if (caps->supports_intz && ms == 0 &&
+        vmsvga3d_d3d9_depth_format(plan->actual_format)) {
+      vmsvga3d_d3d9_texture_plan(surface, plan);
+      plan->use = use;
+      plan->surface_fallback = depth_surface;
+      plan->has_surface_fallback = true;
+    } else {
+      plan->primary = depth_surface;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 uint32_t vmsvga3d_d3d9_multisample_type(uint32_t sample_count) {
@@ -1123,6 +1436,45 @@ bool vmsvga3d_d3d9_indexed_draw(const SVGA3dVertexDecl *first_decl,
 
 uint32_t vmsvga3d_d3d9_texture_filter(SVGA3dTextureFilter filter) {
   return (uint32_t)filter;
+}
+
+bool vmsvga3d_d3d9_mipmap_plan(SVGA3dTextureFilter filter,
+                                 VMSVGA3DD3D9MipmapPlan *plan) {
+  if (plan == NULL || filter < SVGA3D_TEX_FILTER_MIN ||
+      filter >= SVGA3D_TEX_FILTER_MAX) {
+    return false;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->filter = vmsvga3d_d3d9_texture_filter(filter);
+  plan->store_filter = true;
+  plan->require_associated_context = true;
+  plan->create_texture_if_missing = true;
+  plan->allow_texture = true;
+  plan->allow_cube_texture = true;
+  plan->allow_volume_texture = true;
+  plan->set_autogen_filter = true;
+  plan->filter_debug_assert =
+      filter == SVGA3D_TEX_FILTER_FLATCUBIC ||
+      filter == SVGA3D_TEX_FILTER_GAUSSIANCUBIC;
+  plan->filter_failure_is_fatal = false;
+  plan->generate_after_filter_failure = true;
+  plan->generate_sublevels = true;
+  return true;
+}
+
+bool vmsvga3d_d3d9_query_plan(SVGA3dQueryType type,
+                               VMSVGA3DD3D9QueryPlan *plan) {
+  if (plan == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
+    return false;
+  }
+  plan->query_type = 9;    /* D3DQUERYTYPE_OCCLUSION */
+  plan->issue_begin = 2;   /* D3DISSUE_BEGIN */
+  plan->issue_end = 1;     /* D3DISSUE_END */
+  plan->getdata_flags = 1; /* D3DGETDATA_FLUSH */
+  plan->result_size = sizeof(uint32_t);
+  plan->wait_until_ready = true; /* Loop while GetData returns S_FALSE. */
+  return true;
 }
 
 bool vmsvga3d_d3d9_primitive_type(SVGA3dPrimitiveType type,

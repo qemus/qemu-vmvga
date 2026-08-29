@@ -174,6 +174,98 @@ typedef struct vmsvga3d_d3d9_indexed_draw_s {
   uint32_t primitive_count;
 } VMSVGA3DD3D9IndexedDraw;
 
+typedef struct vmsvga3d_d3d9_query_plan_s {
+  uint32_t query_type;
+  uint32_t issue_begin;
+  uint32_t issue_end;
+  uint32_t getdata_flags;
+  uint32_t result_size;
+  bool wait_until_ready;
+} VMSVGA3DD3D9QueryPlan;
+
+typedef struct vmsvga3d_d3d9_mipmap_plan_s {
+  uint32_t filter;
+  bool store_filter;
+  bool require_associated_context;
+  bool create_texture_if_missing;
+  bool allow_texture;
+  bool allow_cube_texture;
+  bool allow_volume_texture;
+  bool set_autogen_filter;
+  bool filter_debug_assert;
+  bool filter_failure_is_fatal;
+  bool generate_after_filter_failure;
+  bool generate_sublevels;
+} VMSVGA3DD3D9MipmapPlan;
+
+typedef enum vmsvga3d_d3d9_resource_use_e {
+  VMSVGA3D_D3D9_RESOURCE_USE_TEXTURE = 0,
+  VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET,
+  VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET,
+  VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER,
+  VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER,
+} VMSVGA3DD3D9ResourceUse;
+
+typedef struct vmsvga3d_d3d9_resource_caps_s {
+  bool supports_uyvy;
+  bool supports_yuy2;
+  bool supports_a8b8g8r8;
+  bool supports_intz;
+} VMSVGA3DD3D9ResourceCaps;
+
+typedef struct vmsvga3d_d3d9_surface_info_s {
+  SVGA3dSurface1Flags surface_flags;
+  SVGA3dSurfaceFormat format;
+  SVGA3dSize size;
+  uint32_t mip_levels;
+  uint32_t multisample_count;
+  SVGA3dTextureFilter autogen_filter;
+  uint32_t surface_bytes;
+  uint32_t index_width;
+  uint32_t multisample_quality_levels;
+} VMSVGA3DD3D9SurfaceInfo;
+
+typedef struct vmsvga3d_d3d9_create_desc_s {
+  bool valid;
+  uint32_t resource_type;
+  uint32_t width;
+  uint32_t height;
+  uint32_t depth;
+  uint32_t levels;
+  uint32_t length;
+  uint32_t usage;
+  uint32_t format;
+  uint32_t pool;
+  uint32_t multisample_type;
+  uint32_t multisample_quality;
+  bool lockable;
+  bool discard;
+  bool shared_handle;
+} VMSVGA3DD3D9CreateDesc;
+
+typedef struct vmsvga3d_d3d9_resource_plan_s {
+  VMSVGA3DD3D9ResourceUse use;
+  SVGA3dSurface1Flags normalized_surface_flags;
+  SVGA3dSurface1Flags post_surface_flags;
+  uint32_t requested_format;
+  uint32_t actual_format;
+  uint32_t base_usage;
+  uint32_t post_usage;
+  VMSVGA3DD3D9CreateDesc primary;
+  VMSVGA3DD3D9CreateDesc bounce;
+  VMSVGA3DD3D9CreateDesc fallback;
+  VMSVGA3DD3D9CreateDesc emulated;
+  VMSVGA3DD3D9CreateDesc surface_fallback;
+  bool has_bounce;
+  bool has_fallback;
+  bool has_emulated;
+  bool has_surface_fallback;
+  bool stencil_as_texture;
+  bool needs_format_conversion;
+  bool set_autogen_filter;
+  uint32_t autogen_filter;
+} VMSVGA3DD3D9ResourcePlan;
+
 typedef enum vmsvga3d_d3d9_shader_stage_e {
   VMSVGA3D_D3D9_SHADER_STAGE_INVALID = 0,
   VMSVGA3D_D3D9_SHADER_STAGE_VERTEX,
@@ -195,6 +287,14 @@ extern "C" {
 #endif
 
 uint32_t vmsvga3d_d3d9_surface_format(SVGA3dSurfaceFormat format);
+SVGA3dSurface1Flags vmsvga3d_d3d9_normalize_surface_flags(
+    SVGA3dSurface1Flags flags, SVGA3dSurfaceFormat format);
+uint32_t vmsvga3d_d3d9_surface_usage(SVGA3dSurface1Flags flags);
+uint32_t vmsvga3d_d3d9_actual_format(
+    uint32_t requested_format, const VMSVGA3DD3D9ResourceCaps *caps);
+bool vmsvga3d_d3d9_resource_plan(
+    const VMSVGA3DD3D9SurfaceInfo *surface, VMSVGA3DD3D9ResourceUse use,
+    const VMSVGA3DD3D9ResourceCaps *caps, VMSVGA3DD3D9ResourcePlan *plan);
 uint32_t vmsvga3d_d3d9_multisample_type(uint32_t sample_count);
 bool vmsvga3d_d3d9_transform_type(SVGA3dTransformType type,
                                    uint32_t *d3d_transform);
@@ -236,6 +336,10 @@ bool vmsvga3d_d3d9_indexed_draw(const SVGA3dVertexDecl *first_decl,
                                  uint32_t vertex_buffer_bytes,
                                  VMSVGA3DD3D9IndexedDraw *draw);
 uint32_t vmsvga3d_d3d9_texture_filter(SVGA3dTextureFilter filter);
+bool vmsvga3d_d3d9_mipmap_plan(SVGA3dTextureFilter filter,
+                                 VMSVGA3DD3D9MipmapPlan *plan);
+bool vmsvga3d_d3d9_query_plan(SVGA3dQueryType type,
+                               VMSVGA3DD3D9QueryPlan *plan);
 bool vmsvga3d_d3d9_primitive_type(SVGA3dPrimitiveType type,
                                    uint32_t primitive_count,
                                    uint32_t *d3d_primitive);

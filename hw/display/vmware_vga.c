@@ -420,8 +420,7 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
 
 /*
  * Some legacy VMware display drivers enter the VGA/VDD teardown path while
- * SVGA_REG_ENABLE is still set.  Match the observed hardware access sequence
- * only; this deliberately has no knowledge of the guest operating system.
+ * SVGA_REG_ENABLE is still set. Match the observed hardware access sequence only.
  */
 struct vmsvga_legacy_shutdown_step_s {
   uint16_t port;

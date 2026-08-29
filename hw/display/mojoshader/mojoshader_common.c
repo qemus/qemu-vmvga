@@ -1,3 +1,5 @@
+/* Modified by qemu-vmvga for QEMU drop-in integration. */
+
 #define __MOJOSHADER_INTERNAL__ 1
 #include "mojoshader_internal.h"
 #ifndef MOJOSHADER_USE_SDL_STDLIB
@@ -9,10 +11,12 @@
 static char zeromalloc = 0;
 void * MOJOSHADERCALL MOJOSHADER_internal_malloc(int bytes, void *d)
 {
+    (void) d;
     return (bytes == 0) ? &zeromalloc : malloc(bytes);
 } // MOJOSHADER_internal_malloc
 void MOJOSHADERCALL MOJOSHADER_internal_free(void *ptr, void *d)
 {
+    (void) d;
     if ((ptr != &zeromalloc) && (ptr != NULL))
         free(ptr);
 } // MOJOSHADER_internal_free
@@ -272,11 +276,19 @@ int hash_keymatch_string(const void *a, const void *b, void *data)
 
 // string -> string map...
 
-static void stringmap_nuke_noop(const void *ctx, const void *key, const void *val, void *d) {}
+static void stringmap_nuke_noop(const void *ctx, const void *key, const void *val, void *d)
+{
+    (void) ctx;
+    (void) key;
+    (void) val;
+    (void) d;
+}
 
 static void stringmap_nuke(const void *ctx, const void *key, const void *val, void *d)
 {
     StringMap *smap = (StringMap *) d;
+    (void) ctx;
+    (void) ctx;
     smap->f((void *) key, smap->d);
     smap->f((void *) val, smap->d);
 } // stringmap_nuke
@@ -427,7 +439,7 @@ const char *stringcache_fmt(StringCache *cache, const char *fmt, ...)
     len = vsnprintf(buf, sizeof (buf), fmt, ap);
     va_end(ap);
 
-    if (len > sizeof (buf))
+    if (len > (int) sizeof (buf))
     {
         ptr = (char *) cache->m(len, cache->d);
         if (ptr == NULL)
@@ -598,7 +610,7 @@ int errorlist_add_va(ErrorList *list, const char *_fname,
     // If we overflowed our scratch buffer, that's okay. We were going to
     //  allocate anyhow...the scratch buffer just lets us avoid a second
     //  run of vsnprintf().
-    if (len < sizeof (scratch))
+    if (len < (int) sizeof (scratch))
         strcpy(failstr, scratch);  // copy it over.
     else
     {
@@ -809,7 +821,7 @@ int buffer_append_va(Buffer *buffer, const char *fmt, va_list va)
 
     if (len == 0)
         return 1;  // nothing to do.
-    else if (len < sizeof (scratch))
+    else if (len < (int) sizeof (scratch))
         return buffer_append(buffer, scratch, len);
 
     char *buf = (char *) buffer->m(len + 1, buffer->d);
@@ -1067,8 +1079,12 @@ void MOJOSHADER_spirv_link_attributes(const MOJOSHADER_parseData *vertex,
     uint32 vOffset, pOffset;
     int vDataLen = vertex->output_len - sizeof(SpirvPatchTable);
     int pDataLen = pixel->output_len - sizeof(SpirvPatchTable);
-    SpirvPatchTable *vTable = (SpirvPatchTable *) &vertex->output[vDataLen];
-    SpirvPatchTable *pTable = (SpirvPatchTable *) &pixel->output[pDataLen];
+    SpirvPatchTable vTableStorage;
+    SpirvPatchTable pTableStorage;
+    SpirvPatchTable *vTable = &vTableStorage;
+    SpirvPatchTable *pTable = &pTableStorage;
+    memcpy(vTable, &vertex->output[vDataLen], sizeof(*vTable));
+    memcpy(pTable, &pixel->output[pDataLen], sizeof(*pTable));
     const uint32 texcoord0Loc = pTable->attrib_offsets[MOJOSHADER_USAGE_TEXCOORD][0];
 
     if (is_glspirv)

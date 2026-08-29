@@ -60,13 +60,18 @@ typedef enum vmsvga_shader_status_e {
 } VMSVGAShaderStatus;
 
 typedef enum vmsvga_shader_resource_type_e {
-  VMSVGA_SHADER_RESOURCE_FLOAT_CONSTANTS = 0,
-  VMSVGA_SHADER_RESOURCE_INT_CONSTANTS,
-  VMSVGA_SHADER_RESOURCE_BOOL_CONSTANTS,
+  VMSVGA_SHADER_RESOURCE_CONSTANT_BLOCK = 0,
   VMSVGA_SHADER_RESOURCE_COMBINED_IMAGE_SAMPLER,
   VMSVGA_SHADER_RESOURCE_SAMPLED_IMAGE,
   VMSVGA_SHADER_RESOURCE_SAMPLER,
 } VMSVGAShaderResourceType;
+
+typedef enum vmsvga_shader_sampler_type_e {
+  VMSVGA_SHADER_SAMPLER_UNKNOWN = 0,
+  VMSVGA_SHADER_SAMPLER_2D,
+  VMSVGA_SHADER_SAMPLER_CUBE,
+  VMSVGA_SHADER_SAMPLER_VOLUME,
+} VMSVGAShaderSamplerType;
 
 typedef enum vmsvga_shader_semantic_e {
   VMSVGA_SHADER_SEMANTIC_POSITION = 0,
@@ -109,6 +114,7 @@ typedef enum vmsvga_shader_vertex_format_e {
 
 typedef struct vmsvga_shader_resource_s {
   VMSVGAShaderResourceType type;
+  VMSVGAShaderSamplerType sampler_type;
   uint32_t guest_slot;
   uint32_t descriptor_set;
   uint32_t binding;
@@ -116,8 +122,8 @@ typedef struct vmsvga_shader_resource_s {
 } VMSVGAShaderResource;
 
 typedef struct vmsvga_shader_reflection_s {
-  uint32_t input_register_mask;
-  uint32_t output_register_mask;
+  uint32_t input_semantic_mask[VMSVGA_SHADER_SEMANTIC_MAX];
+  uint32_t output_semantic_mask[VMSVGA_SHADER_SEMANTIC_MAX];
   uint32_t sampler_mask;
   uint32_t float_constant_mask[8];
   uint32_t int_constant_mask;

@@ -113,6 +113,7 @@ static inline const char *get_SPIRV_const_array_varname_in_buf(Context *ctx,
                                                 const int base, const int size,
                                                 char *buf, const size_t buflen)
 {
+    (void) ctx;
     snprintf(buf, buflen, "c_array_%d_%d", base, size);
     return buf;
 } // get_SPIRV_const_array_varname_in_buf
@@ -798,8 +799,11 @@ static void spv_add_attrib_fixup(Context *ctx, RegisterList *r, unsigned int typ
     next_types = (uint32*) Malloc(ctx, sizeof(uint32) * (TYPE_LOAD_OFFSET.num_loads + 1));
     next_opcodes = (uint32*) Malloc(ctx, sizeof(uint32) * (TYPE_LOAD_OFFSET.num_loads + 1));
 
-    memcpy(next_types, TYPE_LOAD_OFFSET.load_types, sizeof(uint32) * TYPE_LOAD_OFFSET.num_loads);
-    memcpy(next_opcodes, TYPE_LOAD_OFFSET.load_opcodes, sizeof(uint32) * TYPE_LOAD_OFFSET.num_loads);
+    if (TYPE_LOAD_OFFSET.num_loads != 0)
+    {
+        memcpy(next_types, TYPE_LOAD_OFFSET.load_types, sizeof(uint32) * TYPE_LOAD_OFFSET.num_loads);
+        memcpy(next_opcodes, TYPE_LOAD_OFFSET.load_opcodes, sizeof(uint32) * TYPE_LOAD_OFFSET.num_loads);
+    }
 
     Free(ctx, TYPE_LOAD_OFFSET.load_types);
     Free(ctx, TYPE_LOAD_OFFSET.load_opcodes);
@@ -1380,6 +1384,9 @@ static void spv_assign_destarg(Context *ctx, SpirvResult value)
 
 static void spv_emit_vs_main_end(Context* ctx)
 {
+#if !SUPPORT_PROFILE_GLSPIRV
+    (void) ctx;
+#endif
 #if SUPPORT_PROFILE_GLSPIRV
 #if defined(MOJOSHADER_DEPTH_CLIPPING) || defined(MOJOSHADER_FLIP_RENDERTARGET)
     if (!ctx->profile_supports_glspirv || !shader_is_vertex(ctx))
@@ -1949,6 +1956,7 @@ void emit_SPIRV_end(Context *ctx)
 
 void emit_SPIRV_phase(Context *ctx)
 {
+    (void) ctx;
     // no-op
 } // emit_SPIRV_phase
 
@@ -2201,7 +2209,7 @@ void emit_SPIRV_sampler(Context *ctx, int stage, TextureType ttype, int texbem)
 
     if (ctx->spirv.mode == SPIRV_MODE_GL)
     {
-        assert(sampler_reg->regnum < STATICARRAYLEN(ctx->spirv.patch_table.samplers));
+        assert(sampler_reg->regnum >= 0 && (unsigned int) sampler_reg->regnum < STATICARRAYLEN(ctx->spirv.patch_table.samplers));
         uint32 location_offset = spv_output_location(ctx, result, ~0u);
         ctx->spirv.patch_table.samplers[sampler_reg->regnum].offset = location_offset;
     }
@@ -2213,6 +2221,7 @@ void emit_SPIRV_attribute(Context *ctx, RegisterType regtype, int regnum,
                           MOJOSHADER_usage usage, int index, int wmask,
                           int flags)
 {
+    (void) wmask;
     uint32 tid;
     RegisterList *r = spv_getreg(ctx, regtype, regnum);
 
@@ -2796,6 +2805,7 @@ void emit_SPIRV_finalize(Context *ctx)
 
 void emit_SPIRV_NOP(Context *ctx)
 {
+    (void) ctx;
     // no-op is a no-op.  :)
     // TODO: (hnn) SPIR-V has OpNop :O
 } // emit_SPIRV_NOP
@@ -4143,6 +4153,7 @@ void emit_SPIRV_BREAK(Context *ctx)
 
 void emit_SPIRV_TEXM3X2PAD(Context *ctx)
 {
+    (void) ctx;
     // no-op ... work happens in emit_SPIRV_TEXM3X2TEX().
 } // emit_SPIRV_TEXM3X2PAD
 
@@ -4189,6 +4200,7 @@ void emit_SPIRV_TEXM3X2TEX(Context *ctx)
 
 void emit_SPIRV_TEXM3X3PAD(Context *ctx)
 {
+    (void) ctx;
     // no-op ... work happens in emit_SPIRV_TEXM3X3*().
 } // emit_SPIRV_TEXM3X3PAD
 
@@ -4381,6 +4393,7 @@ void emit_SPIRV_DSY(Context *ctx)
 
 void emit_SPIRV_RESERVED(Context *ctx)
 {
+    (void) ctx;
     // do nothing; fails in the state machine.
 } // emit_SPIRV_RESERVED
 

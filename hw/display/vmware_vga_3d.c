@@ -33,7 +33,7 @@
 #include "include/svga3d_shaderdefs.h"
 #include "include/svga3d_surfacedefs.h"
 #include "include/svga3d_types.h"
-#include "include/vmware_vga_3d_backend.h"
+#include "include/vmware_vga_3d_state.h"
 #include "include/vmware_vga_d3d9.h"
 
 typedef struct {
@@ -134,13 +134,10 @@ typedef struct vmsvga3d_surface_s {
 struct vmsvga3d_state_s {
   VMSVGA3DContext *contexts[SVGA3D_MAX_CONTEXT_IDS];
   VMSVGA3DSurface *surfaces[SVGA3D_MAX_SURFACE_IDS];
-  const VMSVGA3DBackendOpsVGPU9 *backend_vgpu9;
-  void *backend_vgpu9_opaque;
   size_t surface_bytes;
   size_t shader_bytes;
 };
 
-static const VMSVGA3DBackendOpsVGPU9 vmsvga3d_backend_vgpu9_default;
 
 static bool vmsvga3d_shader_type_index(SVGA3dShaderType type,
                                        uint32_t *index) {
@@ -203,45 +200,8 @@ static struct vmsvga3d_state_s *
 vmsvga3d_state_ensure(struct vmsvga_state_s *s) {
   if (s->svga3d == NULL) {
     s->svga3d = g_try_new0(struct vmsvga3d_state_s, 1);
-    if (s->svga3d != NULL) {
-      s->svga3d->backend_vgpu9 = &vmsvga3d_backend_vgpu9_default;
-    };
-  } else if (s->svga3d->backend_vgpu9 == NULL) {
-    s->svga3d->backend_vgpu9 = &vmsvga3d_backend_vgpu9_default;
   };
   return s->svga3d;
-};
-
-static const VMSVGA3DBackendOpsVGPU9 *
-vmsvga3d_backend_vgpu9(struct vmsvga_state_s *s) {
-  struct vmsvga3d_state_s *state = vmsvga3d_state_ensure(s);
-
-  return state != NULL ? state->backend_vgpu9 : NULL;
-};
-
-bool vmsvga3d_backend_vgpu9_set(struct vmsvga_state_s *s,
-                                 const VMSVGA3DBackendOpsVGPU9 *ops,
-                                 void *opaque) {
-  struct vmsvga3d_state_s *state;
-
-  if (s == NULL) {
-    return false;
-  };
-  state = vmsvga3d_state_ensure(s);
-  if (state == NULL) {
-    return false;
-  };
-  state->backend_vgpu9 =
-      ops != NULL ? ops : &vmsvga3d_backend_vgpu9_default;
-  state->backend_vgpu9_opaque = ops != NULL ? opaque : NULL;
-  return true;
-};
-
-void *vmsvga3d_backend_vgpu9_opaque(struct vmsvga_state_s *s) {
-  if (s == NULL || s->svga3d == NULL) {
-    return NULL;
-  };
-  return s->svga3d->backend_vgpu9_opaque;
 };
 
 static void vmsvga3d_reset(struct vmsvga_state_s *s) {
@@ -717,7 +677,6 @@ static bool vmsvga3d_handle_surface_destroy(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_context_define(struct vmsvga_state_s *s,
                                            uint32_t cmd, int32_t *len,
                                            uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdDefineContext *body;
   void *payload;
   uint32_t size;
@@ -728,10 +687,7 @@ static bool vmsvga3d_handle_context_define(struct vmsvga_state_s *s,
   };
   if (size >= sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->context_define != NULL) {
-      (void)backend->context_define(s, body->cid);
-    };
+    (void)vmsvga3d_state_context_define(s, body->cid);
   };
   g_free(payload);
   return true;
@@ -740,7 +696,6 @@ static bool vmsvga3d_handle_context_define(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_context_destroy(struct vmsvga_state_s *s,
                                             uint32_t cmd, int32_t *len,
                                             uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdDestroyContext *body;
   void *payload;
   uint32_t size;
@@ -751,10 +706,7 @@ static bool vmsvga3d_handle_context_destroy(struct vmsvga_state_s *s,
   };
   if (size >= sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->context_destroy != NULL) {
-      (void)backend->context_destroy(s, body->cid);
-    };
+    (void)vmsvga3d_state_context_destroy(s, body->cid);
   };
   g_free(payload);
   return true;
@@ -776,7 +728,6 @@ static VMSVGA3DContext *vmsvga3d_context(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_transform(struct vmsvga_state_s *s,
                                            uint32_t cmd, int32_t *len,
                                            uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetTransform *body;
   void *payload;
   uint32_t size;
@@ -787,10 +738,7 @@ static bool vmsvga3d_handle_set_transform(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_transform != NULL) {
-      (void)backend->set_transform(s, body->cid, body->type, body->matrix);
-    };
+    (void)vmsvga3d_state_set_transform(s, body->cid, body->type, body->matrix);
   };
   g_free(payload);
   return true;
@@ -799,7 +747,6 @@ static bool vmsvga3d_handle_set_transform(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_z_range(struct vmsvga_state_s *s,
                                          uint32_t cmd, int32_t *len,
                                          uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetZRange *body;
   void *payload;
   uint32_t size;
@@ -810,10 +757,7 @@ static bool vmsvga3d_handle_set_z_range(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_z_range != NULL) {
-      (void)backend->set_z_range(s, body->cid, &body->zRange);
-    };
+    (void)vmsvga3d_state_set_z_range(s, body->cid, &body->zRange);
   };
   g_free(payload);
   return true;
@@ -822,7 +766,6 @@ static bool vmsvga3d_handle_set_z_range(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_material(struct vmsvga_state_s *s,
                                           uint32_t cmd, int32_t *len,
                                           uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetMaterial *body;
   void *payload;
   uint32_t size;
@@ -833,10 +776,7 @@ static bool vmsvga3d_handle_set_material(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_material != NULL) {
-      (void)backend->set_material(s, body->cid, body->face, &body->material);
-    };
+    (void)vmsvga3d_state_set_material(s, body->cid, body->face, &body->material);
   };
   g_free(payload);
   return true;
@@ -845,7 +785,6 @@ static bool vmsvga3d_handle_set_material(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_light_data(struct vmsvga_state_s *s,
                                             uint32_t cmd, int32_t *len,
                                             uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetLightData *body;
   void *payload;
   uint32_t size;
@@ -856,10 +795,7 @@ static bool vmsvga3d_handle_set_light_data(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_light_data != NULL) {
-      (void)backend->set_light_data(s, body->cid, body->index, &body->data);
-    };
+    (void)vmsvga3d_state_set_light_data(s, body->cid, body->index, &body->data);
   };
   g_free(payload);
   return true;
@@ -868,7 +804,6 @@ static bool vmsvga3d_handle_set_light_data(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_light_enabled(struct vmsvga_state_s *s,
                                                uint32_t cmd, int32_t *len,
                                                uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetLightEnabled *body;
   void *payload;
   uint32_t size;
@@ -879,11 +814,8 @@ static bool vmsvga3d_handle_set_light_enabled(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_light_enabled != NULL) {
-      (void)backend->set_light_enabled(s, body->cid, body->index,
-                                       body->enabled);
-    };
+    (void)vmsvga3d_state_set_light_enabled(s, body->cid, body->index,
+                                          body->enabled);
   };
   g_free(payload);
   return true;
@@ -892,7 +824,6 @@ static bool vmsvga3d_handle_set_light_enabled(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_clip_plane(struct vmsvga_state_s *s,
                                             uint32_t cmd, int32_t *len,
                                             uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetClipPlane *body;
   void *payload;
   uint32_t size;
@@ -903,10 +834,7 @@ static bool vmsvga3d_handle_set_clip_plane(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_clip_plane != NULL) {
-      (void)backend->set_clip_plane(s, body->cid, body->index, body->plane);
-    };
+    (void)vmsvga3d_state_set_clip_plane(s, body->cid, body->index, body->plane);
   };
   g_free(payload);
   return true;
@@ -915,7 +843,6 @@ static bool vmsvga3d_handle_set_clip_plane(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
                                               uint32_t cmd, int32_t *len,
                                               uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetRenderState *body;
   SVGA3dRenderState *states;
   void *payload;
@@ -934,10 +861,7 @@ static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
   body = payload;
   states = (SVGA3dRenderState *)(body + 1);
   count = (size - sizeof(*body)) / sizeof(*states);
-  backend = vmsvga3d_backend_vgpu9(s);
-  if (backend != NULL && backend->set_render_state != NULL) {
-    (void)backend->set_render_state(s, body->cid, count, states);
-  };
+  (void)vmsvga3d_state_set_render_state(s, body->cid, count, states);
   g_free(payload);
   return true;
 };
@@ -945,7 +869,6 @@ static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_texture_state(struct vmsvga_state_s *s,
                                                uint32_t cmd, int32_t *len,
                                                uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetTextureState *body;
   SVGA3dTextureState *states;
   void *payload;
@@ -964,10 +887,7 @@ static bool vmsvga3d_handle_set_texture_state(struct vmsvga_state_s *s,
   body = payload;
   states = (SVGA3dTextureState *)(body + 1);
   count = (size - sizeof(*body)) / sizeof(*states);
-  backend = vmsvga3d_backend_vgpu9(s);
-  if (backend != NULL && backend->set_texture_state != NULL) {
-    (void)backend->set_texture_state(s, body->cid, count, states);
-  };
+  (void)vmsvga3d_state_set_texture_state(s, body->cid, count, states);
   g_free(payload);
   return true;
 };
@@ -975,7 +895,6 @@ static bool vmsvga3d_handle_set_texture_state(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_render_target(struct vmsvga_state_s *s,
                                                uint32_t cmd, int32_t *len,
                                                uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetRenderTarget *body;
   void *payload;
   uint32_t size;
@@ -986,11 +905,8 @@ static bool vmsvga3d_handle_set_render_target(struct vmsvga_state_s *s,
   };
   if (size >= sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_render_target != NULL) {
-      (void)backend->set_render_target(s, body->cid, body->type,
-                                       &body->target);
-    };
+    (void)vmsvga3d_state_set_render_target(s, body->cid, body->type,
+                                         &body->target);
   };
   g_free(payload);
   return true;
@@ -999,7 +915,6 @@ static bool vmsvga3d_handle_set_render_target(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_viewport(struct vmsvga_state_s *s,
                                           uint32_t cmd, int32_t *len,
                                           uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetViewport *body;
   void *payload;
   uint32_t size;
@@ -1010,10 +925,7 @@ static bool vmsvga3d_handle_set_viewport(struct vmsvga_state_s *s,
   };
   if (size >= sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_viewport != NULL) {
-      (void)backend->set_viewport(s, body->cid, &body->rect);
-    };
+    (void)vmsvga3d_state_set_viewport(s, body->cid, &body->rect);
   };
   g_free(payload);
   return true;
@@ -1022,7 +934,6 @@ static bool vmsvga3d_handle_set_viewport(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_scissor(struct vmsvga_state_s *s,
                                          uint32_t cmd, int32_t *len,
                                          uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetScissorRect *body;
   void *payload;
   uint32_t size;
@@ -1033,10 +944,7 @@ static bool vmsvga3d_handle_set_scissor(struct vmsvga_state_s *s,
   };
   if (size >= sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_scissor != NULL) {
-      (void)backend->set_scissor(s, body->cid, &body->rect);
-    };
+    (void)vmsvga3d_state_set_scissor(s, body->cid, &body->rect);
   };
   g_free(payload);
   return true;
@@ -1045,7 +953,6 @@ static bool vmsvga3d_handle_set_scissor(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_generate_mipmaps(struct vmsvga_state_s *s,
                                                uint32_t cmd, int32_t *len,
                                                uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdGenerateMipmaps *body;
   void *payload;
   uint32_t size;
@@ -1056,10 +963,7 @@ static bool vmsvga3d_handle_generate_mipmaps(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->generate_mipmaps != NULL) {
-      (void)backend->generate_mipmaps(s, body->sid, body->filter);
-    };
+    (void)vmsvga3d_state_generate_mipmaps(s, body->sid, body->filter);
   };
   g_free(payload);
   return true;
@@ -1068,7 +972,6 @@ static bool vmsvga3d_handle_generate_mipmaps(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_shader_define(struct vmsvga_state_s *s,
                                            uint32_t cmd, int32_t *len,
                                            uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdDefineShader *body;
   void *payload;
   uint32_t size;
@@ -1084,12 +987,9 @@ static bool vmsvga3d_handle_shader_define(struct vmsvga_state_s *s,
   };
   body = payload;
   bytecode_size = size - sizeof(*body);
-  backend = vmsvga3d_backend_vgpu9(s);
-  if (backend != NULL && backend->shader_define != NULL) {
-    (void)backend->shader_define(s, body->cid, body->shid, body->type,
-                                 bytecode_size,
-                                 (const uint32_t *)(body + 1));
-  };
+  (void)vmsvga3d_state_shader_define(
+      s, body->cid, body->shid, body->type, bytecode_size,
+      (const uint32_t *)(body + 1));
   g_free(payload);
   return true;
 };
@@ -1097,7 +997,6 @@ static bool vmsvga3d_handle_shader_define(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_shader_destroy(struct vmsvga_state_s *s,
                                             uint32_t cmd, int32_t *len,
                                             uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdDestroyShader *body;
   void *payload;
   uint32_t size;
@@ -1108,10 +1007,7 @@ static bool vmsvga3d_handle_shader_destroy(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->shader_destroy != NULL) {
-      (void)backend->shader_destroy(s, body->cid, body->shid, body->type);
-    };
+    (void)vmsvga3d_state_shader_destroy(s, body->cid, body->shid, body->type);
   };
   g_free(payload);
   return true;
@@ -1120,7 +1016,6 @@ static bool vmsvga3d_handle_shader_destroy(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_set_shader(struct vmsvga_state_s *s,
                                         uint32_t cmd, int32_t *len,
                                         uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetShader *body;
   void *payload;
   uint32_t size;
@@ -1131,10 +1026,7 @@ static bool vmsvga3d_handle_set_shader(struct vmsvga_state_s *s,
   };
   if (size == sizeof(*body)) {
     body = payload;
-    backend = vmsvga3d_backend_vgpu9(s);
-    if (backend != NULL && backend->set_shader != NULL) {
-      (void)backend->set_shader(s, body->cid, body->type, body->shid);
-    };
+    (void)vmsvga3d_state_set_shader(s, body->cid, body->type, body->shid);
   };
   g_free(payload);
   return true;
@@ -1171,7 +1063,6 @@ vmsvga3d_shader_const_array(VMSVGA3DContext *context, uint32_t type_index,
 static bool vmsvga3d_handle_set_shader_const(struct vmsvga_state_s *s,
                                               uint32_t cmd, int32_t *len,
                                               uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdSetShaderConst *body;
   void *payload;
   uint32_t size;
@@ -1193,12 +1084,9 @@ static bool vmsvga3d_handle_set_shader_const(struct vmsvga_state_s *s,
   };
   body = payload;
   count = 1 + trailing / sizeof(body->values);
-  backend = vmsvga3d_backend_vgpu9(s);
-  if (backend != NULL && backend->set_shader_const != NULL) {
-    (void)backend->set_shader_const(
-        s, body->cid, body->reg, body->type, body->ctype, count,
-        (const uint32_t (*)[4])body->values);
-  };
+  (void)vmsvga3d_state_set_shader_const(
+      s, body->cid, body->reg, body->type, body->ctype, count,
+      (const uint32_t (*)[4])body->values);
   g_free(payload);
   return true;
 };
@@ -1275,7 +1163,6 @@ static bool vmsvga3d_draw_vertex_surfaces_valid(
 static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
                                              uint32_t cmd, int32_t *len,
                                              uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdDrawPrimitives *body;
   SVGA3dVertexDecl *decls;
   SVGA3dPrimitiveRange *ranges;
@@ -1318,12 +1205,9 @@ static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
     divisors = (SVGA3dVertexDivisor *)(ranges + body->numRanges);
     divisor_count = body->numVertexDecls;
   };
-  backend = vmsvga3d_backend_vgpu9(s);
-  if (backend != NULL && backend->draw_primitives != NULL) {
-    (void)backend->draw_primitives(
-        s, body->cid, body->numVertexDecls, decls, body->numRanges, ranges,
-        divisor_count, divisors);
-  };
+  (void)vmsvga3d_state_draw_primitives(
+      s, body->cid, body->numVertexDecls, decls, body->numRanges, ranges,
+      divisor_count, divisors);
   g_free(payload);
   return true;
 };
@@ -1602,7 +1486,6 @@ static bool vmsvga3d_clear_target(struct vmsvga_state_s *s,
 static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
                                   uint32_t cmd, int32_t *len,
                                   uint32_t fifo_start) {
-  const VMSVGA3DBackendOpsVGPU9 *backend;
   SVGA3dCmdClear *body;
   SVGA3dRect *rects;
   void *payload;
@@ -1626,11 +1509,8 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
   body = payload;
   rects = (SVGA3dRect *)(body + 1);
   rect_count = rect_bytes / sizeof(SVGA3dRect);
-  backend = vmsvga3d_backend_vgpu9(s);
-  if (backend != NULL && backend->clear != NULL) {
-    (void)backend->clear(s, body->cid, body->clearFlag, body->color,
+  (void)vmsvga3d_state_clear(s, body->cid, body->clearFlag, body->color,
                          body->depth, body->stencil, rect_count, rects);
-  };
   g_free(payload);
   return true;
 };
@@ -2738,7 +2618,7 @@ typedef struct {
 } VMSVGA3DCommandInfo;
 
 #include "vmware_vga_d3d9.c"
-#include "vmware_vga_3d_backend.c"
+#include "vmware_vga_3d_state.c"
 
 #define VMSVGA3D_STALL(cmd) \
   { (cmd), VMSVGA3D_COMMAND_STALL, NULL, #cmd }

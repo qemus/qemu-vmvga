@@ -25,16 +25,16 @@
 */
 
 /*
- * Legacy VGPU9 backend.
+ * Legacy VGPU9 protocol and shadow state.
  *
- * FIFO handlers decode and structurally validate command packets. This layer
- * owns the semantic VGPU9 operations, mirroring the boundary used by other
- * VMSVGA implementations while remaining independent of their backend code.
- * A D3D9 provider can replace these operations without learning the FIFO
- * packet layout.
+ * FIFO handlers own packet framing and call these operations directly.  This
+ * file keeps the guest-visible VGPU9 state, validation and CPU-side fallback
+ * behavior separate from FIFO decoding without introducing renderer dispatch.
+ * The D3D9 implementation can consume this state directly when execution is
+ * connected.
  */
 
-static bool vmsvga3d_backend_context_define(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_context_define(struct vmsvga_state_s *s,
                                              uint32_t cid) {
   struct vmsvga3d_state_s *state;
   VMSVGA3DContext *context;
@@ -65,7 +65,7 @@ static bool vmsvga3d_backend_context_define(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_context_destroy(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_context_destroy(struct vmsvga_state_s *s,
                                               uint32_t cid) {
   struct vmsvga3d_state_s *state = s->svga3d;
 
@@ -77,7 +77,7 @@ static bool vmsvga3d_backend_context_destroy(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_transform(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_transform(struct vmsvga_state_s *s,
                                             uint32_t cid,
                                             SVGA3dTransformType type,
                                             const float matrix[16]) {
@@ -93,7 +93,7 @@ static bool vmsvga3d_backend_set_transform(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_z_range(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_z_range(struct vmsvga_state_s *s,
                                           uint32_t cid,
                                           const SVGA3dZRange *z_range) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -106,7 +106,7 @@ static bool vmsvga3d_backend_set_z_range(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_render_state(
+static bool vmsvga3d_state_set_render_state(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t count,
     const SVGA3dRenderState *states) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -127,7 +127,7 @@ static bool vmsvga3d_backend_set_render_state(
   return true;
 };
 
-static bool vmsvga3d_backend_set_render_target(
+static bool vmsvga3d_state_set_render_target(
     struct vmsvga_state_s *s, uint32_t cid, SVGA3dRenderTargetType type,
     const SVGA3dSurfaceImageId *target) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -153,7 +153,7 @@ static bool vmsvga3d_backend_set_render_target(
   return true;
 };
 
-static bool vmsvga3d_backend_set_texture_state(
+static bool vmsvga3d_state_set_texture_state(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t count,
     const SVGA3dTextureState *states) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -182,7 +182,7 @@ static bool vmsvga3d_backend_set_texture_state(
   return true;
 };
 
-static bool vmsvga3d_backend_set_material(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_material(struct vmsvga_state_s *s,
                                            uint32_t cid, SVGA3dFace face,
                                            const SVGA3dMaterial *material) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -195,7 +195,7 @@ static bool vmsvga3d_backend_set_material(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_light_data(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_light_data(struct vmsvga_state_s *s,
                                              uint32_t cid, uint32_t index,
                                              const SVGA3dLightData *data) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -211,7 +211,7 @@ static bool vmsvga3d_backend_set_light_data(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_light_enabled(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_light_enabled(struct vmsvga_state_s *s,
                                                 uint32_t cid,
                                                 uint32_t index,
                                                 uint32_t enabled) {
@@ -225,7 +225,7 @@ static bool vmsvga3d_backend_set_light_enabled(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_viewport(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_viewport(struct vmsvga_state_s *s,
                                            uint32_t cid,
                                            const SVGA3dRect *rect) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -238,7 +238,7 @@ static bool vmsvga3d_backend_set_viewport(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_clip_plane(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_clip_plane(struct vmsvga_state_s *s,
                                              uint32_t cid, uint32_t index,
                                              const float plane[4]) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -252,7 +252,7 @@ static bool vmsvga3d_backend_set_clip_plane(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_clear(struct vmsvga_state_s *s, uint32_t cid,
+static bool vmsvga3d_state_clear(struct vmsvga_state_s *s, uint32_t cid,
                                     SVGA3dClearFlag clear_flags,
                                     uint32_t color, float depth,
                                     uint32_t stencil, uint32_t rect_count,
@@ -305,7 +305,7 @@ static bool vmsvga3d_backend_clear(struct vmsvga_state_s *s, uint32_t cid,
   return valid;
 };
 
-static bool vmsvga3d_backend_draw_primitives(
+static bool vmsvga3d_state_draw_primitives(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t vertex_decl_count,
     const SVGA3dVertexDecl *vertex_decls, uint32_t range_count,
     const SVGA3dPrimitiveRange *ranges, uint32_t divisor_count,
@@ -331,11 +331,11 @@ static bool vmsvga3d_backend_draw_primitives(
     };
   };
 
-  /* Rendering stops at the VGPU9 backend boundary until D3D9 is connected. */
+  /* Rendering stops after protocol validation until D3D9 execution is connected. */
   return true;
 };
 
-static bool vmsvga3d_backend_set_scissor(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_scissor(struct vmsvga_state_s *s,
                                           uint32_t cid,
                                           const SVGA3dRect *rect) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
@@ -348,7 +348,7 @@ static bool vmsvga3d_backend_set_scissor(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_generate_mipmaps(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_generate_mipmaps(struct vmsvga_state_s *s,
                                                uint32_t sid,
                                                SVGA3dTextureFilter filter) {
   VMSVGA3DSurface *surface;
@@ -364,14 +364,14 @@ static bool vmsvga3d_backend_generate_mipmaps(struct vmsvga_state_s *s,
 
   /*
    * Preserve the requested autogen state now. Actual mip generation belongs
-   * to the renderer backend; the CPU surface store remains authoritative until
-   * that renderer exists.
+   * to D3D execution; the CPU surface store remains authoritative until that
+   * path is connected.
    */
   surface->autogen_filter = filter;
   return true;
 };
 
-static bool vmsvga3d_backend_shader_define(
+static bool vmsvga3d_state_shader_define(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t shid,
     SVGA3dShaderType type, uint32_t bytecode_size, const uint32_t *bytecode) {
   struct vmsvga3d_state_s *state;
@@ -424,7 +424,7 @@ static bool vmsvga3d_backend_shader_define(
   return true;
 };
 
-static bool vmsvga3d_backend_shader_destroy(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_shader_destroy(struct vmsvga_state_s *s,
                                              uint32_t cid, uint32_t shid,
                                              SVGA3dShaderType type) {
   struct vmsvga3d_state_s *state = s->svga3d;
@@ -451,7 +451,7 @@ static bool vmsvga3d_backend_shader_destroy(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_shader(struct vmsvga_state_s *s,
+static bool vmsvga3d_state_set_shader(struct vmsvga_state_s *s,
                                          uint32_t cid,
                                          SVGA3dShaderType type,
                                          uint32_t shid) {
@@ -472,7 +472,7 @@ static bool vmsvga3d_backend_set_shader(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_backend_set_shader_const(
+static bool vmsvga3d_state_set_shader_const(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t reg,
     SVGA3dShaderType type, SVGA3dShaderConstType ctype, uint32_t count,
     const uint32_t (*values)[4]) {
@@ -500,25 +500,3 @@ static bool vmsvga3d_backend_set_shader_const(
   return true;
 };
 
-static const VMSVGA3DBackendOpsVGPU9 vmsvga3d_backend_vgpu9_default = {
-    .context_define = vmsvga3d_backend_context_define,
-    .context_destroy = vmsvga3d_backend_context_destroy,
-    .set_transform = vmsvga3d_backend_set_transform,
-    .set_z_range = vmsvga3d_backend_set_z_range,
-    .set_render_state = vmsvga3d_backend_set_render_state,
-    .set_render_target = vmsvga3d_backend_set_render_target,
-    .set_texture_state = vmsvga3d_backend_set_texture_state,
-    .set_material = vmsvga3d_backend_set_material,
-    .set_light_data = vmsvga3d_backend_set_light_data,
-    .set_light_enabled = vmsvga3d_backend_set_light_enabled,
-    .set_viewport = vmsvga3d_backend_set_viewport,
-    .set_clip_plane = vmsvga3d_backend_set_clip_plane,
-    .clear = vmsvga3d_backend_clear,
-    .draw_primitives = vmsvga3d_backend_draw_primitives,
-    .set_scissor = vmsvga3d_backend_set_scissor,
-    .generate_mipmaps = vmsvga3d_backend_generate_mipmaps,
-    .shader_define = vmsvga3d_backend_shader_define,
-    .shader_destroy = vmsvga3d_backend_shader_destroy,
-    .set_shader = vmsvga3d_backend_set_shader,
-    .set_shader_const = vmsvga3d_backend_set_shader_const,
-};

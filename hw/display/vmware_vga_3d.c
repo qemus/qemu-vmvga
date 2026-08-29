@@ -188,6 +188,9 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
     struct vmsvga_state_s *s, const SVGA3dCmdPresent *command,
     const SVGA3dCopyRect *rects, uint32_t rect_count,
     const VMSVGA3DD3D9PresentPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present_readback(
+    struct vmsvga_state_s *s,
+    const VMSVGA3DD3D9PresentReadbackPlan *plan);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_screen_blit(
     struct vmsvga_state_s *s,
     const SVGA3dCmdBlitSurfaceToScreen *command,
@@ -313,6 +316,7 @@ static bool vmsvga3d_fifo_supported_command(uint32_t cmd) {
   case SVGA_3D_CMD_SETCLIPPLANE:
   case SVGA_3D_CMD_CLEAR:
   case SVGA_3D_CMD_PRESENT:
+  case SVGA_3D_CMD_PRESENT_READBACK:
   case SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN:
   case SVGA_3D_CMD_SHADER_DEFINE:
   case SVGA_3D_CMD_SHADER_DESTROY:
@@ -1129,6 +1133,35 @@ static bool vmsvga3d_handle_wait_for_query(struct vmsvga_state_s *s,
   return true;
 };
 
+static bool vmsvga3d_handle_present_readback(struct vmsvga_state_s *s,
+                                               uint32_t cmd, int32_t *len,
+                                               uint32_t fifo_start) {
+  VMSVGA3DD3D9PresentReadbackPlan plan;
+  VMSVGA3DD3D9AccelResult accel = VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  void *payload;
+  uint32_t size;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  }
+  g_free(payload);
+  if (size != 0 || !vmsvga3d_d3d9_present_readback_plan(&plan)) {
+    return true;
+  }
+#ifdef CONFIG_VMSVGA_DXVK
+  accel = vmsvga3d_d3d9_runtime_present_readback(s, &plan);
+#else
+  (void)s;
+#endif
+  /* The CPU PRESENT/readback path already keeps the framebuffer coherent.
+   * UNAVAILABLE therefore means there is nothing GPU-resident to read back.
+   * FAILED is intentionally not replayed after a potentially partial GPU
+   * synchronization. */
+  (void)accel;
+  return true;
+}
+
 static bool vmsvga3d_handle_shader_define(struct vmsvga_state_s *s,
                                            uint32_t cmd, int32_t *len,
                                            uint32_t fifo_start) {
@@ -1294,8 +1327,7 @@ static bool vmsvga3d_draw_ranges_valid(struct vmsvga3d_state_s *state,
     };
     if (sid >= SVGA3D_MAX_SURFACE_IDS || state->surfaces[sid] == NULL ||
         (ranges[i].indexWidth != sizeof(uint16_t) &&
-         ranges[i].indexWidth != sizeof(uint32_t)) ||
-        ranges[i].indexArray.stride != ranges[i].indexWidth) {
+         ranges[i].indexWidth != sizeof(uint32_t))) {
       return false;
     };
   };
@@ -3323,7 +3355,8 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
   VMSVGA3D_HANDLER(SVGA_3D_CMD_BEGIN_QUERY, vmsvga3d_handle_begin_query),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_END_QUERY, vmsvga3d_handle_end_query),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_WAIT_FOR_QUERY, vmsvga3d_handle_wait_for_query),
-  VMSVGA3D_STALL(SVGA_3D_CMD_PRESENT_READBACK),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_PRESENT_READBACK,
+                   vmsvga3d_handle_present_readback),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN,
                    vmsvga3d_handle_blit_surface_to_screen),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SURFACE_DEFINE_V2, vmsvga3d_handle_surface_define_v2),
@@ -3669,11 +3702,11 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
     [SVGA3D_DEVCAP_SURFACEFMT_AYUV] = 0x00000000,
     [SVGA3D_DEVCAP_MAX_CONTEXT_IDS] = 0x00000100,
     [SVGA3D_DEVCAP_MAX_SURFACE_IDS] = 0x00008000,
-    [SVGA3D_DEVCAP_SURFACEFMT_Z_DF16] = 0x000040c5,
+    [SVGA3D_DEVCAP_SURFACEFMT_Z_DF16] = 0x00000000,
     [SVGA3D_DEVCAP_SURFACEFMT_Z_DF24] = 0x000040c5,
     [SVGA3D_DEVCAP_SURFACEFMT_Z_D24S8_INT] = 0x000040c5,
-    [SVGA3D_DEVCAP_SURFACEFMT_ATI1] = 0x00006005,
-    [SVGA3D_DEVCAP_SURFACEFMT_ATI2] = 0x00006005,
+    [SVGA3D_DEVCAP_SURFACEFMT_ATI1] = 0x00000000,
+    [SVGA3D_DEVCAP_SURFACEFMT_ATI2] = 0x00000000,
     [SVGA3D_DEVCAP_DEAD1] = 0x00000000,
     [SVGA3D_DEVCAP_DEAD8] = 0x00000000,
     [SVGA3D_DEVCAP_DEAD9] = 0x00000000,
@@ -3681,7 +3714,7 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
     [SVGA3D_DEVCAP_LINE_STIPPLE] = 0x00000000,
     [SVGA3D_DEVCAP_MAX_LINE_WIDTH] = 0x3f800000, /* 1.0f */
     [SVGA3D_DEVCAP_MAX_AA_LINE_WIDTH] = 0x3f800000, /* 1.0f */
-    [SVGA3D_DEVCAP_SURFACEFMT_YV12] = 0x01246000,
+    [SVGA3D_DEVCAP_SURFACEFMT_YV12] = 0x00000000,
     [SVGA3D_DEVCAP_DEAD3] = 0x00000000,
     [SVGA3D_DEVCAP_TS_COLOR_KEY] = 0x00000000,
     [SVGA3D_DEVCAP_DEAD2] = 0x00000000,
@@ -3854,7 +3887,13 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
     [SVGA3D_DEVCAP_GL43] = 0x00000001};
 
 static uint32_t vmsvga3d_get_devcap(uint32_t index) {
-  return index >= SVGA3D_DEVCAP_MAX ? 0 : vmsvga3d_devcap[index];
+  /* Keep the guest-visible profile strictly legacy VGPU9/D3D9.  D3D10/11
+   * translators may exist internally, but DXCONTEXT and all later devcaps
+   * remain hidden until their FIFO command model is actually exposed. */
+  if (index >= SVGA3D_DEVCAP_DXCONTEXT) {
+    return 0;
+  }
+  return vmsvga3d_devcap[index];
 };
 
 static void vmsvga3d_publish_fifo_caps(struct vmsvga_state_s *s) {

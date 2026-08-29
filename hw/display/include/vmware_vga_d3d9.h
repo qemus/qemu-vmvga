@@ -174,6 +174,38 @@ typedef struct vmsvga3d_d3d9_indexed_draw_s {
   uint32_t primitive_count;
 } VMSVGA3DD3D9IndexedDraw;
 
+typedef enum vmsvga3d_d3d9_draw_action_e {
+  VMSVGA3D_D3D9_DRAW_ACTION_NONINDEXED = 0,
+  VMSVGA3D_D3D9_DRAW_ACTION_INDEXED,
+} VMSVGA3DD3D9DrawAction;
+
+typedef struct vmsvga3d_d3d9_draw_range_plan_s {
+  VMSVGA3DD3D9DrawAction action;
+  uint32_t primitive_type;
+  uint32_t primitive_count;
+  uint32_t index_surface_id;
+  bool unbind_indices;
+  bool sync_index_buffer;
+  uint32_t index_format;
+  uint32_t start_vertex;
+  VMSVGA3DD3D9IndexedDraw indexed;
+} VMSVGA3DD3D9DrawRangePlan;
+
+typedef struct vmsvga3d_d3d9_draw_batch_plan_s {
+  bool sync_vertex_buffers;
+  bool create_or_reuse_vertex_declaration;
+  bool begin_scene;
+  bool end_scene;
+  bool end_scene_after_draw_failure;
+  uint32_t stream_count;
+  bool reset_stream_sources;
+  bool reset_streams_after_draw_failure;
+  bool reset_stream_frequencies;
+  bool clear_vertex_dirty_on_success;
+  bool clear_index_dirty_on_success;
+  bool track_context_usage_on_success;
+} VMSVGA3DD3D9DrawBatchPlan;
+
 typedef struct vmsvga3d_d3d9_query_plan_s {
   uint32_t query_type;
   uint32_t issue_begin;
@@ -422,6 +454,18 @@ typedef struct vmsvga3d_d3d9_present_plan_s {
   bool update_screen_after_each_rect;
 } VMSVGA3DD3D9PresentPlan;
 
+typedef struct vmsvga3d_d3d9_present_readback_plan_s {
+  VMSVGA3DD3D9ExecutionPreference execution;
+  bool cpu_fallback_allowed;
+  uint32_t destination_screen;
+  bool readback_last_presented_content;
+  bool write_cpu_framebuffer;
+  bool clip_to_screen;
+  bool update_screen;
+  bool cpu_fallback_is_noop;
+  bool unavailable_requires_cpu_coherent;
+} VMSVGA3DD3D9PresentReadbackPlan;
+
 typedef enum vmsvga3d_d3d9_shader_stage_e {
   VMSVGA3D_D3D9_SHADER_STAGE_INVALID = 0,
   VMSVGA3D_D3D9_SHADER_STAGE_VERTEX,
@@ -495,6 +539,13 @@ bool vmsvga3d_d3d9_indexed_draw(const SVGA3dVertexDecl *first_decl,
                                  const SVGA3dPrimitiveRange *range,
                                  uint32_t vertex_buffer_bytes,
                                  VMSVGA3DD3D9IndexedDraw *draw);
+bool vmsvga3d_d3d9_draw_range_plan(
+    const SVGA3dVertexDecl *first_decl, const SVGA3dPrimitiveRange *range,
+    uint32_t vertex_buffer_bytes, VMSVGA3DD3D9DrawRangePlan *plan);
+bool vmsvga3d_d3d9_draw_batch_plan(uint32_t stream_count,
+                                    uint32_t vertex_decl_count,
+                                    uint32_t divisor_count,
+                                    VMSVGA3DD3D9DrawBatchPlan *plan);
 uint32_t vmsvga3d_d3d9_texture_filter(SVGA3dTextureFilter filter);
 bool vmsvga3d_d3d9_mipmap_plan(SVGA3dTextureFilter filter,
                                  VMSVGA3DD3D9MipmapPlan *plan);
@@ -522,6 +573,8 @@ bool vmsvga3d_d3d9_present_plan(
     VMSVGA3DD3D9PresentPlan *plan);
 bool vmsvga3d_d3d9_present_dma_box(const SVGA3dCopyRect *rect,
                                      SVGA3dCopyBox *box);
+bool vmsvga3d_d3d9_present_readback_plan(
+    VMSVGA3DD3D9PresentReadbackPlan *plan);
 bool vmsvga3d_d3d9_query_plan(SVGA3dQueryType type,
                                VMSVGA3DD3D9QueryPlan *plan);
 bool vmsvga3d_d3d9_primitive_type(SVGA3dPrimitiveType type,

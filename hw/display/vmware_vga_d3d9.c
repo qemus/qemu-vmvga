@@ -1466,6 +1466,71 @@ bool vmsvga3d_d3d9_indexed_draw(const SVGA3dVertexDecl *first_decl,
   return true;
 }
 
+bool vmsvga3d_d3d9_draw_range_plan(
+    const SVGA3dVertexDecl *first_decl, const SVGA3dPrimitiveRange *range,
+    uint32_t vertex_buffer_bytes, VMSVGA3DD3D9DrawRangePlan *plan) {
+  uint32_t primitive_type;
+
+  if (first_decl == NULL || range == NULL || plan == NULL ||
+      !vmsvga3d_d3d9_primitive_type(range->primType, range->primitiveCount,
+                                    &primitive_type)) {
+    return false;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->primitive_type = primitive_type;
+  plan->primitive_count = range->primitiveCount;
+  plan->index_surface_id = range->indexArray.surfaceId;
+
+  if (range->indexArray.surfaceId == SVGA3D_INVALID_ID) {
+    plan->action = VMSVGA3D_D3D9_DRAW_ACTION_NONINDEXED;
+    plan->unbind_indices = true;
+    /* VBox passes signed indexBias to D3D9's UINT StartVertex unchanged. */
+    plan->start_vertex = (uint32_t)range->indexBias;
+    return true;
+  }
+
+  if ((range->indexWidth != sizeof(uint16_t) &&
+       range->indexWidth != sizeof(uint32_t)) ||
+      !vmsvga3d_d3d9_indexed_draw(first_decl, range, vertex_buffer_bytes,
+                                  &plan->indexed)) {
+    return false;
+  }
+
+  plan->action = VMSVGA3D_D3D9_DRAW_ACTION_INDEXED;
+  plan->sync_index_buffer = true;
+  plan->index_format = vmsvga3d_d3d9_index_format(range->indexWidth);
+  return true;
+}
+
+bool vmsvga3d_d3d9_draw_batch_plan(uint32_t stream_count,
+                                    uint32_t vertex_decl_count,
+                                    uint32_t divisor_count,
+                                    VMSVGA3DD3D9DrawBatchPlan *plan) {
+  if (plan == NULL || stream_count == 0 ||
+      stream_count > SVGA3D_MAX_VERTEX_ARRAYS || vertex_decl_count == 0 ||
+      vertex_decl_count > SVGA3D_MAX_VERTEX_ARRAYS ||
+      stream_count > vertex_decl_count ||
+      (divisor_count != 0 && divisor_count != vertex_decl_count)) {
+    return false;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->sync_vertex_buffers = true;
+  plan->create_or_reuse_vertex_declaration = true;
+  plan->begin_scene = true;
+  plan->end_scene = true;
+  plan->end_scene_after_draw_failure = true;
+  plan->stream_count = stream_count;
+  plan->reset_stream_sources = true;
+  plan->reset_streams_after_draw_failure = true;
+  plan->reset_stream_frequencies = divisor_count != 0;
+  plan->clear_vertex_dirty_on_success = true;
+  plan->clear_index_dirty_on_success = true;
+  plan->track_context_usage_on_success = true;
+  return true;
+}
+
 uint32_t vmsvga3d_d3d9_texture_filter(SVGA3dTextureFilter filter) {
   return (uint32_t)filter;
 }
@@ -1836,6 +1901,25 @@ bool vmsvga3d_d3d9_present_dma_box(const SVGA3dCopyRect *rect,
   box->srcx = rect->x;
   box->srcy = rect->y;
   box->srcz = 0;
+  return true;
+}
+
+bool vmsvga3d_d3d9_present_readback_plan(
+    VMSVGA3DD3D9PresentReadbackPlan *plan) {
+  if (plan == NULL) {
+    return false;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
+  plan->cpu_fallback_allowed = true;
+  plan->destination_screen = 0;
+  plan->readback_last_presented_content = true;
+  plan->write_cpu_framebuffer = true;
+  plan->clip_to_screen = true;
+  plan->update_screen = false;
+  plan->cpu_fallback_is_noop = true;
+  plan->unavailable_requires_cpu_coherent = true;
   return true;
 }
 

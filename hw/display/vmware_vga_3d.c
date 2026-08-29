@@ -3315,6 +3315,7 @@ typedef struct {
   const char *name;
 } VMSVGA3DCommandInfo;
 
+#include "vmware_vga_dxvk_wsi.c"
 #include "vmware_vga_d3d9.c"
 #include "vmware_vga_3d_state.c"
 

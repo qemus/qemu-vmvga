@@ -319,6 +319,7 @@ struct vmsvga_cursor_source_s {
 
 struct vmsvga_gmr_s;
 struct vmsvga3d_state_s;
+struct vmsvga3d_dxvk_s;
 
 struct vmsvga_state_s {
   uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
@@ -386,6 +387,9 @@ struct vmsvga_state_s {
   uint32_t scratch[VMSVGA_SCRATCH_SIZE];
   struct vmsvga_gmr_s *gmrs[64];
   struct vmsvga3d_state_s *svga3d;
+  struct vmsvga3d_dxvk_s *dxvk;
+  /* Guest-visible 3D capability is latched once during device realization. */
+  bool svga3d_capable;
   struct vmsvga_object_s *objects[VMSVGA_MAX_OBJECTS];
   struct vmsvga_fifo_upload_s fifo_upload;
   QEMUCursor *cursor_cache[VMSVGA_MAX_CURSORS];
@@ -5184,8 +5188,10 @@ static inline void vmsvga_publish_fifo_registers(struct vmsvga_state_s *s) {
       guest_hwversion =
           le32_to_cpu(s->fifo[SVGA_FIFO_GUEST_3D_HWVERSION]);
     };
-    s->fifo[SVGA_FIFO_3D_HWVERSION] =
-        cpu_to_le32(vmsvga3d_negotiate_hwversion(guest_hwversion));
+    s->fifo[SVGA_FIFO_3D_HWVERSION] = cpu_to_le32(
+        s->svga3d_capable
+            ? vmsvga3d_negotiate_hwversion(guest_hwversion)
+            : 0);
   };
   vmsvga3d_publish_fifo_caps(s);
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
@@ -5512,6 +5518,9 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     caps |= SVGA_CAP_8BIT_EMULATION;
 #endif
 #endif
+    if (!s->svga3d_capable) {
+      caps &= ~SVGA_CAP_3D;
+    };
     ret = caps;
     VPRINT("SVGA_REG_CAPABILITIES register %u with the return of %u\n",
            s->index, ret);
@@ -5968,7 +5977,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            s->index, value);
     break;
   case SVGA_REG_DEV_CAP:
-    s->devcap_val = vmsvga3d_get_devcap(value);
+    s->devcap_val = s->svga3d_capable ? vmsvga3d_get_devcap(value) : 0;
     VPRINT("SVGA_REG_DEV_CAP register %u with the value of %u\n", s->index,
            value);
     break;
@@ -6894,11 +6903,14 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp) {
   pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->io_bar);
   vmsvga_init(DEVICE(dev), &s->chip, pci_address_space(dev),
               pci_address_space_io(dev));
+  vmsvga3d_renderer_realize(&s->chip);
   pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.vga.vram);
   pci_register_bar(dev, 2, PCI_BASE_ADDRESS_MEM_TYPE_32, &s->chip.fifo_ram);
 };
 static void pci_vmsvga_uninit(PCIDevice *dev) {
   struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+  vmsvga3d_reset(&s->chip);
+  vmsvga3d_renderer_unrealize(&s->chip);
   vmsvga_migration_buffers_clear(&s->chip);
   vmsvga_cursor_cache_clear(&s->chip);
   vmsvga_cursor_source_clear(&s->chip);

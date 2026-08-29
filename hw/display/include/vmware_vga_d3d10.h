@@ -183,6 +183,11 @@ extern "C" {
 #endif
 
 VMSVGA3DD3D10Format vmsvga3d_d3d10_surface_format(SVGA3dSurfaceFormat format);
+bool vmsvga3d_d3d10_is_srgb_format(uint32_t dxgi_format);
+uint32_t vmsvga3d_d3d10_typeless_format(uint32_t dxgi_format);
+bool vmsvga3d_d3d10_is_depth_stencil_format(uint32_t dxgi_format);
+uint32_t vmsvga3d_d3d10_resource_format(SVGA3dSurfaceFormat format,
+                                        SVGA3dSurfaceAllFlags flags);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_resource_policy(
     SVGA3dSurfaceAllFlags flags, bool texture_resource,
     VMSVGA3DD3D10ResourcePolicy *policy);

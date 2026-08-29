@@ -140,11 +140,6 @@ extern "C" {
 #endif
 
 VMSVGA3DD3D11Format vmsvga3d_d3d11_surface_format(SVGA3dSurfaceFormat format);
-bool vmsvga3d_d3d11_is_srgb_format(uint32_t dxgi_format);
-uint32_t vmsvga3d_d3d11_typeless_format(uint32_t dxgi_format);
-bool vmsvga3d_d3d11_is_depth_stencil_format(uint32_t dxgi_format);
-uint32_t vmsvga3d_d3d11_resource_format(SVGA3dSurfaceFormat format,
-                                        SVGA3dSurfaceAllFlags flags);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(
     SVGA3dSurfaceAllFlags flags, bool texture_resource,
     uint32_t buffer_byte_stride, VMSVGA3DD3D11ResourcePolicy *policy);

@@ -361,6 +361,61 @@ VMSVGA3DD3D10Format vmsvga3d_d3d10_surface_format(SVGA3dSurfaceFormat format)
   }
 }
 
+bool vmsvga3d_d3d10_is_srgb_format(uint32_t format)
+{
+  return format == 29u || format == 91u || format == 93u;
+}
+
+uint32_t vmsvga3d_d3d10_typeless_format(uint32_t format)
+{
+  switch (format) {
+  case 2: case 3: case 4: return 1;
+  case 6: case 7: case 8: return 5;
+  case 10: case 11: case 12: case 13: case 14: return 9;
+  case 16: case 17: case 18: return 15;
+  case 20: case 21: case 22: return 19;
+  case 24: case 25: return 23;
+  case 28: case 29: case 30: case 31: case 32: return 27;
+  case 34: case 35: case 36: case 37: case 38: return 33;
+  case 40: case 41: case 42: case 43: return 39;
+  case 45: case 46: case 47: return 44;
+  case 49: case 50: case 51: case 52: return 48;
+  case 54: case 55: case 56: case 57: case 58: case 59: return 53;
+  case 61: case 62: case 63: case 64: return 60;
+  case 71: case 72: return 70;
+  case 74: case 75: return 73;
+  case 77: case 78: return 76;
+  case 80: case 81: return 79;
+  case 83: case 84: return 82;
+  case 87: case 91: return 90;
+  case 88: case 93: return 92;
+  case 95: case 96: return 94;
+  case 98: case 99: return 97;
+  default: return format;
+  }
+}
+
+bool vmsvga3d_d3d10_is_depth_stencil_format(uint32_t format)
+{
+  return format == 20u || format == 40u || format == 45u || format == 55u;
+}
+
+uint32_t vmsvga3d_d3d10_resource_format(SVGA3dSurfaceFormat format,
+                                        SVGA3dSurfaceAllFlags flags)
+{
+  VMSVGA3DD3D10Format translated = vmsvga3d_d3d10_surface_format(format);
+  uint32_t result = translated.dxgi_format;
+
+  (void)flags;
+  if (translated.min_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return 0;
+  }
+  if (!vmsvga3d_d3d10_is_depth_stencil_format(result)) {
+    result = vmsvga3d_d3d10_typeless_format(result);
+  }
+  return result;
+}
+
 VMSVGA3DD3D10Level vmsvga3d_d3d10_resource_policy(
     SVGA3dSurfaceAllFlags flags, bool texture_resource,
     VMSVGA3DD3D10ResourcePolicy *policy)

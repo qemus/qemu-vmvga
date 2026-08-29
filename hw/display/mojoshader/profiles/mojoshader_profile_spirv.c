@@ -7,14 +7,16 @@
  *  This file written by Ryan C. Gordon.
  */
 
+/* Modified by qemu-vmvga for QEMU drop-in integration. */
+
 #define __MOJOSHADER_INTERNAL__ 1
 #include "mojoshader_profile.h"
 
 #pragma GCC visibility push(hidden)
 
 #if SUPPORT_PROFILE_SPIRV
-#include "spirv/spirv.h"
-#include "spirv/GLSL.std.450.h"
+#include "../spirv/spirv.h"
+#include "../spirv/GLSL.std.450.h"
 #include <float.h>
 
 static const int SPV_NO_SWIZZLE = 0xE4; // 0xE4 == 11100100 ... 0 1 2 3. No swizzle.
@@ -920,7 +922,7 @@ static uint32 spv_emit_swizzle(Context *ctx, uint32 arg, uint32 rtid, const int 
     return result;
 } // spv_emit_swizzle
 
-SpirvResult spv_swizzle(Context *ctx, SpirvResult arg, const int swizzle, const int writemask)
+static SpirvResult spv_swizzle(Context *ctx, SpirvResult arg, const int swizzle, const int writemask)
 {
     int i;
 
@@ -969,7 +971,7 @@ SpirvResult spv_swizzle(Context *ctx, SpirvResult arg, const int swizzle, const 
             break;
 
         default:
-            failf(ctx, "Unexpected write mask in swizzle: 0x%X");
+            failf(ctx, "Unexpected write mask in swizzle: 0x%X", writemask);
             assert(0);
             break;
     } // switch
@@ -1608,14 +1610,13 @@ static void spv_emit_vpos_glmode(Context *ctx, uint32 id)
     uint32 id_var_vpos = id;
 
     uint32 id_fragcoord = spv_bumpid(ctx);
+    uint32 id_vpos = spv_bumpid(ctx);
     uint32 id_fragcoord_y = spv_bumpid(ctx);
     uint32 id_vposflip = spv_bumpid(ctx);
     uint32 id_vposflip_x = spv_bumpid(ctx);
     uint32 id_vposflip_y = spv_bumpid(ctx);
     uint32 id_tmp = spv_bumpid(ctx);
     uint32 id_vpos_y = spv_bumpid(ctx);
-    uint32 id_vpos = spv_bumpid(ctx);
-
     // vec4 gl_FragCoord = <compiler magic builtin>;
     // uniform vec2 vposFlip;
     // vec4 ps_vPos = vec4(
@@ -1669,7 +1670,6 @@ static void spv_emit_vpos_vkmode(Context *ctx, uint32 id)
     uint32 id_var_vpos = id;
 
     uint32 id_fragcoord = spv_bumpid(ctx);
-    uint32 id_vpos = spv_bumpid(ctx);
 
     // vec4 gl_FragCoord = <compiler magic builtin>;
     // vec4 ps_vPos = gl_FragCoord;
@@ -2503,10 +2503,10 @@ void emit_SPIRV_finalize(Context *ctx)
             uint32 tid_type_base = spv_get_type(ctx, STI_VEC4);
             uint32 tid_array = spv_bumpid(ctx);
             spv_emit(ctx, 4, SpvOpTypeArray, tid_array, tid_type_base, id_size);
-            uint32 i = member_count++;
-            spv_emit(ctx, 4, SpvOpConstant, tid_arr_idx, ctx->spirv.uniform_arrays.idvec4, i);
-            member_tid[i] = tid_array;
-            member_offset[i] = struct_size;
+            uint32 member_index = member_count++;
+            spv_emit(ctx, 4, SpvOpConstant, tid_arr_idx, ctx->spirv.uniform_arrays.idvec4, member_index);
+            member_tid[member_index] = tid_array;
+            member_offset[member_index] = struct_size;
             struct_size += size * 16;
         } // if
 
@@ -2517,10 +2517,10 @@ void emit_SPIRV_finalize(Context *ctx)
             uint32 tid_type_base = spv_get_type(ctx, STI_IVEC4);
             uint32 tid_array = spv_bumpid(ctx);
             spv_emit(ctx, 4, SpvOpTypeArray, tid_array, tid_type_base, id_size);
-            uint32 i = member_count++;
-            spv_emit(ctx, 4, SpvOpConstant, tid_arr_idx, ctx->spirv.uniform_arrays.idivec4, i);
-            member_tid[i] = tid_array;
-            member_offset[i] = struct_size;
+            uint32 member_index = member_count++;
+            spv_emit(ctx, 4, SpvOpConstant, tid_arr_idx, ctx->spirv.uniform_arrays.idivec4, member_index);
+            member_tid[member_index] = tid_array;
+            member_offset[member_index] = struct_size;
             struct_size += size * 16;
         } // if
 
@@ -2531,10 +2531,10 @@ void emit_SPIRV_finalize(Context *ctx)
             uint32 tid_type_base = spv_get_type(ctx, STI_INT);
             uint32 tid_array = spv_bumpid(ctx);
             spv_emit(ctx, 4, SpvOpTypeArray, tid_array, tid_type_base, id_size);
-            uint32 i = member_count++;
-            spv_emit(ctx, 4, SpvOpConstant, tid_arr_idx, ctx->spirv.uniform_arrays.idbool, i);
-            member_tid[i] = tid_array;
-            member_offset[i] = struct_size;
+            uint32 member_index = member_count++;
+            spv_emit(ctx, 4, SpvOpConstant, tid_arr_idx, ctx->spirv.uniform_arrays.idbool, member_index);
+            member_tid[member_index] = tid_array;
+            member_offset[member_index] = struct_size;
             struct_size += size * 16;
         } // if
 
@@ -2560,10 +2560,10 @@ void emit_SPIRV_finalize(Context *ctx)
         spv_emit(ctx, 3+1, SpvOpDecorate, id_pstruct, SpvDecorationDescriptorSet, set);
         spv_emit(ctx, 3+1, SpvOpDecorate, id_pstruct, SpvDecorationBinding, 0);
 
-        for (uint32 i = 0; i < member_count; i++)
+        for (uint32 member_index = 0; member_index < member_count; member_index++)
         {
-            spv_emit(ctx, 3+1, SpvOpDecorate, member_tid[i], SpvDecorationArrayStride, 16);
-            spv_emit(ctx, 4+1, SpvOpMemberDecorate, tid_struct, i, SpvDecorationOffset, member_offset[i]);
+            spv_emit(ctx, 3+1, SpvOpDecorate, member_tid[member_index], SpvDecorationArrayStride, 16);
+            spv_emit(ctx, 4+1, SpvOpMemberDecorate, tid_struct, member_index, SpvDecorationOffset, member_offset[member_index]);
         } // for
 
         pop_output(ctx);
@@ -2604,9 +2604,9 @@ void emit_SPIRV_finalize(Context *ctx)
     {
         if (!shader_version_atleast(ctx, 1, 4))
         {
-            for (uint32 i = 0; i < implicit_input_count; i++)
+            for (uint32 input_index = 0; input_index < implicit_input_count; input_index++)
             {
-                if (ctx->spirv.id_implicit_input[i])
+                if (ctx->spirv.id_implicit_input[input_index])
                     inoutcount += 1;
             } // for
         } // if
@@ -2655,9 +2655,9 @@ void emit_SPIRV_finalize(Context *ctx)
     {
         if (!shader_version_atleast(ctx, 1, 4))
         {
-            for (uint32 i = 0; i < implicit_input_count; i++)
+            for (uint32 input_index = 0; input_index < implicit_input_count; input_index++)
             {
-                uint32 id = ctx->spirv.id_implicit_input[i];
+                uint32 id = ctx->spirv.id_implicit_input[input_index];
                 if (id)
                     spv_emit_word(ctx, id);
             } // for
@@ -3642,9 +3642,6 @@ void emit_SPIRV_TEXLD(Context *ctx)
     {
         const SourceArgInfo *samp_arg = &ctx->source_args[1];
         RegisterList *sampler_reg = reglist_find(&ctx->samplers, REG_TYPE_SAMPLER, samp_arg->regnum);
-        const SourceArgInfo *texcoord_arg = &ctx->source_args[0];
-        RegisterList *texcoord_reg = spv_getreg(ctx, texcoord_arg->regtype, texcoord_arg->regnum);
-
         if (sampler_reg == NULL)
         {
             fail(ctx, "TEXLD using undeclared sampler");

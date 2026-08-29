@@ -7,6 +7,8 @@
  *  This file written by Ryan C. Gordon.
  */
 
+/* Modified by qemu-vmvga for QEMU drop-in integration. */
+
 #define __MOJOSHADER_INTERNAL__ 1
 #include "mojoshader_profile.h"
 
@@ -126,7 +128,6 @@ int isfail(const Context *ctx)
     return ctx->isfail;
 } // isfail
 
-void failf(Context *ctx, const char *fmt, ...) ISPRINTF(2,3);
 void failf(Context *ctx, const char *fmt, ...)
 {
     ctx->isfail = 1;
@@ -147,7 +148,6 @@ void fail(Context *ctx, const char *reason)
 
 // Output Lines...
 
-void output_line(Context *ctx, const char *fmt, ...) ISPRINTF(2,3);
 void output_line(Context *ctx, const char *fmt, ...)
 {
     assert(ctx->output != NULL);

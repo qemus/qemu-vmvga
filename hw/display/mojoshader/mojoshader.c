@@ -7,6 +7,8 @@
  *  This file written by Ryan C. Gordon.
  */
 
+/* Modified by qemu-vmvga for QEMU drop-in integration. */
+
 // !!! FIXME: this file really needs to be split up.
 // !!! FIXME: I keep changing coding styles for symbols and typedefs.
 
@@ -3565,7 +3567,7 @@ static void process_definitions(Context *ctx)
         RegisterList *next = item->next;
         const RegisterType regtype = item->regtype;
         const int regnum = item->regnum;
-        MOJOSHADER_usage usage;
+        MOJOSHADER_usage usage = MOJOSHADER_USAGE_UNKNOWN;
 
         if (!get_defined_register(ctx, regtype, regnum))
         {
@@ -4003,7 +4005,7 @@ void MOJOSHADER_freePreshader(const MOJOSHADER_preshader *preshader)
 } // MOJOSHADER_freePreshader
 
 #if SUPPORT_PROFILE_SPIRV
-#include <spirv/spirv.h> /* SpvOp, SpvOpConvertUToF, SpvOpConvertSToF, SpvOpCopyObject */
+#include "spirv/spirv.h" /* SpvOp, SpvOpConvertUToF, SpvOpConvertSToF, SpvOpCopyObject */
 #endif
 
 int MOJOSHADER_linkSPIRVShaders(const MOJOSHADER_parseData *vertex_spirv,

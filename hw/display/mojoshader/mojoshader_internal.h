@@ -1,3 +1,5 @@
+/* Modified by qemu-vmvga for QEMU drop-in integration. */
+
 #ifndef _INCLUDE_MOJOSHADER_INTERNAL_H_
 #define _INCLUDE_MOJOSHADER_INTERNAL_H_
 
@@ -376,7 +378,7 @@ StringCache *stringcache_create(MOJOSHADER_malloc m,MOJOSHADER_free f,void *d);
 const char *stringcache(StringCache *cache, const char *str);
 const char *stringcache_len(StringCache *cache, const char *str,
                             const unsigned int len);
-const char *stringcache_fmt(StringCache *cache, const char *fmt, ...);
+const char *stringcache_fmt(StringCache *cache, const char *fmt, ...) ISPRINTF(2,3);
 int stringcache_iscached(StringCache *cache, const char *str);
 void stringcache_destroy(StringCache *cache);
 
@@ -390,7 +392,7 @@ int errorlist_add(ErrorList *list, const char *fname,
 int errorlist_add_fmt(ErrorList *list, const char *fname,
                       const int errpos, const char *fmt, ...) ISPRINTF(4,5);
 int errorlist_add_va(ErrorList *list, const char *_fname,
-                     const int errpos, const char *fmt, va_list va);
+                     const int errpos, const char *fmt, va_list va) ISPRINTF(4,0);
 int errorlist_count(ErrorList *list);
 MOJOSHADER_error *errorlist_flatten(ErrorList *list); // resets the list!
 void errorlist_destroy(ErrorList *list);
@@ -419,7 +421,7 @@ Buffer *buffer_create(size_t blksz,MOJOSHADER_malloc m,MOJOSHADER_free f,void *d
 char *buffer_reserve(Buffer *buffer, const size_t len);
 int buffer_append(Buffer *buffer, const void *_data, size_t len);
 int buffer_append_fmt(Buffer *buffer, const char *fmt, ...) ISPRINTF(2,3);
-int buffer_append_va(Buffer *buffer, const char *fmt, va_list va);
+int buffer_append_va(Buffer *buffer, const char *fmt, va_list va) ISPRINTF(2,0);
 size_t buffer_size(Buffer *buffer);
 void buffer_empty(Buffer *buffer);
 char *buffer_flatten(Buffer *buffer);
@@ -461,6 +463,9 @@ void buffer_patch(Buffer *buffer, const size_t start,
 
 // #define this to force app to supply an allocator, so there's no reference
 //  to the C runtime's malloc() and free()...
+#ifndef MOJOSHADER_FORCE_ALLOCATOR
+#define MOJOSHADER_FORCE_ALLOCATOR 0
+#endif
 #if MOJOSHADER_FORCE_ALLOCATOR
 #define MOJOSHADER_internal_malloc NULL
 #define MOJOSHADER_internal_free NULL
@@ -663,7 +668,7 @@ void MOJOSHADER_spirv_link_attributes(const MOJOSHADER_parseData *vertex,
 #endif  // _INCLUDE_MOJOSHADER_INTERNAL_H_
 
 
-#if MOJOSHADER_DO_INSTRUCTION_TABLE
+#if defined(MOJOSHADER_DO_INSTRUCTION_TABLE) && MOJOSHADER_DO_INSTRUCTION_TABLE
 // These have to be in the right order! Arrays are indexed by the value
 //  of the instruction token.
 

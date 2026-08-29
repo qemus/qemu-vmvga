@@ -7,6 +7,8 @@
  *  This file written by Ryan C. Gordon.
  */
 
+/* Modified by qemu-vmvga for QEMU drop-in integration. */
+
 #ifndef MOJOSHADER_PROFILE_H
 #define MOJOSHADER_PROFILE_H
 
@@ -344,10 +346,10 @@ int shader_is_pixel(const Context *ctx);
 int shader_is_vertex(const Context *ctx);
 
 int isfail(const Context *ctx);
-void failf(Context *ctx, const char *fmt, ...);
+void failf(Context *ctx, const char *fmt, ...) ISPRINTF(2,3);
 void fail(Context *ctx, const char *reason);
 
-void output_line(Context *ctx, const char *fmt, ...);
+void output_line(Context *ctx, const char *fmt, ...) ISPRINTF(2,3);
 void output_blank_line(Context *ctx);
 
 void floatstr(Context *ctx, char *buf, size_t bufsize, float f,

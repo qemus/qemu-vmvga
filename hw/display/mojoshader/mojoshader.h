@@ -7,6 +7,8 @@
  *  This file written by Ryan C. Gordon.
  */
 
+/* Modified by qemu-vmvga for QEMU drop-in integration. */
+
 #ifndef _INCL_MOJOSHADER_H_
 #define _INCL_MOJOSHADER_H_
 
@@ -1605,7 +1607,7 @@ DECLSPEC void MOJOSHADER_glMapUniformBufferMemory(float **vsf, int **vsi, unsign
  * This call requires a valid MOJOSHADER_glContext to have been made current,
  *  or it will crash your program. See MOJOSHADER_glMakeContextCurrent().
  */
-DECLSPEC void MOJOSHADER_glUnmapUniformBufferMemory();
+DECLSPEC void MOJOSHADER_glUnmapUniformBufferMemory(void);
 
 /*
  * Set up the vector for the TEXBEM opcode. Most apps can ignore this API.

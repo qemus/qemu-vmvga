@@ -88,6 +88,9 @@
 #define VMSVGA_CURSOR_MAX_DIMENSION 512
 #define VMSVGA_FIFO_SIZE (2 * 1024 * 1024)
 #define VMSVGA_VGA_FB_BACKUP_SIZE (512 * 1024)
+#define VMSVGA_LEGACY_VGA_IO_BASE 0x3c0
+#define VMSVGA_LEGACY_VGA_IO_SIZE 0x20
+#define VMSVGA_LEGACY_SHUTDOWN_CURSOR_PAIRS 4
 #define VMSVGA_SCRATCH_SIZE 32
 #define VMSVGA_CURSOR_MAX_BYTE_SIZE \
   (VMSVGA_CURSOR_MAX_DIMENSION * VMSVGA_CURSOR_MAX_DIMENSION * 8)
@@ -385,9 +388,16 @@ struct vmsvga_state_s {
   bool dirty_log_enabled;
   bool test_marker;
   bool marker_logged;
+  bool legacy_shutdown_armed;
+  bool legacy_shutdown_expect_cursor_on;
+  bool legacy_shutdown_triggered;
+  uint8_t legacy_shutdown_vga_step;
+  uint8_t legacy_shutdown_cursor_pairs;
+  uint32_t legacy_shutdown_cursor_id;
   uint32_t trace_display_path;
   MemoryRegion fifo_ram;
   MemoryRegion legacy_vga_mem;
+  MemoryRegion legacy_vga_io;
   uint8_t *legacy_vga_ptr;
   uint32_t legacy_vga_size;
 };
@@ -407,6 +417,89 @@ static inline void
 vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
                         const struct vmsvga_damage_rect_s *explicit_damage,
                         uint32_t explicit_count);
+
+/*
+ * Some legacy VMware display drivers enter the VGA/VDD teardown path while
+ * SVGA_REG_ENABLE is still set. Match the observed hardware access sequence only.
+ */
+struct vmsvga_legacy_shutdown_step_s {
+  uint16_t port;
+  uint8_t value;
+  bool write;
+  bool check_value;
+};
+
+static const struct vmsvga_legacy_shutdown_step_s
+    vmsvga_legacy_shutdown_signature[] = {
+        {0x3ce, 0x04, true, true},
+        {0x3cf, 0x02, true, true},
+        {0x3c4, 0x02, true, true},
+        {0x3c5, 0x04, true, true},
+        {0x3ce, 0x05, true, true},
+        {0x3c4, 0x00, true, true},
+        {0x3da, 0x00, false, false},
+        {0x3c0, 0x00, false, false},
+        {0x3c0, 0x20, true, true},
+        {0x3cc, 0x00, false, false},
+        {0x3d4, 0x0f, true, true},
+        {0x3d5, 0x00, true, false},
+        {0x3d4, 0x0e, true, true},
+        {0x3d5, 0x00, true, false},
+};
+
+static inline bool vmsvga_legacy_shutdown_step_matches(
+    const struct vmsvga_legacy_shutdown_step_s *step, bool write,
+    uint32_t port, uint32_t value) {
+  return step->write == write && step->port == port &&
+         (!step->check_value || step->value == (value & 0xff));
+};
+
+static inline void
+vmsvga_legacy_shutdown_disarm(struct vmsvga_state_s *s) {
+  s->legacy_shutdown_vga_step = 0;
+  s->legacy_shutdown_armed = false;
+  s->legacy_shutdown_expect_cursor_on = false;
+  s->legacy_shutdown_cursor_pairs = 0;
+  s->legacy_shutdown_cursor_id = 0;
+};
+
+static inline void
+vmsvga_legacy_shutdown_reset(struct vmsvga_state_s *s) {
+  vmsvga_legacy_shutdown_disarm(s);
+  s->legacy_shutdown_triggered = false;
+};
+
+static inline void
+vmsvga_legacy_shutdown_vga_access(struct vmsvga_state_s *s, bool write,
+                                  uint32_t port, uint32_t value) {
+  const struct vmsvga_legacy_shutdown_step_s *step;
+
+  if (s->legacy_shutdown_triggered || !s->enable || !s->config) {
+    s->legacy_shutdown_vga_step = 0;
+    return;
+  };
+
+  step = &vmsvga_legacy_shutdown_signature[s->legacy_shutdown_vga_step];
+  if (vmsvga_legacy_shutdown_step_matches(step, write, port, value)) {
+    s->legacy_shutdown_vga_step++;
+    if (s->legacy_shutdown_vga_step ==
+        ARRAY_SIZE(vmsvga_legacy_shutdown_signature)) {
+      s->legacy_shutdown_vga_step = 0;
+      s->legacy_shutdown_armed = true;
+      s->legacy_shutdown_expect_cursor_on = false;
+      s->legacy_shutdown_cursor_pairs = 0;
+      VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                         "LEGACY_SHUTDOWN signature armed");
+    };
+    return;
+  };
+
+  s->legacy_shutdown_vga_step =
+      vmsvga_legacy_shutdown_step_matches(&vmsvga_legacy_shutdown_signature[0],
+                                          write, port, value)
+          ? 1
+          : 0;
+};
 
 static inline size_t vmsvga_legacy_vga_backup_size(
     const struct vmsvga_state_s *s) {
@@ -513,6 +606,48 @@ static const MemoryRegionOps vmsvga_legacy_vga_ops = {
             .max_access_size = 1,
         },
 };
+
+static uint64_t vmsvga_legacy_vga_io_read(void *opaque, hwaddr addr,
+                                          unsigned size) {
+  struct vmsvga_state_s *s = opaque;
+  uint32_t port = VMSVGA_LEGACY_VGA_IO_BASE + addr;
+  uint32_t value;
+
+  (void)size;
+  value = vga_ioport_read(&s->vga, port);
+  vmsvga_legacy_shutdown_vga_access(s, false, port, value);
+  return value;
+};
+
+static void vmsvga_legacy_vga_io_write(void *opaque, hwaddr addr,
+                                       uint64_t data, unsigned size) {
+  struct vmsvga_state_s *s = opaque;
+  uint32_t port = VMSVGA_LEGACY_VGA_IO_BASE + addr;
+  uint32_t value = data & 0xff;
+
+  (void)size;
+  vga_ioport_write(&s->vga, port, value);
+  vmsvga_legacy_shutdown_vga_access(s, true, port, value);
+};
+
+static const MemoryRegionOps vmsvga_legacy_vga_io_ops = {
+    .read = vmsvga_legacy_vga_io_read,
+    .write = vmsvga_legacy_vga_io_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid =
+        {
+            .min_access_size = 1,
+            .max_access_size = 4,
+            .unaligned = true,
+        },
+    .impl =
+        {
+            .min_access_size = 1,
+            .max_access_size = 1,
+            .unaligned = true,
+        },
+};
+
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
                                        uint32_t reg);
 static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
@@ -5129,6 +5264,76 @@ static inline void vmsvga_fifo_discard_pending(struct vmsvga_state_s *s) {
   vmsvga_fifo_upload_reset(s);
   vmsvga_fifo_set_busy(s, false);
 };
+
+static void vmsvga_disable_svga(struct vmsvga_state_s *s) {
+  bool was_hidden = s->hidden;
+
+  vmsvga_legacy_shutdown_disarm(s);
+  if (s->enable) {
+    /* VGA needs dirty logging before the shadow is copied back. */
+    vmsvga_set_dirty_log(s, true);
+    vmsvga_fifo_discard_pending(s);
+    vmsvga_legacy_vga_leave(s);
+  };
+  s->enable = 0;
+  s->hidden = false;
+  vmsvga_update_dirty_log(s);
+  if (was_hidden != s->hidden) {
+    s->cursor_dirty = true;
+    cursor_update_from_fifo(s);
+  };
+  s->invalidated = true;
+};
+
+static inline void
+vmsvga_legacy_shutdown_svga_write(struct vmsvga_state_s *s, uint32_t index,
+                                   uint32_t value) {
+  if (!s->legacy_shutdown_armed || s->legacy_shutdown_triggered) {
+    return;
+  };
+  if (!s->enable || !s->config) {
+    vmsvga_legacy_shutdown_disarm(s);
+    return;
+  };
+
+  if (!s->legacy_shutdown_expect_cursor_on) {
+    if (index == SVGA_REG_CURSOR_ID && value < VMSVGA_MAX_CURSORS) {
+      if (s->legacy_shutdown_cursor_pairs == 0) {
+        s->legacy_shutdown_cursor_id = value;
+      } else if (value != s->legacy_shutdown_cursor_id) {
+        vmsvga_legacy_shutdown_disarm(s);
+        return;
+      };
+      s->legacy_shutdown_expect_cursor_on = true;
+      return;
+    };
+    vmsvga_legacy_shutdown_disarm(s);
+    return;
+  };
+
+  if (index == SVGA_REG_CURSOR_ON &&
+      value == SVGA_CURSOR_ON_RESTORE_TO_FB) {
+    s->legacy_shutdown_expect_cursor_on = false;
+    s->legacy_shutdown_cursor_pairs++;
+    if (s->legacy_shutdown_cursor_pairs >=
+        VMSVGA_LEGACY_SHUTDOWN_CURSOR_PAIRS) {
+      if (s->sync || vmsvga_fifo_pending(s)) {
+        vmsvga_legacy_shutdown_disarm(s);
+        return;
+      };
+      s->legacy_shutdown_triggered = true;
+      s->legacy_shutdown_armed = false;
+      VMVGA_TRACE_LOCAL(
+          VMVGA_TRACE_STATE,
+          "LEGACY_SHUTDOWN workaround disable after %u cursor pairs",
+          s->legacy_shutdown_cursor_pairs);
+      vmsvga_disable_svga(s);
+    };
+    return;
+  };
+
+  vmsvga_legacy_shutdown_disarm(s);
+};
 #ifdef CONFIG_PIXMAN
 static inline void vmsvga_palette_update_entry(struct vmsvga_state_s *s,
                                                 uint32_t entry) {
@@ -5632,6 +5837,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
 static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
   VPRINT("vmsvga_value_write was just executed\n");
   struct vmsvga_state_s *s = opaque;
+  vmsvga_legacy_shutdown_svga_write(s, s->index, value);
   if (s->index >= SVGA_REG_PALETTE_MIN && s->index <= SVGA_REG_PALETTE_MAX) {
     uint32_t palette_offset = s->index - SVGA_REG_PALETTE_MIN;
     trace_vmware_palette_write(s->index, value);
@@ -5668,25 +5874,22 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     bool was_enabled = s->enable;
     bool was_hidden = s->hidden;
     bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
-    if (!was_enabled && enabled) {
-      vmsvga_legacy_vga_enter(s);
-    } else if (was_enabled && !enabled) {
-      /* VGA needs dirty logging before the shadow is copied back. */
-      vmsvga_set_dirty_log(s, true);
-      vmsvga_fifo_discard_pending(s);
-      vmsvga_legacy_vga_leave(s);
-    };
-    s->enable = enabled;
-    s->hidden = s->enable && !!(value & SVGA_REG_ENABLE_HIDE);
-    if (s->enable) {
+    if (!enabled) {
+      vmsvga_disable_svga(s);
+    } else {
+      if (!was_enabled) {
+        vmsvga_legacy_vga_enter(s);
+      };
+      s->enable = 1;
+      s->hidden = !!(value & SVGA_REG_ENABLE_HIDE);
       vmsvga_try_commit_mode(s);
+      vmsvga_update_dirty_log(s);
+      if (was_hidden != s->hidden) {
+        s->cursor_dirty = true;
+        cursor_update_from_fifo(s);
+      };
+      s->invalidated = true;
     };
-    vmsvga_update_dirty_log(s);
-    if (was_hidden != s->hidden) {
-      s->cursor_dirty = true;
-      cursor_update_from_fifo(s);
-    };
-    s->invalidated = true;
     /* vmware_value_write already traces this register when enabled. */
     VPRINT("SVGA_REG_ENABLE register %u with the value of %u\n", s->index,
            value);
@@ -6077,6 +6280,7 @@ static void vmsvga_reset(DeviceState *dev) {
   s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
   s->cursor_dirty = true;
   s->marker_logged = false;
+  vmsvga_legacy_shutdown_reset(s);
   s->damage_count = 0;
   s->fence = 0;
   s->fence_goal = 0;
@@ -6441,6 +6645,7 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   s->damage_count = 0;
   s->invalidated = true;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
+  vmsvga_legacy_shutdown_reset(s);
   ret = vmsvga_restore_objects(s);
   if (ret < 0) {
     goto fail;
@@ -6664,6 +6869,11 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
   vga_common_init(&s->vga, OBJECT(dev), &error_fatal);
   vga_init(&s->vga, OBJECT(dev), address_space, io, true);
+  memory_region_init_io(&s->legacy_vga_io, OBJECT(dev),
+                        &vmsvga_legacy_vga_io_ops, s, "vmsvga.vga-io",
+                        VMSVGA_LEGACY_VGA_IO_SIZE);
+  memory_region_add_subregion_overlap(io, VMSVGA_LEGACY_VGA_IO_BASE,
+                                      &s->legacy_vga_io, 1);
   /* vga_common_init() enables DIRTY_MEMORY_VGA logging. */
   s->dirty_log_enabled = true;
   s->legacy_vga_ptr = g_malloc0(VMSVGA_VGA_FB_BACKUP_SIZE);
@@ -6712,6 +6922,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
   s->cursor_dirty = true;
   s->marker_logged = false;
+  vmsvga_legacy_shutdown_reset(s);
   s->damage_count = 0;
   s->fence = 0;
   s->fence_goal = 0;

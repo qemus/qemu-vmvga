@@ -34,13 +34,15 @@
 #include "include/svga3d_surfacedefs.h"
 #include "include/svga3d_types.h"
 #include "include/vmware_vga_3d_backend.h"
+#include "include/vmware_vga_d3d9.h"
 
 typedef struct {
   SVGA3dSize size;
 } SVGA3dCmdSize;
 
-/* Matches the legacy SVGA3D_DEVCAP_MAX_TEXTURES value we advertise. */
-#define VMSVGA3D_MAX_TEXTURE_STAGES 8
+/* D3D9 has 8 fixed-function stages but 21 addressable sampler slots. */
+#define VMSVGA3D_MAX_TEXTURE_STAGES VMSVGA3D_D3D9_MAX_TEXTURE_STAGES
+#define VMSVGA3D_MAX_SAMPLERS VMSVGA3D_D3D9_MAX_SAMPLERS
 
 typedef struct vmsvga3d_state_value_s {
   uint32_t value;
@@ -91,7 +93,7 @@ typedef struct vmsvga3d_context_s {
   SVGA3dRect viewport;
   SVGA3dRect scissor;
   VMSVGA3DStateValue render_state[SVGA3D_RS_MAX];
-  VMSVGA3DStateValue texture_state[VMSVGA3D_MAX_TEXTURE_STAGES][SVGA3D_TS_MAX];
+  VMSVGA3DStateValue texture_state[VMSVGA3D_MAX_SAMPLERS][SVGA3D_TS_MAX];
   VMSVGA3DTransformState transform[SVGA3D_TRANSFORM_MAX];
   SVGA3dZRange z_range;
   VMSVGA3DMaterialState material[SVGA3D_FACE_MAX];
@@ -2735,6 +2737,7 @@ typedef struct {
   const char *name;
 } VMSVGA3DCommandInfo;
 
+#include "vmware_vga_d3d9.c"
 #include "vmware_vga_3d_backend.c"
 
 #define VMSVGA3D_STALL(cmd) \

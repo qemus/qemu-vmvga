@@ -163,7 +163,7 @@ static bool vmsvga3d_backend_set_texture_state(
     return false;
   };
   for (i = 0; i < count; i++) {
-    if (states[i].stage >= VMSVGA3D_MAX_TEXTURE_STAGES ||
+    if (states[i].stage >= VMSVGA3D_MAX_SAMPLERS ||
         states[i].name < SVGA3D_TS_MIN || states[i].name >= SVGA3D_TS_MAX) {
       return false;
     };
@@ -187,19 +187,11 @@ static bool vmsvga3d_backend_set_material(struct vmsvga_state_s *s,
                                            const SVGA3dMaterial *material) {
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
 
-  if (context == NULL || material == NULL ||
-      (face != SVGA3D_FACE_FRONT && face != SVGA3D_FACE_BACK &&
-       face != SVGA3D_FACE_FRONT_BACK)) {
+  if (context == NULL || material == NULL || (uint32_t)face >= SVGA3D_FACE_MAX) {
     return false;
   };
-  if (face == SVGA3D_FACE_FRONT || face == SVGA3D_FACE_FRONT_BACK) {
-    context->material[SVGA3D_FACE_FRONT].material = *material;
-    context->material[SVGA3D_FACE_FRONT].valid = true;
-  };
-  if (face == SVGA3D_FACE_BACK || face == SVGA3D_FACE_FRONT_BACK) {
-    context->material[SVGA3D_FACE_BACK].material = *material;
-    context->material[SVGA3D_FACE_BACK].valid = true;
-  };
+  context->material[face].material = *material;
+  context->material[face].valid = true;
   return true;
 };
 
@@ -209,7 +201,9 @@ static bool vmsvga3d_backend_set_light_data(struct vmsvga_state_s *s,
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
 
   if (context == NULL || data == NULL || index >= SVGA3D_NUM_LIGHTS ||
-      data->type < SVGA3D_LIGHTTYPE_MIN || data->type >= SVGA3D_LIGHTTYPE_MAX) {
+      (data->type != SVGA3D_LIGHTTYPE_POINT &&
+       data->type != SVGA3D_LIGHTTYPE_SPOT1 &&
+       data->type != SVGA3D_LIGHTTYPE_DIRECTIONAL)) {
     return false;
   };
   context->light[index].data = *data;
@@ -268,9 +262,7 @@ static bool vmsvga3d_backend_clear(struct vmsvga_state_s *s, uint32_t cid,
   uint32_t flags = clear_flags;
   bool valid = true;
 
-  if ((rect_count != 0 && rects == NULL) ||
-      (flags & ~(SVGA3D_CLEAR_COLOR | SVGA3D_CLEAR_DEPTH |
-                 SVGA3D_CLEAR_STENCIL))) {
+  if (rect_count != 0 && rects == NULL) {
     return false;
   };
   context = vmsvga3d_context(s, cid);

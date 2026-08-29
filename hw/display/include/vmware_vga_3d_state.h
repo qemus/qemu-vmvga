@@ -78,6 +78,21 @@ static bool vmsvga3d_state_set_scissor(struct vmsvga_state_s *s, uint32_t cid,
                                 const SVGA3dRect *rect);
 static bool vmsvga3d_state_generate_mipmaps(struct vmsvga_state_s *s, uint32_t sid,
                                      SVGA3dTextureFilter filter);
+typedef enum vmsvga3d_query_wait_status_e {
+  VMSVGA3D_QUERY_WAIT_FAILED = 0,
+  VMSVGA3D_QUERY_WAIT_READY,
+  VMSVGA3D_QUERY_WAIT_NEEDS_RENDERER,
+} VMSVGA3DQueryWaitStatus;
+
+static bool vmsvga3d_state_query_begin(struct vmsvga_state_s *s, uint32_t cid,
+                                       SVGA3dQueryType type);
+static bool vmsvga3d_state_query_end(struct vmsvga_state_s *s, uint32_t cid,
+                                     SVGA3dQueryType type);
+bool vmsvga3d_state_query_complete(struct vmsvga_state_s *s, uint32_t cid,
+                                    SVGA3dQueryType type, uint32_t result);
+static VMSVGA3DQueryWaitStatus vmsvga3d_state_query_wait(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dQueryType type,
+    uint32_t *result);
 static bool vmsvga3d_state_shader_define(struct vmsvga_state_s *s, uint32_t cid,
                                   uint32_t shid, SVGA3dShaderType type,
                                   uint32_t bytecode_size,

@@ -266,6 +266,17 @@ struct vmsvga_cursor_source_s {
 #define VPRINT(...)
 #endif
 
+#define VMVGA_DIAG_BLIT_FAIL 1
+
+#if VMVGA_DIAG_BLIT_FAIL
+#define VMVGA_BLIT_FAIL(fmt, ...)                                             \
+  do {                                                                         \
+    fprintf(stderr, "VMVGA-BLIT-FAIL: " fmt "\n", ##__VA_ARGS__);            \
+  } while (0)
+#else
+#define VMVGA_BLIT_FAIL(fmt, ...) do { } while (0)
+#endif
+
 /*
  * Overlay-local diagnostics.
  *
@@ -2339,8 +2350,63 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
   uint8_t *source_row = s->blit_scratch;
   uint32_t row;
   uint32_t column;
-  if (object == NULL || rop > VMSVGA_ROP_SET || bypp < 1 || bypp > 4 ||
-      !vmsvga_verify_rect(s, dst_x, dst_y, width, height)) {
+  if (object == NULL) {
+    if (id >= VMSVGA_MAX_OBJECTS) {
+      VMVGA_BLIT_FAIL(
+          "reason=INVALID_ID id=%u type=%u pattern=%u src=%u,%u dst=%u,%u "
+          "w=%u h=%u rop=0x%02x active=%ux%u depth=%u stride=%u",
+          id, type, pattern, src_x, src_y, dst_x, dst_y, width, height, rop,
+          vmsvga_active_width(s), vmsvga_active_height(s),
+          vmsvga_active_depth(s), bypl);
+    } else if (s->objects[id] == NULL) {
+      VMVGA_BLIT_FAIL(
+          "reason=NO_OBJECT id=%u type=%u pattern=%u src=%u,%u dst=%u,%u "
+          "w=%u h=%u rop=0x%02x active=%ux%u depth=%u stride=%u",
+          id, type, pattern, src_x, src_y, dst_x, dst_y, width, height, rop,
+          vmsvga_active_width(s), vmsvga_active_height(s),
+          vmsvga_active_depth(s), bypl);
+    } else {
+      VMVGA_BLIT_FAIL(
+          "reason=TYPE_MISMATCH id=%u requested_type=%u stored_type=%u "
+          "pattern=%u src=%u,%u dst=%u,%u w=%u h=%u rop=0x%02x "
+          "object=%ux%u depth=%u stride=%u active=%ux%u depth=%u stride=%u",
+          id, type, s->objects[id]->type, pattern, src_x, src_y, dst_x, dst_y,
+          width, height, rop, s->objects[id]->width, s->objects[id]->height,
+          s->objects[id]->depth, s->objects[id]->stride,
+          vmsvga_active_width(s), vmsvga_active_height(s),
+          vmsvga_active_depth(s), bypl);
+    };
+    return false;
+  };
+  if (rop > VMSVGA_ROP_SET) {
+    VMVGA_BLIT_FAIL(
+        "reason=INVALID_ROP id=%u type=%u pattern=%u src=%u,%u dst=%u,%u "
+        "w=%u h=%u rop=0x%02x object=%ux%u depth=%u stride=%u "
+        "active=%ux%u depth=%u stride=%u",
+        id, type, pattern, src_x, src_y, dst_x, dst_y, width, height, rop,
+        object->width, object->height, object->depth, object->stride,
+        vmsvga_active_width(s), vmsvga_active_height(s),
+        vmsvga_active_depth(s), bypl);
+    return false;
+  };
+  if (bypp < 1 || bypp > 4) {
+    VMVGA_BLIT_FAIL(
+        "reason=INVALID_BYPP id=%u type=%u pattern=%u src=%u,%u dst=%u,%u "
+        "w=%u h=%u rop=0x%02x bypp=%u active=%ux%u depth=%u stride=%u",
+        id, type, pattern, src_x, src_y, dst_x, dst_y, width, height, rop, bypp,
+        vmsvga_active_width(s), vmsvga_active_height(s),
+        vmsvga_active_depth(s), bypl);
+    return false;
+  };
+  if (!vmsvga_verify_rect(s, dst_x, dst_y, width, height)) {
+    VMVGA_BLIT_FAIL(
+        "reason=INVALID_DEST id=%u type=%u pattern=%u src=%u,%u dst=%u,%u "
+        "w=%u h=%u rop=0x%02x object=%ux%u depth=%u stride=%u "
+        "active=%ux%u depth=%u stride=%u",
+        id, type, pattern, src_x, src_y, dst_x, dst_y, width, height, rop,
+        object->width, object->height, object->depth, object->stride,
+        vmsvga_active_width(s), vmsvga_active_height(s),
+        vmsvga_active_depth(s), bypl);
     return false;
   };
   if (width == 0 || height == 0 || rop == VMSVGA_ROP_NOOP) {
@@ -2348,9 +2414,25 @@ static inline bool vmsvga_object_blit(struct vmsvga_state_s *s, uint32_t id,
   };
   if (!pattern && !vmsvga_object_rect_valid(object, src_x, src_y, width,
                                              height)) {
+    VMVGA_BLIT_FAIL(
+        "reason=INVALID_SOURCE id=%u type=%u src=%u,%u dst=%u,%u w=%u h=%u "
+        "rop=0x%02x object=%ux%u depth=%u stride=%u active=%ux%u depth=%u "
+        "stride=%u",
+        id, type, src_x, src_y, dst_x, dst_y, width, height, rop,
+        object->width, object->height, object->depth, object->stride,
+        vmsvga_active_width(s), vmsvga_active_height(s),
+        vmsvga_active_depth(s), bypl);
     return false;
   };
   if (type == VMSVGA_OBJECT_PIXMAP && !vmsvga_pixmap_compatible(s, object)) {
+    VMVGA_BLIT_FAIL(
+        "reason=INCOMPATIBLE_DEPTH id=%u type=%u pattern=%u src=%u,%u "
+        "dst=%u,%u w=%u h=%u rop=0x%02x object=%ux%u depth=%u stride=%u "
+        "active=%ux%u depth=%u stride=%u",
+        id, type, pattern, src_x, src_y, dst_x, dst_y, width, height, rop,
+        object->width, object->height, object->depth, object->stride,
+        vmsvga_active_width(s), vmsvga_active_height(s),
+        vmsvga_active_depth(s), bypl);
     return false;
   };
   if (type == VMSVGA_OBJECT_BITMAP &&

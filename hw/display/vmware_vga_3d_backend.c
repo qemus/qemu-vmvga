@@ -30,8 +30,8 @@
  * FIFO handlers decode and structurally validate command packets. This layer
  * owns the semantic VGPU9 operations, mirroring the boundary used by other
  * VMSVGA implementations while remaining independent of their backend code.
- * A future Vulkan renderer can replace these operations without learning the
- * FIFO packet layout.
+ * A D3D9 provider can replace these operations without learning the FIFO
+ * packet layout.
  */
 
 static bool vmsvga3d_backend_context_define(struct vmsvga_state_s *s,
@@ -320,8 +320,6 @@ static bool vmsvga3d_backend_draw_primitives(
     const SVGA3dVertexDivisor *divisors) {
   struct vmsvga3d_state_s *state = s->svga3d;
   VMSVGA3DContext *context = vmsvga3d_context(s, cid);
-  VMSVGAShaderVertexInput vertex_inputs[SVGA3D_MAX_VERTEX_ARRAYS];
-  VMSVGAShaderStatus status;
   uint32_t i;
 
   if (state == NULL || context == NULL || vertex_decl_count == 0 ||
@@ -329,6 +327,7 @@ static bool vmsvga3d_backend_draw_primitives(
       range_count > SVGA3D_MAX_DRAW_PRIMITIVE_RANGES || vertex_decls == NULL ||
       ranges == NULL || (divisor_count != 0 && divisors == NULL) ||
       (divisor_count != 0 && divisor_count != vertex_decl_count) ||
+      !vmsvga3d_draw_decls_valid(vertex_decls, vertex_decl_count) ||
       !vmsvga3d_draw_vertex_surfaces_valid(state, vertex_decls,
                                            vertex_decl_count) ||
       !vmsvga3d_draw_ranges_valid(state, ranges, range_count)) {
@@ -340,15 +339,7 @@ static bool vmsvga3d_backend_draw_primitives(
     };
   };
 
-  memset(vertex_inputs, 0, sizeof(vertex_inputs));
-  status = vmsvga3d_draw_vertex_inputs(vertex_decls, vertex_decl_count,
-                                       vertex_inputs);
-  if (status == VMSVGA_SHADER_OK) {
-    (void)vmsvga3d_prepare_program(state, context, vertex_inputs,
-                                   vertex_decl_count, NULL);
-  };
-
-  /* Rendering intentionally stops at program preparation until Vulkan lands. */
+  /* Rendering stops at the VGPU9 backend boundary until D3D9 is connected. */
   return true;
 };
 
@@ -432,9 +423,7 @@ static bool vmsvga3d_backend_shader_define(
   shader->type = type;
   shader->bytecode_size = bytecode_size;
   memcpy(shader->bytecode, bytecode, bytecode_size);
-  vmsvga3d_shader_translate(state, shader);
 
-  vmsvga3d_program_cache_clear(context);
   if (old_shader != NULL) {
     vmsvga3d_shader_free(old_shader);
   };
@@ -465,7 +454,6 @@ static bool vmsvga3d_backend_shader_destroy(struct vmsvga_state_s *s,
   } else {
     state->shader_bytes = 0;
   };
-  vmsvga3d_program_cache_clear(context);
   vmsvga3d_shader_free(shader);
   context->shader[type_index][shid] = NULL;
   return true;

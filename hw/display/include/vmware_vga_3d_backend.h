@@ -90,4 +90,17 @@ typedef struct vmsvga3d_backend_ops_vgpu9_s {
                            const uint32_t (*values)[4]);
 } VMSVGA3DBackendOpsVGPU9;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+bool vmsvga3d_backend_vgpu9_set(struct vmsvga_state_s *s,
+                                 const VMSVGA3DBackendOpsVGPU9 *ops,
+                                 void *opaque);
+void *vmsvga3d_backend_vgpu9_opaque(struct vmsvga_state_s *s);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif

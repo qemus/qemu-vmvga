@@ -36,12 +36,6 @@
 /*
  * VMware vGPU10 protocol translation for a D3D11-compatible host renderer.
  *
- * VirtualBox implements the vGPU10 protocol through its D3D11 backend rather
- * than by constraining execution to ID3D10Device.  Preserve that distinction:
- * D3D10/D3D10.1 names below are used where their public numeric ABI is shared
- * with D3D11, but guest state is translated according to VirtualBox's vGPU10
- * semantics and D3D11 realization.  No D3D headers are included here.
- *
  * A translation may identify the protocol state as requiring a later Direct3D
  * generation.  The D3D11 translator can extend those cases without making the
  * vGPU10 layer discard state merely because literal D3D10 cannot represent it.

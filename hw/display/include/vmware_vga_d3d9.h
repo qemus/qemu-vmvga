@@ -378,6 +378,29 @@ typedef struct vmsvga3d_d3d9_clear_plan_s {
   uint32_t active_render_target_mask;
 } VMSVGA3DD3D9ClearPlan;
 
+typedef struct vmsvga3d_d3d9_screen_blit_plan_s {
+  VMSVGA3DD3D9ExecutionPreference execution;
+  bool cpu_fallback_allowed;
+  uint32_t destination_screen;
+  uint32_t source_face;
+  uint32_t source_mipmap;
+  uint32_t clip_count;
+  bool clips_relative_to_destination;
+  bool no_clips_means_full_destination;
+  bool force_source_face0_mip0;
+  bool require_accelerated_screen;
+  bool require_2d_source;
+  bool create_source_texture;
+  bool flush_source;
+  bool direct_scanout_blit;
+  bool supports_scaling;
+  bool scaling;
+  uint32_t filter;
+  bool track_source;
+  bool update_scanout;
+  bool fallback_to_dma_readback;
+} VMSVGA3DD3D9ScreenBlitPlan;
+
 typedef struct vmsvga3d_d3d9_present_plan_s {
   VMSVGA3DD3D9ExecutionPreference execution;
   bool cpu_fallback_allowed;
@@ -389,6 +412,8 @@ typedef struct vmsvga3d_d3d9_present_plan_s {
   bool synthesize_full_screen_rect;
   SVGA3dCopyRect full_screen_rect;
   bool legacy_d3d9_screen_blit_unimplemented;
+  bool prefer_direct_screen_blit;
+  VMSVGA3DD3D9ScreenBlitPlan screen_blit;
   bool use_surface_dma_readback;
   SVGA3dTransferType transfer;
   bool one_dma_per_rect;
@@ -485,6 +510,12 @@ bool vmsvga3d_d3d9_dma_plan(
     const VMSVGA3DD3D9TransferSurface *surface,
     SVGA3dTransferType transfer, bool first_box,
     VMSVGA3DD3D9DmaPlan *plan);
+bool vmsvga3d_d3d9_screen_blit_plan(
+    const VMSVGA3DD3D9TransferSurface *surface, uint32_t destination_screen,
+    bool scaling, uint32_t clip_count, VMSVGA3DD3D9ScreenBlitPlan *plan);
+bool vmsvga3d_d3d9_screen_blit_copy_rect(
+    const SVGA3dCopyRect *rect, VMSVGA3DD3D9Rect *source,
+    VMSVGA3DD3D9Rect *destination);
 bool vmsvga3d_d3d9_present_plan(
     const VMSVGA3DD3D9TransferSurface *surface, uint32_t rect_count,
     uint32_t screen_width, uint32_t screen_height,

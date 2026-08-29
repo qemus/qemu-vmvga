@@ -1690,6 +1690,82 @@ bool vmsvga3d_d3d9_dma_plan(
   return true;
 }
 
+bool vmsvga3d_d3d9_screen_blit_plan(
+    const VMSVGA3DD3D9TransferSurface *surface, uint32_t destination_screen,
+    bool scaling, uint32_t clip_count, VMSVGA3DD3D9ScreenBlitPlan *plan) {
+  bool source_2d;
+
+  if (surface == NULL || plan == NULL) {
+    return false;
+  }
+
+  memset(plan, 0, sizeof(*plan));
+  plan->cpu_fallback_allowed = destination_screen == 0 && !scaling;
+  plan->destination_screen = destination_screen;
+  plan->source_face = 0;
+  plan->source_mipmap = 0;
+  plan->clip_count = clip_count;
+  plan->clips_relative_to_destination = true;
+  plan->no_clips_means_full_destination = true;
+  plan->force_source_face0_mip0 = true;
+  plan->require_accelerated_screen = true;
+  plan->require_2d_source = true;
+  plan->supports_scaling = true;
+  plan->scaling = scaling;
+  plan->filter = 1; /* D3DTEXF_POINT / VBox GL_NEAREST. */
+  plan->fallback_to_dma_readback = plan->cpu_fallback_allowed;
+
+  source_2d = (surface->surface_flags &
+               (SVGA3D_SURFACE_CUBEMAP | SVGA3D_SURFACE_VOLUME)) == 0;
+  if (!source_2d ||
+      surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE ||
+      surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE ||
+      surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_VERTEX_BUFFER ||
+      surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_INDEX_BUFFER) {
+    plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+    return true;
+  }
+
+  plan->execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
+  plan->create_source_texture = !surface->resident;
+  plan->flush_source = surface->resident;
+  plan->direct_scanout_blit = true;
+  plan->track_source = surface->resident;
+  plan->update_scanout = true;
+  return true;
+}
+
+bool vmsvga3d_d3d9_screen_blit_copy_rect(
+    const SVGA3dCopyRect *rect, VMSVGA3DD3D9Rect *source,
+    VMSVGA3DD3D9Rect *destination) {
+  uint64_t source_right;
+  uint64_t source_bottom;
+  uint64_t destination_right;
+  uint64_t destination_bottom;
+
+  if (rect == NULL || source == NULL || destination == NULL) {
+    return false;
+  }
+  source_right = (uint64_t)rect->srcx + rect->w;
+  source_bottom = (uint64_t)rect->srcy + rect->h;
+  destination_right = (uint64_t)rect->x + rect->w;
+  destination_bottom = (uint64_t)rect->y + rect->h;
+  if (source_right > INT32_MAX || source_bottom > INT32_MAX ||
+      destination_right > INT32_MAX || destination_bottom > INT32_MAX) {
+    return false;
+  }
+
+  source->left = (int32_t)rect->srcx;
+  source->top = (int32_t)rect->srcy;
+  source->right = (int32_t)source_right;
+  source->bottom = (int32_t)source_bottom;
+  destination->left = (int32_t)rect->x;
+  destination->top = (int32_t)rect->y;
+  destination->right = (int32_t)destination_right;
+  destination->bottom = (int32_t)destination_bottom;
+  return true;
+}
+
 bool vmsvga3d_d3d9_present_plan(
     const VMSVGA3DD3D9TransferSurface *surface, uint32_t rect_count,
     uint32_t screen_width, uint32_t screen_height,
@@ -1717,9 +1793,15 @@ bool vmsvga3d_d3d9_present_plan(
   }
 
   /* VBox's legacy D3D9 SurfaceBlitToScreen callback returns
-   * VERR_NOT_IMPLEMENTED.  The generic path therefore presents through a
-   * READ_HOST_VRAM SurfaceDMA to screen 0's framebuffer. */
+   * VERR_NOT_IMPLEMENTED.  Preserve its DMA readback as the fallback, but
+   * prefer a direct GPU screen blit when the final runtime can provide one. */
   plan->legacy_d3d9_screen_blit_unimplemented = true;
+  if (!vmsvga3d_d3d9_screen_blit_plan(surface, 0, false, 0,
+                                      &plan->screen_blit)) {
+    return false;
+  }
+  plan->prefer_direct_screen_blit =
+      plan->screen_blit.execution == VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
   plan->use_surface_dma_readback = true;
   plan->transfer = SVGA3D_READ_HOST_VRAM;
   plan->one_dma_per_rect = true;
@@ -1730,7 +1812,9 @@ bool vmsvga3d_d3d9_present_plan(
                                &plan->dma)) {
     return false;
   }
-  plan->execution = plan->dma.execution;
+  plan->execution = plan->prefer_direct_screen_blit
+                        ? VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED
+                        : plan->dma.execution;
   return true;
 }
 

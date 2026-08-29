@@ -188,6 +188,11 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
     struct vmsvga_state_s *s, const SVGA3dCmdPresent *command,
     const SVGA3dCopyRect *rects, uint32_t rect_count,
     const VMSVGA3DD3D9PresentPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_screen_blit(
+    struct vmsvga_state_s *s,
+    const SVGA3dCmdBlitSurfaceToScreen *command,
+    const SVGASignedRect *clips, uint32_t clip_count,
+    const VMSVGA3DD3D9ScreenBlitPlan *plan);
 #endif
 
 static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_clear(
@@ -196,6 +201,10 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_clear(
 static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_present(
     struct vmsvga_state_s *s, const SVGA3dCmdPresent *command,
     const SVGA3dCopyRect *rects, uint32_t rect_count);
+static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_screen_blit(
+    struct vmsvga_state_s *s,
+    const SVGA3dCmdBlitSurfaceToScreen *command,
+    const SVGASignedRect *clips, uint32_t clip_count);
 static bool vmsvga3d_d3d9_transfer_surface_info(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DD3D9TransferSurface *info);
@@ -304,6 +313,7 @@ static bool vmsvga3d_fifo_supported_command(uint32_t cmd) {
   case SVGA_3D_CMD_SETCLIPPLANE:
   case SVGA_3D_CMD_CLEAR:
   case SVGA_3D_CMD_PRESENT:
+  case SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN:
   case SVGA_3D_CMD_SHADER_DEFINE:
   case SVGA_3D_CMD_SHADER_DESTROY:
   case SVGA_3D_CMD_SET_SHADER:
@@ -1856,6 +1866,54 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_present(
 #endif
 }
 
+static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_screen_blit(
+    struct vmsvga_state_s *s,
+    const SVGA3dCmdBlitSurfaceToScreen *command,
+    const SVGASignedRect *clips, uint32_t clip_count) {
+#ifdef CONFIG_VMSVGA_DXVK
+  VMSVGA3DD3D9TransferSurface surface_info;
+  VMSVGA3DD3D9ScreenBlitPlan plan;
+  VMSVGA3DSurface *surface;
+  int64_t source_width;
+  int64_t source_height;
+  int64_t destination_width;
+  int64_t destination_height;
+  bool scaling;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      command->srcImage.sid >= SVGA3D_MAX_SURFACE_IDS) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  surface = s->svga3d->surfaces[command->srcImage.sid];
+  source_width = (int64_t)command->srcRect.right - command->srcRect.left;
+  source_height = (int64_t)command->srcRect.bottom - command->srcRect.top;
+  destination_width =
+      (int64_t)command->destRect.right - command->destRect.left;
+  destination_height =
+      (int64_t)command->destRect.bottom - command->destRect.top;
+  if (surface == NULL || source_width <= 0 || source_height <= 0 ||
+      destination_width <= 0 || destination_height <= 0 ||
+      !vmsvga3d_d3d9_transfer_surface_info(s, surface, &surface_info)) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  scaling = source_width != destination_width ||
+            source_height != destination_height;
+  if (!vmsvga3d_d3d9_screen_blit_plan(
+          &surface_info, command->destScreenId, scaling, clip_count, &plan) ||
+      plan.execution != VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  return vmsvga3d_d3d9_runtime_screen_blit(s, command, clips, clip_count,
+                                            &plan);
+#else
+  (void)s;
+  (void)command;
+  (void)clips;
+  (void)clip_count;
+  return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+#endif
+}
+
 static bool vmsvga3d_d3d9_transfer_surface_info(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DD3D9TransferSurface *info) {
@@ -2717,6 +2775,196 @@ static bool vmsvga3d_present_rect(
   return true;
 };
 
+static bool vmsvga3d_screen_blit_copy_rect(
+    const SVGASignedRect *source, const SVGASignedRect *destination,
+    const SVGASignedRect *clip, SVGA3dCopyRect *copy, bool *empty) {
+  int64_t width;
+  int64_t height;
+  int64_t left = 0;
+  int64_t top = 0;
+  int64_t right;
+  int64_t bottom;
+  int64_t source_x;
+  int64_t source_y;
+  int64_t destination_x;
+  int64_t destination_y;
+
+  if (source == NULL || destination == NULL || copy == NULL || empty == NULL) {
+    return false;
+  }
+  *empty = false;
+  width = (int64_t)source->right - source->left;
+  height = (int64_t)source->bottom - source->top;
+  if (width <= 0 || height <= 0 ||
+      width != (int64_t)destination->right - destination->left ||
+      height != (int64_t)destination->bottom - destination->top) {
+    return false;
+  }
+  right = width;
+  bottom = height;
+  if (clip != NULL) {
+    left = MAX((int64_t)clip->left, 0);
+    top = MAX((int64_t)clip->top, 0);
+    right = MIN((int64_t)clip->right, width);
+    bottom = MIN((int64_t)clip->bottom, height);
+    if (right <= left || bottom <= top) {
+      *empty = true;
+      return true;
+    }
+  }
+
+  source_x = (int64_t)source->left + left;
+  source_y = (int64_t)source->top + top;
+  destination_x = (int64_t)destination->left + left;
+  destination_y = (int64_t)destination->top + top;
+  width = right - left;
+  height = bottom - top;
+
+  if (source_x < 0) {
+    int64_t shift = -source_x;
+    source_x = 0;
+    destination_x += shift;
+    width -= shift;
+  }
+  if (destination_x < 0) {
+    int64_t shift = -destination_x;
+    destination_x = 0;
+    source_x += shift;
+    width -= shift;
+  }
+  if (source_y < 0) {
+    int64_t shift = -source_y;
+    source_y = 0;
+    destination_y += shift;
+    height -= shift;
+  }
+  if (destination_y < 0) {
+    int64_t shift = -destination_y;
+    destination_y = 0;
+    source_y += shift;
+    height -= shift;
+  }
+  if (width <= 0 || height <= 0) {
+    *empty = true;
+    return true;
+  }
+  if (source_x > UINT32_MAX || source_y > UINT32_MAX ||
+      destination_x > UINT32_MAX || destination_y > UINT32_MAX ||
+      width > UINT32_MAX || height > UINT32_MAX) {
+    return false;
+  }
+
+  copy->srcx = (uint32_t)source_x;
+  copy->srcy = (uint32_t)source_y;
+  copy->x = (uint32_t)destination_x;
+  copy->y = (uint32_t)destination_y;
+  copy->w = (uint32_t)width;
+  copy->h = (uint32_t)height;
+  return true;
+}
+
+static bool vmsvga3d_handle_blit_surface_to_screen(
+    struct vmsvga_state_s *s, uint32_t cmd, int32_t *len,
+    uint32_t fifo_start) {
+  struct vmsvga3d_state_s *state;
+  SVGA3dCmdBlitSurfaceToScreen *body;
+  SVGASignedRect *clips;
+  VMSVGA3DSurface *surface;
+  VMSVGA3DSurfaceImage *image;
+  const struct svga3d_surface_desc *desc = NULL;
+  SVGA3dCopyRect *copies = NULL;
+  VMSVGA3DD3D9AccelResult accel = VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  void *payload;
+  uint32_t size;
+  uint32_t clip_count;
+  uint32_t copy_count;
+  uint32_t i;
+  bool valid = true;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  }
+  if (size < sizeof(*body) ||
+      (size - sizeof(*body)) % sizeof(SVGASignedRect) != 0) {
+    g_free(payload);
+    return true;
+  }
+
+  body = payload;
+  clips = (SVGASignedRect *)(body + 1);
+  clip_count = (size - sizeof(*body)) / sizeof(*clips);
+  state = s->svga3d;
+  if (state == NULL || body->srcImage.sid >= SVGA3D_MAX_SURFACE_IDS ||
+      !s->active_valid) {
+    valid = false;
+  }
+  surface = valid ? state->surfaces[body->srcImage.sid] : NULL;
+  if (valid && surface != NULL) {
+    accel = vmsvga3d_d3d9_try_screen_blit(s, body, clips, clip_count);
+    if (accel == VMSVGA3D_D3D9_ACCEL_FAILED) {
+      valid = false;
+    }
+  } else {
+    valid = false;
+  }
+
+  image = surface != NULL && surface->mip_count != 0 ? &surface->mips[0] : NULL;
+  if (valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+    int64_t source_width =
+        (int64_t)body->srcRect.right - body->srcRect.left;
+    int64_t source_height =
+        (int64_t)body->srcRect.bottom - body->srcRect.top;
+    int64_t destination_width =
+        (int64_t)body->destRect.right - body->destRect.left;
+    int64_t destination_height =
+        (int64_t)body->destRect.bottom - body->destRect.top;
+
+    if (body->destScreenId != 0 || source_width <= 0 || source_height <= 0 ||
+        source_width != destination_width || source_height != destination_height ||
+        !vmsvga3d_present_format(surface, &desc) || image == NULL) {
+      valid = false;
+    }
+  }
+
+  copy_count = clip_count != 0 ? clip_count : 1;
+  if (valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+    copies = g_try_new0(SVGA3dCopyRect, copy_count);
+    if (copies == NULL) {
+      valid = false;
+    }
+  }
+  for (i = 0; valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
+              i < copy_count; i++) {
+    bool empty;
+    const SVGASignedRect *clip = clip_count != 0 ? &clips[i] : NULL;
+
+    if (!vmsvga3d_screen_blit_copy_rect(&body->srcRect, &body->destRect,
+                                         clip, &copies[i], &empty)) {
+      valid = false;
+    } else if (empty) {
+      copies[i].w = 0;
+      copies[i].h = 0;
+    }
+  }
+  for (i = 0; valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
+              i < copy_count; i++) {
+    if (copies[i].w != 0 && copies[i].h != 0) {
+      valid = vmsvga3d_present_rect(s, surface, image, desc, &copies[i], false);
+    }
+  }
+  for (i = 0; valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
+              i < copy_count; i++) {
+    if (copies[i].w != 0 && copies[i].h != 0) {
+      valid = vmsvga3d_present_rect(s, surface, image, desc, &copies[i], true);
+    }
+  }
+
+  g_free(copies);
+  g_free(payload);
+  return true;
+}
+
 static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
                                      uint32_t cmd, int32_t *len,
                                      uint32_t fifo_start) {
@@ -3076,7 +3324,8 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
   VMSVGA3D_HANDLER(SVGA_3D_CMD_END_QUERY, vmsvga3d_handle_end_query),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_WAIT_FOR_QUERY, vmsvga3d_handle_wait_for_query),
   VMSVGA3D_STALL(SVGA_3D_CMD_PRESENT_READBACK),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN,
+                   vmsvga3d_handle_blit_surface_to_screen),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SURFACE_DEFINE_V2, vmsvga3d_handle_surface_define_v2),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_GENERATE_MIPMAPS, vmsvga3d_handle_generate_mipmaps),
   VMSVGA3D_STALL(SVGA_3D_CMD_DEAD4),

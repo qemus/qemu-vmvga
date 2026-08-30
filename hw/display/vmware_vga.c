@@ -303,7 +303,7 @@ struct vmsvga_cursor_source_s {
 
 #define VMVGA_TRACE_LOCAL_ENABLED(category)                              \
   ((category) &&                                                         \
-   trace_event_get_state_backends(TRACE_VMWARE_VALUE_WRITE))
+   trace_event_get_state_backends(TRACE_VMWARE_VALUE_READ))
 
 #define VMVGA_TRACE_LOCAL(category, fmt, ...)                            \
   do {                                                                   \

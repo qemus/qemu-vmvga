@@ -88,6 +88,7 @@ struct vmsvga3d_dxvk_surface_s {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
 
 #include <dlfcn.h>
+#include <sched.h>
 
 #define VMSVGA3D_DXVK_D3D9_SONAME "libdxvk_d3d9.so.0"
 #define VMSVGA3D_DXVK_D3D11_SONAME "libdxvk_d3d11.so.0"
@@ -207,6 +208,8 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_VIEW 10u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_QUERY 24u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_BEGIN 27u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_END 28u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA 29u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
@@ -477,6 +480,9 @@ typedef void (*VMSVGA3DDxvkD3D11ClearDepthStencilView)(
     uint8_t stencil);
 typedef void (*VMSVGA3DDxvkD3D11GenerateMips)(void *context, void *view);
 typedef void (*VMSVGA3DDxvkD3D11Begin)(void *context, void *query);
+typedef void (*VMSVGA3DDxvkD3D11End)(void *context, void *query);
+typedef int32_t (*VMSVGA3DDxvkD3D11GetData)(
+    void *context, void *query, void *data, uint32_t data_size, uint32_t flags);
 
 _Static_assert(offsetof(VMSVGA3DDxvkSubresourceData, row_pitch) ==
                    sizeof(void *),
@@ -2166,6 +2172,55 @@ bool vmsvga3d_dxvk_d3d11_query_begin(
   (void)cid;
   (void)query_id;
   (void)issue_begin;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_query_end(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_end,
+    void *data, uint32_t data_size, uint32_t getdata_flags) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11End end_query = NULL;
+  VMSVGA3DDxvkD3D11GetData get_data = NULL;
+  VMSVGA3DDxvkQuery *query;
+  int32_t result;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      data == NULL || data_size == 0) {
+    return false;
+  }
+  query = vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
+  if (query == NULL || query->query == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA,
+          &get_data, sizeof(get_data))) {
+    return false;
+  }
+  if (issue_end) {
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_END,
+            &end_query, sizeof(end_query))) {
+      return false;
+    }
+    end_query(dxvk->d3d11_context, query->query);
+  }
+
+  do {
+    result = get_data(dxvk->d3d11_context, query->query, data, data_size,
+                      getdata_flags);
+    if (result != 0) {
+      sched_yield();
+    }
+  } while (result != 0);
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)query_id;
+  (void)issue_end;
+  (void)data;
+  (void)data_size;
+  (void)getdata_flags;
   return false;
 #endif
 }

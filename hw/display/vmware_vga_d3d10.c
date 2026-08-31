@@ -5628,6 +5628,77 @@ out:
   return success;
 }
 
+static bool vmsvga3d_d3d10_query_end_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXEndQuery *command)
+{
+  VMSVGA3DD3D10QueryExecutionPlan plan;
+  SVGADXQueryResultUnion svga_result = { 0 };
+  uint8_t d3d_result[sizeof(SVGADXQueryResultUnion)] = { 0 };
+  uint8_t *entry;
+  VMSVGA3DMob *mob;
+  SVGA3dQueryType type;
+  uint32_t flags;
+  uint32_t mobid;
+  uint32_t offset;
+  uint32_t svga_result_size = 0;
+  uint32_t query_state;
+  bool success = false;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return false;
+  }
+  entry = vmsvga3d_dx_cotable_entry_ptr(
+      s, cid, SVGA_COTABLE_DXQUERY, command->queryId);
+  if (entry == NULL) {
+    return false;
+  }
+  type = (SVGA3dQueryType)entry[0];
+  flags = query_read_u32(entry + 4);
+  if (type >= SVGA3D_QUERYTYPE_DX10_MAX ||
+      vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
+          VMSVGA3D_D3D10_LEVEL_INVALID ||
+      plan.d3d_result_size > sizeof(d3d_result)) {
+    return false;
+  }
+  if (entry[3] == SVGADX_QDSTATE_FINISHED) {
+    return true;
+  }
+  if (entry[3] != SVGADX_QDSTATE_ACTIVE &&
+      entry[3] != SVGADX_QDSTATE_IDLE) {
+    return false;
+  }
+
+  entry[3] = SVGADX_QDSTATE_PENDING;
+  if (vmsvga3d_dxvk_d3d11_query_end(
+          s->dxvk, cid, command->queryId, plan.issue_end, d3d_result,
+          plan.d3d_result_size, plan.getdata_flags) &&
+      vmsvga3d_d3d10_query_result(
+          type, d3d_result, plan.d3d_result_size, &svga_result,
+          &svga_result_size) != VMSVGA3D_D3D10_LEVEL_INVALID) {
+    success = true;
+  }
+
+  mobid = query_read_u32(entry + 8);
+  offset = query_read_u32(entry + 12);
+  mob = vmsvga3d_mob_get(s, mobid);
+  if (mob != NULL) {
+    if (success) {
+      (void)vmsvga3d_mob_write(
+          s, mob, offset + sizeof(uint32_t), &svga_result, svga_result_size);
+    }
+    query_state = success ? SVGA3D_QUERYSTATE_SUCCEEDED
+                          : SVGA3D_QUERYSTATE_FAILED;
+    (void)vmsvga3d_mob_write(
+        s, mob, offset, &query_state, sizeof(query_state));
+  }
+  if (success) {
+    entry[3] = SVGADX_QDSTATE_FINISHED;
+  }
+  return success;
+}
+
 static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                                        uint32_t cid, uint32_t cmd,
                                        const void *payload, uint32_t size) {
@@ -6412,6 +6483,16 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           s, mob, offset, &query_state, sizeof(query_state));
     }
     return true;
+  }
+
+  case SVGA_3D_CMD_DX_END_QUERY: {
+    SVGA3dCmdDXEndQuery command;
+
+    if (size < sizeof(command)) {
+      return false;
+    };
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_query_end_live(s, cid, &command);
   }
 
   case SVGA_3D_CMD_DX_BIND_QUERY: {

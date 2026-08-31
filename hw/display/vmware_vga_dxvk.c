@@ -794,12 +794,7 @@ static bool vmsvga3d_dxvk_environment_enabled(const char *name) {
 
 /*
  * DXVK 2.7.1 captures DXVK_LOG_LEVEL when its Logger singleton is created.
- * Silence the native DXVK startup dump for normal QEMU runs, but leave the
- * caller's logging configuration untouched when the project-wide DEBUG
- * switch is enabled.  Match the shell enabled() helper used by the project:
- * y/yes/true/1/on/enable/enabled, case-insensitively, after trimming.
- * The temporary override is restored after DXVK has initialized, so unrelated
- * code in the QEMU process does not inherit it.
+ * Silence the native DXVK startup dump unless the DEBUG env variable is set.
  */
 static bool vmsvga3d_dxvk_set_log_environment(char **saved, bool *restore,
                                                Error **errp) {

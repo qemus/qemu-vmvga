@@ -6322,6 +6322,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
   case SVGA_3D_CMD_DX_DEFINE_QUERY: {
     SVGA3dCmdDXDefineQuery command;
+    VMSVGA3DD3D10QueryExecutionPlan plan;
+    VMSVGA3DD3D10Level level;
     void *entry;
 
     if (size < sizeof(command)) {
@@ -6330,9 +6332,18 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     memcpy(&command, payload, sizeof(command));
     entry = vmsvga3d_dx_cotable_entry_ptr(
         s, cid, SVGA_COTABLE_DXQUERY, command.queryId);
-    return entry != NULL &&
-           vmsvga3d_d3d10_query_define_entry(&command, entry) !=
-               VMSVGA3D_D3D10_LEVEL_INVALID;
+    level = vmsvga3d_d3d10_query_execution_plan(
+        command.type, command.flags, &plan);
+    if (entry == NULL || !vmsvga3d_d3d10_level_is_vgpu10(level)) {
+      return false;
+    }
+    (void)vmsvga3d_dxvk_d3d11_query_destroy(s->dxvk, cid, command.queryId);
+    if (vmsvga3d_d3d10_query_define_entry(&command, entry) ==
+        VMSVGA3D_D3D10_LEVEL_INVALID) {
+      return false;
+    }
+    return vmsvga3d_dxvk_d3d11_query_define(
+        s->dxvk, cid, command.queryId, plan.d3d_query, plan.misc_flags);
   }
 
   case SVGA_3D_CMD_DX_DESTROY_QUERY: {
@@ -6345,9 +6356,62 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     memcpy(&command, payload, sizeof(command));
     entry = vmsvga3d_dx_cotable_entry_ptr(
         s, cid, SVGA_COTABLE_DXQUERY, command.queryId);
-    return entry != NULL &&
-           vmsvga3d_d3d10_query_destroy_entry(entry) !=
-               VMSVGA3D_D3D10_LEVEL_INVALID;
+    if (entry == NULL ||
+        !vmsvga3d_dxvk_d3d11_query_destroy(s->dxvk, cid, command.queryId)) {
+      return false;
+    }
+    return vmsvga3d_d3d10_query_destroy_entry(entry) !=
+           VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  case SVGA_3D_CMD_DX_BEGIN_QUERY: {
+    SVGA3dCmdDXBeginQuery command;
+    VMSVGA3DD3D10QueryExecutionPlan plan;
+    uint8_t *entry;
+    VMSVGA3DMob *mob;
+    SVGA3dQueryType type;
+    uint32_t flags;
+    uint32_t mobid;
+    uint32_t offset;
+    uint32_t query_state = SVGA3D_QUERYSTATE_PENDING;
+
+    if (size < sizeof(command)) {
+      return false;
+    };
+    memcpy(&command, payload, sizeof(command));
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DXQUERY, command.queryId);
+    if (entry == NULL) {
+      return false;
+    }
+    type = (SVGA3dQueryType)entry[0];
+    flags = query_read_u32(entry + 4);
+    if (type >= SVGA3D_QUERYTYPE_DX10_MAX ||
+        vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID) {
+      return false;
+    }
+    if (entry[3] == SVGADX_QDSTATE_ACTIVE) {
+      return true;
+    }
+    if (entry[3] != SVGADX_QDSTATE_IDLE &&
+        entry[3] != SVGADX_QDSTATE_PENDING &&
+        entry[3] != SVGADX_QDSTATE_FINISHED) {
+      return false;
+    }
+    if (!vmsvga3d_dxvk_d3d11_query_begin(
+            s->dxvk, cid, command.queryId, plan.issue_begin)) {
+      return false;
+    }
+    entry[3] = SVGADX_QDSTATE_ACTIVE;
+    mobid = query_read_u32(entry + 8);
+    offset = query_read_u32(entry + 12);
+    mob = vmsvga3d_mob_get(s, mobid);
+    if (mob != NULL) {
+      (void)vmsvga3d_mob_write(
+          s, mob, offset, &query_state, sizeof(query_state));
+    }
+    return true;
   }
 
   case SVGA_3D_CMD_DX_BIND_QUERY: {

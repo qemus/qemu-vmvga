@@ -83,6 +83,15 @@ bool vmsvga3d_dxvk_d3d11_shader_resource_view_exists(
 bool vmsvga3d_dxvk_d3d11_generate_mips(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const struct vmsvga3d_d3d10_srv_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_query_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id,
+    uint32_t d3d_query, uint32_t misc_flags);
+bool vmsvga3d_dxvk_d3d11_query_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id);
+bool vmsvga3d_dxvk_d3d11_query_begin(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_begin);
+void vmsvga3d_dxvk_d3d11_query_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid);
 bool vmsvga3d_dxvk_d3d11_clear_render_target_view(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const struct vmsvga3d_d3d10_rtv_desc_s *desc, const float color[4]);

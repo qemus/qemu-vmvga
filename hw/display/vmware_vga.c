@@ -465,6 +465,11 @@ struct vmsvga_state_s {
   uint32_t damage_count;
   VGACommonState vga;
   bool invalidated;
+  /* Runtime-only display handoff state. When a configured SVGA scanout is
+   * temporarily disabled for driver reconfiguration, keep the existing host
+   * surface visible until CONFIG_DONE completes the new configuration or a
+   * legacy VGA framebuffer write proves the guest really switched to VGA. */
+  bool svga_reconfig_pending;
   /* The host console surface is not migrated. Track whether it is currently
    * bound directly to the SVGA BAR1 framebuffer rather than the VGA path. */
   bool svga_surface_bound;
@@ -940,10 +945,23 @@ static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s) {
   } else {
     s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
   };
-  /* Keep the current host SVGA surface bound while ENABLE is temporarily
-   * clear. A real VGA framebuffer write will release this hold and select the
-   * VGA renderer on the next display refresh. */
+  s->svga_surface_bound = false;
   VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW leave size=%zu", size);
+};
+
+static inline void vmsvga_reconfig_complete_if_ready(
+    struct vmsvga_state_s *s) {
+  if (!s->svga_reconfig_pending || !s->enable || !s->config) {
+    return;
+  };
+
+  s->svga_reconfig_pending = false;
+  s->svga_surface_bound = false;
+  s->damage_count = 0;
+  s->invalidated = true;
+  VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                     "RECONFIG_COMPLETE width=%u height=%u depth=%u",
+                     s->active_width, s->active_height, s->active_depth);
 };
 
 static inline void vmsvga_clear_vram_dirty(struct vmsvga_state_s *s) {
@@ -1020,12 +1038,15 @@ static void vmsvga_legacy_vga_write(void *opaque, hwaddr addr, uint64_t data,
   };
   vga_mem_writeb(&s->vga, addr, data);
   s->vga.vram_ptr = vram_ptr;
-  if (!s->enable && s->svga_surface_bound) {
-    /* ENABLE=0 alone is also used transiently while an SVGA guest driver
-     * reconfigures the device. Only expose VGA after the guest actually uses
-     * the legacy framebuffer. */
-    s->svga_surface_bound = false;
-    s->vga.hw_ops->invalidate(&s->vga);
+
+  if (!s->enable && s->svga_reconfig_pending) {
+    /* A real VGA framebuffer write means this was not just a transient SVGA
+     * reconfiguration. Allow the next display pass to enter the VGA path. */
+    s->svga_reconfig_pending = false;
+    s->damage_count = 0;
+    s->invalidated = true;
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                       "RECONFIG_CANCEL reason=vga-write");
   };
 };
 
@@ -6403,10 +6424,16 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     bool was_enabled = s->enable;
     bool was_hidden = s->hidden;
     bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
+    bool preserve_scanout = was_enabled && !enabled &&
+                            s->svga_surface_bound && s->active_valid &&
+                            !s->hidden;
     if (!was_enabled && enabled) {
       vmsvga_legacy_vga_enter(s);
     } else if (was_enabled && !enabled) {
-      /* VGA needs dirty logging before selecting its isolated framebuffer. */
+      /* Keep the last valid SVGA host image while the guest temporarily
+       * disables the device to reconfigure it. A real VGA framebuffer write
+       * cancels this hold in vmsvga_legacy_vga_write(). */
+      s->svga_reconfig_pending = preserve_scanout;
       vmsvga_set_dirty_log(s, true);
       vmsvga_fifo_discard_pending(s);
       vmsvga_legacy_vga_leave(s);
@@ -6416,6 +6443,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     if (s->enable) {
       vmsvga_try_commit_mode(s);
     };
+    vmsvga_reconfig_complete_if_ready(s);
     vmsvga_update_dirty_log(s);
     if (was_hidden != s->hidden) {
       s->cursor_dirty = true;
@@ -6469,6 +6497,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
       vmsvga_fifo_upload_reset(s);
       vmsvga_fifo_set_busy(s, false);
     };
+    vmsvga_reconfig_complete_if_ready(s);
     vmsvga_update_dirty_log(s);
     /* vmware_value_write already traces this register when enabled. */
     VPRINT("SVGA_REG_CONFIG_DONE register %u with the value of %u\n", s->index,
@@ -6713,24 +6742,24 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
     cursor_update_from_fifo(s);
   };
 
-  if (!s->enable) {
-    if (s->svga_surface_bound) {
-      /* A guest may clear ENABLE briefly while negotiating/reprogramming SVGA.
-       * Keep the last valid host scanout instead of immediately reinterpreting
-       * the display through the legacy VGA renderer. A subsequent legacy VGA
-       * framebuffer write clears svga_surface_bound and releases this hold. */
-      vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_SVGA, pending_valid);
-      s->damage_count = 0;
-      goto done;
-    };
-    vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA, pending_valid);
-    VMVGA_GFX_UPDATE_FALLBACK(s);
+  if (s->enable && s->hidden) {
+    vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_HIDDEN, pending_valid);
+    s->damage_count = 0;
     goto done;
   };
 
-  if (s->hidden) {
-    vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_HIDDEN, pending_valid);
+  if (s->svga_reconfig_pending) {
+    /* The QEMU console still owns the previous BAR1-backed DisplaySurface.
+     * Do not reinterpret it through VGA, and do not bind a new SVGA surface
+     * until ENABLE and CONFIG_DONE both indicate that reconfiguration ended. */
     s->damage_count = 0;
+    goto done;
+  };
+
+  if (!s->enable) {
+    vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA, pending_valid);
+    s->svga_surface_bound = false;
+    VMVGA_GFX_UPDATE_FALLBACK(s);
     goto done;
   };
 
@@ -6847,6 +6876,7 @@ static void vmsvga_reset(DeviceState *dev) {
   s->fence_goal = 0;
   s->thread = 0;
   s->invalidated = false;
+  s->svga_reconfig_pending = false;
   s->svga_surface_bound = false;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
   s->legacy_vga_size = 0;
@@ -6908,6 +6938,7 @@ static int vmsvga_pre_load(void *opaque) {
   struct vmsvga_state_s *s = opaque;
   vmsvga_set_dirty_log(s, true);
   s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
+  s->svga_reconfig_pending = false;
   s->svga_surface_bound = false;
   s->hidden = false;
   s->legacy_vga_size = 0;
@@ -7231,6 +7262,7 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   s->cursor_dirty = true;
   s->damage_count = 0;
   s->invalidated = s->enable && s->active_valid;
+  s->svga_reconfig_pending = false;
   s->svga_surface_bound = false;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
   ret = vmsvga_restore_objects(s);
@@ -7525,6 +7557,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->fence = 0;
   s->fence_goal = 0;
   s->invalidated = false;
+  s->svga_reconfig_pending = false;
   s->svga_surface_bound = false;
   vmsvga_screen_reset(s);
   memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));

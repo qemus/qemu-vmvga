@@ -419,8 +419,10 @@ typedef enum {
 } SVGACBStatus;
 
 typedef enum {
-   SVGA_CB_FLAG_NONE     = 0,
-   SVGA_CB_FLAG_NO_IRQ   = 1 << 0,
+   SVGA_CB_FLAG_NONE       = 0,
+   SVGA_CB_FLAG_NO_IRQ     = 1 << 0,
+   SVGA_CB_FLAG_DX_CONTEXT = 1 << 1,
+   SVGA_CB_FLAG_MOB        = 1 << 2,
 } SVGACBFlags;
 
 typedef
@@ -432,8 +434,14 @@ struct {
    uint32 length;
    union {
       PA pa;
+      struct {
+         SVGAMobId mobid;
+         uint32 mobOffset;
+      } mob;
    } ptr;
-   uint32 mustBeZero[8];
+   uint32 offset;
+   uint32 dxContext;
+   uint32 mustBeZero[6];
 } SVGACBHeader;
 
 typedef enum {

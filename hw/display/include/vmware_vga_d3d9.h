@@ -48,6 +48,9 @@
 #define VMSVGA3D_D3D9_MAX_SAMPLERS 21u
 #define VMSVGA3D_D3D9_DECL_END_STREAM 0xffu
 
+struct vmsvga_state_s;
+struct vmsvga3d_surface_s;
+
 #define VMSVGA3D_D3D9_MAKE_FOURCC(a, b, c, d) \
   ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8) | \
    ((uint32_t)(uint8_t)(c) << 16) | ((uint32_t)(uint8_t)(d) << 24))
@@ -312,6 +315,12 @@ typedef enum vmsvga3d_d3d9_execution_preference_e {
   VMSVGA3D_D3D9_EXECUTION_CPU_ONLY = 0,
   VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED,
 } VMSVGA3DD3D9ExecutionPreference;
+
+typedef enum vmsvga3d_d3d9_accel_result_e {
+  VMSVGA3D_D3D9_ACCEL_UNAVAILABLE = 0,
+  VMSVGA3D_D3D9_ACCEL_COMPLETE,
+  VMSVGA3D_D3D9_ACCEL_FAILED,
+} VMSVGA3DD3D9AccelResult;
 
 typedef struct vmsvga3d_d3d9_transfer_surface_s {
   VMSVGA3DD3D9HostResourceType resource_type;
@@ -584,6 +593,50 @@ VMSVGA3DD3D9ShaderStage vmsvga3d_d3d9_shader_stage(SVGA3dShaderType type);
 VMSVGA3DD3D9ShaderConstTarget
 vmsvga3d_d3d9_shader_const_target(SVGA3dShaderType type,
                                    SVGA3dShaderConstType ctype);
+
+
+/* VGPU9 execution boundary used by the generic SVGA3D command layer. */
+bool vmsvga3d_d3d9_runtime_surface_info(
+    struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
+    VMSVGA3DD3D9TransferSurface *info);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
+    struct vmsvga_state_s *s, const SVGA3dCmdSurfaceCopy *command,
+    const SVGA3dCopyBox *boxes, uint32_t box_count,
+    const VMSVGA3DD3D9SurfaceCopyPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
+    struct vmsvga_state_s *s, const SVGA3dCmdSurfaceStretchBlt *command,
+    const VMSVGA3DD3D9StretchBltPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_dma(
+    struct vmsvga_state_s *s, const SVGA3dCmdSurfaceDMA *command,
+    const SVGA3dCopyBox *boxes, uint32_t box_count, uint32_t maximum_offset,
+    const VMSVGA3DD3D9DmaPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
+    struct vmsvga_state_s *s, const SVGA3dCmdClear *command,
+    const SVGA3dRect *rects, uint32_t rect_count,
+    const VMSVGA3DD3D9ClearPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
+    struct vmsvga_state_s *s, const SVGA3dCmdPresent *command,
+    const SVGA3dCopyRect *rects, uint32_t rect_count,
+    const VMSVGA3DD3D9PresentPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present_readback(
+    struct vmsvga_state_s *s,
+    const VMSVGA3DD3D9PresentReadbackPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
+    struct vmsvga_state_s *s, uint32_t cid, uint32_t vertex_decl_count,
+    const SVGA3dVertexDecl *vertex_decls, uint32_t range_count,
+    const SVGA3dPrimitiveRange *ranges, uint32_t divisor_count,
+    const SVGA3dVertexDivisor *divisors);
+#ifdef CONFIG_VMSVGA_DXVK
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_screen_blit(
+    struct vmsvga_state_s *s,
+    const SVGA3dCmdBlitSurfaceToScreen *command,
+    const SVGASignedRect *clips, uint32_t clip_count,
+    const VMSVGA3DD3D9ScreenBlitPlan *plan);
+#endif
+void vmsvga3d_d3d9_runtime_sync_surface_from_cpu(
+    struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface);
+void vmsvga3d_d3d9_runtime_sync_clear_targets_from_cpu(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dClearFlag clear_flags);
 
 #ifdef __cplusplus
 }

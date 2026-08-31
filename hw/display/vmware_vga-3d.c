@@ -282,11 +282,11 @@ struct vmsvga_cursor_source_s {
  *
  * This project overlays vmware_vga.c onto an otherwise stock QEMU source
  * tree, so it cannot add generated trace events without also replacing
- * hw/display/trace-events.  Reuse QEMU's existing vmware_value_write trace
- * event as the runtime master switch, then keep the extra diagnostics local.
+ * hw/display/trace-events.  Reuse QEMU's existing vmware_setmode trace event
+ * as the runtime master switch, then keep the extra diagnostics local.
  *
  * Enable at runtime with:
- *   -trace "vmware_value_write"
+ *   -trace "vmware_setmode"
  *
  * Add -trace "vmware_value_read" when register reads/BUSY polling are needed.
  * Categories set to 0 compile down to a constant-false branch.
@@ -303,7 +303,7 @@ struct vmsvga_cursor_source_s {
 
 #define VMVGA_TRACE_LOCAL_ENABLED(category)                              \
   ((category) &&                                                         \
-   trace_event_get_state_backends(TRACE_VMWARE_VALUE_READ))
+   trace_event_get_state_backends(TRACE_VMWARE_SETMODE))
 
 #define VMVGA_TRACE_LOCAL(category, fmt, ...)                            \
   do {                                                                   \

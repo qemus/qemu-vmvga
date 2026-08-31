@@ -1105,7 +1105,7 @@ static VMSVGA3DD3D10Level cotable_info(
     *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_STREAM_OUTPUT;
     break;
   case SVGA_COTABLE_DXQUERY:
-    *entry_size = sizeof(SVGACOTableDXQueryEntry);
+    *entry_size = VMSVGA3D_D3D10_QUERY_COTABLE_ENTRY_SIZE;
     *replay_mode = VMSVGA3D_D3D10_COTABLE_REPLAY_QUERY;
     break;
   case SVGA_COTABLE_DXSHADER:
@@ -4773,13 +4773,23 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_query_info(
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
+static void query_entry_set_u32(uint8_t *entry, uint32_t offset,
+                                uint32_t value)
+{
+  entry[offset] = (uint8_t)value;
+  entry[offset + 1] = (uint8_t)(value >> 8);
+  entry[offset + 2] = (uint8_t)(value >> 16);
+  entry[offset + 3] = (uint8_t)(value >> 24);
+}
+
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_define_entry(
-    const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst)
+    const SVGA3dCmdDXDefineQuery *src, void *dst)
 {
   VMSVGA3DD3D10QueryInfo info;
   VMSVGA3DD3D10Level level;
+  uint8_t *entry = dst;
 
-  if (src == NULL || dst == NULL || src->type < SVGA3D_QUERYTYPE_MIN ||
+  if (src == NULL || entry == NULL || src->type < SVGA3D_QUERYTYPE_MIN ||
       src->type >= SVGA3D_QUERYTYPE_DX10_MAX) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
@@ -4789,57 +4799,62 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_query_define_entry(
     return level;
   }
 
-  /* Update these fields without clearing the COTable padding. */
-  dst->type = src->type;
-  dst->state = SVGADX_QDSTATE_IDLE;
-  dst->flags = src->flags;
-  dst->mobid = SVGA3D_INVALID_ID;
-  dst->offset = 0;
+  /* Packed wire layout: type[0], pad0[1..2], state[3], then uint32 fields. */
+  entry[0] = (uint8_t)src->type;
+  entry[3] = SVGADX_QDSTATE_IDLE;
+  query_entry_set_u32(entry, 4, src->flags);
+  query_entry_set_u32(entry, 8, SVGA3D_INVALID_ID);
+  query_entry_set_u32(entry, 12, 0);
   return level;
 }
 
-VMSVGA3DD3D10Level vmsvga3d_d3d10_query_destroy_entry(
-    SVGACOTableDXQueryEntry *entry)
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_destroy_entry(void *entry_ptr)
 {
+  uint8_t *entry = entry_ptr;
+
   if (entry == NULL) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
-  /* Leave pad0 untouched. */
-  entry->type = SVGA3D_QUERYTYPE_INVALID;
-  entry->state = SVGADX_QDSTATE_INVALID;
-  entry->flags = 0;
-  entry->mobid = SVGA3D_INVALID_ID;
-  entry->offset = 0;
+  /* Leave the two packed pad0 bytes untouched. */
+  entry[0] = (uint8_t)SVGA3D_QUERYTYPE_INVALID;
+  entry[3] = SVGADX_QDSTATE_INVALID;
+  query_entry_set_u32(entry, 4, 0);
+  query_entry_set_u32(entry, 8, SVGA3D_INVALID_ID);
+  query_entry_set_u32(entry, 12, 0);
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_bind_entry(
-    SVGACOTableDXQueryEntry *entry, uint32_t mobid)
+    void *entry_ptr, uint32_t mobid)
 {
+  uint8_t *entry = entry_ptr;
+
   if (entry == NULL) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
-  /* DXBindQuery changes only the backing MOB id. */
-  entry->mobid = mobid;
+  query_entry_set_u32(entry, 8, mobid);
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_set_offset(
-    SVGACOTableDXQueryEntry *entry, uint32_t offset)
+    void *entry_ptr, uint32_t offset)
 {
+  uint8_t *entry = entry_ptr;
+
   if (entry == NULL) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
-  entry->offset = offset;
+  query_entry_set_u32(entry, 12, offset);
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_bind_all(
-    SVGACOTableDXQueryEntry *entries, uint32_t count, uint32_t mobid)
+    void *entries_ptr, uint32_t count, uint32_t mobid)
 {
+  uint8_t *entries = entries_ptr;
   uint32_t i;
 
   if (entries == NULL && count != 0) {
@@ -4847,8 +4862,11 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_query_bind_all(
   }
 
   for (i = 0; i < count; ++i) {
-    if (entries[i].type != SVGA3D_QUERYTYPE_INVALID) {
-      entries[i].mobid = mobid;
+    uint8_t *entry = entries +
+        (size_t)i * VMSVGA3D_D3D10_QUERY_COTABLE_ENTRY_SIZE;
+
+    if (entry[0] != (uint8_t)SVGA3D_QUERYTYPE_INVALID) {
+      query_entry_set_u32(entry, 8, mobid);
     }
   }
   return VMSVGA3D_D3D10_LEVEL_10_0;

@@ -106,6 +106,9 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_define(struct vms
   context->shadow.inputAssembly.topology = SVGA3D_PRIMITIVE_INVALID;
   context->shadow.numViewports = 0;
   context->shadow.numScissorRects = 0;
+  for (uint32_t type = 0; type < SVGA_COTABLE_MAX; type++) {
+    context->cotables[type].mobid = SVGA3D_INVALID_ID;
+  };
 
   vmsvga3d_dx_context_free(state->dx_contexts[cid]);
   state->dx_contexts[cid] = context;

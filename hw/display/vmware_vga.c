@@ -490,6 +490,7 @@ struct vmsvga_state_s {
   uint32_t trace_fifo_last_stall_stage;
   uint64_t trace_fifo_stall_repeat;
   uint64_t trace_key_reg_seen[2];
+  bool trace_handoff_gmrfb_logged;
   bool trace_3d_version_seen;
   uint32_t trace_last_guest_3d_hwversion;
   uint32_t trace_last_host_3d_hwversion;
@@ -532,6 +533,7 @@ static inline void vmsvga_trace_flight_reset(struct vmsvga_state_s *s) {
   s->trace_fifo_last_stall_stop = 0;
   s->trace_fifo_last_stall_stage = 0;
   s->trace_fifo_stall_repeat = 0;
+  s->trace_handoff_gmrfb_logged = false;
   s->trace_3d_version_seen = false;
   s->trace_last_guest_3d_hwversion = 0;
   s->trace_last_host_3d_hwversion = 0;
@@ -911,9 +913,70 @@ static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s) {
   return memory_region_get_ram_ptr(&s->vga.vram);
 };
 
+static uint32_t vmsvga_handoff_diag_hash(const uint8_t *data, size_t size) {
+  uint32_t hash = 2166136261u;
+  size_t i;
+
+  for (i = 0; i < size; i++) {
+    hash ^= data[i];
+    hash *= 16777619u;
+  };
+  return hash;
+};
+
+static void vmsvga_handoff_diag_snapshot(struct vmsvga_state_s *s,
+                                         const char *tag,
+                                         bool captured_now) {
+  static const uint32_t rows[] = { 0, 100, 384, 586, 767 };
+  const size_t stride = 1024u * 4;
+  const size_t scanout_bytes = stride * 768u;
+  uint8_t *bar1;
+  size_t compare_bytes;
+  size_t bar1_scanout_bytes;
+  uint32_t i;
+
+  if (!vmsvga_trace_flight_enabled()) {
+    return;
+  };
+  bar1 = vmsvga_svga_vram_ptr(s);
+  compare_bytes = MIN((size_t)s->legacy_vga_size, (size_t)s->vga.vram_size);
+  bar1_scanout_bytes = MIN(scanout_bytes, (size_t)s->vga.vram_size);
+  fprintf(stderr,
+          "VMVGA-HANDOFF-DIAG tag=%s captured_now=%d legacy_size=%u "
+          "compare_bytes=%zu same=%d shadow_hash=0x%08x "
+          "bar1_compare_hash=0x%08x bar1_1024x768_hash=0x%08x\n",
+          tag, captured_now, s->legacy_vga_size, compare_bytes,
+          compare_bytes != 0 &&
+              memcmp(s->legacy_vga_ptr, bar1, compare_bytes) == 0,
+          compare_bytes != 0 ?
+              vmsvga_handoff_diag_hash(s->legacy_vga_ptr, compare_bytes) : 0,
+          compare_bytes != 0 ?
+              vmsvga_handoff_diag_hash(bar1, compare_bytes) : 0,
+          bar1_scanout_bytes != 0 ?
+              vmsvga_handoff_diag_hash(bar1, bar1_scanout_bytes) : 0);
+  for (i = 0; i < ARRAY_SIZE(rows); i++) {
+    size_t offset = (size_t)rows[i] * stride;
+    bool shadow_available =
+        offset + stride <= (size_t)s->legacy_vga_size;
+
+    if (offset + stride > (size_t)s->vga.vram_size) {
+      continue;
+    };
+    fprintf(stderr,
+            "VMVGA-HANDOFF-DIAG tag=%s row=%u offset=0x%zx "
+            "shadow_available=%d shadow_hash=0x%08x bar1_hash=0x%08x\n",
+            tag, rows[i], offset, shadow_available,
+            shadow_available ?
+                vmsvga_handoff_diag_hash(s->legacy_vga_ptr + offset, stride) :
+                0,
+            vmsvga_handoff_diag_hash(bar1 + offset, stride));
+  };
+};
+
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
   size_t size = vmsvga_legacy_vga_backup_size(s);
   uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
+  bool captured_now = false;
 
   /*
    * Capture the legacy VGA framebuffer only on the first VGA -> SVGA handoff.
@@ -922,7 +985,9 @@ static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
   if (s->legacy_vga_size == 0) {
     memcpy(s->legacy_vga_ptr, svga_ptr, size);
     s->legacy_vga_size = (uint32_t)size;
+    captured_now = true;
   };
+  vmsvga_handoff_diag_snapshot(s, "vga-to-svga", captured_now);
   s->vga.vram_ptr = svga_ptr;
   s->svga_surface_bound = false;
   VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW enter size=%zu", size);

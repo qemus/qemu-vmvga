@@ -755,6 +755,11 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
           row, row_bytes, sizeof(s->blit_scratch));
       return false;
     }
+    if (row == 0 && s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER &&
+        !s->trace_handoff_gmrfb_logged) {
+      s->trace_handoff_gmrfb_logged = true;
+      vmsvga_handoff_diag_snapshot(s, "first-framebuffer-g2s", false);
+    };
     if (!vmsvga_gmr_read(s, s->gmrfb_gmr_id, gmr_offset,
                          s->blit_scratch, row_bytes)) {
       VMSVGA_SCREEN_REJECT(

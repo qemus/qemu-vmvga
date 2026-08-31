@@ -299,7 +299,12 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_STREAM  0
 #define VMVGA_TRACE_FIFO    0
 #define VMVGA_TRACE_3D      1
+#define VMVGA_TRACE_FLIGHT  1
 #define VMVGA_TRACE_QEMU    1
+
+#define VMVGA_TRACE_CMD_MAX 256
+#define VMVGA_TRACE_DEVCAP_MAX 256
+#define VMVGA_TRACE_REPORT_INTERVAL_US 1000000
 
 #define VMVGA_TRACE_LOCAL_ENABLED(category)                              \
   ((category) &&                                                         \
@@ -321,6 +326,37 @@ struct vmsvga_cursor_source_s {
 struct vmsvga_gmr_s;
 struct vmsvga3d_state_s;
 struct vmsvga3d_dxvk_s;
+
+struct vmsvga_trace_counters_s {
+  uint64_t fifo_runs;
+  uint64_t fifo_empty_runs;
+  uint64_t fifo_cmds;
+  uint64_t fifo_2d_cmds;
+  uint64_t fifo_3d_cmds;
+  uint64_t fifo_updates;
+  uint64_t fifo_surface_2d;
+  uint64_t fifo_screen_blits;
+  uint64_t fifo_gmr;
+  uint64_t fifo_fences;
+  uint64_t fifo_stalls;
+  uint64_t fifo_prefilter_stalls;
+  uint64_t sync_writes;
+  uint64_t sync_fifo_busy_zero;
+  uint64_t sync_fifo_busy_one;
+  uint64_t busy_reads;
+  uint64_t dirty_pages;
+  uint64_t damage_rects;
+};
+
+struct vmsvga_trace_cmd_counter_s {
+  uint32_t cmd;
+  uint64_t count;
+};
+
+struct vmsvga_trace_devcap_s {
+  uint32_t index;
+  uint32_t value;
+};
 
 struct vmsvga_state_s {
   uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
@@ -403,12 +439,35 @@ struct vmsvga_state_s {
   uint32_t damage_count;
   VGACommonState vga;
   bool invalidated;
+  /* Keep the VGA/GOP host surface visible until the guest has explicitly
+   * refreshed the complete newly selected SVGA front buffer. */
+  bool mode_handoff_pending;
   bool hidden;
   bool cursor_dirty;
   bool dirty_log_enabled;
   bool test_marker;
   bool marker_logged;
   uint32_t trace_display_path;
+  /* Diagnostic-only flight recorder state; intentionally excluded from VMState. */
+  struct vmsvga_trace_counters_s trace_now;
+  struct vmsvga_trace_counters_s trace_last;
+  struct vmsvga_trace_cmd_counter_s trace_cmd[VMVGA_TRACE_CMD_MAX];
+  uint32_t trace_cmd_count;
+  struct vmsvga_trace_devcap_s trace_devcap[VMVGA_TRACE_DEVCAP_MAX];
+  uint32_t trace_devcap_count;
+  uint64_t trace_activity_seq;
+  uint64_t trace_last_report_seq;
+  int64_t trace_last_report_us;
+  bool trace_fifo_have_stall;
+  uint32_t trace_fifo_last_stall_cmd;
+  uint32_t trace_fifo_last_stall_stop;
+  uint32_t trace_fifo_last_stall_stage;
+  uint64_t trace_fifo_stall_repeat;
+  uint64_t trace_key_reg_seen[2];
+  bool trace_3d_version_seen;
+  uint32_t trace_last_guest_3d_hwversion;
+  uint32_t trace_last_host_3d_hwversion;
+  uint32_t trace_last_revised_3d_hwversion;
   MemoryRegion fifo_ram;
   MemoryRegion legacy_vga_mem;
   uint8_t *legacy_vga_ptr;
@@ -419,6 +478,373 @@ struct pci_vmsvga_state_s {
   PCIDevice parent_obj;
   struct vmsvga_state_s chip;
   MemoryRegion io_bar;
+};
+
+static inline bool vmsvga_trace_flight_enabled(void) {
+  return VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_FLIGHT);
+};
+
+static inline void vmsvga_trace_flight_activity(struct vmsvga_state_s *s) {
+  if (vmsvga_trace_flight_enabled()) {
+    s->trace_activity_seq++;
+  };
+};
+
+static inline void vmsvga_trace_flight_reset(struct vmsvga_state_s *s) {
+  memset(&s->trace_now, 0, sizeof(s->trace_now));
+  memset(&s->trace_last, 0, sizeof(s->trace_last));
+  memset(s->trace_cmd, 0, sizeof(s->trace_cmd));
+  memset(s->trace_devcap, 0, sizeof(s->trace_devcap));
+  memset(s->trace_key_reg_seen, 0, sizeof(s->trace_key_reg_seen));
+  s->trace_cmd_count = 0;
+  s->trace_devcap_count = 0;
+  s->trace_activity_seq = 0;
+  s->trace_last_report_seq = 0;
+  s->trace_last_report_us = 0;
+  s->trace_fifo_have_stall = false;
+  s->trace_fifo_last_stall_cmd = 0;
+  s->trace_fifo_last_stall_stop = 0;
+  s->trace_fifo_last_stall_stage = 0;
+  s->trace_fifo_stall_repeat = 0;
+  s->trace_3d_version_seen = false;
+  s->trace_last_guest_3d_hwversion = 0;
+  s->trace_last_host_3d_hwversion = 0;
+  s->trace_last_revised_3d_hwversion = 0;
+};
+
+static const char *vmsvga_trace_fifo_cmd_name(uint32_t cmd) {
+  switch (cmd) {
+  case SVGA_CMD_UPDATE: return "SVGA_CMD_UPDATE";
+  case SVGA_CMD_RECT_FILL: return "SVGA_CMD_RECT_FILL";
+  case SVGA_CMD_RECT_COPY: return "SVGA_CMD_RECT_COPY";
+  case SVGA_CMD_UPDATE_VERBOSE: return "SVGA_CMD_UPDATE_VERBOSE";
+  case SVGA_CMD_SURFACE_FILL: return "SVGA_CMD_SURFACE_FILL";
+  case SVGA_CMD_SURFACE_COPY: return "SVGA_CMD_SURFACE_COPY";
+  case SVGA_CMD_SURFACE_ALPHA_BLEND: return "SVGA_CMD_SURFACE_ALPHA_BLEND";
+  case SVGA_CMD_FENCE: return "SVGA_CMD_FENCE";
+  case SVGA_CMD_ESCAPE: return "SVGA_CMD_ESCAPE";
+  case SVGA_CMD_DEFINE_SCREEN: return "SVGA_CMD_DEFINE_SCREEN";
+  case SVGA_CMD_DESTROY_SCREEN: return "SVGA_CMD_DESTROY_SCREEN";
+  case SVGA_CMD_DEFINE_GMRFB: return "SVGA_CMD_DEFINE_GMRFB";
+  case SVGA_CMD_BLIT_GMRFB_TO_SCREEN: return "SVGA_CMD_BLIT_GMRFB_TO_SCREEN";
+  case SVGA_CMD_BLIT_SCREEN_TO_GMRFB: return "SVGA_CMD_BLIT_SCREEN_TO_GMRFB";
+  case SVGA_CMD_DEFINE_GMR2: return "SVGA_CMD_DEFINE_GMR2";
+  case SVGA_CMD_REMAP_GMR2: return "SVGA_CMD_REMAP_GMR2";
+  case SVGA_CMD_DEFINE_CURSOR: return "SVGA_CMD_DEFINE_CURSOR";
+  case SVGA_CMD_DEFINE_ALPHA_CURSOR: return "SVGA_CMD_DEFINE_ALPHA_CURSOR";
+  default: return NULL;
+  };
+};
+
+static const char *vmsvga_trace_reg_name(uint32_t reg) {
+  switch (reg) {
+  case SVGA_REG_ID: return "SVGA_REG_ID";
+  case SVGA_REG_CAPABILITIES: return "SVGA_REG_CAPABILITIES";
+  case SVGA_REG_CAP2: return "SVGA_REG_CAP2";
+  case SVGA_REG_MEM_SIZE: return "SVGA_REG_MEM_SIZE";
+  case SVGA_REG_MEM_REGS: return "SVGA_REG_MEM_REGS";
+  case SVGA_REG_MEMORY_SIZE: return "SVGA_REG_MEMORY_SIZE";
+  case SVGA_REG_FIFO_CAPS: return "SVGA_REG_FIFO_CAPS";
+  case SVGA_REG_MOB_MAX_SIZE: return "SVGA_REG_MOB_MAX_SIZE";
+  case SVGA_REG_GBOBJECT_MEM_SIZE_KB: return "SVGA_REG_GBOBJECT_MEM_SIZE_KB";
+  case SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB:
+    return "SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB";
+  case SVGA_REG_GMRS_MAX_PAGES: return "SVGA_REG_GMRS_MAX_PAGES";
+  case SVGA_REG_GMR_MAX_IDS: return "SVGA_REG_GMR_MAX_IDS";
+  case SVGA_REG_GMR_MAX_DESCRIPTOR_LENGTH:
+    return "SVGA_REG_GMR_MAX_DESCRIPTOR_LENGTH";
+  case SVGA_REG_SCREENDMA: return "SVGA_REG_SCREENDMA";
+  default: return NULL;
+  };
+};
+
+static inline void vmsvga_trace_key_reg_read(struct vmsvga_state_s *s,
+                                              uint32_t reg, uint32_t value) {
+  const char *name;
+  uint32_t word;
+  uint64_t bit;
+
+  if (!vmsvga_trace_flight_enabled() || reg >= 128) {
+    return;
+  };
+  name = vmsvga_trace_reg_name(reg);
+  if (name == NULL) {
+    return;
+  };
+  word = reg >> 6;
+  bit = UINT64_C(1) << (reg & 63);
+  if (s->trace_key_reg_seen[word] & bit) {
+    return;
+  };
+  s->trace_key_reg_seen[word] |= bit;
+  if (reg == SVGA_REG_CAPABILITIES) {
+    fprintf(stderr,
+            "VMVGA-CAP capabilities=0x%08x 3d=%u gmr=%u extfifo=%u "
+            "irqmask=%u traces=%u\n",
+            value, !!(value & SVGA_CAP_3D), !!(value & SVGA_CAP_GMR),
+            !!(value & SVGA_CAP_EXTENDED_FIFO), !!(value & SVGA_CAP_IRQMASK),
+            !!(value & SVGA_CAP_TRACES));
+  };
+  fprintf(stderr, "VMVGA-REG-FIRST read name=%s reg=%u value=0x%08x\n",
+          name, reg, value);
+};
+
+static inline void vmsvga_trace_key_reg_write(struct vmsvga_state_s *s,
+                                               uint32_t reg, uint32_t value) {
+  const char *name = NULL;
+
+  if (!vmsvga_trace_flight_enabled()) {
+    return;
+  };
+  switch (reg) {
+  case SVGA_REG_ENABLE: name = "SVGA_REG_ENABLE"; break;
+  case SVGA_REG_CONFIG_DONE: name = "SVGA_REG_CONFIG_DONE"; break;
+  case SVGA_REG_TRACES: name = "SVGA_REG_TRACES"; break;
+  case SVGA_REG_GUEST_ID: name = "SVGA_REG_GUEST_ID"; break;
+  default: break;
+  };
+  if (name != NULL) {
+    fprintf(stderr, "VMVGA-REG-WRITE name=%s reg=%u value=0x%08x\n",
+            name, reg, value);
+  };
+};
+
+static inline void vmsvga_trace_devcap(struct vmsvga_state_s *s,
+                                        uint32_t index, uint32_t value) {
+  uint32_t i;
+
+  if (!vmsvga_trace_flight_enabled()) {
+    return;
+  };
+  for (i = 0; i < s->trace_devcap_count; i++) {
+    if (s->trace_devcap[i].index == index) {
+      if (s->trace_devcap[i].value != value) {
+        fprintf(stderr,
+                "VMVGA-DEVCAP-CHANGE index=%u old=0x%08x new=0x%08x\n",
+                index, s->trace_devcap[i].value, value);
+        s->trace_devcap[i].value = value;
+      };
+      return;
+    };
+  };
+  if (s->trace_devcap_count < VMVGA_TRACE_DEVCAP_MAX) {
+    s->trace_devcap[s->trace_devcap_count].index = index;
+    s->trace_devcap[s->trace_devcap_count].value = value;
+    s->trace_devcap_count++;
+  };
+  fprintf(stderr, "VMVGA-DEVCAP-FIRST index=%u value=0x%08x\n",
+          index, value);
+};
+
+static inline void vmsvga_trace_fifo_record(struct vmsvga_state_s *s,
+                                             uint32_t cmd, bool is_3d,
+                                             bool supported_3d) {
+  struct vmsvga_trace_cmd_counter_s *entry = NULL;
+  const char *name;
+  uint32_t i;
+
+  if (!vmsvga_trace_flight_enabled()) {
+    return;
+  };
+  s->trace_now.fifo_cmds++;
+  if (is_3d) {
+    s->trace_now.fifo_3d_cmds++;
+  } else {
+    s->trace_now.fifo_2d_cmds++;
+  };
+  switch (cmd) {
+  case SVGA_CMD_UPDATE:
+  case SVGA_CMD_UPDATE_VERBOSE:
+    s->trace_now.fifo_updates++;
+    break;
+  case SVGA_CMD_SURFACE_FILL:
+  case SVGA_CMD_SURFACE_COPY:
+  case SVGA_CMD_SURFACE_ALPHA_BLEND:
+    s->trace_now.fifo_surface_2d++;
+    break;
+  case SVGA_CMD_DEFINE_GMRFB:
+  case SVGA_CMD_BLIT_GMRFB_TO_SCREEN:
+  case SVGA_CMD_BLIT_SCREEN_TO_GMRFB:
+    s->trace_now.fifo_screen_blits++;
+    break;
+  case SVGA_CMD_DEFINE_GMR2:
+  case SVGA_CMD_REMAP_GMR2:
+    s->trace_now.fifo_gmr++;
+    break;
+  case SVGA_CMD_FENCE:
+    s->trace_now.fifo_fences++;
+    break;
+  default:
+    break;
+  };
+  vmsvga_trace_flight_activity(s);
+
+  for (i = 0; i < s->trace_cmd_count; i++) {
+    if (s->trace_cmd[i].cmd == cmd) {
+      entry = &s->trace_cmd[i];
+      break;
+    };
+  };
+  if (entry != NULL) {
+    entry->count++;
+    return;
+  };
+  if (s->trace_cmd_count < VMVGA_TRACE_CMD_MAX) {
+    entry = &s->trace_cmd[s->trace_cmd_count++];
+    entry->cmd = cmd;
+    entry->count = 1;
+  };
+  name = vmsvga_trace_fifo_cmd_name(cmd);
+  fprintf(stderr,
+          "VMVGA-FIFO-FIRST cmd=%u name=%s class=%s supported3d=%u "
+          "stop=0x%08x next=0x%08x sync=%u\n",
+          cmd, name != NULL ? name : (is_3d ? "SVGA3D" : "UNKNOWN"),
+          is_3d ? "3D" : "2D", supported_3d, s->fifo_stop,
+          s->fifo_next, s->sync);
+};
+
+static inline void vmsvga_trace_fifo_stall(struct vmsvga_state_s *s,
+                                            uint32_t stage, uint32_t cmd,
+                                            uint32_t fifo_start, int32_t len,
+                                            bool is_3d,
+                                            bool supported_3d) {
+  bool changed;
+  const char *name;
+
+  if (!vmsvga_trace_flight_enabled()) {
+    return;
+  };
+  s->trace_now.fifo_stalls++;
+  if (stage == 1) {
+    s->trace_now.fifo_prefilter_stalls++;
+  };
+  vmsvga_trace_flight_activity(s);
+  changed = !s->trace_fifo_have_stall ||
+            s->trace_fifo_last_stall_cmd != cmd ||
+            s->trace_fifo_last_stall_stop != fifo_start ||
+            s->trace_fifo_last_stall_stage != stage;
+  if (changed) {
+    s->trace_fifo_have_stall = true;
+    s->trace_fifo_last_stall_cmd = cmd;
+    s->trace_fifo_last_stall_stop = fifo_start;
+    s->trace_fifo_last_stall_stage = stage;
+    s->trace_fifo_stall_repeat = 1;
+  } else {
+    s->trace_fifo_stall_repeat++;
+  };
+  if (!changed &&
+      (s->trace_fifo_stall_repeat & (s->trace_fifo_stall_repeat - 1)) != 0) {
+    return;
+  };
+  name = vmsvga_trace_fifo_cmd_name(cmd);
+  fprintf(stderr,
+          "VMVGA-FIFO-STALL stage=%s cmd=%u name=%s class=%s supported3d=%u "
+          "stop=0x%08x next=0x%08x words=%d sync=%u repeat=%" PRIu64
+          " total=%" PRIu64 " sync_writes=%" PRIu64 " busy_reads=%" PRIu64
+          "\n",
+          stage == 1 ? "prefilter" : "handler", cmd,
+          name != NULL ? name : (is_3d ? "SVGA3D" : "UNKNOWN"),
+          is_3d ? "3D" : "2D", supported_3d, fifo_start, s->fifo_next,
+          len, s->sync, s->trace_fifo_stall_repeat,
+          s->trace_now.fifo_stalls, s->trace_now.sync_writes,
+          s->trace_now.busy_reads);
+};
+
+static inline void vmsvga_trace_flight_report(struct vmsvga_state_s *s,
+                                               const char *reason,
+                                               bool force) {
+  struct vmsvga_trace_counters_s *n;
+  struct vmsvga_trace_counters_s *l;
+  int64_t now;
+  uint32_t fifo_min = 0;
+  uint32_t fifo_max = 0;
+  uint32_t stop = 0;
+  uint32_t next = 0;
+  uint32_t fifo_caps = 0;
+  uint32_t fifo_busy = 0;
+  bool pending = false;
+
+  if (!vmsvga_trace_flight_enabled()) {
+    return;
+  };
+  now = g_get_monotonic_time();
+  if (!force) {
+    if (s->trace_activity_seq == s->trace_last_report_seq) {
+      return;
+    };
+    if (s->trace_last_report_us != 0 &&
+        now - s->trace_last_report_us < VMVGA_TRACE_REPORT_INTERVAL_US) {
+      return;
+    };
+  };
+  if (s->fifo != NULL && s->config) {
+    fifo_min = le32_to_cpu(s->fifo[SVGA_FIFO_MIN]);
+    fifo_max = le32_to_cpu(s->fifo[SVGA_FIFO_MAX]);
+    stop = le32_to_cpu(s->fifo[SVGA_FIFO_STOP]);
+    next = le32_to_cpu(s->fifo[SVGA_FIFO_NEXT_CMD]);
+    pending = stop != next;
+    if (fifo_min >= (uint32_t)(SVGA_FIFO_CAPABILITIES + 1) * sizeof(uint32_t)) {
+      fifo_caps = le32_to_cpu(s->fifo[SVGA_FIFO_CAPABILITIES]);
+    };
+    if (fifo_min >= (uint32_t)(SVGA_FIFO_BUSY + 1) * sizeof(uint32_t)) {
+      fifo_busy = le32_to_cpu(s->fifo[SVGA_FIFO_BUSY]);
+    };
+  };
+  n = &s->trace_now;
+  l = &s->trace_last;
+  fprintf(stderr,
+          "VMVGA-FLIGHT reason=%s fifo=%" PRIu64 "(+%" PRIu64 ") "
+          "2d=%" PRIu64 "(+%" PRIu64 ") 3d=%" PRIu64 "(+%" PRIu64 ") "
+          "update=%" PRIu64 "(+%" PRIu64 ") surface2d=%" PRIu64
+          "(+%" PRIu64 ") screenblit=%" PRIu64 "(+%" PRIu64 ") "
+          "gmr=%" PRIu64 "(+%" PRIu64 ") fence=%" PRIu64 "(+%" PRIu64
+          ") sync=%" PRIu64 "(+%" PRIu64 ") busyread=%" PRIu64
+          "(+%" PRIu64 ") stalls=%" PRIu64 "(+%" PRIu64 ") prefilter=%"
+          PRIu64 "(+%" PRIu64 ") dirtypages=%" PRIu64 "(+%" PRIu64
+          ") damage=%" PRIu64 "(+%" PRIu64 ") pending=%u fifo_busy=%u "
+          "min=0x%08x max=0x%08x stop=0x%08x next=0x%08x "
+          "fifo_caps=0x%08x sync_state=%u\n",
+          reason, n->fifo_cmds, n->fifo_cmds - l->fifo_cmds,
+          n->fifo_2d_cmds, n->fifo_2d_cmds - l->fifo_2d_cmds,
+          n->fifo_3d_cmds, n->fifo_3d_cmds - l->fifo_3d_cmds,
+          n->fifo_updates, n->fifo_updates - l->fifo_updates,
+          n->fifo_surface_2d, n->fifo_surface_2d - l->fifo_surface_2d,
+          n->fifo_screen_blits, n->fifo_screen_blits - l->fifo_screen_blits,
+          n->fifo_gmr, n->fifo_gmr - l->fifo_gmr,
+          n->fifo_fences, n->fifo_fences - l->fifo_fences,
+          n->sync_writes, n->sync_writes - l->sync_writes,
+          n->busy_reads, n->busy_reads - l->busy_reads,
+          n->fifo_stalls, n->fifo_stalls - l->fifo_stalls,
+          n->fifo_prefilter_stalls,
+          n->fifo_prefilter_stalls - l->fifo_prefilter_stalls,
+          n->dirty_pages, n->dirty_pages - l->dirty_pages,
+          n->damage_rects, n->damage_rects - l->damage_rects,
+          pending, fifo_busy, fifo_min, fifo_max, stop, next, fifo_caps,
+          s->sync);
+  fprintf(stderr,
+          "VMVGA-SYNC-STATS fifo_busy_before_sync: zero=%" PRIu64
+          " one=%" PRIu64 " unavailable=%" PRIu64 "\n",
+          n->sync_fifo_busy_zero, n->sync_fifo_busy_one,
+          n->sync_writes - n->sync_fifo_busy_zero - n->sync_fifo_busy_one);
+  s->trace_last = s->trace_now;
+  s->trace_last_report_seq = s->trace_activity_seq;
+  s->trace_last_report_us = now;
+};
+
+static inline void vmsvga_trace_flight_histogram(struct vmsvga_state_s *s,
+                                                  const char *reason) {
+  uint32_t i;
+
+  if (!vmsvga_trace_flight_enabled()) {
+    return;
+  };
+  vmsvga_trace_flight_report(s, reason, true);
+  for (i = 0; i < s->trace_cmd_count; i++) {
+    const char *name = vmsvga_trace_fifo_cmd_name(s->trace_cmd[i].cmd);
+    fprintf(stderr, "VMVGA-FIFO-COUNT cmd=%u name=%s count=%" PRIu64 "\n",
+            s->trace_cmd[i].cmd, name != NULL ? name : "SVGA3D/UNKNOWN",
+            s->trace_cmd[i].count);
+  };
 };
 
 /*
@@ -626,6 +1052,10 @@ static void cursor_update_from_fifo(struct vmsvga_state_s *s) {
 };
 static inline void vmsvga_damage_flush(struct vmsvga_state_s *s) {
   uint32_t i;
+  if (vmsvga_trace_flight_enabled() && s->damage_count != 0) {
+    s->trace_now.damage_rects += s->damage_count;
+    vmsvga_trace_flight_activity(s);
+  };
   for (i = 0; i < s->damage_count; i++) {
     struct vmsvga_damage_rect_s *rect = &s->damage[i];
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_DRAW,
@@ -664,7 +1094,24 @@ static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
                                      uint32_t y, uint32_t w, uint32_t h) {
   struct vmsvga_damage_rect_s rect;
   uint32_t i;
-  if (s->invalidated || w == 0 || h == 0) {
+  if (w == 0 || h == 0) {
+    return;
+  };
+  if (s->mode_handoff_pending) {
+    if (s->active_valid && x == 0 && y == 0 &&
+        w >= s->active_width && h >= s->active_height) {
+      /* The guest has now declared the complete new front buffer valid.
+       * The next display pass may safely bind BAR1 and redraw it in full. */
+      s->mode_handoff_pending = false;
+      s->damage_count = 0;
+      s->invalidated = true;
+      VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                         "MODE_HANDOFF_READY width=%u height=%u",
+                         s->active_width, s->active_height);
+    };
+    return;
+  };
+  if (s->invalidated) {
     return;
   };
   rect.x = x;
@@ -3464,7 +3911,13 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   uint32_t maxloop = 1024;
   struct vmsvga_cursor_definition_s cursor = {0};
   len = vmsvga_fifo_length(s);
+  if (vmsvga_trace_flight_enabled()) {
+    s->trace_now.fifo_runs++;
+  };
   if (len < 1) {
+    if (vmsvga_trace_flight_enabled()) {
+      s->trace_now.fifo_empty_runs++;
+    };
     if (flush_damage) {
       vmsvga_damage_flush(s);
     };
@@ -3503,24 +3956,29 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     };
     fifo_start = s->fifo_stop;
     cmd = vmsvga_fifo_read(s);
+    {
+      bool is_3d = cmd >= SVGA_3D_CMD_BASE && cmd < SVGA_3D_CMD_MAX;
+      bool supported_3d = is_3d && vmsvga3d_fifo_supported_command(cmd);
+      vmsvga_trace_fifo_record(s, cmd, is_3d, supported_3d);
+    };
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_FIFO,
         "FIFO cmd=%u stop=0x%08x next=0x%08x words=%d sync=%u",
         cmd, fifo_start, s->fifo_next, len, s->sync);
     irq_status = 0;
-#ifndef EXPCAPS
-    if (cmd > SVGA_CMD_FENCE && !vmsvga3d_fifo_supported_command(cmd)) {
-      s->fifo_stop = fifo_start;
-      s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
-      len = 0;
-      VMVGA_TRACE_LOCAL(
-          VMVGA_TRACE_STATE,
-          "FIFO_STALL cmd=%u stop=0x%08x next=0x%08x words=%d sync=%u",
-          cmd, fifo_start, s->fifo_next, len, s->sync);
-      VPRINT("unsupported command %u in SVGA command FIFO\n", cmd);
-      break;
-    };
-#endif
+    /*
+     * Do not pre-filter commands by numeric value here.  Extended 2D FIFO
+     * commands (ESCAPE, screen objects, GMRFB, GMR2, ...) live above
+     * SVGA_CMD_FENCE, while SVGA3D has its own command namespace beginning at
+     * SVGA_3D_CMD_BASE.  The old `cmd > SVGA_CMD_FENCE` gate therefore
+     * rejected legitimate non-3D commands before the switch below could
+     * handle them.
+     *
+     * Unknown commands are still safe: extended 2D commands fall through to
+     * the explicit switch cases below, and SVGA3D commands are validated by
+     * vmsvga3d_fifo_command().  Anything neither layer recognizes is rewound
+     * by the default path, preserving the existing stall semantics.
+     */
     VPRINT("Unknown command %u in SVGA command FIFO\n", cmd);
     switch (cmd) {
     case SVGA_CMD_INVALID_CMD:
@@ -4833,10 +5291,14 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       break;
     };
     if (s->fifo_stop == fifo_start && len == 0) {
+      bool is_3d = cmd >= SVGA_3D_CMD_BASE && cmd < SVGA_3D_CMD_MAX;
+      bool supported_3d = is_3d && vmsvga3d_fifo_supported_command(cmd);
       VMVGA_TRACE_LOCAL(
           VMVGA_TRACE_STATE,
           "FIFO_STALL cmd=%u stop=0x%08x next=0x%08x words=%d sync=%u",
           cmd, fifo_start, s->fifo_next, len, s->sync);
+      vmsvga_trace_fifo_stall(s, 2, cmd, fifo_start, len, is_3d,
+                              supported_3d);
     };
     if (s->fifo_stop != fifo_start) {
       irq_status |= SVGA_IRQFLAG_FIFO_PROGRESS;
@@ -4996,7 +5458,16 @@ static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s) {
   s->active_depth = s->new_depth;
   s->active_stride = stride;
   if (changed) {
-    s->invalidated = true;
+    s->damage_count = 0;
+    if (s->enable) {
+      /* A mode change reinterprets BAR1 using a new packed-pixel layout.
+       * Do not expose pre-mode VGA/GOP bytes through the direct scanout until
+       * the guest declares the complete new front buffer updated. */
+      s->mode_handoff_pending = true;
+      s->invalidated = false;
+    } else {
+      s->invalidated = true;
+    };
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
                        "MODE_COMMIT width=%u height=%u depth=%u stride=%u",
                        s->active_width, s->active_height, s->active_depth,
@@ -5090,6 +5561,10 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
         if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, page_addr,
                                               page_end - page_addr)) {
           continue;
+        };
+        if (vmsvga_trace_flight_enabled()) {
+          s->trace_now.dirty_pages++;
+          vmsvga_trace_flight_activity(s);
         };
         if (trace_dirty) {
           if (trace_range_open && page_addr != trace_range_end) {
@@ -5198,6 +5673,38 @@ static inline void vmsvga_publish_fifo_registers(struct vmsvga_state_s *s) {
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
     s->fifo[SVGA_FIFO_FENCE] = cpu_to_le32(s->fence);
   };
+  if (vmsvga_trace_flight_enabled()) {
+    uint32_t fifo_min = le32_to_cpu(s->fifo[SVGA_FIFO_MIN]);
+    uint32_t fifo_max = le32_to_cpu(s->fifo[SVGA_FIFO_MAX]);
+    uint32_t fifo_caps = vmsvga_fifo_has_reg(s, SVGA_FIFO_CAPABILITIES)
+                             ? le32_to_cpu(s->fifo[SVGA_FIFO_CAPABILITIES])
+                             : 0;
+    uint32_t guest_hw = vmsvga_fifo_has_reg(s, SVGA_FIFO_GUEST_3D_HWVERSION)
+                            ? le32_to_cpu(s->fifo[SVGA_FIFO_GUEST_3D_HWVERSION])
+                            : 0;
+    uint32_t host_hw = vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_HWVERSION)
+                           ? le32_to_cpu(s->fifo[SVGA_FIFO_3D_HWVERSION])
+                           : 0;
+    uint32_t revised_hw = vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_HWVERSION_REVISED)
+                              ? le32_to_cpu(s->fifo[SVGA_FIFO_3D_HWVERSION_REVISED])
+                              : 0;
+    uint32_t caps_len = vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_CAPS_LAST)
+                            ? le32_to_cpu(s->fifo[SVGA_FIFO_3D_CAPS])
+                            : 0;
+    uint32_t caps_type = vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_CAPS_LAST)
+                             ? le32_to_cpu(s->fifo[SVGA_FIFO_3D_CAPS + 1])
+                             : 0;
+    fprintf(stderr,
+            "VMVGA-NEGOTIATE capable=%u fifo_min=0x%08x fifo_max=0x%08x "
+            "fifo_caps=0x%08x guest3d=0x%08x host3d=0x%08x revised3d=0x%08x "
+            "caps_len=%u caps_type=%u fc=0x%08x ff=0x%08x\n",
+            s->svga3d_capable, fifo_min, fifo_max, fifo_caps, guest_hw,
+            host_hw, revised_hw, caps_len, caps_type, s->fc, s->ff);
+    s->trace_3d_version_seen = true;
+    s->trace_last_guest_3d_hwversion = guest_hw;
+    s->trace_last_host_3d_hwversion = host_hw;
+    s->trace_last_revised_3d_hwversion = revised_hw;
+  };
 };
 static inline void vmsvga_fifo_set_busy(struct vmsvga_state_s *s,
                                         bool busy) {
@@ -5224,6 +5731,37 @@ static inline void vmsvga_fifo_discard_pending(struct vmsvga_state_s *s) {
   s->sync = 0;
   vmsvga_fifo_upload_reset(s);
   vmsvga_fifo_set_busy(s, false);
+};
+static inline void vmsvga_trace_3d_versions(struct vmsvga_state_s *s) {
+  uint32_t guest_hw;
+  uint32_t host_hw;
+  uint32_t revised_hw;
+
+  if (!vmsvga_trace_flight_enabled() || s->fifo == NULL || !s->config) {
+    return;
+  };
+  guest_hw = vmsvga_fifo_has_reg(s, SVGA_FIFO_GUEST_3D_HWVERSION)
+                 ? le32_to_cpu(s->fifo[SVGA_FIFO_GUEST_3D_HWVERSION])
+                 : 0;
+  host_hw = vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_HWVERSION)
+                ? le32_to_cpu(s->fifo[SVGA_FIFO_3D_HWVERSION])
+                : 0;
+  revised_hw = vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_HWVERSION_REVISED)
+                   ? le32_to_cpu(s->fifo[SVGA_FIFO_3D_HWVERSION_REVISED])
+                   : 0;
+  if (!s->trace_3d_version_seen ||
+      guest_hw != s->trace_last_guest_3d_hwversion ||
+      host_hw != s->trace_last_host_3d_hwversion ||
+      revised_hw != s->trace_last_revised_3d_hwversion) {
+    fprintf(stderr,
+            "VMVGA-3D-VERSION guest=0x%08x host=0x%08x revised=0x%08x "
+            "capable=%u\n",
+            guest_hw, host_hw, revised_hw, s->svga3d_capable);
+    s->trace_3d_version_seen = true;
+    s->trace_last_guest_3d_hwversion = guest_hw;
+    s->trace_last_host_3d_hwversion = host_hw;
+    s->trace_last_revised_3d_hwversion = revised_hw;
+  };
 };
 #ifdef CONFIG_PIXMAN
 static inline void vmsvga_palette_update_entry(struct vmsvga_state_s *s,
@@ -5283,7 +5821,7 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
 };
 static inline uint32_t vmsvga_read_width(struct vmsvga_state_s *s) {
   DisplaySurface *surface;
-  if (s->enable) {
+  if (s->new_width != 0) {
     return s->new_width;
   };
   surface = qemu_console_surface(s->vga.con);
@@ -5291,30 +5829,11 @@ static inline uint32_t vmsvga_read_width(struct vmsvga_state_s *s) {
 };
 static inline uint32_t vmsvga_read_height(struct vmsvga_state_s *s) {
   DisplaySurface *surface;
-  if (s->enable) {
+  if (s->new_height != 0) {
     return s->new_height;
   };
   surface = qemu_console_surface(s->vga.con);
   return surface && surface_height(surface) > 0 ? surface_height(surface) : 768;
-};
-static inline uint32_t vmsvga_read_fb_size(struct vmsvga_state_s *s) {
-  DisplaySurface *surface;
-  uint64_t size;
-  if (s->enable) {
-    vmsvga_try_commit_mode(s);
-    if (!s->active_valid) {
-      return 0;
-    };
-    size = (uint64_t)s->active_height * s->active_stride;
-  } else {
-    surface = qemu_console_surface(s->vga.con);
-    if (surface == NULL || surface_height(surface) <= 0 ||
-        surface_stride(surface) <= 0) {
-      return 0;
-    };
-    size = (uint64_t)surface_height(surface) * surface_stride(surface);
-  };
-  return size <= UINT32_MAX ? (uint32_t)size : UINT32_MAX;
 };
 static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
   VPRINT("vmsvga_value_read was just executed\n");
@@ -5446,8 +5965,13 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
   case SVGA_REG_BYTES_PER_LINE:
     if (vmsvga_pending_mode_valid(s)) {
       ret = vmsvga_pending_stride(s);
-    } else {
+    } else if (s->active_valid) {
       ret = vmsvga_stride(s);
+    } else {
+      DisplaySurface *surface = qemu_console_surface(s->vga.con);
+      ret = surface != NULL && surface_stride(surface) > 0
+                ? surface_stride(surface)
+                : 0;
     };
     VPRINT("SVGA_REG_BYTES_PER_LINE register %u with the return of %u\n",
            s->index, ret);
@@ -5473,7 +5997,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            ret);
     break;
   case SVGA_REG_FB_SIZE:
-    ret = vmsvga_read_fb_size(s);
+    ret = s->vga.vram_size;
     VPRINT("SVGA_REG_FB_SIZE register %u with the return of %u\n", s->index,
            ret);
     break;
@@ -5554,6 +6078,10 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     VPRINT("SVGA_REG_SYNC register %u with the return of %u\n", s->index, ret);
     break;
   case SVGA_REG_BUSY:
+    if (vmsvga_trace_flight_enabled()) {
+      s->trace_now.busy_reads++;
+      vmsvga_trace_flight_activity(s);
+    };
     if (s->sync) {
       vmsvga_try_commit_mode(s);
       vmsvga_fifo_run(s, false);
@@ -5727,6 +6255,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     VPRINT("default register %u with the return of %u\n", s->index, ret);
     break;
   };
+  vmsvga_trace_key_reg_read(s, s->index, ret);
   VMVGA_QEMU_TRACE(trace_vmware_value_read(s->index, ret));
   return ret;
 };
@@ -5771,11 +6300,15 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
     if (!was_enabled && enabled) {
       vmsvga_legacy_vga_enter(s);
+      s->mode_handoff_pending = true;
+      s->damage_count = 0;
+      s->invalidated = false;
     } else if (was_enabled && !enabled) {
       /* VGA needs dirty logging before the shadow is copied back. */
       vmsvga_set_dirty_log(s, true);
       vmsvga_fifo_discard_pending(s);
       vmsvga_legacy_vga_leave(s);
+      s->mode_handoff_pending = false;
     };
     s->enable = enabled;
     s->hidden = s->enable && !!(value & SVGA_REG_ENABLE_HIDE);
@@ -5787,7 +6320,9 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
       s->cursor_dirty = true;
       cursor_update_from_fifo(s);
     };
-    s->invalidated = true;
+    if (!s->mode_handoff_pending) {
+      s->invalidated = true;
+    };
     /* vmware_value_write already traces this register when enabled. */
     VPRINT("SVGA_REG_ENABLE register %u with the value of %u\n", s->index,
            value);
@@ -5842,6 +6377,18 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     break;
   };
   case SVGA_REG_SYNC:
+    if (vmsvga_trace_flight_enabled()) {
+      s->trace_now.sync_writes++;
+      if (s->fifo != NULL && s->config &&
+          vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+        if (le32_to_cpu(s->fifo[SVGA_FIFO_BUSY])) {
+          s->trace_now.sync_fifo_busy_one++;
+        } else {
+          s->trace_now.sync_fifo_busy_zero++;
+        };
+      };
+      vmsvga_trace_flight_activity(s);
+    };
     if (s->enable && s->config) {
       vmsvga_try_commit_mode(s);
       s->sync = 1;
@@ -5979,12 +6526,14 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     break;
   case SVGA_REG_DEV_CAP:
     s->devcap_val = s->svga3d_capable ? vmsvga3d_get_devcap(value) : 0;
+    vmsvga_trace_devcap(s, value, s->devcap_val);
     VPRINT("SVGA_REG_DEV_CAP register %u with the value of %u\n", s->index,
            value);
     break;
   default:
     VPRINT("default register %u with the value of %u\n", s->index, value);
   };
+  vmsvga_trace_key_reg_write(s, s->index, value);
   return;
 };
 static uint32_t vmsvga_irqstatus_read(void *opaque, uint32_t address) {
@@ -6084,6 +6633,12 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
     s->damage_count = 0;
     goto done;
   };
+  if (s->mode_handoff_pending) {
+    /* Keep the last VGA/GOP host surface until a complete SVGA front-buffer
+     * update proves that BAR1 no longer contains stale pre-mode contents. */
+    s->damage_count = 0;
+    goto done;
+  };
 
   vmsvga_check_size(s);
   scan_dirty = vmsvga_effective_traces(s);
@@ -6113,6 +6668,8 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
     vmsvga_damage_flush(s);
   };
 done:
+  vmsvga_trace_3d_versions(s);
+  vmsvga_trace_flight_report(s, "display", false);
   VMVGA_GFX_UPDATE_DONE();
 };
 static void vmsvga_reset(DeviceState *dev) {
@@ -6123,6 +6680,10 @@ static void vmsvga_reset(DeviceState *dev) {
       VMVGA_TRACE_STATE,
       "RESET enable=%u config=%u hidden=%u sync=%u",
       s->enable, s->config, s->hidden, s->sync);
+  if (s->trace_activity_seq != 0) {
+    vmsvga_trace_flight_histogram(s, "reset");
+  };
+  vmsvga_trace_flight_reset(s);
   vmsvga3d_reset(s);
   vmsvga_gmr_reset(s);
   s->index = 0;
@@ -6140,14 +6701,14 @@ static void vmsvga_reset(DeviceState *dev) {
   s->hidden = false;
   s->config = 0;
   s->svgaid = SVGA_ID_2;
-  s->new_width = 1024;
-  s->new_height = 768;
+  s->new_width = 0;
+  s->new_height = 0;
   s->new_depth = 32;
-  s->active_valid = true;
-  s->active_width = 1024;
-  s->active_height = 768;
-  s->active_depth = 32;
-  s->active_stride = 1024 * 4;
+  s->active_valid = false;
+  s->active_width = 0;
+  s->active_height = 0;
+  s->active_depth = 0;
+  s->active_stride = 0;
   s->disp_width = 1024;
   s->disp_height = 768;
   s->num_gd = 1;
@@ -6182,7 +6743,8 @@ static void vmsvga_reset(DeviceState *dev) {
   s->fence = 0;
   s->fence_goal = 0;
   s->thread = 0;
-  s->invalidated = true;
+  s->invalidated = false;
+  s->mode_handoff_pending = false;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
   s->legacy_vga_size = 0;
   memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));
@@ -6212,6 +6774,9 @@ static void vmsvga_invalidate_display(void *opaque) {
     s->vga.hw_ops->invalidate(&s->vga);
     return;
   };
+  if (s->mode_handoff_pending) {
+    return;
+  };
   s->invalidated = true;
 };
 static void vmsvga_text_update(void *opaque, uint32_t *chardata) {
@@ -6239,6 +6804,7 @@ static int vmsvga_pre_load(void *opaque) {
   vmsvga_set_dirty_log(s, true);
   s->hidden = false;
   s->legacy_vga_size = 0;
+  vmsvga_trace_flight_reset(s);
   memset(s->legacy_vga_ptr, 0, VMSVGA_VGA_FB_BACKUP_SIZE);
   vmsvga_fifo_upload_reset(s);
   vmsvga_migration_buffers_clear(s);
@@ -6511,10 +7077,8 @@ static int vmsvga_post_load(void *opaque, int version_id) {
       ret = -EINVAL;
       goto fail;
     };
-    if (s->enable && !s->active_valid) {
-      ret = -EINVAL;
-      goto fail;
-    };
+    /* ENABLE may legitimately be migrated before the guest has completed
+     * a usable WIDTH/HEIGHT/BPP tuple. */
     shadow_size = vmsvga_legacy_vga_backup_size(s);
     if (s->legacy_vga_size > shadow_size ||
         (s->enable && s->legacy_vga_size != shadow_size)) {
@@ -6540,7 +7104,10 @@ static int vmsvga_post_load(void *opaque, int version_id) {
 
   s->cursor_dirty = true;
   s->damage_count = 0;
-  s->invalidated = true;
+  if (version_id < 8) {
+    s->mode_handoff_pending = false;
+  };
+  s->invalidated = !s->mode_handoff_pending;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
   ret = vmsvga_restore_objects(s);
   if (ret < 0) {
@@ -6653,7 +7220,7 @@ static bool vmsvga_legacy_vga_size_valid(void *opaque, int version_id) {
 
 static VMStateDescription vmstate_vmware_vga_internal = {
     .name = "vmware_vga_internal",
-    .version_id = 7,
+    .version_id = 8,
     .minimum_version_id = 2,
     .pre_load = vmsvga_pre_load,
     .post_load = vmsvga_post_load,
@@ -6713,6 +7280,7 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32(fc, struct vmsvga_state_s),
         VMSTATE_UINT32(ff, struct vmsvga_state_s),
         VMSTATE_BOOL_V(active_valid, struct vmsvga_state_s, 6),
+        VMSTATE_BOOL_V(mode_handoff_pending, struct vmsvga_state_s, 8),
         VMSTATE_UINT32_V(active_width, struct vmsvga_state_s, 6),
         VMSTATE_UINT32_V(active_height, struct vmsvga_state_s, 6),
         VMSTATE_UINT32_V(active_depth, struct vmsvga_state_s, 6),
@@ -6736,7 +7304,7 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_END_OF_LIST()}};
 static VMStateDescription vmstate_vmware_vga = {
     .name = "vmware_vga",
-    .version_id = 7,
+    .version_id = 8,
     .minimum_version_id = 2,
     .fields = (const VMStateField[]){
         VMSTATE_PCI_DEVICE(parent_obj, struct pci_vmsvga_state_s),
@@ -6760,6 +7328,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->fifo_size = VMSVGA_FIFO_SIZE;
   s->hidden = false;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
+  vmsvga_trace_flight_reset(s);
   memory_region_init_ram(&s->fifo_ram, OBJECT(dev), "vmsvga.fifo",
                          s->fifo_size, &error_fatal);
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
@@ -6783,14 +7352,14 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   VMVGA_REGISTER_VGA_VMSTATE(&s->vga);
   s->thread = 0;
   s->svgaid = SVGA_ID_2;
-  s->new_width = 1024;
-  s->new_height = 768;
+  s->new_width = 0;
+  s->new_height = 0;
   s->new_depth = 32;
-  s->active_valid = true;
-  s->active_width = 1024;
-  s->active_height = 768;
-  s->active_depth = 32;
-  s->active_stride = 1024 * 4;
+  s->active_valid = false;
+  s->active_width = 0;
+  s->active_height = 0;
+  s->active_depth = 0;
+  s->active_stride = 0;
   s->disp_width = 1024;
   s->disp_height = 768;
   s->num_gd = 1;
@@ -6816,7 +7385,8 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->damage_count = 0;
   s->fence = 0;
   s->fence_goal = 0;
-  s->invalidated = true;
+  s->invalidated = false;
+  s->mode_handoff_pending = false;
   memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));
   vmsvga_fifo_upload_reset(s);
 #ifdef CONFIG_PIXMAN
@@ -6910,6 +7480,7 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp) {
 };
 static void pci_vmsvga_uninit(PCIDevice *dev) {
   struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+  vmsvga_trace_flight_histogram(&s->chip, "uninit");
   vmsvga3d_reset(&s->chip);
   vmsvga3d_renderer_unrealize(&s->chip);
   vmsvga_migration_buffers_clear(&s->chip);

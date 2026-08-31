@@ -66,6 +66,9 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_WSI_VALUE "SDL2"
 #define VMSVGA3D_DXVK_CONFIG_FILE_ENV "DXVK_CONFIG_FILE"
 #define VMSVGA3D_DXVK_CONFIG_FILE_VALUE "/dev/null"
+#define VMSVGA3D_DXVK_LOG_LEVEL_ENV "DXVK_LOG_LEVEL"
+#define VMSVGA3D_DXVK_LOG_LEVEL_QUIET "none"
+#define VMSVGA3D_DXVK_DEBUG_ENV "DEBUG"
 
 #define VMSVGA3D_DXVK_VULKAN_SONAME "libvulkan.so.1"
 #define VMSVGA3D_DXVK_VULKAN_API_1_3 ((1u << 22) | (3u << 12))
@@ -757,6 +760,90 @@ static void vmsvga3d_dxvk_restore_config_environment(char *saved) {
   g_free(saved);
 }
 
+static bool vmsvga3d_dxvk_environment_enabled(const char *name) {
+  static const char *const enabled_values[] = {
+      "y", "yes", "true", "1", "on", "enable", "enabled",
+  };
+  const char *value = g_getenv(name);
+  const char *end;
+  size_t length;
+  size_t i;
+
+  if (value == NULL) {
+    return false;
+  }
+  while (*value != '\0' && g_ascii_isspace(*value)) {
+    value++;
+  }
+  end = value + strlen(value);
+  while (end > value && g_ascii_isspace(end[-1])) {
+    end--;
+  }
+  length = (size_t)(end - value);
+
+  for (i = 0; i < G_N_ELEMENTS(enabled_values); i++) {
+    size_t enabled_length = strlen(enabled_values[i]);
+
+    if (length == enabled_length &&
+        g_ascii_strncasecmp(value, enabled_values[i], length) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * DXVK 2.7.1 captures DXVK_LOG_LEVEL when its Logger singleton is created.
+ * Silence the native DXVK startup dump unless the DEBUG env variable is set.
+ */
+static bool vmsvga3d_dxvk_set_log_environment(char **saved, bool *restore,
+                                               Error **errp) {
+  const char *log_level;
+
+  *saved = NULL;
+  *restore = false;
+  if (vmsvga3d_dxvk_environment_enabled(VMSVGA3D_DXVK_DEBUG_ENV)) {
+    return true;
+  }
+
+  log_level = g_getenv(VMSVGA3D_DXVK_LOG_LEVEL_ENV);
+  if (log_level != NULL) {
+    size_t length = strlen(log_level) + 1;
+
+    *saved = g_try_malloc0(length);
+    if (*saved == NULL) {
+      error_setg(errp, "failed to save %s", VMSVGA3D_DXVK_LOG_LEVEL_ENV);
+      return false;
+    }
+    memcpy(*saved, log_level, length);
+  }
+  if (!g_setenv(VMSVGA3D_DXVK_LOG_LEVEL_ENV,
+                VMSVGA3D_DXVK_LOG_LEVEL_QUIET, true)) {
+    error_setg(errp, "failed to set %s=%s", VMSVGA3D_DXVK_LOG_LEVEL_ENV,
+               VMSVGA3D_DXVK_LOG_LEVEL_QUIET);
+    g_free(*saved);
+    *saved = NULL;
+    return false;
+  }
+  *restore = true;
+  return true;
+}
+
+static void vmsvga3d_dxvk_restore_log_environment(char *saved, bool restore) {
+  if (!restore) {
+    g_free(saved);
+    return;
+  }
+  if (saved != NULL) {
+    bool restored = g_setenv(VMSVGA3D_DXVK_LOG_LEVEL_ENV, saved, true);
+
+    (void)restored;
+  } else {
+    g_unsetenv(VMSVGA3D_DXVK_LOG_LEVEL_ENV);
+  }
+  g_free(saved);
+}
+
 static bool vmsvga3d_dxvk_set_wsi_environment(bool *restore,
                                                Error **errp) {
   const char *driver = g_getenv(VMSVGA3D_DXVK_WSI_ENV);
@@ -866,7 +953,9 @@ VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
   VMSVGA3DDxvk *dxvk;
   void *create9_entry;
   char *saved_config_file = NULL;
+  char *saved_log_level = NULL;
   bool config_environment_set = false;
+  bool restore_log_environment = false;
   bool restore_wsi_environment = false;
 
   width = width != 0 ? width : VMSVGA3D_DXVK_DEVICE_DEFAULT_WIDTH;
@@ -886,6 +975,10 @@ VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
 
   /* DXVK initialization reads process-global environment variables. */
   g_mutex_lock(&vmsvga3d_dxvk_init_lock);
+  if (!vmsvga3d_dxvk_set_log_environment(&saved_log_level,
+                                          &restore_log_environment, errp)) {
+    goto fail;
+  }
   if (!vmsvga3d_dxvk_set_config_environment(&saved_config_file, errp)) {
     goto fail;
   }
@@ -928,6 +1021,8 @@ VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
   if (config_environment_set) {
     vmsvga3d_dxvk_restore_config_environment(saved_config_file);
   }
+  vmsvga3d_dxvk_restore_log_environment(saved_log_level,
+                                         restore_log_environment);
   g_mutex_unlock(&vmsvga3d_dxvk_init_lock);
   dxvk->ready = true;
   return dxvk;
@@ -937,6 +1032,8 @@ fail:
   if (config_environment_set) {
     vmsvga3d_dxvk_restore_config_environment(saved_config_file);
   }
+  vmsvga3d_dxvk_restore_log_environment(saved_log_level,
+                                         restore_log_environment);
   g_mutex_unlock(&vmsvga3d_dxvk_init_lock);
 fail_unlocked:
   vmsvga3d_dxvk_destroy(dxvk);

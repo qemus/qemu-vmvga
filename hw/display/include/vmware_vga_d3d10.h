@@ -1091,18 +1091,19 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_triangle_fan_generate_u16(
     const void *source_indices, uint32_t source_bytes,
     uint16_t *generated_indices, uint32_t generated_capacity,
     uint32_t *generated_count);
+#define VMSVGA3D_D3D10_QUERY_COTABLE_ENTRY_SIZE 16u
+
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_info(
     SVGA3dQueryType type, uint32_t flags, VMSVGA3DD3D10QueryInfo *info);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_define_entry(
-    const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst);
-VMSVGA3DD3D10Level vmsvga3d_d3d10_query_destroy_entry(
-    SVGACOTableDXQueryEntry *entry);
+    const SVGA3dCmdDXDefineQuery *src, void *dst);
+VMSVGA3DD3D10Level vmsvga3d_d3d10_query_destroy_entry(void *entry);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_bind_entry(
-    SVGACOTableDXQueryEntry *entry, uint32_t mobid);
+    void *entry, uint32_t mobid);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_set_offset(
-    SVGACOTableDXQueryEntry *entry, uint32_t offset);
+    void *entry, uint32_t offset);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_bind_all(
-    SVGACOTableDXQueryEntry *entries, uint32_t count, uint32_t mobid);
+    void *entries, uint32_t count, uint32_t mobid);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_execution_plan(
     SVGA3dQueryType type, uint32_t flags,
     VMSVGA3DD3D10QueryExecutionPlan *plan);

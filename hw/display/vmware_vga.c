@@ -5123,6 +5123,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       if (struct_size < VMSVGA_SCREEN_V1_STRUCT_SIZE ||
           struct_size > SVGA_CMD_MAX_DATASIZE || screen_words > UINT32_MAX ||
           total_words > (uint64_t)len) {
+        if (vmsvga_trace_flight_enabled()) {
+          fprintf(stderr,
+                  "VMVGA-SCREEN-REJECT define reason=fifo-size size=%u "
+                  "remaining=%d\n",
+                  struct_size, len);
+        }
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
@@ -5147,6 +5153,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     case SVGA_CMD_DESTROY_SCREEN: {
       uint32_t screen_id;
       if (len < (sizeof(SVGAFifoCmdDestroyScreen) / sizeof(uint32_t)) + 1) {
+        if (vmsvga_trace_flight_enabled()) {
+          fprintf(stderr,
+                  "VMVGA-SCREEN-REJECT destroy reason=fifo-truncated remaining=%d\n",
+                  len);
+        }
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
@@ -5160,6 +5171,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     case SVGA_CMD_DEFINE_GMRFB: {
       uint32_t gmr_id, offset, bytes_per_line, format;
       if (len < (sizeof(SVGAFifoCmdDefineGMRFB) / sizeof(uint32_t)) + 1) {
+        if (vmsvga_trace_flight_enabled()) {
+          fprintf(stderr,
+                  "VMVGA-SCREEN-REJECT gmrfb reason=fifo-truncated remaining=%d\n",
+                  len);
+        }
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
@@ -5182,6 +5198,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       SVGASignedRect dest_rect;
       uint32_t dest_screen_id;
       if (len < (sizeof(SVGAFifoCmdBlitGMRFBToScreen) / sizeof(uint32_t)) + 1) {
+        if (vmsvga_trace_flight_enabled()) {
+          fprintf(stderr,
+                  "VMVGA-SCREEN-REJECT blit-gmrfb-to-screen "
+                  "reason=fifo-truncated remaining=%d\n",
+                  len);
+        }
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
@@ -5204,6 +5226,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       SVGASignedRect src_rect;
       uint32_t src_screen_id;
       if (len < (sizeof(SVGAFifoCmdBlitScreenToGMRFB) / sizeof(uint32_t)) + 1) {
+        if (vmsvga_trace_flight_enabled()) {
+          fprintf(stderr,
+                  "VMVGA-SCREEN-REJECT blit-screen-to-gmrfb "
+                  "reason=fifo-truncated remaining=%d\n",
+                  len);
+        }
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
@@ -5224,6 +5252,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
     case SVGA_CMD_ANNOTATION_FILL: {
       uint32_t color;
       if (len < (sizeof(SVGAFifoCmdAnnotationFill) / sizeof(uint32_t)) + 1) {
+        if (vmsvga_trace_flight_enabled()) {
+          fprintf(stderr,
+                  "VMVGA-SCREEN-REJECT annotation-fill "
+                  "reason=fifo-truncated remaining=%d\n",
+                  len);
+        }
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;
@@ -5238,6 +5272,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       int32_t src_x, src_y;
       uint32_t src_screen_id;
       if (len < (sizeof(SVGAFifoCmdAnnotationCopy) / sizeof(uint32_t)) + 1) {
+        if (vmsvga_trace_flight_enabled()) {
+          fprintf(stderr,
+                  "VMVGA-SCREEN-REJECT annotation-copy "
+                  "reason=fifo-truncated remaining=%d\n",
+                  len);
+        }
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
         len = 0;

@@ -319,6 +319,13 @@ static void vmsvga_gmr_reset(struct vmsvga_state_s *s) {
 #define VMSVGA_ANNOTATION_FILL 1u
 #define VMSVGA_ANNOTATION_COPY 2u
 
+#define VMSVGA_SCREEN_REJECT(fmt, ...)                                    \
+  do {                                                                     \
+    if (vmsvga_trace_flight_enabled()) {                                   \
+      fprintf(stderr, "VMVGA-SCREEN-REJECT " fmt "\n", ##__VA_ARGS__); \
+    }                                                                      \
+  } while (0)
+
 static inline void vmsvga_screen_trace_activity(struct vmsvga_state_s *s) {
   vmsvga_trace_flight_activity(s);
 }
@@ -360,12 +367,19 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
   if (id != VMSVGA_SCREEN_V1_ID || !(flags & SVGA_SCREEN_MUST_BE_SET) ||
       (flags & ~supported_flags) != 0 || width == 0 || height == 0 ||
       width > VMSVGA_MAX_WIDTH || height > VMSVGA_MAX_HEIGHT) {
+    VMSVGA_SCREEN_REJECT(
+        "define reason=parameters id=%u flags=0x%08x size=%ux%u root=%d,%d",
+        id, flags, width, height, root_x, root_y);
     return false;
   }
 
   stride = (uint64_t)width * 4;
   size = stride * height;
   if (stride > UINT32_MAX || size > s->vga.vram_size) {
+    VMSVGA_SCREEN_REJECT(
+        "define reason=framebuffer-size id=%u size=%ux%u stride=%" PRIu64
+        " bytes=%" PRIu64 " vram=%" PRIu64,
+        id, width, height, stride, size, (uint64_t)s->vga.vram_size);
     return false;
   }
 
@@ -401,6 +415,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
 static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
                                   uint32_t screen_id) {
   if (screen_id != VMSVGA_SCREEN_V1_ID) {
+    VMSVGA_SCREEN_REJECT("destroy reason=screen-id id=%u", screen_id);
     return false;
   }
   if (!s->screen_defined) {
@@ -449,6 +464,9 @@ static bool vmsvga_screen_define_gmrfb(struct vmsvga_state_s *s,
 
   if (!vmsvga_screen_format_decode(format, &bpp, &depth, &bypp) ||
       bytes_per_line == 0 || gmr_id == SVGA_GMR_NULL) {
+    VMSVGA_SCREEN_REJECT(
+        "gmrfb reason=parameters gmr=%u offset=0x%08x pitch=%u format=0x%08x",
+        gmr_id, offset, bytes_per_line, format);
     return false;
   }
   (void)bpp;
@@ -456,6 +474,9 @@ static bool vmsvga_screen_define_gmrfb(struct vmsvga_state_s *s,
   (void)bypp;
   /* Validate the starting byte now; each blit validates its full row range. */
   if (!vmsvga_gmr_validate_range(s, gmr_id, offset, 0)) {
+    VMSVGA_SCREEN_REJECT(
+        "gmrfb reason=gmr-range gmr=%u offset=0x%08x pitch=%u format=0x%08x",
+        gmr_id, offset, bytes_per_line, format);
     return false;
   }
 
@@ -591,6 +612,11 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
   if (!s->screen_defined || !s->gmrfb_defined ||
       !vmsvga_screen_format_decode(s->gmrfb_format, &bpp, &depth, &bypp) ||
       right <= left || bottom <= top) {
+    VMSVGA_SCREEN_REJECT(
+        "blit-gmrfb-to-screen reason=state-or-rect screen=%d gmrfb=%d "
+        "src=%d,%d dst=%d,%d-%d,%d format=0x%08x",
+        s->screen_defined, s->gmrfb_defined, src_x, src_y, dst_left, dst_top,
+        dst_right, dst_bottom, s->gmrfb_format);
     return false;
   }
 
@@ -602,6 +628,10 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
     return true;
   }
   if (source_x < 0 || source_y < 0) {
+    VMSVGA_SCREEN_REJECT(
+        "blit-gmrfb-to-screen reason=negative-source src=%" PRId64 ",%" PRId64
+        " dst=%" PRId64 ",%" PRId64 "-%" PRId64 ",%" PRId64,
+        source_x, source_y, left, top, right, bottom);
     return false;
   }
 
@@ -614,10 +644,24 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
                    (uint64_t)left * 4;
     if (!vmsvga_screen_gmrfb_row_offset(s, (int32_t)source_x,
                                         (int32_t)(source_y + row), width,
-                                        bypp, &gmr_offset, &row_bytes) ||
-        row_bytes > sizeof(s->blit_scratch) ||
-        !vmsvga_gmr_read(s, s->gmrfb_gmr_id, gmr_offset,
+                                        bypp, &gmr_offset, &row_bytes)) {
+      VMSVGA_SCREEN_REJECT(
+          "blit-gmrfb-to-screen reason=row-range row=%u src=%" PRId64 ",%"
+          PRId64 " width=%u", row, source_x, source_y + row, width);
+      return false;
+    }
+    if (row_bytes > sizeof(s->blit_scratch)) {
+      VMSVGA_SCREEN_REJECT(
+          "blit-gmrfb-to-screen reason=row-too-wide row=%u bytes=%zu limit=%zu",
+          row, row_bytes, sizeof(s->blit_scratch));
+      return false;
+    }
+    if (!vmsvga_gmr_read(s, s->gmrfb_gmr_id, gmr_offset,
                          s->blit_scratch, row_bytes)) {
+      VMSVGA_SCREEN_REJECT(
+          "blit-gmrfb-to-screen reason=gmr-read row=%u gmr=%u offset=0x%08x "
+          "bytes=%zu",
+          row, s->gmrfb_gmr_id, gmr_offset, row_bytes);
       return false;
     }
     vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
@@ -641,11 +685,20 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
   bool ok;
 
   if (!s->screen_defined || src_origin == NULL || dest_rect == NULL) {
+    VMSVGA_SCREEN_REJECT(
+        "blit-gmrfb-to-screen reason=missing-state screen=%d src=%d rect=%d "
+        "dest-id=%u",
+        s->screen_defined, src_origin != NULL, dest_rect != NULL,
+        dest_screen_id);
     return false;
   }
   width = (int64_t)dest_rect->right - dest_rect->left;
   height = (int64_t)dest_rect->bottom - dest_rect->top;
   if (width <= 0 || height <= 0 || width > INT32_MAX || height > INT32_MAX) {
+    VMSVGA_SCREEN_REJECT(
+        "blit-gmrfb-to-screen reason=dest-rect dest-id=%u rect=%d,%d-%d,%d",
+        dest_screen_id, dest_rect->left, dest_rect->top, dest_rect->right,
+        dest_rect->bottom);
     return false;
   }
 
@@ -662,6 +715,10 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
     if (left < INT32_MIN || left > INT32_MAX || top < INT32_MIN ||
         top > INT32_MAX || right < INT32_MIN || right > INT32_MAX ||
         bottom < INT32_MIN || bottom > INT32_MAX) {
+      VMSVGA_SCREEN_REJECT(
+          "blit-gmrfb-to-screen reason=root-overflow root=%d,%d rect=%d,%d-%d,%d",
+          s->screen_root_x, s->screen_root_y, dest_rect->left, dest_rect->top,
+          dest_rect->right, dest_rect->bottom);
       return false;
     }
     local_left = (int32_t)left;
@@ -669,6 +726,8 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
     local_right = (int32_t)right;
     local_bottom = (int32_t)bottom;
   } else {
+    VMSVGA_SCREEN_REJECT("blit-gmrfb-to-screen reason=screen-id dest-id=%u",
+                         dest_screen_id);
     return false;
   }
 
@@ -692,6 +751,10 @@ static bool vmsvga_screen_blit_screen_to_gmrfb(
   if (!s->screen_defined || !s->gmrfb_defined || dest_origin == NULL ||
       src_rect == NULL || src_screen_id != VMSVGA_SCREEN_V1_ID ||
       !vmsvga_screen_format_decode(s->gmrfb_format, &bpp, &depth, &bypp)) {
+    VMSVGA_SCREEN_REJECT(
+        "blit-screen-to-gmrfb reason=state-or-id screen=%d gmrfb=%d src-id=%u "
+        "format=0x%08x",
+        s->screen_defined, s->gmrfb_defined, src_screen_id, s->gmrfb_format);
     return false;
   }
   width64 = (int64_t)src_rect->right - src_rect->left;
@@ -701,6 +764,11 @@ static bool vmsvga_screen_blit_screen_to_gmrfb(
       src_rect->right > (int32_t)s->screen_width ||
       src_rect->bottom > (int32_t)s->screen_height ||
       width64 > UINT32_MAX || height64 > UINT32_MAX) {
+    VMSVGA_SCREEN_REJECT(
+        "blit-screen-to-gmrfb reason=rect src=%d,%d-%d,%d dest=%d,%d "
+        "screen=%ux%u",
+        src_rect->left, src_rect->top, src_rect->right, src_rect->bottom,
+        dest_origin->x, dest_origin->y, s->screen_width, s->screen_height);
     return false;
   }
   width = (uint32_t)width64;
@@ -715,13 +783,25 @@ static bool vmsvga_screen_blit_screen_to_gmrfb(
     if (!vmsvga_screen_gmrfb_row_offset(s, dest_origin->x,
                                         dest_origin->y + (int32_t)row,
                                         width, bypp, &gmr_offset,
-                                        &row_bytes) ||
-        row_bytes > sizeof(s->blit_scratch)) {
+                                        &row_bytes)) {
+      VMSVGA_SCREEN_REJECT(
+          "blit-screen-to-gmrfb reason=row-range row=%u dest=%d,%d width=%u",
+          row, dest_origin->x, dest_origin->y + (int32_t)row, width);
+      return false;
+    }
+    if (row_bytes > sizeof(s->blit_scratch)) {
+      VMSVGA_SCREEN_REJECT(
+          "blit-screen-to-gmrfb reason=row-too-wide row=%u bytes=%zu limit=%zu",
+          row, row_bytes, sizeof(s->blit_scratch));
       return false;
     }
     vmsvga_screen_bgrx_to_gmrfb(s->blit_scratch, src, width, bpp, depth);
     if (!vmsvga_gmr_write(s, s->gmrfb_gmr_id, gmr_offset,
                           s->blit_scratch, row_bytes)) {
+      VMSVGA_SCREEN_REJECT(
+          "blit-screen-to-gmrfb reason=gmr-write row=%u gmr=%u offset=0x%08x "
+          "bytes=%zu",
+          row, s->gmrfb_gmr_id, gmr_offset, row_bytes);
       return false;
     }
   }

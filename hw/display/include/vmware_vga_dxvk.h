@@ -41,6 +41,14 @@ struct vmsvga3d_d3d9_vertex_element_s;
 struct vmsvga3d_d3d9_viewport_s;
 struct vmsvga3d_d3d9_material_s;
 struct vmsvga3d_d3d9_light_s;
+struct vmsvga3d_d3d10_create_desc_s;
+struct vmsvga3d_d3d10_rtv_desc_s;
+
+typedef struct vmsvga3d_dxvk_subresource_data_s {
+  const void *data;
+  uint32_t row_pitch;
+  uint32_t slice_pitch;
+} VMSVGA3DDxvkSubresourceData;
 
 VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
                                     Error **errp);
@@ -57,6 +65,16 @@ bool vmsvga3d_dxvk_surface_info(
 bool vmsvga3d_dxvk_surface_materialize(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const struct vmsvga3d_d3d9_resource_plan_s *plan);
+
+/* D3D11 residency is distinct from the legacy D3D9 resource path. */
+bool vmsvga3d_dxvk_d3d11_surface_materialize(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_create_desc_s *desc,
+    const VMSVGA3DDxvkSubresourceData *initial_data,
+    uint32_t initial_data_count);
+bool vmsvga3d_dxvk_d3d11_clear_render_target_view(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_rtv_desc_s *desc, const float color[4]);
 void vmsvga3d_dxvk_surface_evict(VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_surface_upload_level(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,

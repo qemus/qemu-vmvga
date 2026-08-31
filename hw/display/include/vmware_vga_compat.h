@@ -125,18 +125,30 @@ static inline void vmvga_cursor_unref(QEMUCursor *cursor)
     device_class_set_legacy_reset((_dc), (_reset))
 #endif
 
-#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
+/*
+ * QEMU 11.0 already has the const Property/class_init API and no longer uses
+ * DEFINE_PROP_END_OF_LIST().  The display callback API changes below only
+ * arrive in QEMU 11.1, so keep these compatibility boundaries separate.
+ */
+#if QEMU_VERSION_MAJOR == 11
 #define VMVGA_PROPERTY_QUALIFIER const
 #define VMVGA_PROPERTY_END
 #define VMVGA_CLASS_INIT_DATA const void *
+#define VMVGA_GLOBAL_VMSTATE_PROPERTY(_state, _field)
+#else
+#define VMVGA_PROPERTY_QUALIFIER
+#define VMVGA_PROPERTY_END DEFINE_PROP_END_OF_LIST(),
+#define VMVGA_CLASS_INIT_DATA void *
+#define VMVGA_GLOBAL_VMSTATE_PROPERTY(_state, _field) \
+    DEFINE_PROP_BOOL("global-vmstate", _state, _field, false),
+#endif
+
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
 #define VMVGA_GFX_UPDATE_RET bool
 #define VMVGA_GFX_UPDATE_FALLBACK(_s) \
     return (_s)->vga.hw_ops->gfx_update(&(_s)->vga)
 #define VMVGA_GFX_UPDATE_DONE() return true
 #else
-#define VMVGA_PROPERTY_QUALIFIER
-#define VMVGA_PROPERTY_END DEFINE_PROP_END_OF_LIST(),
-#define VMVGA_CLASS_INIT_DATA void *
 #define VMVGA_GFX_UPDATE_RET void
 #define VMVGA_GFX_UPDATE_FALLBACK(_s) \
     do { \

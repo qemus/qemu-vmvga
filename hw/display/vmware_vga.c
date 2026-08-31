@@ -368,9 +368,6 @@ struct vmsvga_trace_devcap_s {
 
 struct vmsvga_state_s {
   uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
-  /* Preserve the historical 769-DWORD migration layout without exposing an
-   * extra guest palette register. */
-  uint32_t palette_compat_pad;
 #ifdef CONFIG_PIXMAN
   pixman_indexed_t indexed_palette;
 #endif
@@ -403,7 +400,6 @@ struct vmsvga_state_s {
   uint32_t svgaid;
   uint32_t thread;
   uint32_t sync;
-  uint32_t bios;
   uint32_t fifo_size;
   uint32_t fifo_min;
   uint32_t fifo_max;
@@ -432,7 +428,11 @@ struct vmsvga_state_s {
   uint32_t scratch[VMSVGA_SCRATCH_SIZE];
   struct vmsvga_gmr_s *gmrs[64];
   /* Screen Object v1: this implementation intentionally exposes one screen
-   * ID (0), with its host-managed base layer stored in BAR1. */
+   * ID (0). Its host-managed base layer is kept separately from BAR1. */
+  uint8_t *screen_base;
+  size_t screen_base_size;
+  uint32_t screen_stride;
+  uint32_t screen_base_migration_size;
   bool screen_defined;
   uint32_t screen_flags;
   uint32_t screen_width;
@@ -465,13 +465,8 @@ struct vmsvga_state_s {
   uint32_t damage_count;
   VGACommonState vga;
   bool invalidated;
-  /* Runtime-only display handoff state. When a configured SVGA scanout is
-   * temporarily disabled for driver reconfiguration, keep the existing host
-   * surface visible until CONFIG_DONE completes the new configuration or a
-   * legacy VGA framebuffer write proves the guest really switched to VGA. */
-  bool svga_reconfig_pending;
   /* The host console surface is not migrated. Track whether it is currently
-   * bound directly to the SVGA BAR1 framebuffer rather than the VGA path. */
+   * bound to the selected SVGA scanout backing rather than the VGA path. */
   bool svga_surface_bound;
   bool hidden;
   bool cursor_dirty;
@@ -949,21 +944,6 @@ static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s) {
   VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW leave size=%zu", size);
 };
 
-static inline void vmsvga_reconfig_complete_if_ready(
-    struct vmsvga_state_s *s) {
-  if (!s->svga_reconfig_pending || !s->enable || !s->config) {
-    return;
-  };
-
-  s->svga_reconfig_pending = false;
-  s->svga_surface_bound = false;
-  s->damage_count = 0;
-  s->invalidated = true;
-  VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
-                     "RECONFIG_COMPLETE width=%u height=%u depth=%u",
-                     s->active_width, s->active_height, s->active_depth);
-};
-
 static inline void vmsvga_clear_vram_dirty(struct vmsvga_state_s *s) {
   DirtyBitmapSnapshot *snap;
   if (!s->dirty_log_enabled || s->vga.vram_size == 0) {
@@ -1038,16 +1018,6 @@ static void vmsvga_legacy_vga_write(void *opaque, hwaddr addr, uint64_t data,
   };
   vga_mem_writeb(&s->vga, addr, data);
   s->vga.vram_ptr = vram_ptr;
-
-  if (!s->enable && s->svga_reconfig_pending) {
-    /* A real VGA framebuffer write means this was not just a transient SVGA
-     * reconfiguration. Allow the next display pass to enter the VGA path. */
-    s->svga_reconfig_pending = false;
-    s->damage_count = 0;
-    s->invalidated = true;
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
-                       "RECONFIG_CANCEL reason=vga-write");
-  };
 };
 
 static const MemoryRegionOps vmsvga_legacy_vga_ops = {
@@ -5904,9 +5874,20 @@ static inline void vmsvga_palette_rebuild(struct vmsvga_state_s *s) {
 static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
   VPRINT("vmsvga_check_size was just executed\n");
   DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  uint8_t *scanout;
   uint32_t stride;
   if (!s->active_valid) {
     return;
+  };
+  if (s->screen_defined) {
+    if (s->screen_base == NULL ||
+        s->screen_stride != (uint64_t)s->screen_width * 4 ||
+        (uint64_t)s->screen_stride * s->screen_height > s->screen_base_size) {
+      return;
+    };
+    scanout = s->screen_base;
+  } else {
+    scanout = vmsvga_svga_vram_ptr(s);
   };
   stride = s->active_stride;
   if (!s->svga_surface_bound ||
@@ -5924,8 +5905,7 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     VMVGA_QEMU_TRACE(trace_vmware_setmode(s->active_width, s->active_height,
                                            s->active_depth));
     surface = qemu_create_displaysurface_from(
-        s->active_width, s->active_height, format, stride,
-        vmsvga_svga_vram_ptr(s));
+        s->active_width, s->active_height, format, stride, scanout);
 #ifdef CONFIG_PIXMAN
     if (s->active_depth == 8) {
       pixman_image_set_indexed(surface->image, &s->indexed_palette);
@@ -5939,6 +5919,10 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     vmvga_console_set_surface(s->vga.con, surface);
     s->svga_surface_bound = true;
     s->invalidated = true;
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                       "SCANOUT source=%s width=%u height=%u depth=%u stride=%u",
+                       s->screen_defined ? "screen" : "bar1", s->active_width,
+                       s->active_height, s->active_depth, stride);
   };
 };
 static inline uint32_t vmsvga_read_width(struct vmsvga_state_s *s) {
@@ -6424,16 +6408,10 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     bool was_enabled = s->enable;
     bool was_hidden = s->hidden;
     bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
-    bool preserve_scanout = was_enabled && !enabled &&
-                            s->svga_surface_bound && s->active_valid &&
-                            !s->hidden;
     if (!was_enabled && enabled) {
       vmsvga_legacy_vga_enter(s);
     } else if (was_enabled && !enabled) {
-      /* Keep the last valid SVGA host image while the guest temporarily
-       * disables the device to reconfigure it. A real VGA framebuffer write
-       * cancels this hold in vmsvga_legacy_vga_write(). */
-      s->svga_reconfig_pending = preserve_scanout;
+      /* VGA needs dirty logging before selecting its isolated framebuffer. */
       vmsvga_set_dirty_log(s, true);
       vmsvga_fifo_discard_pending(s);
       vmsvga_legacy_vga_leave(s);
@@ -6443,7 +6421,6 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     if (s->enable) {
       vmsvga_try_commit_mode(s);
     };
-    vmsvga_reconfig_complete_if_ready(s);
     vmsvga_update_dirty_log(s);
     if (was_hidden != s->hidden) {
       s->cursor_dirty = true;
@@ -6497,7 +6474,6 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
       vmsvga_fifo_upload_reset(s);
       vmsvga_fifo_set_busy(s, false);
     };
-    vmsvga_reconfig_complete_if_ready(s);
     vmsvga_update_dirty_log(s);
     /* vmware_value_write already traces this register when enabled. */
     VPRINT("SVGA_REG_CONFIG_DONE register %u with the value of %u\n", s->index,
@@ -6742,24 +6718,16 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
     cursor_update_from_fifo(s);
   };
 
-  if (s->enable && s->hidden) {
-    vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_HIDDEN, pending_valid);
-    s->damage_count = 0;
-    goto done;
-  };
-
-  if (s->svga_reconfig_pending) {
-    /* The QEMU console still owns the previous BAR1-backed DisplaySurface.
-     * Do not reinterpret it through VGA, and do not bind a new SVGA surface
-     * until ENABLE and CONFIG_DONE both indicate that reconfiguration ended. */
-    s->damage_count = 0;
-    goto done;
-  };
-
   if (!s->enable) {
     vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA, pending_valid);
     s->svga_surface_bound = false;
     VMVGA_GFX_UPDATE_FALLBACK(s);
+    goto done;
+  };
+
+  if (s->hidden) {
+    vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_HIDDEN, pending_valid);
+    s->damage_count = 0;
     goto done;
   };
 
@@ -6772,7 +6740,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
   };
 
   vmsvga_check_size(s);
-  scan_dirty = vmsvga_effective_traces(s);
+  scan_dirty = !s->screen_defined && vmsvga_effective_traces(s);
   if (scan_dirty) {
     struct vmsvga_damage_rect_s explicit_damage[VMSVGA_DAMAGE_RECTS];
     uint32_t explicit_count = s->damage_count;
@@ -6819,7 +6787,6 @@ static void vmsvga_reset(DeviceState *dev) {
   vmsvga_gmr_reset(s);
   vmsvga_screen_reset(s);
   s->index = 0;
-  s->palette_compat_pad = 0;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
   if (s->enable) {
@@ -6857,7 +6824,6 @@ static void vmsvga_reset(DeviceState *dev) {
   s->pitchlock = 0;
   s->traces = 0;
   s->guest = 0;
-  s->bios = 0; /* migration compatibility placeholder; BIOS port is inert */
   s->sync = 0;
   s->irq_mask = 0;
   s->irq_status = 0;
@@ -6876,7 +6842,6 @@ static void vmsvga_reset(DeviceState *dev) {
   s->fence_goal = 0;
   s->thread = 0;
   s->invalidated = false;
-  s->svga_reconfig_pending = false;
   s->svga_surface_bound = false;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
   s->legacy_vga_size = 0;
@@ -6938,10 +6903,11 @@ static int vmsvga_pre_load(void *opaque) {
   struct vmsvga_state_s *s = opaque;
   vmsvga_set_dirty_log(s, true);
   s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
-  s->svga_reconfig_pending = false;
   s->svga_surface_bound = false;
   s->hidden = false;
   s->legacy_vga_size = 0;
+  vmsvga_screen_base_clear(s);
+  s->screen_base_migration_size = 0;
   vmsvga_trace_flight_reset(s);
   memset(s->legacy_vga_ptr, 0, VMSVGA_VGA_FB_BACKUP_SIZE);
   vmsvga_fifo_upload_reset(s);
@@ -6955,8 +6921,24 @@ static int vmsvga_pre_load(void *opaque) {
 static int vmsvga_pre_save(void *opaque) {
   struct vmsvga_state_s *s = opaque;
   uint32_t id;
+  s->screen_base_migration_size = 0;
   if (s->enable || s->legacy_vga_size != 0) {
     s->legacy_vga_size = (uint32_t)vmsvga_legacy_vga_backup_size(s);
+  };
+  if (s->screen_defined) {
+    uint64_t stride = (uint64_t)s->screen_width * 4;
+    uint64_t size = stride * s->screen_height;
+    if (s->screen_width == 0 || s->screen_height == 0 ||
+        s->screen_width > VMSVGA_MAX_WIDTH ||
+        s->screen_height > VMSVGA_MAX_HEIGHT || stride > UINT32_MAX ||
+        size == 0 || size > UINT32_MAX || s->screen_base == NULL ||
+        s->screen_stride != stride || s->screen_base_size != size) {
+      return -EINVAL;
+    };
+    s->screen_base_migration_size = (uint32_t)size;
+  } else if (s->screen_base != NULL || s->screen_base_size != 0 ||
+             s->screen_stride != 0) {
+    return -EINVAL;
   };
   if (!vmsvga_fifo_upload_valid(s)) {
     return -EINVAL;
@@ -7035,6 +7017,7 @@ static int vmsvga_pre_save(void *opaque) {
 };
 static void vmsvga_post_save(void *opaque) {
   struct vmsvga_state_s *s = opaque;
+  s->screen_base_migration_size = 0;
   memset(s->object_migration, 0, sizeof(s->object_migration));
   memset(s->cursor_migration, 0, sizeof(s->cursor_migration));
 };
@@ -7178,79 +7161,52 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   struct vmsvga_state_s *s = opaque;
   size_t shadow_size;
   int ret;
+  (void)version_id;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
   s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
   s->thread = 0;
   s->traces = !!s->traces;
-  if (version_id < 3 || !s->enable) {
+  if (!s->enable) {
     s->hidden = false;
   };
-  if (version_id < 5) {
-    s->disp_width = s->new_width;
-    s->disp_height = s->new_height;
-    s->num_gd = MIN(s->num_gd, 1u);
-    s->display_id = 0;
-  };
 
-  if (version_id < 6) {
-    /* Older streams had no committed-mode tuple. Preserve the requested
-     * registers exactly and reconstruct only the derived active mode. */
-    if (!vmsvga_try_commit_mode(s)) {
-      s->active_valid = true;
-      s->active_width = 1024;
-      s->active_height = 768;
-      s->active_depth = 32;
-      s->active_stride = 1024 * 4;
-    };
-    shadow_size = vmsvga_legacy_vga_backup_size(s);
-    s->legacy_vga_size = s->enable ? (uint32_t)shadow_size : 0;
-    if (s->enable) {
-      /* Compatibility fallback for streams predating explicit shadow state. */
-      memcpy(s->legacy_vga_ptr, s->vga.vram_ptr, shadow_size);
-    };
-  } else {
-    if (s->active_valid &&
-        !vmsvga_mode_valid(s, s->active_width, s->active_height,
-                           s->active_depth, s->active_stride)) {
-      ret = -EINVAL;
-      goto fail;
-    };
-    if (version_id < 8 && s->enable && !s->active_valid) {
-      ret = -EINVAL;
-      goto fail;
-    };
-    shadow_size = vmsvga_legacy_vga_backup_size(s);
-    if (s->legacy_vga_size > shadow_size ||
-        (s->enable && s->legacy_vga_size != shadow_size)) {
-      ret = -EINVAL;
-      goto fail;
-    };
+  if (s->active_valid &&
+      !vmsvga_mode_valid(s, s->active_width, s->active_height,
+                         s->active_depth, s->active_stride)) {
+    ret = -EINVAL;
+    goto fail;
   };
-
-  if (version_id < 7) {
-    /* Old streams exposed one cursor tuple, so pending and active state were
-     * necessarily identical. */
-    s->active_cursor = s->cursor;
-    s->active_cursor_x = s->cursor_x;
-    s->active_cursor_y = s->cursor_y;
-    s->active_cursor_on = s->cursor_on;
-  } else if (s->active_cursor_on > SVGA_CURSOR_ON_RESTORE_TO_FB) {
+  shadow_size = vmsvga_legacy_vga_backup_size(s);
+  if (s->legacy_vga_size > shadow_size ||
+      (s->enable && s->legacy_vga_size != shadow_size)) {
     ret = -EINVAL;
     goto fail;
   };
 
-  if (version_id < 8) {
-    vmsvga_screen_reset(s);
-  } else if (s->screen_defined &&
-             (s->screen_width == 0 || s->screen_height == 0 ||
-              s->screen_width > VMSVGA_MAX_WIDTH ||
-              s->screen_height > VMSVGA_MAX_HEIGHT ||
-              (uint64_t)s->screen_width * s->screen_height * 4 >
-                  s->vga.vram_size)) {
+  if (s->active_cursor_on > SVGA_CURSOR_ON_RESTORE_TO_FB) {
     ret = -EINVAL;
     goto fail;
   };
+
+  if (s->screen_defined) {
+    uint64_t stride = (uint64_t)s->screen_width * 4;
+    uint64_t size = stride * s->screen_height;
+    if (s->screen_width == 0 || s->screen_height == 0 ||
+        s->screen_width > VMSVGA_MAX_WIDTH ||
+        s->screen_height > VMSVGA_MAX_HEIGHT || stride > UINT32_MAX ||
+        size == 0 || size > UINT32_MAX ||
+        s->screen_base_migration_size != size || s->screen_base == NULL) {
+      ret = -EINVAL;
+      goto fail;
+    };
+    s->screen_stride = (uint32_t)stride;
+    s->screen_base_size = (size_t)size;
+  } else if (s->screen_base_migration_size != 0 || s->screen_base != NULL) {
+    ret = -EINVAL;
+    goto fail;
+  };
+  s->screen_base_migration_size = 0;
 
   if (s->enable) {
     vmsvga_legacy_vga_enter(s);
@@ -7262,16 +7218,13 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   s->cursor_dirty = true;
   s->damage_count = 0;
   s->invalidated = s->enable && s->active_valid;
-  s->svga_reconfig_pending = false;
   s->svga_surface_bound = false;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
   ret = vmsvga_restore_objects(s);
   if (ret < 0) {
     goto fail;
   };
-  if (version_id < 4) {
-    vmsvga_fifo_upload_reset(s);
-  } else if (!vmsvga_fifo_upload_valid(s)) {
+  if (!vmsvga_fifo_upload_valid(s)) {
     ret = -EINVAL;
     goto fail;
   };
@@ -7304,6 +7257,8 @@ fail:
   vmsvga_cursor_cache_clear(s);
   vmsvga_cursor_source_clear(s);
   vmsvga_objects_clear(s);
+  vmsvga_screen_base_clear(s);
+  s->screen_base_migration_size = 0;
   vmsvga_migration_buffers_clear(s);
   return ret;
 };
@@ -7339,7 +7294,7 @@ static const VMStateDescription vmstate_vmsvga_object_migration = {
             VMSTATE_END_OF_LIST()}};
 static const VMStateDescription vmstate_vmsvga_cursor_migration = {
     .name = "vmware_vga_cursor",
-    .version_id = 2,
+    .version_id = 1,
     .minimum_version_id = 1,
     .fields =
         (const VMStateField[]){
@@ -7352,23 +7307,21 @@ static const VMStateDescription vmstate_vmsvga_cursor_migration = {
             VMSTATE_VARRAY_UINT32_ALLOC(
                 data, struct vmsvga_cursor_migration_s, pixel_count, 0,
                 vmstate_info_uint32, uint32_t),
-            VMSTATE_BOOL_V(raw, struct vmsvga_cursor_migration_s, 2),
-            VMSTATE_BOOL_V(alpha, struct vmsvga_cursor_migration_s, 2),
-            VMSTATE_UINT32_V(and_mask_bpp, struct vmsvga_cursor_migration_s, 2),
-            VMSTATE_UINT32_V(xor_mask_bpp, struct vmsvga_cursor_migration_s, 2),
-            VMSTATE_UINT32_V(and_size, struct vmsvga_cursor_migration_s, 2),
-            VMSTATE_UINT32_V(xor_size, struct vmsvga_cursor_migration_s, 2),
+            VMSTATE_BOOL(raw, struct vmsvga_cursor_migration_s),
+            VMSTATE_BOOL(alpha, struct vmsvga_cursor_migration_s),
+            VMSTATE_UINT32(and_mask_bpp, struct vmsvga_cursor_migration_s),
+            VMSTATE_UINT32(xor_mask_bpp, struct vmsvga_cursor_migration_s),
+            VMSTATE_UINT32(and_size, struct vmsvga_cursor_migration_s),
+            VMSTATE_UINT32(xor_size, struct vmsvga_cursor_migration_s),
             VMSTATE_VBUFFER_ALLOC_UINT32(
-                and_data, struct vmsvga_cursor_migration_s, 2, NULL, and_size),
+                and_data, struct vmsvga_cursor_migration_s, 0, NULL, and_size),
             VMSTATE_VBUFFER_ALLOC_UINT32(
-                xor_data, struct vmsvga_cursor_migration_s, 2, NULL, xor_size),
+                xor_data, struct vmsvga_cursor_migration_s, 0, NULL, xor_size),
             VMSTATE_END_OF_LIST()}};
 static bool vmsvga_legacy_vga_size_valid(void *opaque, int version_id) {
   struct vmsvga_state_s *s = opaque;
   size_t expected;
-  if (version_id < 6) {
-    return true;
-  };
+  (void)version_id;
   expected = vmsvga_legacy_vga_backup_size(s);
   return s->legacy_vga_size <= expected &&
          (!s->enable || s->legacy_vga_size == expected);
@@ -7376,8 +7329,8 @@ static bool vmsvga_legacy_vga_size_valid(void *opaque, int version_id) {
 
 static VMStateDescription vmstate_vmware_vga_internal = {
     .name = "vmware_vga_internal",
-    .version_id = 8,
-    .minimum_version_id = 2,
+    .version_id = 1,
+    .minimum_version_id = 1,
     .pre_load = vmsvga_pre_load,
     .post_load = vmsvga_post_load,
     .pre_save = vmsvga_pre_save,
@@ -7385,9 +7338,8 @@ static VMStateDescription vmstate_vmware_vga_internal = {
     .fields = (const VMStateField[]){
         VMSTATE_UINT32_ARRAY(svgapalettebase, struct vmsvga_state_s,
                              VMSVGA_PALETTE_STORAGE_SIZE),
-        VMSTATE_UINT32(palette_compat_pad, struct vmsvga_state_s),
         VMSTATE_UINT32(enable, struct vmsvga_state_s),
-        VMSTATE_BOOL_V(hidden, struct vmsvga_state_s, 3),
+        VMSTATE_BOOL(hidden, struct vmsvga_state_s),
         VMSTATE_UINT32(config, struct vmsvga_state_s),
         VMSTATE_UINT32(index, struct vmsvga_state_s),
         VMSTATE_UINT32(scratch_size, struct vmsvga_state_s),
@@ -7400,8 +7352,8 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32(disp_prim, struct vmsvga_state_s),
         VMSTATE_UINT32(disp_x, struct vmsvga_state_s),
         VMSTATE_UINT32(disp_y, struct vmsvga_state_s),
-        VMSTATE_UINT32_V(disp_width, struct vmsvga_state_s, 5),
-        VMSTATE_UINT32_V(disp_height, struct vmsvga_state_s, 5),
+        VMSTATE_UINT32(disp_width, struct vmsvga_state_s),
+        VMSTATE_UINT32(disp_height, struct vmsvga_state_s),
         VMSTATE_UINT32(devcap_val, struct vmsvga_state_s),
         VMSTATE_UINT32(gmrdesc, struct vmsvga_state_s),
         VMSTATE_UINT32(gmrid, struct vmsvga_state_s),
@@ -7413,7 +7365,6 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32(svgaid, struct vmsvga_state_s),
         VMSTATE_UINT32(thread, struct vmsvga_state_s),
         VMSTATE_UINT32(sync, struct vmsvga_state_s),
-        VMSTATE_UINT32(bios, struct vmsvga_state_s),
         VMSTATE_UINT32(fifo_size, struct vmsvga_state_s),
         VMSTATE_UINT32(fifo_min, struct vmsvga_state_s),
         VMSTATE_UINT32(fifo_max, struct vmsvga_state_s),
@@ -7427,56 +7378,59 @@ static VMStateDescription vmstate_vmware_vga_internal = {
         VMSTATE_UINT32(cursor_x, struct vmsvga_state_s),
         VMSTATE_UINT32(cursor_y, struct vmsvga_state_s),
         VMSTATE_UINT32(cursor_on, struct vmsvga_state_s),
-        VMSTATE_UINT32_V(active_cursor, struct vmsvga_state_s, 7),
-        VMSTATE_UINT32_V(active_cursor_x, struct vmsvga_state_s, 7),
-        VMSTATE_UINT32_V(active_cursor_y, struct vmsvga_state_s, 7),
-        VMSTATE_UINT32_V(active_cursor_on, struct vmsvga_state_s, 7),
+        VMSTATE_UINT32(active_cursor, struct vmsvga_state_s),
+        VMSTATE_UINT32(active_cursor_x, struct vmsvga_state_s),
+        VMSTATE_UINT32(active_cursor_y, struct vmsvga_state_s),
+        VMSTATE_UINT32(active_cursor_on, struct vmsvga_state_s),
         VMSTATE_UINT32(fence, struct vmsvga_state_s),
         VMSTATE_UINT32(fence_goal, struct vmsvga_state_s),
         VMSTATE_UINT32(fc, struct vmsvga_state_s),
         VMSTATE_UINT32(ff, struct vmsvga_state_s),
-        VMSTATE_BOOL_V(active_valid, struct vmsvga_state_s, 6),
-        VMSTATE_UINT32_V(active_width, struct vmsvga_state_s, 6),
-        VMSTATE_UINT32_V(active_height, struct vmsvga_state_s, 6),
-        VMSTATE_UINT32_V(active_depth, struct vmsvga_state_s, 6),
-        VMSTATE_UINT32_V(active_stride, struct vmsvga_state_s, 6),
-        VMSTATE_UINT32_V(legacy_vga_size, struct vmsvga_state_s, 6),
+        VMSTATE_BOOL(active_valid, struct vmsvga_state_s),
+        VMSTATE_UINT32(active_width, struct vmsvga_state_s),
+        VMSTATE_UINT32(active_height, struct vmsvga_state_s),
+        VMSTATE_UINT32(active_depth, struct vmsvga_state_s),
+        VMSTATE_UINT32(active_stride, struct vmsvga_state_s),
+        VMSTATE_UINT32(legacy_vga_size, struct vmsvga_state_s),
         VMSTATE_VALIDATE("legacy VGA shadow size",
                          vmsvga_legacy_vga_size_valid),
-        VMSTATE_VBUFFER_UINT32(legacy_vga_ptr, struct vmsvga_state_s, 6, NULL,
+        VMSTATE_VBUFFER_UINT32(legacy_vga_ptr, struct vmsvga_state_s, 0, NULL,
                                legacy_vga_size),
-        VMSTATE_STRUCT(fifo_upload, struct vmsvga_state_s, 4,
+        VMSTATE_STRUCT(fifo_upload, struct vmsvga_state_s, 0,
                        vmstate_vmsvga_fifo_upload,
                        struct vmsvga_fifo_upload_s),
         VMSTATE_STRUCT_ARRAY(object_migration, struct vmsvga_state_s,
-                             VMSVGA_MAX_OBJECTS, 2,
+                             VMSVGA_MAX_OBJECTS, 0,
                              vmstate_vmsvga_object_migration,
                              struct vmsvga_object_migration_s),
         VMSTATE_STRUCT_ARRAY(cursor_migration, struct vmsvga_state_s,
-                             VMSVGA_MAX_CURSORS, 2,
+                             VMSVGA_MAX_CURSORS, 0,
                              vmstate_vmsvga_cursor_migration,
                              struct vmsvga_cursor_migration_s),
-        VMSTATE_BOOL_V(screen_defined, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(screen_flags, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(screen_width, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(screen_height, struct vmsvga_state_s, 8),
-        VMSTATE_INT32_V(screen_root_x, struct vmsvga_state_s, 8),
-        VMSTATE_INT32_V(screen_root_y, struct vmsvga_state_s, 8),
-        VMSTATE_BOOL_V(gmrfb_defined, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(gmrfb_gmr_id, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(gmrfb_offset, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(gmrfb_bytes_per_line, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(gmrfb_format, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(screen_annotation_type, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(screen_annotation_color, struct vmsvga_state_s, 8),
-        VMSTATE_INT32_V(screen_annotation_src_x, struct vmsvga_state_s, 8),
-        VMSTATE_INT32_V(screen_annotation_src_y, struct vmsvga_state_s, 8),
-        VMSTATE_UINT32_V(screen_annotation_src_id, struct vmsvga_state_s, 8),
+        VMSTATE_BOOL(screen_defined, struct vmsvga_state_s),
+        VMSTATE_UINT32(screen_flags, struct vmsvga_state_s),
+        VMSTATE_UINT32(screen_width, struct vmsvga_state_s),
+        VMSTATE_UINT32(screen_height, struct vmsvga_state_s),
+        VMSTATE_INT32(screen_root_x, struct vmsvga_state_s),
+        VMSTATE_INT32(screen_root_y, struct vmsvga_state_s),
+        VMSTATE_UINT32(screen_base_migration_size, struct vmsvga_state_s),
+        VMSTATE_VBUFFER_ALLOC_UINT32(screen_base, struct vmsvga_state_s, 0,
+                                     NULL, screen_base_migration_size),
+        VMSTATE_BOOL(gmrfb_defined, struct vmsvga_state_s),
+        VMSTATE_UINT32(gmrfb_gmr_id, struct vmsvga_state_s),
+        VMSTATE_UINT32(gmrfb_offset, struct vmsvga_state_s),
+        VMSTATE_UINT32(gmrfb_bytes_per_line, struct vmsvga_state_s),
+        VMSTATE_UINT32(gmrfb_format, struct vmsvga_state_s),
+        VMSTATE_UINT32(screen_annotation_type, struct vmsvga_state_s),
+        VMSTATE_UINT32(screen_annotation_color, struct vmsvga_state_s),
+        VMSTATE_INT32(screen_annotation_src_x, struct vmsvga_state_s),
+        VMSTATE_INT32(screen_annotation_src_y, struct vmsvga_state_s),
+        VMSTATE_UINT32(screen_annotation_src_id, struct vmsvga_state_s),
         VMSTATE_END_OF_LIST()}};
 static VMStateDescription vmstate_vmware_vga = {
     .name = "vmware_vga",
-    .version_id = 8,
-    .minimum_version_id = 2,
+    .version_id = 1,
+    .minimum_version_id = 1,
     .fields = (const VMStateField[]){
         VMSTATE_PCI_DEVICE(parent_obj, struct pci_vmsvga_state_s),
         VMSTATE_STRUCT(chip, struct pci_vmsvga_state_s, 0,
@@ -7491,7 +7445,6 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                         MemoryRegion *address_space, MemoryRegion *io) {
   VPRINT("vmsvga_init was just executed\n");
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
-  s->palette_compat_pad = 0;
   memset(s->scratch, 0, sizeof(s->scratch));
   memset(s->cursor_cache, 0, sizeof(s->cursor_cache));
   memset(s->cursor_source, 0, sizeof(s->cursor_source));
@@ -7541,7 +7494,6 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->pitchlock = 0;
   s->traces = 0;
   s->guest = 0;
-  s->bios = 0;
   s->sync = 0;
   s->cursor = 0;
   s->cursor_x = 0;
@@ -7557,7 +7509,6 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->fence = 0;
   s->fence_goal = 0;
   s->invalidated = false;
-  s->svga_reconfig_pending = false;
   s->svga_surface_bound = false;
   vmsvga_screen_reset(s);
   memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));
@@ -7656,6 +7607,7 @@ static void pci_vmsvga_uninit(PCIDevice *dev) {
   vmsvga_trace_flight_histogram(&s->chip, "uninit");
   vmsvga3d_reset(&s->chip);
   vmsvga3d_renderer_unrealize(&s->chip);
+  vmsvga_screen_reset(&s->chip);
   vmsvga_migration_buffers_clear(&s->chip);
   vmsvga_cursor_cache_clear(&s->chip);
   vmsvga_cursor_source_clear(&s->chip);
@@ -7665,8 +7617,8 @@ static void pci_vmsvga_uninit(PCIDevice *dev) {
 static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {
     DEFINE_PROP_UINT32("vgamem_mb", struct pci_vmsvga_state_s,
                        chip.vga.vram_size_mb, 128),
-    DEFINE_PROP_BOOL("global-vmstate", struct pci_vmsvga_state_s,
-                     chip.vga.global_vmstate, true),
+    VMVGA_GLOBAL_VMSTATE_PROPERTY(struct pci_vmsvga_state_s,
+                                  chip.vga.global_vmstate)
     DEFINE_PROP_BOOL("x-test-marker", struct pci_vmsvga_state_s,
                      chip.test_marker, false),
     VMVGA_PROPERTY_END

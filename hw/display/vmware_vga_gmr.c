@@ -307,9 +307,9 @@ static void vmsvga_gmr_reset(struct vmsvga_state_s *s) {
  * VMware SVGA Screen Object v1 support.
  *
  * Screen Object v1 permits an implementation-specific number of screen IDs.
- * Cubey currently implements one screen (ID 0), backed by the existing BAR1
- * framebuffer.  This keeps the base layer coherent with QEMU's scanout and
- * the legacy SVGA3D PRESENT path without advertising SCREEN_OBJECT_2/GMR2.
+ * Cubey currently implements one screen (ID 0).  Its host-managed base layer
+ * is allocated separately from BAR1 so later display and blit paths can use
+ * Screen Object storage without aliasing the guest-visible framebuffer.
  */
 
 #define VMSVGA_SCREEN_V1_ID 0u
@@ -330,7 +330,57 @@ static inline void vmsvga_screen_trace_activity(struct vmsvga_state_s *s) {
   vmsvga_trace_flight_activity(s);
 }
 
+static void vmsvga_screen_base_clear(struct vmsvga_state_s *s) {
+  g_clear_pointer(&s->screen_base, g_free);
+  s->screen_base_size = 0;
+  s->screen_stride = 0;
+}
+
+static bool vmsvga_screen_base_resize(struct vmsvga_state_s *s,
+                                      uint32_t width, uint32_t height) {
+  uint64_t stride64 = (uint64_t)width * 4;
+  uint64_t size64 = stride64 * height;
+  uint32_t stride;
+  size_t size;
+  uint8_t *new_base;
+
+  if (stride64 > UINT32_MAX || size64 == 0 || size64 > SIZE_MAX) {
+    return false;
+  }
+  stride = (uint32_t)stride64;
+  size = (size_t)size64;
+  if (s->screen_base != NULL && s->screen_defined &&
+      s->screen_width == width && s->screen_height == height &&
+      s->screen_stride == stride && s->screen_base_size == size) {
+    return true;
+  }
+
+  new_base = g_try_malloc0(size);
+  if (new_base == NULL) {
+    return false;
+  }
+  if (s->screen_base != NULL && s->screen_defined &&
+      s->screen_stride != 0) {
+    uint32_t copy_width = MIN(s->screen_width, width);
+    uint32_t copy_height = MIN(s->screen_height, height);
+    size_t copy_bytes = (size_t)copy_width * 4;
+    uint32_t row;
+
+    for (row = 0; row < copy_height; row++) {
+      memcpy(new_base + (size_t)row * stride,
+             s->screen_base + (size_t)row * s->screen_stride, copy_bytes);
+    }
+  }
+
+  g_free(s->screen_base);
+  s->screen_base = new_base;
+  s->screen_base_size = size;
+  s->screen_stride = stride;
+  return true;
+}
+
 static void vmsvga_screen_reset(struct vmsvga_state_s *s) {
+  vmsvga_screen_base_clear(s);
   s->screen_defined = false;
   s->screen_flags = 0;
   s->screen_width = 0;
@@ -375,11 +425,17 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
 
   stride = (uint64_t)width * 4;
   size = stride * height;
-  if (stride > UINT32_MAX || size > s->vga.vram_size) {
+  if (stride > UINT32_MAX || size == 0 || size > SIZE_MAX) {
     VMSVGA_SCREEN_REJECT(
-        "define reason=framebuffer-size id=%u size=%ux%u stride=%" PRIu64
-        " bytes=%" PRIu64 " vram=%" PRIu64,
-        id, width, height, stride, size, (uint64_t)s->vga.vram_size);
+        "define reason=base-size id=%u size=%ux%u stride=%" PRIu64
+        " bytes=%" PRIu64,
+        id, width, height, stride, size);
+    return false;
+  }
+  if (!vmsvga_screen_base_resize(s, width, height)) {
+    VMSVGA_SCREEN_REJECT(
+        "define reason=base-allocation id=%u size=%ux%u bytes=%" PRIu64,
+        id, width, height, size);
     return false;
   }
 
@@ -390,7 +446,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
   s->screen_root_x = root_x;
   s->screen_root_y = root_y;
 
-  /* Screen Object v1's host-managed base layer is Cubey's BAR1 scanout. */
+  /* The active tuple also describes the Screen Object scanout surface. */
   s->active_valid = true;
   s->active_width = width;
   s->active_height = height;
@@ -419,8 +475,10 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
     return false;
   }
   if (!s->screen_defined) {
+    vmsvga_screen_base_clear(s);
     return true;
   }
+  vmsvga_screen_base_clear(s);
   s->screen_defined = false;
   s->screen_flags = 0;
   s->screen_width = 0;
@@ -428,6 +486,9 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
   s->screen_root_x = 0;
   s->screen_root_y = 0;
   s->screen_annotation_type = VMSVGA_ANNOTATION_NONE;
+  s->damage_count = 0;
+  s->svga_surface_bound = false;
+  s->invalidated = true;
   s->trace_now.screen_destroys++;
   vmsvga_screen_trace_activity(s);
   VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "SCREEN_DESTROY id=%u", screen_id);
@@ -607,9 +668,11 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
   int64_t source_x = src_x;
   int64_t source_y = src_y;
   uint32_t width, height, row;
-  uint8_t *vram = vmsvga_svga_vram_ptr(s);
 
-  if (!s->screen_defined || !s->gmrfb_defined ||
+  if (!s->screen_defined || s->screen_base == NULL ||
+      s->screen_stride != (uint64_t)s->screen_width * 4 ||
+      (uint64_t)s->screen_stride * s->screen_height > s->screen_base_size ||
+      !s->gmrfb_defined ||
       !vmsvga_screen_format_decode(s->gmrfb_format, &bpp, &depth, &bypp) ||
       right <= left || bottom <= top) {
     VMSVGA_SCREEN_REJECT(
@@ -640,7 +703,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
   for (row = 0; row < height; row++) {
     uint32_t gmr_offset;
     size_t row_bytes;
-    uint8_t *dst = vram + (uint64_t)(top + row) * s->active_stride +
+    uint8_t *dst = s->screen_base +
+                   (uint64_t)(top + row) * s->screen_stride +
                    (uint64_t)left * 4;
     if (!vmsvga_screen_gmrfb_row_offset(s, (int32_t)source_x,
                                         (int32_t)(source_y + row), width,
@@ -667,9 +731,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
     vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
   }
 
-  vmsvga_mark_vram_dirty_rect(s, 0, s->active_stride, 4,
-                              (uint32_t)left, (uint32_t)top, width, height);
-  vmsvga_damage_add_visible(s, (uint32_t)left, (uint32_t)top, width, height);
+  vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
   return true;
 }
 
@@ -746,10 +808,12 @@ static bool vmsvga_screen_blit_screen_to_gmrfb(
   uint32_t bpp, depth, bypp;
   int64_t width64, height64;
   uint32_t width, height, row;
-  uint8_t *vram = vmsvga_svga_vram_ptr(s);
 
-  if (!s->screen_defined || !s->gmrfb_defined || dest_origin == NULL ||
-      src_rect == NULL || src_screen_id != VMSVGA_SCREEN_V1_ID ||
+  if (!s->screen_defined || s->screen_base == NULL ||
+      s->screen_stride != (uint64_t)s->screen_width * 4 ||
+      (uint64_t)s->screen_stride * s->screen_height > s->screen_base_size ||
+      !s->gmrfb_defined || dest_origin == NULL || src_rect == NULL ||
+      src_screen_id != VMSVGA_SCREEN_V1_ID ||
       !vmsvga_screen_format_decode(s->gmrfb_format, &bpp, &depth, &bypp)) {
     VMSVGA_SCREEN_REJECT(
         "blit-screen-to-gmrfb reason=state-or-id screen=%d gmrfb=%d src-id=%u "
@@ -777,8 +841,8 @@ static bool vmsvga_screen_blit_screen_to_gmrfb(
   for (row = 0; row < height; row++) {
     uint32_t gmr_offset;
     size_t row_bytes;
-    const uint8_t *src = vram +
-        (uint64_t)(src_rect->top + (int32_t)row) * s->active_stride +
+    const uint8_t *src = s->screen_base +
+        (uint64_t)(src_rect->top + (int32_t)row) * s->screen_stride +
         (uint64_t)src_rect->left * 4;
     if (!vmsvga_screen_gmrfb_row_offset(s, dest_origin->x,
                                         dest_origin->y + (int32_t)row,

@@ -44,6 +44,12 @@ struct vmsvga3d_dxvk_s {
   bool ready;
 };
 
+typedef struct vmsvga3d_dxvk_srv_s {
+  VMSVGA3DD3D10SRVDesc desc;
+  void *view;
+  struct vmsvga3d_dxvk_srv_s *next;
+} VMSVGA3DDxvkSRV;
+
 /*
  * Renderer-side lifetime object for one guest SVGA3D surface. D3D9 and D3D11
  * residency are deliberately independent; crossing generations without an
@@ -63,6 +69,7 @@ struct vmsvga3d_dxvk_surface_s {
 
   VMSVGA3DD3D10CreateDesc d3d11_desc;
   void *d3d11_resource;
+  VMSVGA3DDxvkSRV *d3d11_srvs;
   bool d3d11_resident;
 };
 
@@ -183,12 +190,26 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE1D 4u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE2D 5u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE3D 6u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SHADER_RESOURCE_VIEW 7u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RENDERTARGET_VIEW 9u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_VIEW 10u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
 #define VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER 1u
 #define VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE1D 2u
 #define VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D 3u
 #define VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE3D 4u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_BUFFER 1u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE1D 2u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE1DARRAY 3u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2D 4u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2DARRAY 5u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2DMS 6u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY 7u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE3D 8u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURECUBE 9u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURECUBEARRAY 10u
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_BUFFER 1u
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE1D 2u
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE1DARRAY 3u
@@ -197,6 +218,12 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE2DMS 6u
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY 7u
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE3D 8u
+#define VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE1D 1u
+#define VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE1DARRAY 2u
+#define VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE2D 3u
+#define VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE2DARRAY 4u
+#define VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE2DMS 5u
+#define VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY 6u
 
 static GMutex vmsvga3d_dxvk_init_lock;
 
@@ -377,11 +404,24 @@ typedef struct vmsvga3d_dxvk_d3d11_texture3d_desc_s {
   uint32_t misc_flags;
 } VMSVGA3DDxvkD3D11Texture3DDesc;
 
+typedef struct vmsvga3d_dxvk_d3d11_srv_desc_s {
+  uint32_t format;
+  uint32_t view_dimension;
+  uint32_t data[4];
+} VMSVGA3DDxvkD3D11SRVDesc;
+
 typedef struct vmsvga3d_dxvk_d3d11_rtv_desc_s {
   uint32_t format;
   uint32_t view_dimension;
   uint32_t data[3];
 } VMSVGA3DDxvkD3D11RTVDesc;
+
+typedef struct vmsvga3d_dxvk_d3d11_dsv_desc_s {
+  uint32_t format;
+  uint32_t view_dimension;
+  uint32_t flags;
+  uint32_t data[3];
+} VMSVGA3DDxvkD3D11DSVDesc;
 
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateDevice)(
     void *adapter, uint32_t driver_type, void *software, uint32_t flags,
@@ -400,11 +440,21 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CreateTexture2D)(
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateTexture3D)(
     void *device, const VMSVGA3DDxvkD3D11Texture3DDesc *desc,
     const VMSVGA3DDxvkSubresourceData *initial_data, void **texture);
+typedef int32_t (*VMSVGA3DDxvkD3D11CreateShaderResourceView)(
+    void *device, void *resource, const VMSVGA3DDxvkD3D11SRVDesc *desc,
+    void **view);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateRenderTargetView)(
     void *device, void *resource, const VMSVGA3DDxvkD3D11RTVDesc *desc,
     void **view);
+typedef int32_t (*VMSVGA3DDxvkD3D11CreateDepthStencilView)(
+    void *device, void *resource, const VMSVGA3DDxvkD3D11DSVDesc *desc,
+    void **view);
 typedef void (*VMSVGA3DDxvkD3D11ClearRenderTargetView)(
     void *context, void *view, const float color[4]);
+typedef void (*VMSVGA3DDxvkD3D11ClearDepthStencilView)(
+    void *context, void *view, uint32_t clear_flags, float depth,
+    uint8_t stencil);
+typedef void (*VMSVGA3DDxvkD3D11GenerateMips)(void *context, void *view);
 
 _Static_assert(offsetof(VMSVGA3DDxvkSubresourceData, row_pitch) ==
                    sizeof(void *),
@@ -423,8 +473,12 @@ _Static_assert(sizeof(VMSVGA3DDxvkD3D11Texture2DDesc) == 44,
                "D3D11_TEXTURE2D_DESC ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DDxvkD3D11Texture3DDesc) == 36,
                "D3D11_TEXTURE3D_DESC ABI mismatch");
+_Static_assert(sizeof(VMSVGA3DDxvkD3D11SRVDesc) == 24,
+               "D3D11_SHADER_RESOURCE_VIEW_DESC ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DDxvkD3D11RTVDesc) == 20,
                "D3D11_RENDER_TARGET_VIEW_DESC ABI mismatch");
+_Static_assert(sizeof(VMSVGA3DDxvkD3D11DSVDesc) == 24,
+               "D3D11_DEPTH_STENCIL_VIEW_DESC ABI mismatch");
 
 typedef int32_t VMSVGA3DDxvkVkResult;
 typedef void *VMSVGA3DDxvkVkInstance;
@@ -1316,6 +1370,14 @@ static void vmsvga3d_dxvk_surface_evict_d3d11(
     return;
   }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
+  while (surface->d3d11_srvs != NULL) {
+    VMSVGA3DDxvkSRV *srv = surface->d3d11_srvs;
+    surface->d3d11_srvs = srv->next;
+    if (srv->view != NULL) {
+      vmsvga3d_dxvk_release(srv->view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    g_free(srv);
+  }
   if (surface->d3d11_resource != NULL) {
     vmsvga3d_dxvk_release(surface->d3d11_resource,
                           VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -1599,8 +1661,7 @@ static bool vmsvga3d_dxvk_d3d11_desc_equal(
          a->sample_quality == b->sample_quality && a->usage == b->usage &&
          a->bind_flags == b->bind_flags &&
          a->cpu_access_flags == b->cpu_access_flags &&
-         a->misc_flags == b->misc_flags &&
-         a->initial_subresource_count == b->initial_subresource_count;
+         a->misc_flags == b->misc_flags;
 }
 #endif
 
@@ -1758,6 +1819,177 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
 }
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
+static bool vmsvga3d_dxvk_d3d11_srv_desc(
+    const VMSVGA3DD3D10SRVDesc *src, VMSVGA3DDxvkD3D11SRVDesc *dst) {
+  if (src == NULL || dst == NULL) {
+    return false;
+  }
+  memset(dst, 0, sizeof(*dst));
+  dst->format = src->format;
+  dst->view_dimension = src->view_dimension;
+
+  switch (src->view_dimension) {
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_BUFFER:
+    dst->data[0] = src->first_element;
+    dst->data[1] = src->num_elements;
+    break;
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE1D:
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2D:
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE3D:
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURECUBE:
+    dst->data[0] = src->most_detailed_mip;
+    dst->data[1] = src->mip_levels;
+    break;
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE1DARRAY:
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
+    dst->data[0] = src->most_detailed_mip;
+    dst->data[1] = src->mip_levels;
+    dst->data[2] = src->first_array_slice;
+    dst->data[3] = src->array_size;
+    break;
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2DMS:
+    break;
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY:
+    dst->data[0] = src->first_array_slice;
+    dst->data[1] = src->array_size;
+    break;
+  case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURECUBEARRAY:
+    dst->data[0] = src->most_detailed_mip;
+    dst->data[1] = src->mip_levels;
+    dst->data[2] = src->first_array_slice;
+    dst->data[3] = src->array_size;
+    break;
+  default:
+    return false;
+  }
+  return true;
+}
+#endif
+
+static bool vmsvga3d_dxvk_d3d11_srv_desc_equal(
+    const VMSVGA3DD3D10SRVDesc *a, const VMSVGA3DD3D10SRVDesc *b) {
+  return a != NULL && b != NULL && a->format == b->format &&
+         a->view_dimension == b->view_dimension &&
+         a->most_detailed_mip == b->most_detailed_mip &&
+         a->mip_levels == b->mip_levels &&
+         a->first_array_slice == b->first_array_slice &&
+         a->array_size == b->array_size &&
+         a->first_element == b->first_element &&
+         a->num_elements == b->num_elements;
+}
+
+static const VMSVGA3DDxvkSRV *vmsvga3d_dxvk_d3d11_srv_find(
+    const VMSVGA3DDxvkSurface *surface,
+    const VMSVGA3DD3D10SRVDesc *view_desc) {
+  const VMSVGA3DDxvkSRV *srv;
+
+  if (surface == NULL || view_desc == NULL) {
+    return NULL;
+  }
+  for (srv = surface->d3d11_srvs; srv != NULL; srv = srv->next) {
+    if (vmsvga3d_dxvk_d3d11_srv_desc_equal(&srv->desc, view_desc)) {
+      return srv;
+    }
+  }
+  return NULL;
+}
+
+bool vmsvga3d_dxvk_d3d11_shader_resource_view_exists(
+    const VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_srv_desc_s *desc) {
+  const VMSVGA3DD3D10SRVDesc *view_desc = desc;
+  const VMSVGA3DDxvkSRV *srv;
+
+  if (surface == NULL || view_desc == NULL || !surface->d3d11_resident ||
+      surface->d3d11_resource == NULL) {
+    return false;
+  }
+  srv = vmsvga3d_dxvk_d3d11_srv_find(surface, view_desc);
+  return srv != NULL && srv->view != NULL;
+}
+
+bool vmsvga3d_dxvk_d3d11_shader_resource_view_ensure(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_srv_desc_s *desc) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11CreateShaderResourceView create_view = NULL;
+  VMSVGA3DDxvkD3D11SRVDesc native;
+  const VMSVGA3DD3D10SRVDesc *view_desc = desc;
+  VMSVGA3DDxvkSRV *srv;
+  void *view = NULL;
+  int32_t result;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+      surface == NULL || !surface->d3d11_resident ||
+      surface->d3d11_resource == NULL || view_desc == NULL) {
+    return false;
+  }
+  if (vmsvga3d_dxvk_d3d11_shader_resource_view_exists(surface, view_desc)) {
+    return true;
+  }
+  if (!vmsvga3d_dxvk_d3d11_srv_desc(view_desc, &native) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_device,
+          VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SHADER_RESOURCE_VIEW,
+          &create_view, sizeof(create_view))) {
+    return false;
+  }
+  result = create_view(dxvk->d3d11_device, surface->d3d11_resource, &native,
+                       &view);
+  if (!vmsvga3d_dxvk_succeeded(result) || view == NULL) {
+    return false;
+  }
+
+  srv = g_try_new0(VMSVGA3DDxvkSRV, 1);
+  if (srv == NULL) {
+    vmsvga3d_dxvk_release(view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    return false;
+  }
+  srv->desc = *view_desc;
+  srv->view = view;
+  srv->next = surface->d3d11_srvs;
+  surface->d3d11_srvs = srv;
+  return true;
+#else
+  (void)dxvk;
+  (void)surface;
+  (void)desc;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_generate_mips(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_srv_desc_s *desc) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11GenerateMips generate_mips = NULL;
+  const VMSVGA3DD3D10SRVDesc *view_desc = desc;
+  const VMSVGA3DDxvkSRV *srv;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      surface == NULL || !surface->d3d11_resident ||
+      surface->d3d11_resource == NULL || view_desc == NULL) {
+    return false;
+  }
+  srv = vmsvga3d_dxvk_d3d11_srv_find(surface, view_desc);
+  if (srv == NULL || srv->view == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS,
+          &generate_mips, sizeof(generate_mips))) {
+    return false;
+  }
+  generate_mips(dxvk->d3d11_context, srv->view);
+  return true;
+#else
+  (void)dxvk;
+  (void)surface;
+  (void)desc;
+  return false;
+#endif
+}
+
+#if defined(CONFIG_LINUX) && defined(__ELF__)
 static bool vmsvga3d_dxvk_d3d11_rtv_desc(
     const VMSVGA3DD3D10RTVDesc *src, VMSVGA3DDxvkD3D11RTVDesc *dst) {
   if (src == NULL || dst == NULL) {
@@ -1840,6 +2072,87 @@ bool vmsvga3d_dxvk_d3d11_clear_render_target_view(
   (void)surface;
   (void)desc;
   (void)color;
+  return false;
+#endif
+}
+
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+static bool vmsvga3d_dxvk_d3d11_dsv_desc(
+    const VMSVGA3DD3D10DSVDesc *src, VMSVGA3DDxvkD3D11DSVDesc *dst) {
+  if (src == NULL || dst == NULL) {
+    return false;
+  }
+  memset(dst, 0, sizeof(*dst));
+  dst->format = src->format;
+  dst->view_dimension = src->view_dimension;
+
+  switch (src->view_dimension) {
+  case VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE1D:
+  case VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE2D:
+    dst->data[0] = src->mip_slice;
+    break;
+  case VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE1DARRAY:
+  case VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE2DARRAY:
+    dst->data[0] = src->mip_slice;
+    dst->data[1] = src->first_array_slice;
+    dst->data[2] = src->array_size;
+    break;
+  case VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE2DMS:
+    break;
+  case VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY:
+    dst->data[0] = src->first_array_slice;
+    dst->data[1] = src->array_size;
+    break;
+  default:
+    return false;
+  }
+  return true;
+}
+#endif
+
+bool vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_dsv_desc_s *desc, uint32_t clear_flags,
+    float depth, uint8_t stencil) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11CreateDepthStencilView create_view = NULL;
+  VMSVGA3DDxvkD3D11ClearDepthStencilView clear_view = NULL;
+  VMSVGA3DDxvkD3D11DSVDesc native;
+  const VMSVGA3DD3D10DSVDesc *view_desc = desc;
+  void *view = NULL;
+  int32_t result;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+      dxvk->d3d11_context == NULL || surface == NULL ||
+      !surface->d3d11_resident || surface->d3d11_resource == NULL ||
+      view_desc == NULL ||
+      !vmsvga3d_dxvk_d3d11_dsv_desc(view_desc, &native) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_device,
+          VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_VIEW,
+          &create_view, sizeof(create_view)) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW,
+          &clear_view, sizeof(clear_view))) {
+    return false;
+  }
+
+  result = create_view(dxvk->d3d11_device, surface->d3d11_resource, &native,
+                       &view);
+  if (!vmsvga3d_dxvk_succeeded(result) || view == NULL) {
+    return false;
+  }
+  clear_view(dxvk->d3d11_context, view, clear_flags, depth, stencil);
+  vmsvga3d_dxvk_release(view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+  return true;
+#else
+  (void)dxvk;
+  (void)surface;
+  (void)desc;
+  (void)clear_flags;
+  (void)depth;
+  (void)stencil;
   return false;
 #endif
 }

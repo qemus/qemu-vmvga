@@ -43,6 +43,8 @@ struct vmsvga3d_d3d9_material_s;
 struct vmsvga3d_d3d9_light_s;
 struct vmsvga3d_d3d10_create_desc_s;
 struct vmsvga3d_d3d10_rtv_desc_s;
+struct vmsvga3d_d3d10_dsv_desc_s;
+struct vmsvga3d_d3d10_srv_desc_s;
 
 typedef struct vmsvga3d_dxvk_subresource_data_s {
   const void *data;
@@ -72,9 +74,22 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
     const struct vmsvga3d_d3d10_create_desc_s *desc,
     const VMSVGA3DDxvkSubresourceData *initial_data,
     uint32_t initial_data_count);
+bool vmsvga3d_dxvk_d3d11_shader_resource_view_ensure(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_srv_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_shader_resource_view_exists(
+    const VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_srv_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_generate_mips(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_srv_desc_s *desc);
 bool vmsvga3d_dxvk_d3d11_clear_render_target_view(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const struct vmsvga3d_d3d10_rtv_desc_s *desc, const float color[4]);
+bool vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_dsv_desc_s *desc, uint32_t clear_flags,
+    float depth, uint8_t stencil);
 void vmsvga3d_dxvk_surface_evict(VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_surface_upload_level(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,

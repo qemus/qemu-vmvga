@@ -1952,11 +1952,11 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_gen_mips_plan(
 
   memset(plan, 0, sizeof(*plan));
   plan->view_id = view_id;
-  plan->require_existing_backend_view = true;
-  plan->do_not_create_view_on_call = true;
+  plan->require_existing_backend_view = false;
+  plan->do_not_create_view_on_call = false;
   plan->require_view_entry = true;
   plan->require_surface = true;
-  plan->require_backend_surface = true;
+  plan->require_backend_surface = false;
   plan->immediate_generate_mips = true;
   plan->mark_surface_drawing_context = true;
   return VMSVGA3D_D3D10_LEVEL_10_0;
@@ -5364,6 +5364,120 @@ static bool vmsvga3d_d3d10_initial_subresources_live(
   return true;
 }
 
+static bool vmsvga3d_d3d10_srv_realize_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    SVGA3dShaderResourceViewId view_id)
+{
+  SVGACOTableDXSRViewEntry *entry;
+  VMSVGA3DSurface *surface;
+  VMSVGA3DD3D10SurfaceInfo surface_info;
+  VMSVGA3DD3D10ResourcePlan resource_plan;
+  VMSVGA3DD3D10SRVDesc srv_desc;
+  VMSVGA3DDxvkSubresourceData *initial_data = NULL;
+  VMSVGA3DD3D10ResourceUse resource_use;
+  VMSVGA3DD3D10Level level;
+  uint32_t initial_data_count = 0;
+  bool success = false;
+
+  if (view_id == SVGA3D_INVALID_ID) {
+    return true;
+  }
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return false;
+  }
+  entry = vmsvga3d_dx_cotable_entry_ptr(
+      s, cid, SVGA_COTABLE_SRVIEW, view_id);
+  if (entry == NULL || entry->sid == SVGA3D_INVALID_ID ||
+      entry->sid >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  surface = s->svga3d->surfaces[entry->sid];
+  if (surface == NULL || surface->dxvk_surface == NULL ||
+      !vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
+    return false;
+  }
+
+  resource_use = entry->resourceDimension == SVGA3D_RESOURCE_BUFFER
+                     ? VMSVGA3D_D3D10_RESOURCE_USE_GENERIC_BUFFER
+                     : VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE;
+  level = vmsvga3d_d3d10_resource_plan(
+      &surface_info, resource_use, &resource_plan);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      !resource_plan.primary.valid) {
+    return false;
+  }
+  level = vmsvga3d_d3d10_srv_desc(
+      entry, surface_info.array_elements, surface_info.multisample_count,
+      &srv_desc);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      !vmsvga3d_d3d10_initial_subresources_live(
+          surface, &resource_plan.primary, &initial_data,
+          &initial_data_count)) {
+    return false;
+  }
+
+  if (!vmsvga3d_dxvk_d3d11_surface_materialize(
+          s->dxvk, surface->dxvk_surface, &resource_plan.primary,
+          initial_data, initial_data_count)) {
+    goto out;
+  }
+  success = vmsvga3d_dxvk_d3d11_shader_resource_view_ensure(
+      s->dxvk, surface->dxvk_surface, &srv_desc);
+
+out:
+  g_free(initial_data);
+  return success;
+}
+
+static bool vmsvga3d_d3d10_gen_mips_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXGenMips *command)
+{
+  VMSVGA3DDXContext *context;
+  VMSVGA3DD3D10GenMipsPlan plan;
+  SVGACOTableDXSRViewEntry *entry;
+  VMSVGA3DSurface *surface;
+  VMSVGA3DD3D10SurfaceInfo surface_info;
+  VMSVGA3DD3D10SRVDesc srv_desc;
+  VMSVGA3DD3D10Level level;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return false;
+  }
+  context = vmsvga3d_dx_context(s, cid);
+  if (context == NULL) {
+    return false;
+  }
+  level = vmsvga3d_d3d10_gen_mips_plan(
+      command->shaderResourceViewId,
+      context->cotables[SVGA_COTABLE_SRVIEW].valid_entries, &plan);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level)) {
+    return false;
+  }
+
+  entry = vmsvga3d_dx_cotable_entry_ptr(
+      s, cid, SVGA_COTABLE_SRVIEW, plan.view_id);
+  if (entry == NULL || entry->sid == SVGA3D_INVALID_ID ||
+      entry->sid >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  surface = s->svga3d->surfaces[entry->sid];
+  if (surface == NULL || surface->dxvk_surface == NULL ||
+      !vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
+    return false;
+  }
+  level = vmsvga3d_d3d10_srv_desc(
+      entry, surface_info.array_elements, surface_info.multisample_count,
+      &srv_desc);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      !vmsvga3d_d3d10_srv_realize_live(s, cid, plan.view_id)) {
+    return false;
+  }
+  return vmsvga3d_dxvk_d3d11_generate_mips(
+      s->dxvk, surface->dxvk_surface, &srv_desc);
+}
+
 static bool vmsvga3d_d3d10_clear_rtv_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXClearRenderTargetView *command)
@@ -5440,6 +5554,80 @@ out:
   return success;
 }
 
+static bool vmsvga3d_d3d10_clear_dsv_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXClearDepthStencilView *command)
+{
+  VMSVGA3DDXContext *context;
+  SVGACOTableDXDSViewEntry *entry;
+  VMSVGA3DSurface *surface;
+  VMSVGA3DD3D10ClearDSVPlan clear_plan;
+  VMSVGA3DD3D10SurfaceInfo surface_info;
+  VMSVGA3DD3D10ResourcePlan resource_plan;
+  VMSVGA3DD3D10DSVDesc dsv_desc;
+  VMSVGA3DDxvkSubresourceData *initial_data = NULL;
+  VMSVGA3DD3D10Level level;
+  uint32_t initial_data_count = 0;
+  bool success = false;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return false;
+  }
+  context = vmsvga3d_dx_context(s, cid);
+  if (context == NULL) {
+    return false;
+  }
+
+  level = vmsvga3d_d3d10_clear_dsv_plan(
+      command->flags, command->depthStencilViewId, command->depth,
+      command->stencil,
+      context->cotables[SVGA_COTABLE_DSVIEW].valid_entries, &clear_plan);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level)) {
+    return false;
+  }
+  entry = vmsvga3d_dx_cotable_entry_ptr(
+      s, cid, SVGA_COTABLE_DSVIEW, clear_plan.view_id);
+  if (entry == NULL || entry->sid == SVGA3D_INVALID_ID ||
+      entry->sid >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  surface = s->svga3d->surfaces[entry->sid];
+  if (surface == NULL || surface->dxvk_surface == NULL ||
+      !vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
+    return false;
+  }
+
+  level = vmsvga3d_d3d10_resource_plan(
+      &surface_info, VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE, &resource_plan);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      !resource_plan.primary.valid) {
+    return false;
+  }
+  level = vmsvga3d_d3d10_dsv_desc(
+      entry, surface_info.array_elements, surface_info.multisample_count,
+      &dsv_desc);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      !vmsvga3d_d3d10_initial_subresources_live(
+          surface, &resource_plan.primary, &initial_data,
+          &initial_data_count)) {
+    return false;
+  }
+
+  if (!vmsvga3d_dxvk_d3d11_surface_materialize(
+          s->dxvk, surface->dxvk_surface, &resource_plan.primary,
+          initial_data, initial_data_count)) {
+    goto out;
+  }
+  success = vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
+      s->dxvk, surface->dxvk_surface, &dsv_desc, clear_plan.d3d_clear_flags,
+      clear_plan.depth, clear_plan.stencil);
+
+out:
+  g_free(initial_data);
+  return success;
+}
+
 static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                                        uint32_t cid, uint32_t cmd,
                                        const void *payload, uint32_t size) {
@@ -5459,6 +5647,48 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     }
     memcpy(&command, payload, sizeof(command));
     return vmsvga3d_d3d10_clear_rtv_live(s, cid, &command);
+  }
+
+  case SVGA_3D_CMD_DX_CLEAR_DEPTHSTENCIL_VIEW: {
+    SVGA3dCmdDXClearDepthStencilView command;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_clear_dsv_live(s, cid, &command);
+  }
+
+  case SVGA_3D_CMD_DX_INVALIDATE_SUBRESOURCE: {
+    SVGA3dCmdDXInvalidateSubResource command;
+    VMSVGA3DSurface *surface;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    if (s == NULL || s->svga3d == NULL ||
+        command.sid >= SVGA3D_MAX_SURFACE_IDS) {
+      return false;
+    }
+    surface = s->svga3d->surfaces[command.sid];
+    if (surface == NULL || surface->mips == NULL ||
+        command.subResource >= surface->mip_count) {
+      return false;
+    }
+
+    /* Invalidation is advisory: retaining the current contents is valid. */
+    return true;
+  }
+
+  case SVGA_3D_CMD_DX_GENMIPS: {
+    SVGA3dCmdDXGenMips command;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_gen_mips_live(s, cid, &command);
   }
 
   case SVGA_3D_CMD_DX_SET_SINGLE_CONSTANT_BUFFER: {
@@ -5519,12 +5749,20 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
       memcpy(ids, (const uint8_t *)payload + header_size,
              count * sizeof(ids[0]));
     };
-    return vmsvga3d_d3d10_shader_resources_set_plan(
-               command.startView, command.type, count,
-               count != 0 ? ids : NULL,
-               context->cotables[SVGA_COTABLE_SRVIEW].valid_entries,
-               &plan) != VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_state_dx_apply_shader_resources(s, cid, &plan);
+    if (vmsvga3d_d3d10_shader_resources_set_plan(
+            command.startView, command.type, count,
+            count != 0 ? ids : NULL,
+            context->cotables[SVGA_COTABLE_SRVIEW].valid_entries,
+            &plan) == VMSVGA3D_D3D10_LEVEL_INVALID ||
+        !vmsvga3d_state_dx_apply_shader_resources(s, cid, &plan)) {
+      return false;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+      if (!vmsvga3d_d3d10_srv_realize_live(s, cid, ids[i])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   case SVGA_3D_CMD_DX_SET_SHADER: {

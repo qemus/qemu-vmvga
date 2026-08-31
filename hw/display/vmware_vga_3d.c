@@ -3322,6 +3322,111 @@ static bool vmsvga3d_present_rect(
   return true;
 };
 
+static bool vmsvga3d_present_scaled_screen_rect(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, const struct svga3d_surface_desc *desc,
+    const SVGASignedRect *source, const SVGASignedRect *destination,
+    const SVGASignedRect *clip, bool execute) {
+  int64_t src_width, src_height, dst_width, dst_height;
+  int64_t local_left = 0, local_top = 0, local_right, local_bottom;
+  int64_t dst_left, dst_top, dst_right, dst_bottom;
+  uint32_t dst_depth = vmsvga_active_depth(s);
+  uint32_t dst_bypp = vmsvga_bytes_per_pixel(dst_depth);
+  uint32_t dst_pitch = vmsvga_stride(s);
+  uint32_t src_bypp;
+  uint32_t y;
+
+  if (s == NULL || surface == NULL || image == NULL || desc == NULL ||
+      source == NULL || destination == NULL || dst_bypp == 0 ||
+      dst_pitch == 0 || s->vga.vram_ptr == NULL) {
+    return false;
+  }
+  src_width = (int64_t)source->right - source->left;
+  src_height = (int64_t)source->bottom - source->top;
+  dst_width = (int64_t)destination->right - destination->left;
+  dst_height = (int64_t)destination->bottom - destination->top;
+  if (src_width <= 0 || src_height <= 0 || dst_width <= 0 || dst_height <= 0 ||
+      source->left < 0 || source->top < 0 ||
+      source->right > (int32_t)image->size.width ||
+      source->bottom > (int32_t)image->size.height ||
+      (dst_depth != 15 && dst_depth != 16 && dst_depth != 24 &&
+       dst_depth != 32)) {
+    return false;
+  }
+  src_bypp = desc->bytes_per_block;
+  if (src_bypp == 0 || desc->block_size.width != 1 ||
+      desc->block_size.height != 1 || desc->block_size.depth != 1) {
+    return false;
+  }
+
+  local_right = dst_width;
+  local_bottom = dst_height;
+  if (clip != NULL) {
+    local_left = MAX(local_left, (int64_t)clip->left);
+    local_top = MAX(local_top, (int64_t)clip->top);
+    local_right = MIN(local_right, (int64_t)clip->right);
+    local_bottom = MIN(local_bottom, (int64_t)clip->bottom);
+  }
+  local_left = MAX(local_left, -(int64_t)destination->left);
+  local_top = MAX(local_top, -(int64_t)destination->top);
+  local_right = MIN(local_right,
+                    (int64_t)vmsvga_active_width(s) - destination->left);
+  local_bottom = MIN(local_bottom,
+                     (int64_t)vmsvga_active_height(s) - destination->top);
+  if (local_right <= local_left || local_bottom <= local_top) {
+    return true;
+  }
+  dst_left = (int64_t)destination->left + local_left;
+  dst_top = (int64_t)destination->top + local_top;
+  dst_right = (int64_t)destination->left + local_right;
+  dst_bottom = (int64_t)destination->top + local_bottom;
+  if (dst_left < 0 || dst_top < 0 || dst_right > vmsvga_active_width(s) ||
+      dst_bottom > vmsvga_active_height(s)) {
+    return false;
+  }
+  if (!execute) {
+    return true;
+  }
+
+  for (y = (uint32_t)local_top; y < (uint32_t)local_bottom; y++) {
+    uint32_t src_y = (uint32_t)((int64_t)source->top +
+        ((int64_t)y * src_height) / dst_height);
+    uint8_t *dst = s->vga.vram_ptr +
+        (uint64_t)(destination->top + (int32_t)y) * dst_pitch +
+        (uint64_t)(destination->left + (int32_t)local_left) * dst_bypp;
+    uint32_t x;
+    for (x = (uint32_t)local_left; x < (uint32_t)local_right; x++) {
+      uint32_t src_x = (uint32_t)((int64_t)source->left +
+          ((int64_t)x * src_width) / dst_width);
+      uint64_t src_offset = (uint64_t)src_y * image->pitch +
+                            (uint64_t)src_x * src_bypp;
+      uint64_t pixel;
+      uint8_t blue, green, red;
+      uint32_t scanout;
+      if (src_offset + src_bypp > image->data_size) {
+        return false;
+      }
+      pixel = vmsvga3d_present_load_pixel(image->data + src_offset, src_bypp);
+      blue = vmsvga3d_present_channel(pixel, desc->bitDepth.blue,
+                                      desc->bitOffset.blue);
+      green = vmsvga3d_present_channel(pixel, desc->bitDepth.green,
+                                       desc->bitOffset.green);
+      red = vmsvga3d_present_channel(pixel, desc->bitDepth.red,
+                                     desc->bitOffset.red);
+      scanout = vmsvga3d_present_scanout_pixel(red, green, blue, dst_depth);
+      vmsvga_store_pixel(dst, dst_bypp, scanout);
+      dst += dst_bypp;
+    }
+  }
+  vmsvga_mark_active_rect_dirty(s, (uint32_t)dst_left, (uint32_t)dst_top,
+                                (uint32_t)(dst_right - dst_left),
+                                (uint32_t)(dst_bottom - dst_top));
+  vmsvga_damage_add_visible(s, (uint32_t)dst_left, (uint32_t)dst_top,
+                            (uint32_t)(dst_right - dst_left),
+                            (uint32_t)(dst_bottom - dst_top));
+  return true;
+}
+
 static bool vmsvga3d_screen_blit_copy_rect(
     const SVGASignedRect *source, const SVGASignedRect *destination,
     const SVGASignedRect *clip, SVGA3dCopyRect *copy, bool *empty) {
@@ -3441,6 +3546,7 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
   body = payload;
   clips = (SVGASignedRect *)(body + 1);
   clip_count = (size - sizeof(*body)) / sizeof(*clips);
+  vmsvga_screen_record_surface_to_screen(s);
   state = s->svga3d;
   if (state == NULL || body->srcImage.sid >= SVGA3D_MAX_SURFACE_IDS ||
       !s->active_valid) {
@@ -3466,45 +3572,61 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
         (int64_t)body->destRect.right - body->destRect.left;
     int64_t destination_height =
         (int64_t)body->destRect.bottom - body->destRect.top;
+    bool scaling = source_width != destination_width ||
+                   source_height != destination_height;
 
-    if (body->destScreenId != 0 || source_width <= 0 || source_height <= 0 ||
-        source_width != destination_width || source_height != destination_height ||
+    if (!vmsvga_screen_is_primary(s, body->destScreenId) ||
+        source_width <= 0 || source_height <= 0 ||
+        destination_width <= 0 || destination_height <= 0 ||
         !vmsvga3d_present_format(surface, &desc) || image == NULL) {
       valid = false;
     }
-  }
 
-  copy_count = clip_count != 0 ? clip_count : 1;
-  if (valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
-    copies = g_try_new0(SVGA3dCopyRect, copy_count);
-    if (copies == NULL) {
-      valid = false;
+    copy_count = clip_count != 0 ? clip_count : 1;
+    if (valid && !scaling) {
+      copies = g_try_new0(SVGA3dCopyRect, copy_count);
+      if (copies == NULL) {
+        valid = false;
+      }
+      for (i = 0; valid && i < copy_count; i++) {
+        bool empty;
+        const SVGASignedRect *clip = clip_count != 0 ? &clips[i] : NULL;
+        if (!vmsvga3d_screen_blit_copy_rect(&body->srcRect, &body->destRect,
+                                             clip, &copies[i], &empty)) {
+          valid = false;
+        } else if (empty) {
+          copies[i].w = 0;
+          copies[i].h = 0;
+        }
+      }
+      for (i = 0; valid && i < copy_count; i++) {
+        if (copies[i].w != 0 && copies[i].h != 0) {
+          valid = vmsvga3d_present_rect(s, surface, image, desc, &copies[i],
+                                         false);
+        }
+      }
+      for (i = 0; valid && i < copy_count; i++) {
+        if (copies[i].w != 0 && copies[i].h != 0) {
+          valid = vmsvga3d_present_rect(s, surface, image, desc, &copies[i],
+                                         true);
+        }
+      }
+    } else if (valid) {
+      for (i = 0; valid && i < copy_count; i++) {
+        const SVGASignedRect *clip = clip_count != 0 ? &clips[i] : NULL;
+        valid = vmsvga3d_present_scaled_screen_rect(
+            s, surface, image, desc, &body->srcRect, &body->destRect, clip,
+            false);
+      }
+      for (i = 0; valid && i < copy_count; i++) {
+        const SVGASignedRect *clip = clip_count != 0 ? &clips[i] : NULL;
+        valid = vmsvga3d_present_scaled_screen_rect(
+            s, surface, image, desc, &body->srcRect, &body->destRect, clip,
+            true);
+      }
     }
-  }
-  for (i = 0; valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
-              i < copy_count; i++) {
-    bool empty;
-    const SVGASignedRect *clip = clip_count != 0 ? &clips[i] : NULL;
-
-    if (!vmsvga3d_screen_blit_copy_rect(&body->srcRect, &body->destRect,
-                                         clip, &copies[i], &empty)) {
-      valid = false;
-    } else if (empty) {
-      copies[i].w = 0;
-      copies[i].h = 0;
-    }
-  }
-  for (i = 0; valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
-              i < copy_count; i++) {
-    if (copies[i].w != 0 && copies[i].h != 0) {
-      valid = vmsvga3d_present_rect(s, surface, image, desc, &copies[i], false);
-    }
-  }
-  for (i = 0; valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
-              i < copy_count; i++) {
-    if (copies[i].w != 0 && copies[i].h != 0) {
-      valid = vmsvga3d_present_rect(s, surface, image, desc, &copies[i], true);
-    }
+  } else {
+    copy_count = 0;
   }
 
   g_free(copies);
@@ -3808,7 +3930,7 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
 };
 
 static uint32_t vmsvga3d_host_hwversion(void) {
-  return SVGA3D_HWVERSION_WS65_B1;
+  return SVGA3D_HWVERSION_WS8_B1;
 };
 
 typedef bool (*VMSVGA3DCommandHandler)(struct vmsvga_state_s *s,

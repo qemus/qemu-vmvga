@@ -3807,10 +3807,7 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
   return true;
 };
 
-static uint32_t vmsvga3d_negotiate_hwversion(uint32_t guest_hwversion) {
-  if (guest_hwversion < SVGA3D_HWVERSION_WS65_B1) {
-    return 0;
-  };
+static uint32_t vmsvga3d_host_hwversion(void) {
   return SVGA3D_HWVERSION_WS65_B1;
 };
 

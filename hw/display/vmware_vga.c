@@ -976,18 +976,12 @@ static void vmsvga_handoff_diag_snapshot(struct vmsvga_state_s *s,
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
   size_t size = vmsvga_legacy_vga_backup_size(s);
   uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
-  bool captured_now = false;
 
   /*
-   * Capture the legacy VGA framebuffer only on the first VGA -> SVGA handoff.
-   * After that it remains independent while BAR1 continues to hold SVGA data.
+   * Legacy VGA has its own backing store from reset onward. Switching to SVGA
+   * only selects BAR1; never copy legacy VGA contents into the SVGA GFB.
    */
-  if (s->legacy_vga_size == 0) {
-    memcpy(s->legacy_vga_ptr, svga_ptr, size);
-    s->legacy_vga_size = (uint32_t)size;
-    captured_now = true;
-  };
-  vmsvga_handoff_diag_snapshot(s, "vga-to-svga", captured_now);
+  vmsvga_handoff_diag_snapshot(s, "vga-to-svga", false);
   s->vga.vram_ptr = svga_ptr;
   s->svga_surface_bound = false;
   VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW enter size=%zu", size);
@@ -1000,11 +994,7 @@ static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s) {
    * Do not copy the VGA shadow over BAR1. The two framebuffer contents are
    * independent; only select the shadow as VGACommonState's backing store.
    */
-  if (s->legacy_vga_size != 0) {
-    s->vga.vram_ptr = s->legacy_vga_ptr;
-  } else {
-    s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
-  };
+  s->vga.vram_ptr = s->legacy_vga_ptr;
   s->svga_surface_bound = false;
   VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW leave size=%zu", size);
 };
@@ -6860,7 +6850,7 @@ static void vmsvga_reset(DeviceState *dev) {
     vmsvga_set_dirty_log(s, true);
     vmsvga_fifo_discard_pending(s);
   };
-  s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
+  s->vga.vram_ptr = s->legacy_vga_ptr;
   s->enable = 0;
   s->hidden = false;
   s->config = 0;
@@ -6909,7 +6899,7 @@ static void vmsvga_reset(DeviceState *dev) {
   s->invalidated = false;
   s->svga_surface_bound = false;
   s->trace_display_path = VMSVGA_TRACE_DISPLAY_UNKNOWN;
-  s->legacy_vga_size = 0;
+  s->legacy_vga_size = (uint32_t)vmsvga_legacy_vga_backup_size(s);
   memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));
   memset(s->legacy_vga_ptr, 0, VMSVGA_VGA_FB_BACKUP_SIZE);
   vmsvga_fifo_upload_reset(s);
@@ -7526,7 +7516,8 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   /* vga_common_init() enables DIRTY_MEMORY_VGA logging. */
   s->dirty_log_enabled = true;
   s->legacy_vga_ptr = g_malloc0(VMSVGA_VGA_FB_BACKUP_SIZE);
-  s->legacy_vga_size = 0;
+  s->legacy_vga_size = (uint32_t)vmsvga_legacy_vga_backup_size(s);
+  s->vga.vram_ptr = s->legacy_vga_ptr;
   memory_region_init_io(&s->legacy_vga_mem, OBJECT(dev),
                         &vmsvga_legacy_vga_ops, s, "vmsvga.vga-lowmem",
                         0x20000);

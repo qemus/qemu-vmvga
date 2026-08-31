@@ -3930,7 +3930,7 @@ static void shader_store_le32(uint8_t *bytes, uint32_t value)
   (w) += (x); \
 } while (0)
 
-static void shader_md5_transform(uint32_t state[4], const uint8_t block[64])
+static void shader_md5_transform(uint32_t state[4], const uint8_t *block)
 {
   uint32_t in[16];
   uint32_t a = state[0];

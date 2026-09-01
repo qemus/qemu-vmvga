@@ -909,28 +909,16 @@ static bool vmsvga_screen_define_gmrfb(struct vmsvga_state_s *s,
                                        uint32_t gmr_id, uint32_t offset,
                                        uint32_t bytes_per_line,
                                        uint32_t format) {
-  uint32_t bpp, depth, bypp;
   bool trace_flight;
   bool source_changed;
 
-  if (!vmsvga_screen_format_decode(format, &bpp, &depth, &bypp) ||
-      bytes_per_line == 0 || gmr_id == SVGA_GMR_NULL) {
-    VMSVGA_SCREEN_REJECT(
-        "gmrfb reason=parameters gmr=%u offset=0x%08x pitch=%u format=0x%08x",
-        gmr_id, offset, bytes_per_line, format);
-    return false;
-  }
-  (void)bpp;
-  (void)depth;
-  (void)bypp;
-  /* Validate the starting byte now; each blit validates its full row range. */
-  if (!vmsvga_gmr_validate_range(s, gmr_id, offset, 0)) {
-    VMSVGA_SCREEN_REJECT(
-        "gmrfb reason=gmr-range gmr=%u offset=0x%08x pitch=%u format=0x%08x",
-        gmr_id, offset, bytes_per_line, format);
-    return false;
-  }
-
+  /*
+   * Match VirtualBox: DEFINE_GMRFB is only a state update.  Store the guest
+   * pointer, pitch and format verbatim, even if the pointer is not currently
+   * mappable.  Actual GMR/range and format validation belongs to the blit
+   * which consumes this state; rejecting the definition here would leave an
+   * older GMRFB active when the guest deliberately replaces it.
+   */
   trace_flight = vmsvga_trace_flight_enabled();
   source_changed = trace_flight &&
                    (!s->gmrfb_defined || s->gmrfb_gmr_id != gmr_id ||
@@ -942,16 +930,23 @@ static bool vmsvga_screen_define_gmrfb(struct vmsvga_state_s *s,
   s->gmrfb_bytes_per_line = bytes_per_line;
   s->gmrfb_format = format;
   if (trace_flight) {
+    uint32_t bpp = 0, depth = 0, bypp = 0;
+    bool format_valid =
+        vmsvga_screen_format_decode(format, &bpp, &depth, &bypp);
+
+    (void)bypp;
     s->trace_now.gmrfb_defines++;
     s->trace_activity_seq++;
     if (s->trace_now.gmrfb_defines <= 24 || source_changed ||
         (s->trace_now.gmrfb_defines & 63) == 0) {
       fprintf(stderr,
               "VMVGA-GMR-DIAG gmrfb seq=%" PRIu64 " source=%s gmr=%u "
-              "offset=0x%08x pitch=%u format=0x%08x bpp=%u depth=%u\n",
+              "offset=0x%08x pitch=%u format=0x%08x bpp=%u depth=%u "
+              "format-valid=%u\n",
               s->trace_now.gmrfb_defines,
               gmr_id == SVGA_GMR_FRAMEBUFFER ? "framebuffer" : "gmr-v1",
-              gmr_id, offset, bytes_per_line, format, bpp, depth);
+              gmr_id, offset, bytes_per_line, format, bpp, depth,
+              format_valid);
     };
   };
   VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,

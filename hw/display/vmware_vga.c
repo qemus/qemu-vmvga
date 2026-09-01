@@ -3984,6 +3984,7 @@ typedef struct {
   uint32 param1;
   uint32 param2;
 } SVGAFifoCmdSurfaceAlphaBlend;
+static inline void vmsvga_check_size(struct vmsvga_state_s *s);
 #include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
 static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {

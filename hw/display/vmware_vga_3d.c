@@ -2443,8 +2443,8 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_present(
   uint32_t height;
 
   if (s != NULL && s->screen_defined) {
-    /* Screen Object scanout is host-owned storage. Keep legacy PRESENT on the
-     * CPU path until the accelerated path targets the same base layer. */
+    /* Keep legacy PRESENT on the CPU path while a Screen Object is active so
+     * it targets the exact guest-backed or fallback base layer. */
     return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
   }
   if (s == NULL || command == NULL || s->svga3d == NULL ||
@@ -2470,8 +2470,8 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_screen_blit(
     const SVGA3dCmdBlitSurfaceToScreen *command,
     const SVGASignedRect *clips, uint32_t clip_count) {
   if (s != NULL && s->screen_defined) {
-    /* Screen Object scanout is host-owned storage. Keep this command on the
-     * CPU path until the accelerated path targets the same base layer. */
+    /* Keep this command on the CPU path while a Screen Object is active so
+     * it targets the exact guest-backed or fallback base layer. */
     return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
   }
 #ifdef CONFIG_VMSVGA_DXVK
@@ -3227,7 +3227,8 @@ static bool vmsvga3d_present_rect_to_buffer(
     VMSVGA3DSurfaceImage *image, const struct svga3d_surface_desc *desc,
     const SVGA3dCopyRect *rect, uint8_t *dst_base, size_t dst_size,
     uint32_t dst_width, uint32_t dst_height, uint32_t dst_depth,
-    uint32_t dst_pitch, bool mark_vram_dirty, bool execute) {
+    uint32_t dst_pitch, uint64_t dirty_base_offset, bool mark_vram_dirty,
+    bool execute) {
   SVGA3dCopyRect clipped;
   uint32_t dst_bypp = vmsvga_bytes_per_pixel(dst_depth);
   uint32_t src_bypp = desc->bytes_per_block;
@@ -3322,8 +3323,8 @@ static bool vmsvga3d_present_rect_to_buffer(
   };
 
   if (mark_vram_dirty) {
-    vmsvga_mark_active_rect_dirty(s, clipped.x, clipped.y, clipped.w,
-                                  clipped.h);
+    vmsvga_mark_vram_dirty_rect(s, dirty_base_offset, dst_pitch, dst_bypp,
+                                clipped.x, clipped.y, clipped.w, clipped.h);
   };
   vmsvga_damage_add_visible(s, clipped.x, clipped.y, clipped.w, clipped.h);
   return true;
@@ -3336,23 +3337,32 @@ static bool vmsvga3d_present_rect(
   return vmsvga3d_present_rect_to_buffer(
       s, surface, image, desc, rect, s->vga.vram_ptr, s->vga.vram_size,
       vmsvga_active_width(s), vmsvga_active_height(s),
-      vmsvga_active_depth(s), vmsvga_stride(s), true, execute);
+      vmsvga_active_depth(s), vmsvga_stride(s), 0, true, execute);
 };
 
 static bool vmsvga3d_present_screen_rect(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DSurfaceImage *image, const struct svga3d_surface_desc *desc,
     const SVGA3dCopyRect *rect, bool execute) {
-  if (s == NULL || !s->screen_defined || s->screen_base == NULL ||
-      s->screen_stride != (uint64_t)s->screen_width * 4 ||
-      (uint64_t)s->screen_stride * s->screen_height > s->screen_base_size) {
+  uint8_t *screen_base;
+  size_t screen_size;
+  uint32_t screen_stride;
+  uint64_t dirty_base = 0;
+  bool mark_dirty;
+
+  if (s == NULL ||
+      !vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride)) {
     return false;
   };
+  mark_dirty = s->screen_backing_valid;
+  if (mark_dirty) {
+    dirty_base = s->screen_backing_offset;
+  };
   return vmsvga3d_present_rect_to_buffer(
-      s, surface, image, desc, rect, s->screen_base, s->screen_base_size,
-      s->screen_width, s->screen_height, 32, s->screen_stride, false,
-      execute);
-};
+      s, surface, image, desc, rect, screen_base, screen_size,
+      s->screen_width, s->screen_height, 32, screen_stride, dirty_base,
+      mark_dirty, execute);
+}
 
 static bool vmsvga3d_present_scaled_screen_rect(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
@@ -3367,15 +3377,15 @@ static bool vmsvga3d_present_scaled_screen_rect(
   uint32_t dst_pitch;
   uint32_t src_bypp;
   uint32_t y;
+  uint8_t *screen_base;
+  size_t screen_size;
 
   if (s == NULL || surface == NULL || image == NULL || desc == NULL ||
-      source == NULL || destination == NULL || !s->screen_defined ||
-      s->screen_base == NULL ||
-      s->screen_stride != (uint64_t)s->screen_width * dst_bypp ||
-      (uint64_t)s->screen_stride * s->screen_height > s->screen_base_size) {
+      source == NULL || destination == NULL ||
+      !vmsvga_screen_storage(s, &screen_base, &screen_size, &dst_pitch)) {
     return false;
   }
-  dst_pitch = s->screen_stride;
+  (void)screen_size;
   src_width = (int64_t)source->right - source->left;
   src_height = (int64_t)source->bottom - source->top;
   dst_width = (int64_t)destination->right - destination->left;
@@ -3424,7 +3434,7 @@ static bool vmsvga3d_present_scaled_screen_rect(
   for (y = (uint32_t)local_top; y < (uint32_t)local_bottom; y++) {
     uint32_t src_y = (uint32_t)((int64_t)source->top +
         ((int64_t)y * src_height) / dst_height);
-    uint8_t *dst = s->screen_base +
+    uint8_t *dst = screen_base +
         (uint64_t)(destination->top + (int32_t)y) * dst_pitch +
         (uint64_t)(destination->left + (int32_t)local_left) * dst_bypp;
     uint32_t x;
@@ -3451,6 +3461,9 @@ static bool vmsvga3d_present_scaled_screen_rect(
       dst += dst_bypp;
     }
   }
+  vmsvga_screen_mark_dirty(s, (uint32_t)dst_left, (uint32_t)dst_top,
+                           (uint32_t)(dst_right - dst_left),
+                           (uint32_t)(dst_bottom - dst_top));
   vmsvga_damage_add_visible(s, (uint32_t)dst_left, (uint32_t)dst_top,
                             (uint32_t)(dst_right - dst_left),
                             (uint32_t)(dst_bottom - dst_top));

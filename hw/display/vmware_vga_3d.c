@@ -36,8 +36,6 @@
 #include "include/vmware_vga_3d_state.h"
 #include "include/vmware_vga_d3d9.h"
 #include "include/vmware_vga_dxvk.h"
-#include "hw/pci/pci_device.h"
-#include "system/address-spaces.h"
 
 typedef struct {
   SVGA3dSize size;
@@ -4906,7 +4904,8 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
     return false;
   };
 
-  if (vmsvga3d_trace_fifo_command(cmd)) {
+  if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D) &&
+      vmsvga3d_trace_fifo_command(cmd)) {
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "3D-CMD path=%s name=%s id=%u action=%s fifo=0x%08x",

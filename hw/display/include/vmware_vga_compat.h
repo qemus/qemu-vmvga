@@ -41,12 +41,18 @@
 #if QEMU_VERSION_MAJOR == 7
 #include "hw/pci/pci.h"
 #include "hw/qdev-properties.h"
+#include "exec/cpu-common.h"
+#include "exec/address-spaces.h"
 #elif QEMU_VERSION_MAJOR == 9
 #include "hw/pci/pci_device.h"
 #include "hw/qdev-properties.h"
+#include "exec/cpu-common.h"
+#include "exec/address-spaces.h"
 #elif QEMU_VERSION_MAJOR == 11
 #include "hw/pci/pci_device.h"
 #include "hw/core/qdev-properties.h"
+#include "system/ramblock.h"
+#include "system/address-spaces.h"
 #else
 #error "qemu-vmvga supports QEMU major versions 7, 9 and 11"
 #endif
@@ -114,13 +120,23 @@ static inline void vmvga_cursor_unref(QEMUCursor *cursor)
 #endif
 }
 
+/*
+ * vga_common_init() registers VGA VRAM for migration before returning.
+ * Retag only the RAMBlock identifier so VMVGA does not share stock QEMU's
+ * "vga.vram" migration identity.  The migratable flag and any migration
+ * blockers installed by vmstate_register_ram() stay intact.
+ */
+static inline void vmvga_ram_set_migration_id(MemoryRegion *mr,
+                                               DeviceState *dev,
+                                               const char *name)
+{
+    qemu_ram_unset_idstr(mr->ram_block);
+    qemu_ram_set_idstr(mr->ram_block, name, dev);
+}
+
 #if QEMU_VERSION_MAJOR == 7
-#define VMVGA_REGISTER_VGA_VMSTATE(_vga) \
-    vmstate_register(NULL, 0, &vmstate_vga_common, (_vga))
 #define VMVGA_SET_LEGACY_RESET(_dc, _reset) ((_dc)->reset = (_reset))
 #else
-#define VMVGA_REGISTER_VGA_VMSTATE(_vga) \
-    vmstate_register_any(NULL, &vmstate_vga_common, (_vga))
 #define VMVGA_SET_LEGACY_RESET(_dc, _reset) \
     device_class_set_legacy_reset((_dc), (_reset))
 #endif

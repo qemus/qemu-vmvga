@@ -467,6 +467,67 @@ static inline void vmsvga_screen_mark_dirty(struct vmsvga_state_s *s,
   }
 }
 
+static bool vmsvga_handoff_frame_seed_screen(struct vmsvga_state_s *s) {
+  uint8_t *screen_base;
+  size_t screen_size;
+  uint32_t screen_stride;
+  uint32_t y;
+
+  if (s->handoff_frame == NULL || s->handoff_frame_width == 0 ||
+      s->handoff_frame_height == 0 || s->handoff_frame_stride == 0 ||
+      !s->screen_defined || s->screen_width == 0 || s->screen_height == 0 ||
+      !vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride) ||
+      screen_stride < (uint64_t)s->screen_width * 4) {
+    return false;
+  };
+  (void)screen_size;
+
+  if (s->handoff_frame_width == s->screen_width &&
+      s->handoff_frame_height == s->screen_height) {
+    size_t row_bytes = (size_t)s->screen_width * 4;
+
+    for (y = 0; y < s->screen_height; y++) {
+      memcpy(screen_base + (size_t)y * screen_stride,
+             s->handoff_frame + (size_t)y * s->handoff_frame_stride,
+             row_bytes);
+    };
+  } else {
+    /* Keep the transition deterministic when firmware and Screen Object
+     * geometries differ: nearest-neighbour scale the already converted BGRX
+     * snapshot into the guest's actual Screen backing store. */
+    for (y = 0; y < s->screen_height; y++) {
+      uint32_t src_y =
+          (uint32_t)(((uint64_t)y * s->handoff_frame_height) /
+                     s->screen_height);
+      const uint8_t *src_row =
+          s->handoff_frame + (size_t)src_y * s->handoff_frame_stride;
+      uint8_t *dst_row = screen_base + (size_t)y * screen_stride;
+      uint32_t x;
+
+      for (x = 0; x < s->screen_width; x++) {
+        uint32_t src_x =
+            (uint32_t)(((uint64_t)x * s->handoff_frame_width) /
+                       s->screen_width);
+        memcpy(dst_row + (size_t)x * 4, src_row + (size_t)src_x * 4, 4);
+      };
+    };
+  };
+
+  vmsvga_screen_mark_dirty(s, 0, 0, s->screen_width, s->screen_height);
+  if (vmsvga_trace_flight_enabled()) {
+    fprintf(stderr,
+            "VMVGA-HANDOFF-SEED commit src=%ux%u dst=%ux%u backing=%u:%08x "
+            "pitch=%u\n",
+            s->handoff_frame_width, s->handoff_frame_height,
+            s->screen_width, s->screen_height,
+            s->screen_backing_valid ? s->screen_backing_gmr_id :
+                                      SVGA_GMR_NULL,
+            s->screen_backing_valid ? s->screen_backing_offset : 0,
+            screen_stride);
+  };
+  return true;
+}
+
 static void vmsvga_screen_reset(struct vmsvga_state_s *s) {
   vmsvga_screen_base_clear(s);
   s->screen_defined = false;
@@ -565,6 +626,19 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
   s->screen_root_y = root_y;
   s->screen_clone_count = clone_count;
   s->screen_stride = (uint32_t)stride;
+
+  if (s->handoff_frame != NULL) {
+    bool seeded = vmsvga_handoff_frame_seed_screen(s);
+
+    if (!seeded && vmsvga_trace_flight_enabled()) {
+      fprintf(stderr,
+              "VMVGA-HANDOFF-SEED commit-failed src=%ux%u dst=%ux%u\n",
+              s->handoff_frame_width, s->handoff_frame_height, width, height);
+    };
+    /* A Screen Object definition is the handoff point. Never carry the host
+     * snapshot into later unrelated mode changes. */
+    vmsvga_handoff_frame_clear(s);
+  };
 
   /* The active tuple also describes the Screen Object scanout surface. */
   s->active_valid = true;

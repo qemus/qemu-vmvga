@@ -473,6 +473,12 @@ struct vmsvga_state_s {
   /* The host console surface is not migrated. Track whether it is currently
    * bound to the selected SVGA scanout backing rather than the VGA path. */
   bool svga_surface_bound;
+  /* Transient deep copy of the VGA-rendered host surface while switching to
+   * the next SVGA Screen Object. It is host-only and is never migrated. */
+  uint8_t *handoff_frame;
+  uint32_t handoff_frame_width;
+  uint32_t handoff_frame_height;
+  uint32_t handoff_frame_stride;
   bool hidden;
   bool cursor_dirty;
   bool dirty_log_enabled;
@@ -914,6 +920,72 @@ static inline size_t vmsvga_legacy_vga_backup_size(
 
 static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s) {
   return memory_region_get_ram_ptr(&s->vga.vram);
+};
+
+static void vmsvga_handoff_frame_clear(struct vmsvga_state_s *s) {
+  g_clear_pointer(&s->handoff_frame, g_free);
+  s->handoff_frame_width = 0;
+  s->handoff_frame_height = 0;
+  s->handoff_frame_stride = 0;
+};
+
+static bool vmsvga_handoff_frame_capture(struct vmsvga_state_s *s) {
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  pixman_image_t *copy;
+  uint8_t *buffer;
+  uint64_t stride64;
+  uint64_t size64;
+  int width;
+  int height;
+
+  vmsvga_handoff_frame_clear(s);
+  if (surface == NULL || surface_is_placeholder(surface)) {
+    return false;
+  };
+
+  width = surface_width(surface);
+  height = surface_height(surface);
+  if (width <= 0 || height <= 0 || width > VMSVGA_MAX_WIDTH ||
+      height > VMSVGA_MAX_HEIGHT) {
+    return false;
+  };
+
+  stride64 = (uint64_t)width * 4;
+  size64 = stride64 * (uint32_t)height;
+  if (stride64 > INT_MAX || size64 == 0 || size64 > SIZE_MAX) {
+    return false;
+  };
+
+  buffer = g_try_malloc((size_t)size64);
+  if (buffer == NULL) {
+    return false;
+  };
+  copy = pixman_image_create_bits(PIXMAN_x8r8g8b8, width, height,
+                                  (uint32_t *)buffer, (int)stride64);
+  if (copy == NULL) {
+    g_free(buffer);
+    return false;
+  };
+
+  /* Deep-copy the pixels QEMU is actually presenting. Pixman performs any
+   * VGA host-surface format conversion into little-endian BGRX8888, which is
+   * the 32-bpp Screen Object layout used by the guest. */
+  pixman_image_composite32(PIXMAN_OP_SRC, surface->image, NULL, copy,
+                           0, 0, 0, 0, 0, 0, width, height);
+  pixman_image_unref(copy);
+
+  s->handoff_frame = buffer;
+  s->handoff_frame_width = (uint32_t)width;
+  s->handoff_frame_height = (uint32_t)height;
+  s->handoff_frame_stride = (uint32_t)stride64;
+  if (vmsvga_trace_flight_enabled()) {
+    fprintf(stderr,
+            "VMVGA-HANDOFF-SEED capture size=%ux%u src-bpp=%d src-stride=%d "
+            "dst-format=BGRX8888\n",
+            width, height, surface_bits_per_pixel(surface),
+            surface_stride(surface));
+  };
+  return true;
 };
 
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
@@ -5917,6 +5989,9 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     };
     (void)scanout_size;
   } else {
+    /* A guest using the legacy linear SVGA mode has chosen BAR1 directly,
+     * so a pending Screen Object handoff snapshot no longer applies. */
+    vmsvga_handoff_frame_clear(s);
     scanout = vmsvga_svga_vram_ptr(s);
   };
   stride = s->active_stride;
@@ -6439,8 +6514,12 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     bool was_hidden = s->hidden;
     bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
     if (!was_enabled && enabled) {
+      /* Preserve the image produced by the VGA/VBE renderer before BAR1 is
+       * reinterpreted as the linear SVGA Screen Object backing store. */
+      vmsvga_handoff_frame_capture(s);
       vmsvga_legacy_vga_enter(s);
     } else if (was_enabled && !enabled) {
+      vmsvga_handoff_frame_clear(s);
       /* VGA needs dirty logging before selecting its isolated framebuffer. */
       vmsvga_set_dirty_log(s, true);
       vmsvga_fifo_discard_pending(s);
@@ -6816,6 +6895,7 @@ static void vmsvga_reset(DeviceState *dev) {
   vmsvga3d_reset(s);
   vmsvga_gmr_reset(s);
   vmsvga_screen_reset(s);
+  vmsvga_handoff_frame_clear(s);
   s->index = 0;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
@@ -6934,6 +7014,7 @@ static int vmsvga_pre_load(void *opaque) {
   vmsvga_set_dirty_log(s, true);
   s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
   s->svga_surface_bound = false;
+  vmsvga_handoff_frame_clear(s);
   s->hidden = false;
   s->legacy_vga_size = 0;
   vmsvga_screen_base_clear(s);
@@ -7687,6 +7768,7 @@ static void pci_vmsvga_uninit(PCIDevice *dev) {
   vmsvga_cursor_cache_clear(&s->chip);
   vmsvga_cursor_source_clear(&s->chip);
   vmsvga_objects_clear(&s->chip);
+  vmsvga_handoff_frame_clear(&s->chip);
   g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
 };
 static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {

@@ -640,51 +640,6 @@ static bool vmsvga3d_gbo_copy(struct vmsvga_state_s *s,
   return true;
 }
 
-static bool vmsvga3d_gbo_backing_create(struct vmsvga_state_s *s,
-                                        VMSVGA3DGBO *gbo,
-                                        uint32_t valid_size) {
-  if (s == NULL || gbo == NULL) {
-    return false;
-  };
-  if (!gbo->host_backed) {
-    gbo->host = g_try_malloc0(gbo->size);
-  };
-  if (gbo->host == NULL) {
-    return false;
-  };
-  valid_size = MIN(valid_size, gbo->size);
-  if (!vmsvga3d_gbo_read(s, gbo, 0, gbo->host, valid_size)) {
-    g_free(gbo->host);
-    gbo->host = NULL;
-    gbo->host_backed = false;
-    return false;
-  };
-  gbo->host_backed = true;
-  return true;
-}
-
-static void vmsvga3d_gbo_backing_delete(VMSVGA3DGBO *gbo) {
-  if (gbo == NULL || !gbo->host_backed) {
-    return;
-  };
-  g_free(gbo->host);
-  gbo->host = NULL;
-  gbo->host_backed = false;
-}
-
-static bool vmsvga3d_gbo_backing_write(struct vmsvga_state_s *s,
-                                       VMSVGA3DGBO *gbo) {
-  return gbo != NULL && gbo->host_backed &&
-         vmsvga3d_gbo_write(s, gbo, 0, gbo->host, gbo->size);
-}
-
-static void *vmsvga3d_gbo_backing_ptr(VMSVGA3DGBO *gbo, uint32_t offset) {
-  if (gbo == NULL || !gbo->host_backed || offset > gbo->size) {
-    return NULL;
-  };
-  return gbo->host + offset;
-}
-
 static bool vmsvga3d_otable_index_valid(const VMSVGA3DGBO *table,
                                         uint32_t index,
                                         uint32_t entry_size) {
@@ -832,28 +787,6 @@ static bool vmsvga3d_mob_write(struct vmsvga_state_s *s, VMSVGA3DMob *mob,
                                uint32_t size) {
   return mob != NULL &&
          vmsvga3d_gbo_write(s, &mob->gbo, offset, data, size);
-}
-
-static bool vmsvga3d_mob_backing_create(struct vmsvga_state_s *s,
-                                        VMSVGA3DMob *mob,
-                                        uint32_t valid_size) {
-  return mob != NULL &&
-         vmsvga3d_gbo_backing_create(s, &mob->gbo, valid_size);
-}
-
-static void vmsvga3d_mob_backing_delete(VMSVGA3DMob *mob) {
-  if (mob != NULL) {
-    vmsvga3d_gbo_backing_delete(&mob->gbo);
-  };
-}
-
-static bool vmsvga3d_mob_backing_write(struct vmsvga_state_s *s,
-                                       VMSVGA3DMob *mob) {
-  return mob != NULL && vmsvga3d_gbo_backing_write(s, &mob->gbo);
-}
-
-static void *vmsvga3d_mob_backing_ptr(VMSVGA3DMob *mob, uint32_t offset) {
-  return mob != NULL ? vmsvga3d_gbo_backing_ptr(&mob->gbo, offset) : NULL;
 }
 
 static struct vmsvga3d_state_s *

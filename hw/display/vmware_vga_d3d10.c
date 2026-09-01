@@ -5434,6 +5434,84 @@ static bool vmsvga3d_d3d10_sampler_state_realize_live(
              s->dxvk, cid, state_id, &desc);
 }
 
+/*
+ * State-object part of the deferred dxSetupPipeline path.  Draw execution is
+ * still capability-gated, but keep the already implemented realization code
+ * connected to its final pipeline location so intermediate batches build as a
+ * coherent implementation rather than accumulating dead helpers.
+ */
+static void VMSVGA3D_D3D10_LIVE_UNUSED
+vmsvga3d_d3d10_pipeline_state_realize_live(
+    struct vmsvga_state_s *s, uint32_t cid)
+{
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+  uint32_t stage;
+  uint32_t slot;
+
+  if (context == NULL) {
+    return;
+  }
+
+  if ((context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE) != 0 &&
+      context->shadow.renderState.blendStateId != SVGA3D_INVALID_ID) {
+    uint32_t id = context->shadow.renderState.blendStateId;
+    SVGACOTableDXBlendStateEntry *entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_BLENDSTATE, id);
+
+    if (entry != NULL) {
+      (void)vmsvga3d_d3d10_blend_state_realize_live(s, cid, id, entry);
+    }
+  }
+
+  if ((context->renderer_dirty &
+       VMSVGA3D_DX_CTX_F_STATE_DEPTHSTENCILSTATE) != 0 &&
+      context->shadow.renderState.depthStencilStateId != SVGA3D_INVALID_ID) {
+    uint32_t id = context->shadow.renderState.depthStencilStateId;
+    SVGACOTableDXDepthStencilEntry *entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DEPTHSTENCIL, id);
+
+    if (entry != NULL) {
+      (void)vmsvga3d_d3d10_depth_stencil_state_realize_live(
+          s, cid, id, entry);
+    }
+  }
+
+  if ((context->renderer_dirty &
+       VMSVGA3D_DX_CTX_F_STATE_RASTERIZERSTATE) != 0 &&
+      context->shadow.renderState.rasterizerStateId != SVGA3D_INVALID_ID) {
+    uint32_t id = context->shadow.renderState.rasterizerStateId;
+    SVGACOTableDXRasterizerStateEntry *entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_RASTERIZERSTATE, id);
+
+    if (entry != NULL) {
+      (void)vmsvga3d_d3d10_rasterizer_state_realize_live(
+          s, cid, id, entry);
+    }
+  }
+
+  for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE; stage++) {
+    uint64_t flag = VMSVGA3D_DX_CTX_F_STATE_SAMPLER_VS << stage;
+
+    if ((context->renderer_dirty & flag) == 0) {
+      continue;
+    }
+    for (slot = 0; slot < SVGA3D_DX_MAX_SAMPLERS; slot++) {
+      uint32_t id = context->shadow.shaderState[stage].samplers[slot];
+      SVGACOTableDXSamplerEntry *entry;
+
+      if (id == SVGA3D_INVALID_ID) {
+        continue;
+      }
+      entry = vmsvga3d_dx_cotable_entry_ptr(
+          s, cid, SVGA_COTABLE_SAMPLER, id);
+      if (entry != NULL) {
+        (void)vmsvga3d_d3d10_sampler_state_realize_live(
+            s, cid, id, entry);
+      }
+    }
+  }
+}
+
 static bool vmsvga3d_d3d10_entry_is_zero(const void *entry, size_t size)
 {
   const uint8_t *bytes = entry;
@@ -5510,8 +5588,7 @@ static void vmsvga3d_d3d10_cotable_sanitize_live(
       SVGACOTableDXQueryEntry *entry = &table[i];
 
       if (!vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
-          (entry->type < SVGA3D_QUERYTYPE_MIN ||
-           entry->type >= SVGA3D_QUERYTYPE_MAX)) {
+          entry->type >= SVGA3D_QUERYTYPE_MAX) {
         memset(entry, 0, sizeof(*entry));
       }
     }

@@ -1771,7 +1771,7 @@ typedef enum {
 } SVGACOTableType;
 
 
-#define SVGA_COTABLE_MAX_IDS (MAX_UINT16 - 2)
+#define SVGA_COTABLE_MAX_IDS (UINT16_MAX - 2)
 
 typedef enum SVGAMobFormat {
    SVGA3D_MOBFMT_INVALID          = SVGA3D_INVALID_ID,

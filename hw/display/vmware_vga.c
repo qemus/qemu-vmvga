@@ -427,8 +427,9 @@ struct vmsvga_state_s {
   uint32_t *fifo;
   uint32_t scratch[VMSVGA_SCRATCH_SIZE];
   struct vmsvga_gmr_s *gmrs[64];
-  /* Screen Object ID 0. A guest-provided GFB backing store is authoritative
-   * when present; screen_base is only the short-v1 compatibility fallback. */
+  /* Screen Object ID 0. Keep the visible base layer host-owned. Optional
+   * guest backingStore metadata is parsed and validated, but guest memory is
+   * touched only by explicit FIFO DMA commands. */
   uint8_t *screen_base;
   size_t screen_base_size;
   uint32_t screen_stride;
@@ -473,12 +474,6 @@ struct vmsvga_state_s {
   /* The host console surface is not migrated. Track whether it is currently
    * bound to the selected SVGA scanout backing rather than the VGA path. */
   bool svga_surface_bound;
-  /* Transient deep copy of the VGA-rendered host surface while switching to
-   * the next SVGA Screen Object. It is host-only and is never migrated. */
-  uint8_t *handoff_frame;
-  uint32_t handoff_frame_width;
-  uint32_t handoff_frame_height;
-  uint32_t handoff_frame_stride;
   bool hidden;
   bool cursor_dirty;
   bool dirty_log_enabled;
@@ -918,78 +913,35 @@ static inline size_t vmsvga_legacy_vga_backup_size(
              (size_t)s->vga.vram_size);
 };
 
+static inline size_t
+vmsvga_first_svga_clear_size(struct vmsvga_state_s *s) {
+  DisplaySurface *surface = qemu_console_surface(s->vga.con);
+  size_t clear_size = vmsvga_legacy_vga_backup_size(s);
+
+  /*
+   * VirtualBox clears at least the legacy 512 KiB aperture on the first
+   * VGA -> SVGA ownership transition.  Also discard the complete inherited
+   * firmware framebuffer, using the frontend's real stride and height rather
+   * than assuming a particular resolution such as 1024x768.
+   */
+  if (surface != NULL && surface_stride(surface) > 0 &&
+      surface_height(surface) > 0) {
+    uint64_t inherited_size =
+        (uint64_t)surface_stride(surface) * surface_height(surface);
+    clear_size = (size_t)MIN(inherited_size, (uint64_t)s->vga.vram_size);
+    clear_size = MAX(clear_size, vmsvga_legacy_vga_backup_size(s));
+  };
+
+  return MIN(clear_size, (size_t)s->vga.vram_size);
+};
+
 static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s) {
   return memory_region_get_ram_ptr(&s->vga.vram);
 };
 
-static void vmsvga_handoff_frame_clear(struct vmsvga_state_s *s) {
-  g_clear_pointer(&s->handoff_frame, g_free);
-  s->handoff_frame_width = 0;
-  s->handoff_frame_height = 0;
-  s->handoff_frame_stride = 0;
-};
-
-static bool vmsvga_handoff_frame_capture(struct vmsvga_state_s *s) {
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
-  pixman_image_t *copy;
-  uint8_t *buffer;
-  uint64_t stride64;
-  uint64_t size64;
-  int width;
-  int height;
-
-  vmsvga_handoff_frame_clear(s);
-  if (surface == NULL || surface_is_placeholder(surface)) {
-    return false;
-  };
-
-  width = surface_width(surface);
-  height = surface_height(surface);
-  if (width <= 0 || height <= 0 || width > VMSVGA_MAX_WIDTH ||
-      height > VMSVGA_MAX_HEIGHT) {
-    return false;
-  };
-
-  stride64 = (uint64_t)width * 4;
-  size64 = stride64 * (uint32_t)height;
-  if (stride64 > INT_MAX || size64 == 0 || size64 > SIZE_MAX) {
-    return false;
-  };
-
-  buffer = g_try_malloc((size_t)size64);
-  if (buffer == NULL) {
-    return false;
-  };
-  copy = pixman_image_create_bits(PIXMAN_x8r8g8b8, width, height,
-                                  (uint32_t *)buffer, (int)stride64);
-  if (copy == NULL) {
-    g_free(buffer);
-    return false;
-  };
-
-  /* Deep-copy the pixels QEMU is actually presenting. Pixman performs any
-   * VGA host-surface format conversion into little-endian BGRX8888, which is
-   * the 32-bpp Screen Object layout used by the guest. */
-  pixman_image_composite32(PIXMAN_OP_SRC, surface->image, NULL, copy,
-                           0, 0, 0, 0, 0, 0, width, height);
-  pixman_image_unref(copy);
-
-  s->handoff_frame = buffer;
-  s->handoff_frame_width = (uint32_t)width;
-  s->handoff_frame_height = (uint32_t)height;
-  s->handoff_frame_stride = (uint32_t)stride64;
-  if (vmsvga_trace_flight_enabled()) {
-    fprintf(stderr,
-            "VMVGA-HANDOFF-SEED capture size=%ux%u src-bpp=%d src-stride=%d "
-            "dst-format=BGRX8888\n",
-            width, height, surface_bits_per_pixel(surface),
-            surface_stride(surface));
-  };
-  return true;
-};
-
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
-  size_t size = vmsvga_legacy_vga_backup_size(s);
+  size_t backup_size = vmsvga_legacy_vga_backup_size(s);
+  size_t clear_size = vmsvga_first_svga_clear_size(s);
   uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
 
   /*
@@ -997,12 +949,20 @@ static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
    * After that it remains independent while BAR1 continues to hold SVGA data.
    */
   if (s->legacy_vga_size == 0) {
-    memcpy(s->legacy_vga_ptr, svga_ptr, size);
-    s->legacy_vga_size = (uint32_t)size;
+    memcpy(s->legacy_vga_ptr, svga_ptr, backup_size);
+    /*
+     * Clear the inherited firmware framebuffer after preserving the legacy
+     * VGA aperture.  The extent comes from the currently visible frontend
+     * surface, so the handoff is independent of the firmware resolution.
+     */
+    memset(svga_ptr, 0, clear_size);
+    s->legacy_vga_size = (uint32_t)backup_size;
   };
   s->vga.vram_ptr = svga_ptr;
   s->svga_surface_bound = false;
-  VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW enter size=%zu", size);
+  VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                     "VGA_SHADOW enter backup=%zu clear=%zu",
+                     backup_size, clear_size);
 };
 
 static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s) {
@@ -5989,9 +5949,6 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     };
     (void)scanout_size;
   } else {
-    /* A guest using the legacy linear SVGA mode has chosen BAR1 directly,
-     * so a pending Screen Object handoff snapshot no longer applies. */
-    vmsvga_handoff_frame_clear(s);
     scanout = vmsvga_svga_vram_ptr(s);
   };
   stride = s->active_stride;
@@ -6377,12 +6334,16 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            s->index, ret);
     break;
   case SVGA_REG_DISPLAY_WIDTH:
-    ret = s->display_id == 0 ? s->disp_width : 0;
+    ret = s->display_id == 0
+              ? (s->disp_width != 0 ? s->disp_width : vmsvga_read_width(s))
+              : 0;
     VPRINT("SVGA_REG_DISPLAY_WIDTH register %u with the return of %u\n",
            s->index, ret);
     break;
   case SVGA_REG_DISPLAY_HEIGHT:
-    ret = s->display_id == 0 ? s->disp_height : 0;
+    ret = s->display_id == 0
+              ? (s->disp_height != 0 ? s->disp_height : vmsvga_read_height(s))
+              : 0;
     VPRINT("SVGA_REG_DISPLAY_HEIGHT register %u with the return of %u\n",
            s->index, ret);
     break;
@@ -6514,12 +6475,8 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     bool was_hidden = s->hidden;
     bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
     if (!was_enabled && enabled) {
-      /* Preserve the image produced by the VGA/VBE renderer before BAR1 is
-       * reinterpreted as the linear SVGA Screen Object backing store. */
-      vmsvga_handoff_frame_capture(s);
       vmsvga_legacy_vga_enter(s);
     } else if (was_enabled && !enabled) {
-      vmsvga_handoff_frame_clear(s);
       /* VGA needs dirty logging before selecting its isolated framebuffer. */
       vmsvga_set_dirty_log(s, true);
       vmsvga_fifo_discard_pending(s);
@@ -6895,7 +6852,6 @@ static void vmsvga_reset(DeviceState *dev) {
   vmsvga3d_reset(s);
   vmsvga_gmr_reset(s);
   vmsvga_screen_reset(s);
-  vmsvga_handoff_frame_clear(s);
   s->index = 0;
   s->scratch_size = VMSVGA_SCRATCH_SIZE;
   s->fifo_size = VMSVGA_FIFO_SIZE;
@@ -6918,8 +6874,8 @@ static void vmsvga_reset(DeviceState *dev) {
   s->active_height = 0;
   s->active_depth = 0;
   s->active_stride = 0;
-  s->disp_width = 1024;
-  s->disp_height = 768;
+  s->disp_width = 0;
+  s->disp_height = 0;
   s->num_gd = 1;
   s->display_id = 0;
   s->disp_prim = 0;
@@ -7014,7 +6970,6 @@ static int vmsvga_pre_load(void *opaque) {
   vmsvga_set_dirty_log(s, true);
   s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
   s->svga_surface_bound = false;
-  vmsvga_handoff_frame_clear(s);
   s->hidden = false;
   s->legacy_vga_size = 0;
   vmsvga_screen_base_clear(s);
@@ -7037,30 +6992,24 @@ static int vmsvga_pre_save(void *opaque) {
     s->legacy_vga_size = (uint32_t)vmsvga_legacy_vga_backup_size(s);
   };
   if (s->screen_defined) {
-    if (s->screen_backing_valid) {
-      uint8_t *base;
-      size_t size;
-      uint32_t stride;
-
-      if (s->screen_base != NULL || s->screen_base_size != 0 ||
-          !vmsvga_screen_storage(s, &base, &size, &stride) ||
-          stride != s->screen_stride || stride != s->active_stride) {
-        return -EINVAL;
-      };
-      (void)base;
-      (void)size;
-    } else {
-      uint64_t stride = (uint64_t)s->screen_width * 4;
-      uint64_t size = stride * s->screen_height;
-      if (s->screen_width == 0 || s->screen_height == 0 ||
-          s->screen_width > VMSVGA_MAX_WIDTH ||
-          s->screen_height > VMSVGA_MAX_HEIGHT || stride > UINT32_MAX ||
-          size == 0 || size > UINT32_MAX || s->screen_base == NULL ||
-          s->screen_stride != stride || s->screen_base_size != size) {
-        return -EINVAL;
-      };
-      s->screen_base_migration_size = (uint32_t)size;
+    uint64_t stride = (uint64_t)s->screen_width * 4;
+    uint64_t size = stride * s->screen_height;
+    if (s->screen_width == 0 || s->screen_height == 0 ||
+        s->screen_width > VMSVGA_MAX_WIDTH ||
+        s->screen_height > VMSVGA_MAX_HEIGHT || stride > UINT32_MAX ||
+        size == 0 || size > UINT32_MAX || s->screen_base == NULL ||
+        s->screen_stride != stride || s->screen_base_size != size ||
+        s->active_stride != stride) {
+      return -EINVAL;
     };
+    if (s->screen_backing_valid &&
+        !vmsvga_screen_backing_validate(
+            s, s->screen_width, s->screen_height,
+            s->screen_backing_gmr_id, s->screen_backing_offset,
+            s->screen_backing_pitch)) {
+      return -EINVAL;
+    };
+    s->screen_base_migration_size = (uint32_t)size;
   } else if (s->screen_base != NULL || s->screen_base_size != 0 ||
              s->screen_stride != 0 || s->screen_backing_valid ||
              s->screen_backing_gmr_id != SVGA_GMR_NULL ||
@@ -7318,37 +7267,24 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   };
 
   if (s->screen_defined) {
-    if (s->screen_backing_valid) {
-      uint8_t *base;
-      size_t size;
-      uint32_t stride;
-
-      s->screen_stride = s->screen_backing_pitch;
-      s->screen_base_size = 0;
-      if (s->screen_base_migration_size != 0 || s->screen_base != NULL ||
-          !vmsvga_screen_storage(s, &base, &size, &stride) ||
-          stride != s->screen_stride || stride != s->active_stride) {
-        ret = -EINVAL;
-        goto fail;
-      };
-      (void)base;
-      (void)size;
-    } else {
-      uint64_t stride = (uint64_t)s->screen_width * 4;
-      uint64_t size = stride * s->screen_height;
-      if (s->screen_width == 0 || s->screen_height == 0 ||
-          s->screen_width > VMSVGA_MAX_WIDTH ||
-          s->screen_height > VMSVGA_MAX_HEIGHT || stride > UINT32_MAX ||
-          size == 0 || size > UINT32_MAX ||
-          s->screen_base_migration_size != size || s->screen_base == NULL ||
-          s->screen_backing_gmr_id != SVGA_GMR_NULL ||
-          s->screen_backing_offset != 0 || s->screen_backing_pitch != 0) {
-        ret = -EINVAL;
-        goto fail;
-      };
-      s->screen_stride = (uint32_t)stride;
-      s->screen_base_size = (size_t)size;
+    uint64_t stride = (uint64_t)s->screen_width * 4;
+    uint64_t size = stride * s->screen_height;
+    if (s->screen_width == 0 || s->screen_height == 0 ||
+        s->screen_width > VMSVGA_MAX_WIDTH ||
+        s->screen_height > VMSVGA_MAX_HEIGHT || stride > UINT32_MAX ||
+        size == 0 || size > UINT32_MAX ||
+        s->screen_base_migration_size != size || s->screen_base == NULL ||
+        s->active_stride != stride ||
+        (s->screen_backing_valid &&
+         !vmsvga_screen_backing_validate(
+             s, s->screen_width, s->screen_height,
+             s->screen_backing_gmr_id, s->screen_backing_offset,
+             s->screen_backing_pitch))) {
+      ret = -EINVAL;
+      goto fail;
     };
+    s->screen_stride = (uint32_t)stride;
+    s->screen_base_size = (size_t)size;
   } else if (s->screen_base_migration_size != 0 || s->screen_base != NULL ||
              s->screen_backing_valid ||
              s->screen_backing_gmr_id != SVGA_GMR_NULL ||
@@ -7640,8 +7576,8 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
   s->active_height = 0;
   s->active_depth = 0;
   s->active_stride = 0;
-  s->disp_width = 1024;
-  s->disp_height = 768;
+  s->disp_width = 0;
+  s->disp_height = 0;
   s->num_gd = 1;
   s->display_id = 0;
   s->disp_prim = 0;
@@ -7768,7 +7704,6 @@ static void pci_vmsvga_uninit(PCIDevice *dev) {
   vmsvga_cursor_cache_clear(&s->chip);
   vmsvga_cursor_source_clear(&s->chip);
   vmsvga_objects_clear(&s->chip);
-  vmsvga_handoff_frame_clear(&s->chip);
   g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
 };
 static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {

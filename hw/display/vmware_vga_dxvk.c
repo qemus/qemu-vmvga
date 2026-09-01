@@ -213,6 +213,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA 29u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SET_PREDICATION 30u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION 46u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_RESOURCE 47u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
@@ -502,6 +503,8 @@ typedef void (*VMSVGA3DDxvkD3D11CopySubresourceRegion)(
     uint32_t destination_x, uint32_t destination_y, uint32_t destination_z,
     void *source, uint32_t source_subresource,
     const VMSVGA3DDxvkD3D11Box *source_box);
+typedef void (*VMSVGA3DDxvkD3D11CopyResource)(
+    void *context, void *destination, void *source);
 typedef int32_t (*VMSVGA3DDxvkD3D11GetData)(
     void *context, void *query, void *data, uint32_t data_size, uint32_t flags);
 
@@ -2346,6 +2349,32 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
   (void)source;
   (void)source_subresource;
   (void)source_box;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_copy_resource(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
+    VMSVGA3DDxvkSurface *source) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11CopyResource copy_resource = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      destination == NULL || source == NULL ||
+      !destination->d3d11_resident || destination->d3d11_resource == NULL ||
+      !source->d3d11_resident || source->d3d11_resource == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_RESOURCE,
+          &copy_resource, sizeof(copy_resource))) {
+    return false;
+  }
+  copy_resource(dxvk->d3d11_context, destination->d3d11_resource,
+                source->d3d11_resource);
+  return true;
+#else
+  (void)dxvk;
+  (void)destination;
+  (void)source;
   return false;
 #endif
 }

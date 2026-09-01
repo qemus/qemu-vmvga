@@ -5499,6 +5499,40 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
       plan.source_subresource, &plan.region.source_box);
 }
 
+static bool vmsvga3d_d3d10_pred_copy_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXPredCopy *command)
+{
+  VMSVGA3DSurface *source;
+  VMSVGA3DSurface *destination;
+  VMSVGA3DD3D10CopyResourcePlan plan;
+  VMSVGA3DD3D10Level level;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk) || vmsvga3d_dx_context(s, cid) == NULL ||
+      command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
+      command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  source = s->svga3d->surfaces[command->srcSid];
+  destination = s->svga3d->surfaces[command->dstSid];
+  if (source == NULL || destination == NULL) {
+    return false;
+  }
+
+  level = vmsvga3d_d3d10_copy_resource_plan(
+      source->format, false, false, &plan);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      !vmsvga3d_d3d10_copy_surface_materialize_live(
+          s, source, plan.source_create_kind) ||
+      !vmsvga3d_d3d10_copy_surface_materialize_live(
+          s, destination, plan.destination_create_kind)) {
+    return false;
+  }
+  return vmsvga3d_dxvk_d3d11_copy_resource(
+      s->dxvk, destination->dxvk_surface, source->dxvk_surface);
+}
+
 static bool vmsvga3d_d3d10_gen_mips_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXGenMips *command)
@@ -5866,6 +5900,16 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     }
     memcpy(&command, payload, sizeof(command));
     return vmsvga3d_d3d10_pred_copy_region_live(s, cid, &command);
+  }
+
+  case SVGA_3D_CMD_DX_PRED_COPY: {
+    SVGA3dCmdDXPredCopy command;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_pred_copy_live(s, cid, &command);
   }
 
   case SVGA_3D_CMD_DX_GENMIPS: {

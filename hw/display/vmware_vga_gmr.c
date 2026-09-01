@@ -889,6 +889,17 @@ static bool vmsvga_screen_gmrfb_row_offset(struct vmsvga_state_s *s,
   return true;
 }
 
+static bool vmsvga_screen_is_direct_self_present(
+    const struct vmsvga_state_s *s, int64_t source_x, int64_t source_y,
+    int64_t left, int64_t top, uint32_t bypp) {
+  return s->screen_backing_valid &&
+         s->screen_backing_gmr_id == SVGA_GMR_FRAMEBUFFER &&
+         s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER &&
+         s->screen_backing_offset == s->gmrfb_offset &&
+         s->screen_backing_pitch == s->gmrfb_bytes_per_line &&
+         bypp == 4 && source_x == left && source_y == top;
+}
+
 static bool vmsvga_screen_blit_one_from_gmrfb(
     struct vmsvga_state_s *s, int32_t src_x, int32_t src_y,
     int32_t dst_left, int32_t dst_top, int32_t dst_right,
@@ -912,6 +923,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
   uint32_t trace_after_hash = 2166136261u;
   uint32_t trace_source_nonzero_rows = 0;
   uint32_t trace_changed_rows = 0;
+  bool self_present;
 
   if (!vmsvga_screen_base_layer_storage(
           s, &screen_base, &screen_size, &screen_stride) ||
@@ -956,6 +968,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
 
   width = (uint32_t)(right - left);
   height = (uint32_t)(bottom - top);
+  self_present = vmsvga_screen_is_direct_self_present(
+      s, source_x, source_y, left, top, bypp);
   trace_blit = vmsvga_trace_flight_enabled() &&
                (s->trace_now.gmrfb_to_screen < 16 ||
                 ((s->trace_now.gmrfb_to_screen + 1) & 63) == 0);
@@ -1010,9 +1024,15 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         }
       }
 
-      vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
-      if (mirror_dst != NULL) {
-        memcpy(mirror_dst, dst, (size_t)width * 4);
+      if (self_present) {
+        if (mirror_dst != NULL) {
+          memcpy(mirror_dst, s->blit_scratch, (size_t)width * 4);
+        }
+      } else {
+        vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
+        if (mirror_dst != NULL) {
+          memcpy(mirror_dst, dst, (size_t)width * 4);
+        }
       }
       trace_after_hash = vmsvga_gmr_diag_hash_extend(
           trace_after_hash, trace_dst, (size_t)width * 4);
@@ -1021,9 +1041,15 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         trace_changed_rows++;
       }
     } else {
-      vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
-      if (mirror_dst != NULL) {
-        memcpy(mirror_dst, dst, (size_t)width * 4);
+      if (self_present) {
+        if (mirror_dst != NULL) {
+          memcpy(mirror_dst, s->blit_scratch, (size_t)width * 4);
+        }
+      } else {
+        vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
+        if (mirror_dst != NULL) {
+          memcpy(mirror_dst, dst, (size_t)width * 4);
+        }
       }
     }
   }
@@ -1035,7 +1061,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
             "rows=%u width=%u before=0x%08x source-hash=0x%08x "
             "after=0x%08x source-nonzero-rows=%u changed-rows=%u\n",
             s->trace_now.gmrfb_to_screen + 1,
-            mirror_base != NULL ? "handoff-mirror" : "backing",
+            mirror_base != NULL ? "handoff-mirror" :
+            (self_present ? "backing-self-present" : "backing"),
             s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER ? "framebuffer" :
                                                       "gmr-v1",
             s->gmrfb_gmr_id, left, top, right, bottom, height, width,
@@ -1043,8 +1070,17 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
             trace_source_nonzero_rows, trace_changed_rows);
   }
 
-  vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,
-                           width, height);
+  /*
+   * An exact framebuffer-backed self-present is a notification, not a VRAM
+   * write. VirtualBox's transfer is effectively a same-address memmove here.
+   * Do not manufacture DIRTY_MEMORY_VGA bits: steady-state dirty tracking
+   * must reflect real guest/renderer writes so it can recover writes which
+   * become visible after the FIFO notification.
+   */
+  if (!self_present) {
+    vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,
+                             width, height);
+  }
   {
     DisplaySurface *surface = qemu_console_surface(s->vga.con);
     uint8_t *scanout_base = NULL;

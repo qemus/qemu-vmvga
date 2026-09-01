@@ -150,8 +150,8 @@ enum {
    SVGA_REG_CONFIG_DONE = 20,         /* Set when memory area configured */
    SVGA_REG_SYNC = 21,                /* See "FIFO Synchronization Registers" */
    SVGA_REG_BUSY = 22,                /* See "FIFO Synchronization Registers" */
-   SVGA_REG_GUEST_ID = 23,            /* Set guest OS identifier */
-   SVGA_REG_CURSOR_ID = 24,           /* (Deprecated) */
+   SVGA_REG_GUEST_ID = 23,            /* (Deprecated) */
+   SVGA_REG_DEAD = 24,                /* Drivers should never write this. */
    SVGA_REG_CURSOR_X = 25,            /* (Deprecated) */
    SVGA_REG_CURSOR_Y = 26,            /* (Deprecated) */
    SVGA_REG_CURSOR_ON = 27,           /* (Deprecated) */
@@ -182,17 +182,52 @@ enum {
    SVGA_REG_MEMORY_SIZE = 47,       /* Total dedicated device memory excluding FIFO */
    SVGA_REG_COMMAND_LOW = 48,       /* Lower 32 bits and submits commands */
    SVGA_REG_COMMAND_HIGH = 49,      /* Upper 32 bits of command buffer PA */
-   SVGA_REG_MAX_PRIMARY_BOUNDING_BOX_MEM = 50,   /* Max primary memory */
-   SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB = 51, /* Suggested limit on mob mem */
-   SVGA_REG_DEV_CAP = 52,           /* Write dev cap index, read value */
+
+   SVGA_REG_MAX_PRIMARY_MEM = 50,
+   SVGA_REG_MAX_PRIMARY_BOUNDING_BOX_MEM = 50,
+   SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB = 51,
+   SVGA_REG_DEV_CAP = 52,
    SVGA_REG_CMD_PREPEND_LOW = 53,
-   SVGA_REG_iCMD_PREPEND_HIGH = 54,
+   SVGA_REG_CMD_PREPEND_HIGH = 54,
    SVGA_REG_SCREENTARGET_MAX_WIDTH = 55,
    SVGA_REG_SCREENTARGET_MAX_HEIGHT = 56,
    SVGA_REG_MOB_MAX_SIZE = 57,
    SVGA_REG_BLANK_SCREEN_TARGETS = 58,
    SVGA_REG_CAP2 = 59,
-   SVGA_REG_TOP = 60,               /* Must be 1 more than the last register */
+   SVGA_REG_DEVEL_CAP = 60,
+
+   SVGA_REG_GUEST_DRIVER_ID = 61,
+   SVGA_REG_GUEST_DRIVER_VERSION1 = 62,
+   SVGA_REG_GUEST_DRIVER_VERSION2 = 63,
+   SVGA_REG_GUEST_DRIVER_VERSION3 = 64,
+
+   SVGA_REG_CURSOR_MOBID = 65,
+   SVGA_REG_CURSOR_MAX_BYTE_SIZE = 66,
+   SVGA_REG_CURSOR_MAX_DIMENSION = 67,
+
+   SVGA_REG_FIFO_CAPS = 68,
+   SVGA_REG_FENCE = 69,
+
+   SVGA_REG_CURSOR4_ON = 70,
+   SVGA_REG_CURSOR4_X = 71,
+   SVGA_REG_CURSOR4_Y = 72,
+   SVGA_REG_CURSOR4_SCREEN_ID = 73,
+   SVGA_REG_CURSOR4_SUBMIT = 74,
+
+   SVGA_REG_SCREENDMA = 75,
+   SVGA_REG_GBOBJECT_MEM_SIZE_KB = 76,
+
+   SVGA_REG_REGS_START_HIGH32 = 77,
+   SVGA_REG_REGS_START_LOW32 = 78,
+   SVGA_REG_FB_START_HIGH32 = 79,
+   SVGA_REG_FB_START_LOW32 = 80,
+
+   SVGA_REG_MSHINT = 81,
+   SVGA_REG_IRQ_STATUS = 82,
+   SVGA_REG_DIRTY_TRACKING = 83,
+   SVGA_REG_FENCE_GOAL = 84,
+
+   SVGA_REG_TOP = 85,               /* Must be 1 more than the last register */
 
    SVGA_PALETTE_BASE = 1024,        /* Base of SVGA color map */
    /* Next 768 (== 256*3) registers exist for colormap */
@@ -203,6 +238,30 @@ enum {
       the use of the current SVGA driver. */
 };
 
+typedef enum SVGARegGuestDriverId {
+   SVGA_REG_GUEST_DRIVER_ID_UNKNOWN = 0,
+   SVGA_REG_GUEST_DRIVER_ID_WDDM = 1,
+   SVGA_REG_GUEST_DRIVER_ID_LINUX = 2,
+   SVGA_REG_GUEST_DRIVER_ID_MAX,
+
+   SVGA_REG_GUEST_DRIVER_ID_SUBMIT = MAX_UINT32,
+} SVGARegGuestDriverId;
+
+typedef enum SVGARegMSHint {
+   SVGA_REG_MSHINT_DISABLED = 0,
+   SVGA_REG_MSHINT_FULL = 1,
+   SVGA_REG_MSHINT_RESOLVED = 2,
+} SVGARegMSHint;
+
+typedef enum SVGARegDirtyTracking {
+   SVGA_REG_DIRTY_TRACKING_PER_IMAGE = 0,
+   SVGA_REG_DIRTY_TRACKING_PER_SURFACE = 1,
+} SVGARegDirtyTracking;
+
+#define SVGA_SCREENDMA_REG_UNDEFINED    0
+#define SVGA_SCREENDMA_REG_NOT_PRESENT  1
+#define SVGA_SCREENDMA_REG_PRESENT      2
+#define SVGA_SCREENDMA_REG_MAX          3
 /*
  * Guest memory regions (GMRs):
  *
@@ -654,8 +713,10 @@ struct {
 #define SVGA_CAP_DEAD1              0x02000000
 #define SVGA_CAP_CMD_BUFFERS_2      0x04000000
 #define SVGA_CAP_GBOBJECTS          0x08000000
-#define SVGA_CAP_CMD_BUFFERS_3      0x10000000
-
+#define SVGA_CAP_DX                 0x10000000
+#define SVGA_CAP_CMD_BUFFERS_3      SVGA_CAP_DX
+#define SVGA_CAP_HP_CMD_QUEUE       0x20000000
+#define SVGA_CAP_NO_BB_RESTRICTION  0x40000000
 #define SVGA_CAP_CAP2_REGISTER      0x80000000
 
 
@@ -672,10 +733,25 @@ struct {
  *      Reserve the last bit for extending the SVGA capabilities to some
  *      future mechanisms.
  */
-#define SVGA_CAP2_NONE               0x00000000
-#define SVGA_CAP2_GROW_OTABLE        0x00000001
-#define SVGA_CAP2_INTRA_SURFACE_COPY 0x00000002
-#define SVGA_CAP2_RESERVED           0x80000000
+#define SVGA_CAP2_NONE                        0x00000000
+#define SVGA_CAP2_GROW_OTABLE                 0x00000001
+#define SVGA_CAP2_INTRA_SURFACE_COPY          0x00000002
+#define SVGA_CAP2_DX2                         0x00000004
+#define SVGA_CAP2_GB_MEMSIZE_2                0x00000008
+#define SVGA_CAP2_SCREENDMA_REG               0x00000010
+#define SVGA_CAP2_OTABLE_PTDEPTH_2            0x00000020
+#define SVGA_CAP2_NON_MS_TO_MS_STRETCHBLT     0x00000040
+#define SVGA_CAP2_CURSOR_MOB                  0x00000080
+#define SVGA_CAP2_MSHINT                      0x00000100
+#define SVGA_CAP2_CB_MAX_SIZE_4MB             0x00000200
+#define SVGA_CAP2_DX3                         0x00000400
+#define SVGA_CAP2_FRAME_TYPE                  0x00000800
+#define SVGA_CAP2_COTABLE_COPY                0x00001000
+#define SVGA_CAP2_TRACE_FULL_FB               0x00002000
+#define SVGA_CAP2_EXTRA_REGS                  0x00004000
+#define SVGA_CAP2_LO_STAGING                  0x00008000
+#define SVGA_CAP2_VIDEO_BLT                   0x00010000
+#define SVGA_CAP2_RESERVED                    0x80000000
 
 /*
  * The Guest can optionally read some SVGA device capabilities through

@@ -353,6 +353,18 @@ static uint32_t vmsvga_gmr_diag_hash(const uint8_t *data, size_t size) {
   return hash;
 };
 
+static uint32_t vmsvga_gmr_diag_hash_extend(uint32_t hash,
+                                             const uint8_t *data,
+                                             size_t size) {
+  size_t i;
+
+  for (i = 0; i < size; i++) {
+    hash ^= data[i];
+    hash *= 16777619u;
+  };
+  return hash;
+};
+
 static inline void vmsvga_screen_trace_activity(struct vmsvga_state_s *s) {
   vmsvga_trace_flight_activity(s);
 }
@@ -879,6 +891,12 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
   uint8_t *screen_base;
   size_t screen_size;
   uint32_t screen_stride;
+  bool trace_blit;
+  uint32_t trace_before_hash = 2166136261u;
+  uint32_t trace_source_hash = 2166136261u;
+  uint32_t trace_after_hash = 2166136261u;
+  uint32_t trace_source_nonzero_rows = 0;
+  uint32_t trace_changed_rows = 0;
 
   if (!vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride) ||
       !s->gmrfb_defined ||
@@ -910,6 +928,9 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
 
   width = (uint32_t)(right - left);
   height = (uint32_t)(bottom - top);
+  trace_blit = vmsvga_trace_flight_enabled() &&
+               (s->trace_now.gmrfb_to_screen < 16 ||
+                ((s->trace_now.gmrfb_to_screen + 1) & 63) == 0);
   for (row = 0; row < height; row++) {
     uint32_t gmr_offset;
     size_t row_bytes;
@@ -938,31 +959,46 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
           row, s->gmrfb_gmr_id, gmr_offset, row_bytes);
       return false;
     }
-    if (row == 0 && vmsvga_trace_flight_enabled() &&
-        (s->trace_now.gmrfb_to_screen < 16 ||
-         ((s->trace_now.gmrfb_to_screen + 1) & 63) == 0)) {
-      uint32_t before_hash =
+    if (trace_blit) {
+      uint32_t before_row_hash =
           vmsvga_gmr_diag_hash(dst, (size_t)width * 4);
-      uint32_t source_hash =
-          vmsvga_gmr_diag_hash(s->blit_scratch, row_bytes);
+      size_t i;
+
+      trace_before_hash = vmsvga_gmr_diag_hash_extend(
+          trace_before_hash, dst, (size_t)width * 4);
+      trace_source_hash = vmsvga_gmr_diag_hash_extend(
+          trace_source_hash, s->blit_scratch, row_bytes);
+      for (i = 0; i < row_bytes; i++) {
+        if (s->blit_scratch[i] != 0) {
+          trace_source_nonzero_rows++;
+          break;
+        }
+      }
 
       vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
-      fprintf(stderr,
-              "VMVGA-MIRROR-COPY seq=%" PRIu64 " source=%s gmr=%u "
-              "offset=0x%08x bytes=%zu rect=%" PRId64 ",%" PRId64 " "
-              "width=%u before=0x%08x source-hash=0x%08x "
-              "after=0x%08x changed=%u\n",
-              s->trace_now.gmrfb_to_screen + 1,
-              s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER ? "framebuffer" :
-                                                        "gmr-v1",
-              s->gmrfb_gmr_id, gmr_offset, row_bytes, left, top, width,
-              before_hash, source_hash,
-              vmsvga_gmr_diag_hash(dst, (size_t)width * 4),
-              before_hash !=
-                  vmsvga_gmr_diag_hash(dst, (size_t)width * 4));
+      trace_after_hash = vmsvga_gmr_diag_hash_extend(
+          trace_after_hash, dst, (size_t)width * 4);
+      if (before_row_hash !=
+          vmsvga_gmr_diag_hash(dst, (size_t)width * 4)) {
+        trace_changed_rows++;
+      }
     } else {
       vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
     };
+  }
+
+  if (trace_blit) {
+    fprintf(stderr,
+            "VMVGA-MIRROR-BLIT seq=%" PRIu64 " source=%s gmr=%u "
+            "rect=%" PRId64 ",%" PRId64 "-%" PRId64 ",%" PRId64 " "
+            "rows=%u width=%u before=0x%08x source-hash=0x%08x "
+            "after=0x%08x source-nonzero-rows=%u changed-rows=%u\n",
+            s->trace_now.gmrfb_to_screen + 1,
+            s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER ? "framebuffer" :
+                                                      "gmr-v1",
+            s->gmrfb_gmr_id, left, top, right, bottom, height, width,
+            trace_before_hash, trace_source_hash, trace_after_hash,
+            trace_source_nonzero_rows, trace_changed_rows);
   }
 
   vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,

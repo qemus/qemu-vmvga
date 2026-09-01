@@ -5675,6 +5675,11 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   hwaddr visible_offset = 0;
   hwaddr visible_size;
   hwaddr visible_end;
+  hwaddr snapshot_offset;
+  hwaddr snapshot_size;
+  uint32_t bar1_dirty_pages = 0;
+  hwaddr bar1_first_dirty = 0;
+  hwaddr bar1_last_dirty = 0;
   bool direct_screen = vmsvga_direct_screen_vram_scanout(s);
   bool trace_dirty = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_DIRTY);
   bool trace_range_open = false;
@@ -5702,10 +5707,39 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
     return;
   };
   visible_end = visible_offset + visible_size;
+  snapshot_offset = direct_screen ? 0 : visible_offset;
+  snapshot_size = direct_screen ? s->vga.vram_size : visible_size;
   snap = memory_region_snapshot_and_clear_dirty(
-      &s->vga.vram, visible_offset, visible_size, DIRTY_MEMORY_VGA);
+      &s->vga.vram, snapshot_offset, snapshot_size, DIRTY_MEMORY_VGA);
   if (snap == NULL) {
     return;
+  };
+  if (direct_screen &&
+      memory_region_snapshot_get_dirty(&s->vga.vram, snap, 0,
+                                       s->vga.vram_size)) {
+    block_size = (hwaddr)TARGET_PAGE_SIZE * VMSVGA_DIRTY_BLOCK_PAGES;
+    for (block_addr = 0; block_addr < s->vga.vram_size;
+         block_addr += block_size) {
+      hwaddr block_end = MIN(block_addr + block_size, s->vga.vram_size);
+      if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, block_addr,
+                                            block_end - block_addr)) {
+        continue;
+      };
+      for (page_addr = block_addr; page_addr < block_end;
+           page_addr += TARGET_PAGE_SIZE) {
+        hwaddr page_end =
+            MIN(page_addr + (hwaddr)TARGET_PAGE_SIZE, block_end);
+        if (!memory_region_snapshot_get_dirty(&s->vga.vram, snap, page_addr,
+                                              page_end - page_addr)) {
+          continue;
+        };
+        bar1_dirty_pages++;
+        if (bar1_dirty_pages == 1) {
+          bar1_first_dirty = page_addr;
+        };
+        bar1_last_dirty = page_end;
+      };
+    };
   };
   if (!s->invalidated && memory_region_snapshot_get_dirty(
                             &s->vga.vram, snap, visible_offset,
@@ -5792,33 +5826,40 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   };
   if (direct_screen && vmsvga_trace_flight_enabled()) {
     uint64_t seq = ++s->trace_bar1_dirty_scans;
-    bool sample = seq <= 16 || (seq & 63) == 0 || dirty_pages != 0;
+    bool sample = seq <= 4 || (seq & 63) == 0 ||
+                  (bar1_dirty_pages != 0 && !s->trace_bar1_dirty_seen);
 
     if (sample) {
       uint8_t *vram = vmsvga_svga_vram_ptr(s);
       uint32_t hash =
-          vmsvga_gmr_diag_hash(vram + visible_offset, (size_t)visible_size);
+          vmsvga_gmr_diag_hash(vram, (size_t)s->vga.vram_size);
       bool hash_changed =
           s->trace_bar1_hash_valid && hash != s->trace_bar1_last_hash;
       bool report =
-          seq <= 16 || (seq & 63) == 0 ||
-          (dirty_pages != 0 && !s->trace_bar1_dirty_seen) ||
+          seq <= 4 || (seq & 63) == 0 ||
+          (bar1_dirty_pages != 0 && !s->trace_bar1_dirty_seen) ||
           (hash_changed && !s->trace_bar1_change_seen);
 
       if (report) {
         fprintf(stderr,
                 "VMVGA-BAR1-DIRTY seq=%" PRIu64
-                " pages=%u first=0x%" PRIx64 " last=0x%" PRIx64
-                " base=0x%" PRIx64 " size=0x%" PRIx64
-                " damage-before=%u damage-after=%u hash=0x%08x"
+                " visible-pages=%u visible-first=0x%" PRIx64
+                " visible-last=0x%" PRIx64
+                " bar1-pages=%u bar1-first=0x%" PRIx64
+                " bar1-last=0x%" PRIx64
+                " visible-base=0x%" PRIx64 " visible-size=0x%" PRIx64
+                " bar1-size=0x%" PRIx64
+                " damage-before=%u damage-after=%u bar1-hash=0x%08x"
                 " previous=0x%08x hash-valid=%u hash-changed=%u\n",
                 seq, dirty_pages, (uint64_t)first_dirty,
-                (uint64_t)last_dirty, (uint64_t)visible_offset,
-                (uint64_t)visible_size, damage_before, s->damage_count,
+                (uint64_t)last_dirty, bar1_dirty_pages,
+                (uint64_t)bar1_first_dirty, (uint64_t)bar1_last_dirty,
+                (uint64_t)visible_offset, (uint64_t)visible_size,
+                (uint64_t)s->vga.vram_size, damage_before, s->damage_count,
                 hash, s->trace_bar1_last_hash, s->trace_bar1_hash_valid,
                 hash_changed);
       };
-      if (dirty_pages != 0) {
+      if (bar1_dirty_pages != 0) {
         s->trace_bar1_dirty_seen = true;
       };
       if (hash_changed) {
@@ -7788,7 +7829,7 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp) {
   vmsvga_init(DEVICE(dev), &s->chip, pci_address_space(dev),
               pci_address_space_io(dev));
   vmsvga3d_renderer_realize(&s->chip);
-  pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.vga.vram);
+  pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_TYPE_32, &s->chip.vga.vram);
   pci_register_bar(dev, 2, PCI_BASE_ADDRESS_MEM_TYPE_32, &s->chip.fifo_ram);
 };
 static void pci_vmsvga_uninit(PCIDevice *dev) {

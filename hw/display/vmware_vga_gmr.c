@@ -900,6 +900,18 @@ static bool vmsvga_screen_is_direct_self_present(
          bypp == 4 && source_x == left && source_y == top;
 }
 
+static bool vmsvga_screen_is_direct_self_readback(
+    const struct vmsvga_state_s *s, const SVGASignedPoint *dest_origin,
+    const SVGASignedRect *src_rect, uint32_t bypp) {
+  return s->screen_backing_valid &&
+         s->screen_backing_gmr_id == SVGA_GMR_FRAMEBUFFER &&
+         s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER &&
+         s->screen_backing_offset == s->gmrfb_offset &&
+         s->screen_backing_pitch == s->gmrfb_bytes_per_line &&
+         bypp == 4 && dest_origin->x == src_rect->left &&
+         dest_origin->y == src_rect->top;
+}
+
 static bool vmsvga_screen_blit_one_from_gmrfb(
     struct vmsvga_state_s *s, int32_t src_x, int32_t src_y,
     int32_t dst_left, int32_t dst_top, int32_t dst_right,
@@ -1258,6 +1270,26 @@ static bool vmsvga_screen_blit_screen_to_gmrfb(
   }
   width = (uint32_t)width64;
   height = (uint32_t)height64;
+
+  /*
+   * When both the Screen Object and GMRFB describe the same BAR1 bytes,
+   * SCREEN_TO_GMRFB is an exact self-copy. VirtualBox's framebuffer GMR
+   * shortcut performs a same-address memcpy in this case. Avoid round-tripping
+   * BGRX through the conversion helper, which would otherwise rewrite the
+   * unused byte and mutate VRAM during a readback notification.
+   */
+  if (vmsvga_screen_is_direct_self_readback(s, dest_origin, src_rect, bypp)) {
+    if (vmsvga_trace_flight_enabled()) {
+      fprintf(stderr,
+              "VMVGA-SCREEN-READBACK seq=%" PRIu64
+              " target=backing-self-copy action=noop rect=%d,%d-%d,%d\n",
+              s->trace_now.screen_to_gmrfb + 1, src_rect->left,
+              src_rect->top, src_rect->right, src_rect->bottom);
+    }
+    s->trace_now.screen_to_gmrfb++;
+    vmsvga_screen_trace_activity(s);
+    return true;
+  }
 
   for (row = 0; row < height; row++) {
     uint32_t gmr_offset;

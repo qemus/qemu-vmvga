@@ -299,7 +299,7 @@ static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
     uint64_t ppn;
 
     if (flags & SVGA_REMAP_GMR2_PPN64) {
-      uint64_t raw;
+      uint64_t raw = UINT64_MAX;
 
       vmsvga_fifo_peek_raw_data(
           s, (size_t)ppn_index * sizeof(raw), &raw, sizeof(raw));
@@ -311,7 +311,7 @@ static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
         continue;
       };
     } else {
-      uint32_t raw;
+      uint32_t raw = UINT32_MAX;
 
       vmsvga_fifo_peek_raw_data(
           s, (size_t)ppn_index * sizeof(raw), &raw, sizeof(raw));

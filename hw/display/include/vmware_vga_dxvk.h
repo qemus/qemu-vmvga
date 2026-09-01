@@ -45,6 +45,7 @@ struct vmsvga3d_d3d10_create_desc_s;
 struct vmsvga3d_d3d10_rtv_desc_s;
 struct vmsvga3d_d3d10_dsv_desc_s;
 struct vmsvga3d_d3d10_srv_desc_s;
+struct vmsvga3d_d3d10_box_s;
 
 typedef struct vmsvga3d_dxvk_subresource_data_s {
   const void *data;
@@ -83,6 +84,12 @@ bool vmsvga3d_dxvk_d3d11_shader_resource_view_exists(
 bool vmsvga3d_dxvk_d3d11_generate_mips(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const struct vmsvga3d_d3d10_srv_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
+    uint32_t destination_subresource, uint32_t destination_x,
+    uint32_t destination_y, uint32_t destination_z,
+    VMSVGA3DDxvkSurface *source, uint32_t source_subresource,
+    const struct vmsvga3d_d3d10_box_s *source_box);
 bool vmsvga3d_dxvk_d3d11_query_define(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id,
     uint32_t d3d_query, uint32_t misc_flags);

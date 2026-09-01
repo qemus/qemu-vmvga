@@ -212,6 +212,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_END 28u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA 29u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SET_PREDICATION 30u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION 46u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
@@ -487,6 +488,20 @@ typedef void (*VMSVGA3DDxvkD3D11Begin)(void *context, void *query);
 typedef void (*VMSVGA3DDxvkD3D11End)(void *context, void *query);
 typedef void (*VMSVGA3DDxvkD3D11SetPredication)(
     void *context, void *predicate, int32_t predicate_value);
+typedef struct vmsvga3d_dxvk_d3d11_box_s {
+  uint32_t left;
+  uint32_t top;
+  uint32_t front;
+  uint32_t right;
+  uint32_t bottom;
+  uint32_t back;
+} VMSVGA3DDxvkD3D11Box;
+
+typedef void (*VMSVGA3DDxvkD3D11CopySubresourceRegion)(
+    void *context, void *destination, uint32_t destination_subresource,
+    uint32_t destination_x, uint32_t destination_y, uint32_t destination_z,
+    void *source, uint32_t source_subresource,
+    const VMSVGA3DDxvkD3D11Box *source_box);
 typedef int32_t (*VMSVGA3DDxvkD3D11GetData)(
     void *context, void *query, void *data, uint32_t data_size, uint32_t flags);
 
@@ -513,6 +528,8 @@ _Static_assert(sizeof(VMSVGA3DDxvkD3D11RTVDesc) == 20,
                "D3D11_RENDER_TARGET_VIEW_DESC ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DDxvkD3D11DSVDesc) == 24,
                "D3D11_DEPTH_STENCIL_VIEW_DESC ABI mismatch");
+_Static_assert(sizeof(VMSVGA3DDxvkD3D11Box) == 24,
+               "D3D11_BOX ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DDxvkD3D11QueryDesc) == 8,
                "D3D11_QUERY_DESC ABI mismatch");
 
@@ -2283,6 +2300,52 @@ bool vmsvga3d_dxvk_d3d11_set_predication(
   (void)query_id;
   (void)enabled;
   (void)predicate_value;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
+    uint32_t destination_subresource, uint32_t destination_x,
+    uint32_t destination_y, uint32_t destination_z,
+    VMSVGA3DDxvkSurface *source, uint32_t source_subresource,
+    const struct vmsvga3d_d3d10_box_s *source_box) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
+  const VMSVGA3DD3D10Box *box = source_box;
+  VMSVGA3DDxvkD3D11Box native;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      destination == NULL || source == NULL || box == NULL ||
+      !destination->d3d11_resident || destination->d3d11_resource == NULL ||
+      !source->d3d11_resident || source->d3d11_resource == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION,
+          &copy_region, sizeof(copy_region))) {
+    return false;
+  }
+  native.left = box->left;
+  native.top = box->top;
+  native.front = box->front;
+  native.right = box->right;
+  native.bottom = box->bottom;
+  native.back = box->back;
+  copy_region(dxvk->d3d11_context, destination->d3d11_resource,
+              destination_subresource, destination_x, destination_y,
+              destination_z, source->d3d11_resource, source_subresource,
+              &native);
+  return true;
+#else
+  (void)dxvk;
+  (void)destination;
+  (void)destination_subresource;
+  (void)destination_x;
+  (void)destination_y;
+  (void)destination_z;
+  (void)source;
+  (void)source_subresource;
+  (void)source_box;
   return false;
 #endif
 }

@@ -647,15 +647,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_resource_plan(
     if (use == VMSVGA3D_D3D10_RESOURCE_USE_GENERIC_BUFFER) {
       usage = policy.usage;
       cpu_access = policy.cpu_access_flags;
-      if (!(surface->surface_flags &
-            (SVGA3D_SURFACE_STAGING_UPLOAD |
-             SVGA3D_SURFACE_STAGING_DOWNLOAD |
-             SVGA3D_SURFACE_HINT_DYNAMIC)) &&
-          (surface->surface_flags & SVGA3D_SURFACE_HINT_STATIC) &&
-          surface->has_initial_data) {
-        usage = D3D10_USAGE_IMMUTABLE;
-        cpu_access = 0;
-      }
     } else if (use == VMSVGA3D_D3D10_RESOURCE_USE_STREAM_OUTPUT_BUFFER) {
       initial_count = 0;
     }
@@ -5429,6 +5420,85 @@ out:
   return success;
 }
 
+static bool vmsvga3d_d3d10_copy_surface_materialize_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DD3D10ResourceCreateKind create_kind)
+{
+  VMSVGA3DD3D10SurfaceInfo surface_info;
+  VMSVGA3DD3D10ResourcePlan resource_plan;
+  VMSVGA3DDxvkSubresourceData *initial_data = NULL;
+  VMSVGA3DD3D10ResourceUse resource_use;
+  VMSVGA3DD3D10Level level;
+  uint32_t initial_data_count = 0;
+  bool success;
+
+  if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return false;
+  }
+  if (!vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
+    return false;
+  }
+  resource_use = create_kind == VMSVGA3D_D3D10_CREATE_BUFFER
+                     ? VMSVGA3D_D3D10_RESOURCE_USE_GENERIC_BUFFER
+                     : VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE;
+  level = vmsvga3d_d3d10_resource_plan(
+      &surface_info, resource_use, &resource_plan);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      !resource_plan.primary.valid ||
+      !vmsvga3d_d3d10_initial_subresources_live(
+          surface, &resource_plan.primary, &initial_data,
+          &initial_data_count)) {
+    return false;
+  }
+  success = vmsvga3d_dxvk_d3d11_surface_materialize(
+      s->dxvk, surface->dxvk_surface, &resource_plan.primary,
+      initial_data, initial_data_count);
+  g_free(initial_data);
+  return success;
+}
+
+static bool vmsvga3d_d3d10_pred_copy_region_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXPredCopyRegion *command)
+{
+  VMSVGA3DSurface *source;
+  VMSVGA3DSurface *destination;
+  VMSVGA3DD3D10CopySubresourcePlan plan;
+  VMSVGA3DD3D10Level level;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk) || vmsvga3d_dx_context(s, cid) == NULL ||
+      command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
+      command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  source = s->svga3d->surfaces[command->srcSid];
+  destination = s->svga3d->surfaces[command->dstSid];
+  if (source == NULL || destination == NULL ||
+      command->srcSubResource >= source->mip_count ||
+      command->dstSubResource >= destination->mip_count) {
+    return false;
+  }
+
+  level = vmsvga3d_d3d10_copy_subresource_plan(
+      source->format, false, false, command->dstSubResource,
+      command->srcSubResource, &source->mips[command->srcSubResource].size,
+      &destination->mips[command->dstSubResource].size, &command->box, &plan);
+  if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      !vmsvga3d_d3d10_copy_surface_materialize_live(
+          s, source, plan.source_create_kind) ||
+      !vmsvga3d_d3d10_copy_surface_materialize_live(
+          s, destination, plan.destination_create_kind)) {
+    return false;
+  }
+  return vmsvga3d_dxvk_d3d11_copy_subresource_region(
+      s->dxvk, destination->dxvk_surface, plan.destination_subresource,
+      plan.region.destination_x, plan.region.destination_y,
+      plan.region.destination_z, source->dxvk_surface,
+      plan.source_subresource, &plan.region.source_box);
+}
+
 static bool vmsvga3d_d3d10_gen_mips_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXGenMips *command)
@@ -5786,6 +5856,16 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
     /* Invalidation is advisory: retaining the current contents is valid. */
     return true;
+  }
+
+  case SVGA_3D_CMD_DX_PRED_COPY_REGION: {
+    SVGA3dCmdDXPredCopyRegion command;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_pred_copy_region_live(s, cid, &command);
   }
 
   case SVGA_3D_CMD_DX_GENMIPS: {

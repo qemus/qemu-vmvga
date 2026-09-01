@@ -430,6 +430,21 @@ static bool vmsvga_screen_storage(struct vmsvga_state_s *s,
   if (!s->screen_defined || base == NULL || size == NULL || stride == NULL) {
     return false;
   }
+
+  if (s->screen_backing_valid) {
+    if (!vmsvga_screen_backing_validate(
+            s, s->screen_width, s->screen_height,
+            s->screen_backing_gmr_id, s->screen_backing_offset,
+            s->screen_backing_pitch)) {
+      return false;
+    }
+    required = (uint64_t)s->screen_backing_pitch * s->screen_height;
+    *base = vmsvga_svga_vram_ptr(s) + s->screen_backing_offset;
+    *size = (size_t)required;
+    *stride = s->screen_backing_pitch;
+    return true;
+  }
+
   required = (uint64_t)s->screen_stride * s->screen_height;
   if (s->screen_base == NULL ||
       s->screen_stride != (uint64_t)s->screen_width * 4 ||
@@ -446,13 +461,12 @@ static inline void vmsvga_screen_mark_dirty(struct vmsvga_state_s *s,
                                             uint32_t x, uint32_t y,
                                             uint32_t width,
                                             uint32_t height) {
-  /* Screen base storage is host-owned. Guest BAR1 is dirtied only when an
-   * explicit DMA command actually writes to it. */
-  (void)s;
-  (void)x;
-  (void)y;
-  (void)width;
-  (void)height;
+  if (s->screen_backing_valid &&
+      s->screen_backing_gmr_id == SVGA_GMR_FRAMEBUFFER) {
+    vmsvga_mark_vram_dirty_rect(s, s->screen_backing_offset,
+                                s->screen_backing_pitch, 4,
+                                x, y, width, height);
+  }
 }
 
 static void vmsvga_screen_reset(struct vmsvga_state_s *s) {
@@ -526,7 +540,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         id, backing_gmr_id, backing_offset, backing_pitch, width, height);
     return false;
   }
-  if (!vmsvga_screen_base_resize(s, width, height)) {
+  if (!backing_present && !vmsvga_screen_base_resize(s, width, height)) {
     VMSVGA_SCREEN_REJECT(
         "define reason=base-allocation id=%u size=%ux%u bytes=%" PRIu64,
         id, width, height, size);
@@ -544,14 +558,14 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
   s->screen_root_x = root_x;
   s->screen_root_y = root_y;
   s->screen_clone_count = clone_count;
-  s->screen_stride = (uint32_t)stride;
+  s->screen_stride = backing_present ? backing_pitch : (uint32_t)stride;
 
   /* The active tuple also describes the Screen Object scanout surface. */
   s->active_valid = true;
   s->active_width = width;
   s->active_height = height;
   s->active_depth = 32;
-  s->active_stride = (uint32_t)stride;
+  s->active_stride = s->screen_stride;
   s->new_width = width;
   s->new_height = height;
   s->new_depth = 32;
@@ -882,7 +896,18 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
 
   vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,
                            width, height);
-  vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
+  if (s->screen_backing_valid && s->svga_surface_bound &&
+      qemu_console_surface(s->vga.con) != NULL &&
+      surface_data(qemu_console_surface(s->vga.con)) == screen_base) {
+    if (vmsvga_trace_flight_enabled()) {
+      s->trace_now.damage_rects++;
+      vmsvga_trace_flight_activity(s);
+    }
+    vmvga_console_update(s->vga.con, (uint32_t)left, (uint32_t)top,
+                         width, height);
+  } else {
+    vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
+  }
   return true;
 }
 

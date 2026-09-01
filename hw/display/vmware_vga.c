@@ -427,9 +427,9 @@ struct vmsvga_state_s {
   uint32_t *fifo;
   uint32_t scratch[VMSVGA_SCRATCH_SIZE];
   struct vmsvga_gmr_s *gmrs[64];
-  /* Screen Object ID 0. Keep the visible base layer host-owned. Optional
-   * guest backingStore metadata is parsed and validated, but guest memory is
-   * touched only by explicit FIFO DMA commands. */
+  /* Screen Object ID 0. Backed Screen Objects scan out directly from their
+   * guest-provided BAR1 backingStore. screen_base is retained only for the
+   * optional unbacked Screen Object form. */
   uint8_t *screen_base;
   size_t screen_base_size;
   uint32_t screen_stride;
@@ -5956,7 +5956,8 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
       s->active_width != surface_width(surface) ||
       s->active_height != surface_height(surface) ||
       stride != surface_stride(surface) ||
-      s->active_depth != surface_bits_per_pixel(surface)) {
+      s->active_depth != surface_bits_per_pixel(surface) ||
+      surface_data(surface) != scanout) {
     pixman_format_code_t format = vmsvga_pixman_format(s->active_depth);
 #ifdef VERBOSE
     int old_width = surface_width(surface);
@@ -6992,24 +6993,34 @@ static int vmsvga_pre_save(void *opaque) {
     s->legacy_vga_size = (uint32_t)vmsvga_legacy_vga_backup_size(s);
   };
   if (s->screen_defined) {
-    uint64_t stride = (uint64_t)s->screen_width * 4;
+    uint64_t packed_stride = (uint64_t)s->screen_width * 4;
+    uint64_t stride = s->screen_backing_valid
+                          ? s->screen_backing_pitch
+                          : packed_stride;
     uint64_t size = stride * s->screen_height;
     if (s->screen_width == 0 || s->screen_height == 0 ||
         s->screen_width > VMSVGA_MAX_WIDTH ||
-        s->screen_height > VMSVGA_MAX_HEIGHT || stride > UINT32_MAX ||
-        size == 0 || size > UINT32_MAX || s->screen_base == NULL ||
-        s->screen_stride != stride || s->screen_base_size != size ||
-        s->active_stride != stride) {
+        s->screen_height > VMSVGA_MAX_HEIGHT ||
+        packed_stride > UINT32_MAX || stride > UINT32_MAX ||
+        size == 0 || size > UINT32_MAX ||
+        s->screen_stride != stride || s->active_stride != stride) {
       return -EINVAL;
     };
-    if (s->screen_backing_valid &&
-        !vmsvga_screen_backing_validate(
-            s, s->screen_width, s->screen_height,
-            s->screen_backing_gmr_id, s->screen_backing_offset,
-            s->screen_backing_pitch)) {
-      return -EINVAL;
+    if (s->screen_backing_valid) {
+      if (!vmsvga_screen_backing_validate(
+              s, s->screen_width, s->screen_height,
+              s->screen_backing_gmr_id, s->screen_backing_offset,
+              s->screen_backing_pitch)) {
+        return -EINVAL;
+      };
+      s->screen_base_migration_size = 0;
+    } else {
+      if (s->screen_base == NULL || s->screen_base_size != size ||
+          stride != packed_stride) {
+        return -EINVAL;
+      };
+      s->screen_base_migration_size = (uint32_t)size;
     };
-    s->screen_base_migration_size = (uint32_t)size;
   } else if (s->screen_base != NULL || s->screen_base_size != 0 ||
              s->screen_stride != 0 || s->screen_backing_valid ||
              s->screen_backing_gmr_id != SVGA_GMR_NULL ||
@@ -7267,24 +7278,38 @@ static int vmsvga_post_load(void *opaque, int version_id) {
   };
 
   if (s->screen_defined) {
-    uint64_t stride = (uint64_t)s->screen_width * 4;
+    uint64_t packed_stride = (uint64_t)s->screen_width * 4;
+    uint64_t stride = s->screen_backing_valid
+                          ? s->screen_backing_pitch
+                          : packed_stride;
     uint64_t size = stride * s->screen_height;
+    bool backing_valid =
+        !s->screen_backing_valid ||
+        vmsvga_screen_backing_validate(
+            s, s->screen_width, s->screen_height,
+            s->screen_backing_gmr_id, s->screen_backing_offset,
+            s->screen_backing_pitch);
+    bool storage_valid = s->screen_backing_valid
+                             ? s->screen_base_migration_size == 0
+                             : (stride == packed_stride &&
+                                s->screen_base_migration_size == size &&
+                                s->screen_base != NULL);
     if (s->screen_width == 0 || s->screen_height == 0 ||
         s->screen_width > VMSVGA_MAX_WIDTH ||
-        s->screen_height > VMSVGA_MAX_HEIGHT || stride > UINT32_MAX ||
-        size == 0 || size > UINT32_MAX ||
-        s->screen_base_migration_size != size || s->screen_base == NULL ||
-        s->active_stride != stride ||
-        (s->screen_backing_valid &&
-         !vmsvga_screen_backing_validate(
-             s, s->screen_width, s->screen_height,
-             s->screen_backing_gmr_id, s->screen_backing_offset,
-             s->screen_backing_pitch))) {
+        s->screen_height > VMSVGA_MAX_HEIGHT ||
+        packed_stride > UINT32_MAX || stride > UINT32_MAX ||
+        size == 0 || size > UINT32_MAX || !backing_valid || !storage_valid ||
+        s->active_stride != stride) {
       ret = -EINVAL;
       goto fail;
     };
     s->screen_stride = (uint32_t)stride;
-    s->screen_base_size = (size_t)size;
+    if (s->screen_backing_valid) {
+      g_clear_pointer(&s->screen_base, g_free);
+      s->screen_base_size = 0;
+    } else {
+      s->screen_base_size = (size_t)size;
+    };
   } else if (s->screen_base_migration_size != 0 || s->screen_base != NULL ||
              s->screen_backing_valid ||
              s->screen_backing_gmr_id != SVGA_GMR_NULL ||

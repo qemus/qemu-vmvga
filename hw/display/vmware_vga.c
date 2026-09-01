@@ -5804,9 +5804,16 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   hwaddr visible_end;
   hwaddr snapshot_offset;
   hwaddr snapshot_size;
-  uint32_t bar1_dirty_pages;
-  hwaddr bar1_first_dirty;
-  hwaddr bar1_last_dirty;
+  struct vmsvga_bar1_trace_s {
+    uint32_t bar1_dirty_pages;
+    hwaddr bar1_first_dirty;
+    hwaddr bar1_last_dirty;
+    uint32_t dirty_pages;
+    hwaddr first_dirty;
+    hwaddr last_dirty;
+    uint32_t damage_before;
+  } bar1_trace_state;
+  struct vmsvga_bar1_trace_s *bar1_trace = NULL;
   bool direct_screen = vmsvga_direct_screen_vram_scanout(s);
   bool trace_flight = vmsvga_trace_flight_enabled();
   bool trace_full_bar1 = direct_screen && trace_flight;
@@ -5814,19 +5821,16 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   bool trace_range_open;
   hwaddr trace_range_start;
   hwaddr trace_range_end;
-  uint32_t dirty_pages;
-  hwaddr first_dirty;
-  hwaddr last_dirty;
-  uint32_t damage_before;
 
   if (trace_full_bar1) {
-    bar1_dirty_pages = 0;
-    bar1_first_dirty = 0;
-    bar1_last_dirty = 0;
-    dirty_pages = 0;
-    first_dirty = 0;
-    last_dirty = 0;
-    damage_before = s->damage_count;
+    bar1_trace_state.bar1_dirty_pages = 0;
+    bar1_trace_state.bar1_first_dirty = 0;
+    bar1_trace_state.bar1_last_dirty = 0;
+    bar1_trace_state.dirty_pages = 0;
+    bar1_trace_state.first_dirty = 0;
+    bar1_trace_state.last_dirty = 0;
+    bar1_trace_state.damage_before = s->damage_count;
+    bar1_trace = &bar1_trace_state;
   };
   if (trace_dirty) {
     trace_range_open = false;
@@ -5863,7 +5867,7 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
   if (snap == NULL) {
     return;
   };
-  if (trace_full_bar1 &&
+  if (bar1_trace != NULL &&
       memory_region_snapshot_get_dirty(&s->vga.vram, snap, 0,
                                        s->vga.vram_size)) {
     block_size = (hwaddr)TARGET_PAGE_SIZE * VMSVGA_DIRTY_BLOCK_PAGES;
@@ -5882,11 +5886,11 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
                                               page_end - page_addr)) {
           continue;
         };
-        bar1_dirty_pages++;
-        if (bar1_dirty_pages == 1) {
-          bar1_first_dirty = page_addr;
+        bar1_trace->bar1_dirty_pages++;
+        if (bar1_trace->bar1_dirty_pages == 1) {
+          bar1_trace->bar1_first_dirty = page_addr;
         };
-        bar1_last_dirty = page_end;
+        bar1_trace->bar1_last_dirty = page_end;
       };
     };
   };
@@ -5912,12 +5916,12 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
                                               page_end - page_addr)) {
           continue;
         };
-        if (trace_full_bar1) {
-          dirty_pages++;
-          if (dirty_pages == 1) {
-            first_dirty = page_addr;
+        if (bar1_trace != NULL) {
+          bar1_trace->dirty_pages++;
+          if (bar1_trace->dirty_pages == 1) {
+            bar1_trace->first_dirty = page_addr;
           };
-          last_dirty = page_end;
+          bar1_trace->last_dirty = page_end;
         };
         if (trace_flight) {
           s->trace_now.dirty_pages++;
@@ -5975,7 +5979,7 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
         (uint32_t)((trace_range_end - 1 - visible_offset) / stride),
         stride, bypp);
   };
-  if (trace_full_bar1) {
+  if (bar1_trace != NULL) {
     uint64_t seq = ++s->trace_bar1_dirty_scans;
     uint8_t *vram = vmsvga_svga_vram_ptr(s);
     uint32_t probe_count = MIN(
@@ -5983,7 +5987,8 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
         DIV_ROUND_UP((uint64_t)s->vga.vram_size,
                      (uint64_t)VMVGA_TRACE_BAR1_PROBE_SIZE));
     bool sample = seq <= 4 || (seq & 63) == 0 ||
-                  (bar1_dirty_pages != 0 && !s->trace_bar1_dirty_seen);
+                  (bar1_trace->bar1_dirty_pages != 0 &&
+                   !s->trace_bar1_dirty_seen);
 
     if (probe_count != 0) {
       uint32_t slot = s->trace_bar1_probe_slot % probe_count;
@@ -6016,7 +6021,8 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
           s->trace_bar1_hash_valid && hash != s->trace_bar1_last_hash;
       bool report =
           seq <= 4 || (seq & 63) == 0 ||
-          (bar1_dirty_pages != 0 && !s->trace_bar1_dirty_seen) ||
+          (bar1_trace->bar1_dirty_pages != 0 &&
+           !s->trace_bar1_dirty_seen) ||
           (hash_changed && !s->trace_bar1_change_seen);
 
       if (report) {
@@ -6030,15 +6036,19 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
                 " bar1-size=0x%" PRIx64
                 " damage-before=%u damage-after=%u bar1-hash=0x%08x"
                 " previous=0x%08x hash-valid=%u hash-changed=%u\n",
-                seq, dirty_pages, (uint64_t)first_dirty,
-                (uint64_t)last_dirty, bar1_dirty_pages,
-                (uint64_t)bar1_first_dirty, (uint64_t)bar1_last_dirty,
+                seq, bar1_trace->dirty_pages,
+                (uint64_t)bar1_trace->first_dirty,
+                (uint64_t)bar1_trace->last_dirty,
+                bar1_trace->bar1_dirty_pages,
+                (uint64_t)bar1_trace->bar1_first_dirty,
+                (uint64_t)bar1_trace->bar1_last_dirty,
                 (uint64_t)visible_offset, (uint64_t)visible_size,
-                (uint64_t)s->vga.vram_size, damage_before, s->damage_count,
+                (uint64_t)s->vga.vram_size, bar1_trace->damage_before,
+                s->damage_count,
                 hash, s->trace_bar1_last_hash, s->trace_bar1_hash_valid,
                 hash_changed);
       };
-      if (bar1_dirty_pages != 0) {
+      if (bar1_trace->bar1_dirty_pages != 0) {
         s->trace_bar1_dirty_seen = true;
       };
       if (hash_changed) {

@@ -5982,6 +5982,12 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     vmvga_console_set_surface(s->vga.con, surface);
     s->svga_surface_bound = true;
     s->invalidated = true;
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_DRAW,
+                       "SURFACE_BIND data=%p width=%u height=%u stride=%u "
+                       "scanout=%p",
+                       surface_data(surface), surface_width(surface),
+                       surface_height(surface), surface_stride(surface),
+                       scanout);
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
                        "SCANOUT source=%s width=%u height=%u depth=%u stride=%u",
                        s->screen_defined ? "screen" : "bar1", s->active_width,

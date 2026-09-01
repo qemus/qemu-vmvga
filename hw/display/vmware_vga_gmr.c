@@ -896,9 +896,9 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
 
   vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,
                            width, height);
-  if (s->screen_backing_valid && s->svga_surface_bound &&
-      qemu_console_surface(s->vga.con) != NULL &&
-      surface_data(qemu_console_surface(s->vga.con)) == screen_base) {
+  if (s->screen_backing_valid && s->screen_backing_gmr_id ==
+      SVGA_GMR_FRAMEBUFFER && s->svga_surface_bound &&
+      qemu_console_surface(s->vga.con) != NULL) {
     if (vmsvga_trace_flight_enabled()) {
       s->trace_now.damage_rects++;
       vmsvga_trace_flight_activity(s);

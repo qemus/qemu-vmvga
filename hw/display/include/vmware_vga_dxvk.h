@@ -46,6 +46,11 @@ struct vmsvga3d_d3d10_rtv_desc_s;
 struct vmsvga3d_d3d10_dsv_desc_s;
 struct vmsvga3d_d3d10_srv_desc_s;
 struct vmsvga3d_d3d10_box_s;
+struct vmsvga3d_d3d10_input_element_s;
+struct vmsvga3d_d3d10_blend_desc_s;
+struct vmsvga3d_d3d10_depth_stencil_desc_s;
+struct vmsvga3d_d3d10_rasterizer_desc_s;
+struct vmsvga3d_d3d10_sampler_desc_s;
 
 typedef struct vmsvga3d_dxvk_subresource_data_s {
   const void *data;
@@ -93,6 +98,51 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
 bool vmsvga3d_dxvk_d3d11_copy_resource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
     VMSVGA3DDxvkSurface *source);
+bool vmsvga3d_dxvk_d3d11_update_subresource(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    const struct vmsvga3d_d3d10_box_s *box, const void *data,
+    uint32_t row_pitch, uint32_t depth_pitch);
+bool vmsvga3d_dxvk_d3d11_blend_state_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
+    const struct vmsvga3d_d3d10_blend_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_blend_state_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id);
+bool vmsvga3d_dxvk_d3d11_depth_stencil_state_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
+    const struct vmsvga3d_d3d10_depth_stencil_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_depth_stencil_state_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id);
+bool vmsvga3d_dxvk_d3d11_rasterizer_state_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
+    const struct vmsvga3d_d3d10_rasterizer_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_rasterizer_state_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id);
+bool vmsvga3d_dxvk_d3d11_sampler_state_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
+    const struct vmsvga3d_d3d10_sampler_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_sampler_state_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id);
+void vmsvga3d_dxvk_d3d11_state_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid);
+bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t layout_id,
+    uint32_t shader_id,
+    const struct vmsvga3d_d3d10_input_element_s *elements,
+    uint32_t element_count);
+bool vmsvga3d_dxvk_d3d11_input_layout_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t layout_id);
+void vmsvga3d_dxvk_d3d11_input_layout_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid);
+bool vmsvga3d_dxvk_d3d11_shader_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t shader_type, const void *bytecode, uint32_t bytecode_size);
+bool vmsvga3d_dxvk_d3d11_shader_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id);
+bool vmsvga3d_dxvk_d3d11_shader_bytecode(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t shader_type, const void **bytecode, uint32_t *bytecode_size);
+void vmsvga3d_dxvk_d3d11_shader_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid);
 bool vmsvga3d_dxvk_d3d11_query_define(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id,
     uint32_t d3d_query, uint32_t misc_flags);

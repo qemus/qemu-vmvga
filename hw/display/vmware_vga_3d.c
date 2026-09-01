@@ -833,6 +833,7 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s) {
     vmsvga3d_context_free(state, state->contexts[i]);
     vmsvga3d_dxvk_d3d11_query_context_destroy(s->dxvk, i);
     vmsvga3d_dxvk_d3d11_state_context_destroy(s->dxvk, i);
+    vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(s->dxvk, i);
     vmsvga3d_dx_context_free(state->dx_contexts[i]);
   };
   for (i = 0; i < SVGA3D_MAX_SURFACE_IDS; i++) {
@@ -4247,6 +4248,7 @@ static bool vmsvga3d_dx_context_define_backed(struct vmsvga_state_s *s,
   }
   vmsvga3d_dxvk_d3d11_query_context_destroy(s->dxvk, cid);
   vmsvga3d_dxvk_d3d11_state_context_destroy(s->dxvk, cid);
+  vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(s->dxvk, cid);
   vmsvga3d_dxvk_d3d11_shader_context_destroy(s->dxvk, cid);
   return true;
 }
@@ -4261,6 +4263,7 @@ static bool vmsvga3d_dx_context_destroy_backed(struct vmsvga_state_s *s,
   }
   vmsvga3d_dxvk_d3d11_query_context_destroy(s->dxvk, cid);
   vmsvga3d_dxvk_d3d11_state_context_destroy(s->dxvk, cid);
+  vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(s->dxvk, cid);
   vmsvga3d_dxvk_d3d11_shader_context_destroy(s->dxvk, cid);
   return true;
 }

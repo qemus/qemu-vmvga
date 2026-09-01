@@ -102,6 +102,24 @@ bool vmsvga3d_dxvk_d3d11_update_subresource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d10_box_s *box, const void *data,
     uint32_t row_pitch, uint32_t depth_pitch);
+bool vmsvga3d_dxvk_d3d11_constant_buffer_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
+    uint32_t slot, const void *data, uint32_t size);
+bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
+    uint32_t slot);
+bool vmsvga3d_dxvk_d3d11_set_constant_buffers(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
+    uint32_t start_slot, uint32_t buffer_count);
+bool vmsvga3d_dxvk_d3d11_set_vertex_buffers(
+    VMSVGA3DDxvk *dxvk, uint32_t start_slot, uint32_t buffer_count,
+    VMSVGA3DDxvkSurface *const *surfaces, const uint32_t *strides,
+    const uint32_t *offsets);
+bool vmsvga3d_dxvk_d3d11_set_index_buffer(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    uint32_t format, uint32_t offset);
+void vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid);
 bool vmsvga3d_dxvk_d3d11_blend_state_define(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
     const struct vmsvga3d_d3d10_blend_desc_s *desc);

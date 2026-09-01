@@ -441,6 +441,8 @@ struct vmsvga_state_s {
   int32_t screen_root_x;
   int32_t screen_root_y;
   bool screen_backing_valid;
+  /* Temporary protection during legacy VGA -> Screen Object takeover. */
+  bool screen_handoff_active;
   uint32_t screen_backing_gmr_id;
   uint32_t screen_backing_offset;
   uint32_t screen_backing_pitch;
@@ -5982,6 +5984,11 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     vmvga_console_set_surface(s->vga.con, surface);
     s->svga_surface_bound = true;
     s->invalidated = true;
+    /* A newly bound surface does not necessarily trigger a frontend redraw.
+     * Force an initial full update so the display frontend starts consuming
+     * the new scanout contents immediately. */
+    vmvga_console_update(s->vga.con, 0, 0,
+                         s->active_width, s->active_height);
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_DRAW,
                        "SURFACE_BIND data=%p width=%u height=%u stride=%u "
                        "scanout=%p",

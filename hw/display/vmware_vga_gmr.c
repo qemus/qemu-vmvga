@@ -440,20 +440,26 @@ static bool vmsvga_screen_storage(struct vmsvga_state_s *s,
     }
     required = (uint64_t)s->screen_backing_pitch * s->screen_height;
     /*
-     * Keep the host scanout mirror for the active Screen Object.  The guest
-     * framebuffer is the source of GMRFB_TO_SCREEN operations, but BAR1 must
-     * not become the QEMU display surface during the legacy VGA -> Screen
-     * Object transition.  This avoids reinterpreting the previous firmware
-     * framebuffer with the new pitch.
+     * Keep the host scanout mirror only during the legacy VGA -> Screen
+     * Object handoff. Once Windows has successfully presented the new Screen
+     * Object, use the real framebuffer backing.
      */
-    if (!vmsvga_screen_base_resize(s, s->screen_width,
-                                   s->screen_height)) {
-      return false;
+    if (s->screen_handoff_active) {
+      if (!vmsvga_screen_base_resize(s, s->screen_width,
+                                     s->screen_height)) {
+        return false;
+      }
+      *base = s->screen_base;
+      *size = s->screen_base_size;
+      *stride = s->screen_stride;
+      return true;
     }
-    *base = s->screen_base;
-    *size = s->screen_base_size;
-    *stride = s->screen_stride;
-    return true;
+    if (s->screen_backing_gmr_id == SVGA_GMR_FRAMEBUFFER) {
+      *base = vmsvga_svga_vram_ptr(s) + s->screen_backing_offset;
+      *size = s->vga.vram_size - s->screen_backing_offset;
+      *stride = s->screen_backing_pitch;
+      return true;
+    }
   }
 
   required = (uint64_t)s->screen_stride * s->screen_height;
@@ -558,6 +564,8 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     return false;
   }
   s->screen_backing_valid = backing_present;
+  /* Keep the mirror only until the first successful guest Screen update. */
+  s->screen_handoff_active = backing_present;
   s->screen_backing_gmr_id = backing_present ? backing_gmr_id : SVGA_GMR_NULL;
   s->screen_backing_offset = backing_present ? backing_offset : 0;
   s->screen_backing_pitch = backing_present ? backing_pitch : 0;
@@ -582,6 +590,11 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
   s->new_depth = 32;
   s->svga_surface_bound = false;
   s->invalidated = true;
+
+  /* Bind the Screen Object surface when it is defined, not from the first
+   * guest blit. The first GMRFB-to-screen operation must only update an
+   * already selected scanout surface. */
+  vmsvga_check_size(s);
 
   if (vmsvga_trace_flight_enabled()) {
     fprintf(stderr,

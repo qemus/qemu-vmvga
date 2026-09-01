@@ -5670,6 +5670,80 @@ static bool vmsvga3d_d3d10_initial_subresources_live(
   return true;
 }
 
+static bool vmsvga3d_d3d10_buffer_materialize_live(
+    struct vmsvga_state_s *s, SVGA3dSurfaceId sid)
+{
+  VMSVGA3DSurface *surface;
+  VMSVGA3DD3D10SurfaceInfo surface_info;
+  VMSVGA3DD3D10ResourcePlan resource_plan;
+  VMSVGA3DDxvkSubresourceData *initial_data = NULL;
+  uint32_t initial_data_count = 0;
+  bool success;
+
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk) ||
+      sid >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  surface = s->svga3d->surfaces[sid];
+  if (surface == NULL || surface->dxvk_surface == NULL ||
+      !vmsvga3d_d3d10_surface_info_live(surface, &surface_info) ||
+      !vmsvga3d_d3d10_level_is_vgpu10(
+          vmsvga3d_d3d10_resource_plan(
+              &surface_info, VMSVGA3D_D3D10_RESOURCE_USE_BUFFER,
+              &resource_plan)) ||
+      !resource_plan.primary.valid ||
+      !vmsvga3d_d3d10_initial_subresources_live(
+          surface, &resource_plan.primary, &initial_data,
+          &initial_data_count)) {
+    return false;
+  }
+  success = vmsvga3d_dxvk_d3d11_surface_materialize(
+      s->dxvk, surface->dxvk_surface, &resource_plan.primary,
+      initial_data, initial_data_count);
+  g_free(initial_data);
+  return success;
+}
+
+static bool vmsvga3d_d3d10_vertex_buffers_live(
+    struct vmsvga_state_s *s,
+    const VMSVGA3DD3D10VertexBufferSetPlan *plan)
+{
+  uint32_t i;
+
+  if (s == NULL || plan == NULL || !plan->prepare_backend_on_set ||
+      !plan->backend_updates_sequentially ||
+      plan->start_buffer > SVGA3D_DX_MAX_VERTEXBUFFERS ||
+      plan->count > SVGA3D_DX_MAX_VERTEXBUFFERS - plan->start_buffer ||
+      plan->shadow_update_count != plan->count) {
+    return false;
+  }
+  for (i = 0; i < plan->count; i++) {
+    if (plan->bindings[i].unbind) {
+      continue;
+    }
+    if (!plan->bindings[i].ensure_buffer_on_set ||
+        !vmsvga3d_d3d10_buffer_materialize_live(
+            s, plan->bindings[i].sid)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool vmsvga3d_d3d10_index_buffer_live(
+    struct vmsvga_state_s *s,
+    const VMSVGA3DD3D10IndexBufferSetPlan *plan)
+{
+  if (s == NULL || plan == NULL) {
+    return false;
+  }
+  if (plan->unbind) {
+    return true;
+  }
+  return plan->ensure_buffer_on_set && !plan->backend_reject &&
+         vmsvga3d_d3d10_buffer_materialize_live(s, plan->sid);
+}
+
 static bool vmsvga3d_d3d10_srv_realize_live(
     struct vmsvga_state_s *s, uint32_t cid,
     SVGA3dShaderResourceViewId view_id)
@@ -6304,6 +6378,47 @@ static bool vmsvga3d_d3d10_set_predication_live(
       s->dxvk, cid, command->queryId, plan.enabled, plan.predicate_value);
 }
 
+static bool vmsvga3d_d3d10_constant_buffer_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10ConstantBufferPlan *plan,
+    const VMSVGA3DSurface *surface)
+{
+  const void *data = NULL;
+
+  if (s == NULL || plan == NULL ||
+      plan->stage_index >= SVGA3D_NUM_SHADERTYPE_DX10 ||
+      plan->slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+    return false;
+  }
+  if (plan->unbind) {
+    return vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
+        s->dxvk, cid, plan->stage_index, plan->slot);
+  }
+  if (!plan->create_buffer || !plan->replace_only_on_create_success ||
+      !plan->preserve_old_buffer_on_create_failure || surface == NULL ||
+      surface->mips == NULL || surface->mip_count == 0 ||
+      plan->offset_in_bytes > surface->mips[0].data_size ||
+      plan->size_in_bytes >
+          surface->mips[0].data_size - plan->offset_in_bytes) {
+    return false;
+  }
+  if (plan->has_initial_data) {
+    if (surface->mips[0].data == NULL ||
+        plan->initial_data_offset > surface->mips[0].data_size ||
+        plan->size_in_bytes >
+            surface->mips[0].data_size - plan->initial_data_offset) {
+      return false;
+    }
+    data = surface->mips[0].data + plan->initial_data_offset;
+  }
+  if (vmsvga3d_dxvk_d3d11_constant_buffer_define(
+          s->dxvk, cid, plan->stage_index, plan->slot, data,
+          plan->size_in_bytes)) {
+    return true;
+  }
+  return plan->create_failure_is_success;
+}
+
 static bool vmsvga3d_d3d10_samplers_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10SamplerSetPlan *plan, uint32_t bind_count)
@@ -6501,7 +6616,9 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
       };
       return false;
     };
-    return vmsvga3d_state_dx_apply_constant_buffer(s, cid, &plan);
+    return vmsvga3d_d3d10_constant_buffer_live(
+               s, cid, &plan, surface) &&
+           vmsvga3d_state_dx_apply_constant_buffer(s, cid, &plan);
   }
 
   case SVGA_3D_CMD_DX_SET_SHADER_RESOURCES: {
@@ -6641,10 +6758,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     SVGA3dCmdDXSetVertexBuffers command;
     SVGA3dVertexBuffer buffers[SVGA3D_DX_MAX_VERTEXBUFFERS];
     VMSVGA3DD3D10VertexBufferSetPlan plan;
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     const uint32_t header_size = sizeof(command);
     uint32_t count;
 
-    if (size < header_size) {
+    if (context == NULL || size < header_size) {
       return false;
     };
     memcpy(&command, payload, sizeof(command));
@@ -6659,6 +6777,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     return vmsvga3d_d3d10_vertex_buffers_set_plan(
                command.startBuffer, count, count != 0 ? buffers : NULL,
                &plan) != VMSVGA3D_D3D10_LEVEL_INVALID &&
+           vmsvga3d_d3d10_vertex_buffers_live(s, &plan) &&
            vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan);
   }
 
@@ -6666,8 +6785,9 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     SVGA3dCmdDXSetIndexBuffer command;
     VMSVGA3DD3D10IndexBufferSetPlan plan;
     VMSVGA3DD3D10Level level;
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
 
-    if (size < sizeof(command)) {
+    if (context == NULL || size < sizeof(command)) {
       return false;
     };
     memcpy(&command, payload, sizeof(command));
@@ -6680,7 +6800,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
       };
       return false;
     };
-    return vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan);
+    return vmsvga3d_d3d10_index_buffer_live(s, &plan) &&
+           vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan);
   }
 
   case SVGA_3D_CMD_DX_SET_TOPOLOGY: {

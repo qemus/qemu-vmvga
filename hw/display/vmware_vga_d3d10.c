@@ -5458,6 +5458,156 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
   return success;
 }
 
+typedef struct vmsvga3d_d3d10_update_layout_s {
+  SVGA3dBox box;
+  uint32_t box_offset;
+  uint32_t row_bytes;
+  uint32_t row_count;
+  uint32_t depth_count;
+} VMSVGA3DD3D10UpdateLayout;
+
+static bool vmsvga3d_d3d10_update_box_live(
+    VMSVGA3DSurface *surface, VMSVGA3DSurfaceImage *image,
+    const SVGA3dBox *source, VMSVGA3DD3D10UpdateLayout *layout) {
+  const struct svga3d_surface_desc *desc;
+  uint64_t right;
+  uint64_t bottom;
+  uint64_t back;
+  uint64_t offset;
+  uint64_t bytes;
+  uint32_t block_width;
+  uint32_t block_height;
+  uint32_t block_depth;
+  uint32_t blocks_x;
+
+  if (surface == NULL || image == NULL || source == NULL || layout == NULL ||
+      source->w == 0 || source->h == 0 || source->d == 0 ||
+      source->x >= image->size.width || source->y >= image->size.height ||
+      source->z >= image->size.depth) {
+    return false;
+  }
+  desc = svga3dsurface_get_desc(surface->format);
+  if (desc->format != surface->format || desc->pitch_bytes_per_block == 0 ||
+      desc->block_size.width == 0 || desc->block_size.height == 0 ||
+      desc->block_size.depth == 0) {
+    return false;
+  }
+  block_width = desc->block_size.width;
+  block_height = desc->block_size.height;
+  block_depth = desc->block_size.depth;
+  right = MIN((uint64_t)source->x + source->w, (uint64_t)image->size.width);
+  bottom = MIN((uint64_t)source->y + source->h,
+               (uint64_t)image->size.height);
+  back = MIN((uint64_t)source->z + source->d, (uint64_t)image->size.depth);
+  if (right <= source->x || bottom <= source->y || back <= source->z) {
+    return false;
+  }
+
+  memset(layout, 0, sizeof(*layout));
+  layout->box = *source;
+  layout->box.w = (uint32_t)(right - source->x);
+  layout->box.h = (uint32_t)(bottom - source->y);
+  layout->box.d = (uint32_t)(back - source->z);
+  if (source->x % block_width != 0 || source->y % block_height != 0 ||
+      source->z % block_depth != 0 ||
+      ((uint32_t)right % block_width != 0 && right != image->size.width) ||
+      ((uint32_t)bottom % block_height != 0 && bottom != image->size.height) ||
+      ((uint32_t)back % block_depth != 0 && back != image->size.depth)) {
+    return false;
+  }
+
+  blocks_x = (layout->box.w + block_width - 1) / block_width;
+  bytes = (uint64_t)blocks_x * desc->pitch_bytes_per_block;
+  offset = (uint64_t)(layout->box.x / block_width) *
+               desc->pitch_bytes_per_block +
+           (uint64_t)(layout->box.y / block_height) * image->pitch +
+           (uint64_t)(layout->box.z / block_depth) * image->plane_size;
+  if (bytes == 0 || bytes > UINT32_MAX || offset > UINT32_MAX ||
+      offset > image->data_size || bytes > image->data_size - offset) {
+    return false;
+  }
+  layout->box_offset = (uint32_t)offset;
+  layout->row_bytes = (uint32_t)bytes;
+  layout->row_count = (layout->box.h + block_height - 1) / block_height;
+  layout->depth_count = (layout->box.d + block_depth - 1) / block_depth;
+  return layout->row_count != 0 && layout->depth_count != 0;
+}
+
+static bool vmsvga3d_d3d10_update_subresource_live(
+    struct vmsvga_state_s *s, const SVGA3dCmdDXUpdateSubResource *command) {
+  SVGAOTableSurfaceEntry entry;
+  VMSVGA3DSurface *surface;
+  VMSVGA3DSurfaceImage *image;
+  VMSVGA3DMob *mob;
+  VMSVGA3DD3D10UpdateLayout layout;
+  VMSVGA3DD3D10Box native_box;
+  uint64_t subresource_offset = 0;
+  uint32_t z;
+  uint32_t y;
+  uint32_t i;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      command->sid >= SVGA3D_MAX_SURFACE_IDS ||
+      !vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, command->sid,
+                            sizeof(entry), &entry, sizeof(entry))) {
+    return false;
+  }
+  mob = vmsvga3d_mob_get(s, le32_to_cpu(entry.mobid));
+  if (mob == NULL) {
+    return true;
+  }
+  surface = s->svga3d->surfaces[command->sid];
+  if (surface == NULL || surface->mips == NULL ||
+      command->subResource >= surface->mip_count) {
+    return false;
+  }
+  /* VBox skips guest-backed transfers for multisampled surfaces. */
+  if (surface->multisample_count > 1) {
+    return true;
+  }
+  image = &surface->mips[command->subResource];
+  if (!vmsvga3d_d3d10_update_box_live(
+          surface, image, &command->box, &layout)) {
+    return false;
+  }
+  for (i = 0; i < command->subResource; i++) {
+    subresource_offset += surface->mips[i].data_size;
+  }
+  if (subresource_offset > UINT32_MAX ||
+      layout.box_offset > UINT32_MAX - (uint32_t)subresource_offset) {
+    return false;
+  }
+  subresource_offset += layout.box_offset;
+
+  for (z = 0; z < layout.depth_count; z++) {
+    for (y = 0; y < layout.row_count; y++) {
+      uint64_t offset = subresource_offset +
+                        (uint64_t)z * image->plane_size +
+                        (uint64_t)y * image->pitch;
+      uint64_t host_offset = (uint64_t)layout.box_offset +
+                             (uint64_t)z * image->plane_size +
+                             (uint64_t)y * image->pitch;
+
+      if (offset > UINT32_MAX || host_offset > image->data_size ||
+          layout.row_bytes > image->data_size - host_offset ||
+          !vmsvga3d_mob_read(s, mob, (uint32_t)offset,
+                             image->data + host_offset, layout.row_bytes)) {
+        return false;
+      }
+    }
+  }
+
+  native_box.left = layout.box.x;
+  native_box.top = layout.box.y;
+  native_box.front = layout.box.z;
+  native_box.right = layout.box.x + layout.box.w;
+  native_box.bottom = layout.box.y + layout.box.h;
+  native_box.back = layout.box.z + layout.box.d;
+  return vmsvga3d_dxvk_d3d11_update_subresource(
+      s->dxvk, surface->dxvk_surface, command->subResource, &native_box,
+      image->data + layout.box_offset, image->pitch, image->plane_size);
+}
+
 static bool vmsvga3d_d3d10_pred_copy_region_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXPredCopyRegion *command)
@@ -5868,6 +6018,16 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     }
     memcpy(&command, payload, sizeof(command));
     return vmsvga3d_d3d10_clear_dsv_live(s, cid, &command);
+  }
+
+  case SVGA_3D_CMD_DX_UPDATE_SUBRESOURCE: {
+    SVGA3dCmdDXUpdateSubResource command;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_update_subresource_live(s, &command);
   }
 
   case SVGA_3D_CMD_DX_INVALIDATE_SUBRESOURCE: {

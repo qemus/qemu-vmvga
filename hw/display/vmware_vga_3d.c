@@ -4428,6 +4428,40 @@ static bool vmsvga3d_handle_destroy_gb_mob(struct vmsvga_state_s *s,
   return true;
 }
 
+static bool vmsvga3d_handle_bind_gb_surface(struct vmsvga_state_s *s,
+                                             uint32_t cmd, int32_t *len,
+                                             uint32_t fifo_start) {
+  const SVGA3dCmdBindGBSurface *body;
+  struct vmsvga3d_state_s *state;
+  SVGAOTableSurfaceEntry entry;
+  void *payload;
+  uint32_t size;
+
+  (void)cmd;
+  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    return true;
+  };
+  if (size < sizeof(*body)) {
+    g_free(payload);
+    return true;
+  };
+  body = payload;
+  state = s != NULL ? s->svga3d : NULL;
+  if (state != NULL &&
+      (body->mobid == SVGA3D_INVALID_ID ||
+       vmsvga3d_otable_index_valid(&state->otables[SVGA_OTABLE_MOB],
+                                    body->mobid,
+                                    sizeof(SVGAOTableMobEntry))) &&
+      vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, body->sid,
+                           sizeof(entry), &entry, sizeof(entry))) {
+    entry.mobid = cpu_to_le32(body->mobid);
+    (void)vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, body->sid,
+                                sizeof(entry), &entry, sizeof(entry));
+  };
+  g_free(payload);
+  return true;
+}
+
 static bool vmsvga3d_handle_dx_context_lifecycle(
     struct vmsvga_state_s *s, uint32_t cmd, int32_t *len,
     uint32_t fifo_start) {
@@ -4577,7 +4611,7 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
   VMSVGA3D_DISCARD(SVGA_3D_CMD_UPDATE_GB_MOB_MAPPING),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_DEFINE_GB_SURFACE),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_DESTROY_GB_SURFACE),
-  VMSVGA3D_DISCARD(SVGA_3D_CMD_BIND_GB_SURFACE),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_BIND_GB_SURFACE, vmsvga3d_handle_bind_gb_surface),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_COND_BIND_GB_SURFACE),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_UPDATE_GB_IMAGE),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_UPDATE_GB_SURFACE),

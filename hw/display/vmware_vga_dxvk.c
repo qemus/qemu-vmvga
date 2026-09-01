@@ -214,6 +214,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SET_PREDICATION 30u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION 46u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_RESOURCE 47u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UPDATE_SUBRESOURCE 48u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
@@ -505,6 +506,10 @@ typedef void (*VMSVGA3DDxvkD3D11CopySubresourceRegion)(
     const VMSVGA3DDxvkD3D11Box *source_box);
 typedef void (*VMSVGA3DDxvkD3D11CopyResource)(
     void *context, void *destination, void *source);
+typedef void (*VMSVGA3DDxvkD3D11UpdateSubresource)(
+    void *context, void *destination, uint32_t destination_subresource,
+    const VMSVGA3DDxvkD3D11Box *destination_box, const void *source_data,
+    uint32_t source_row_pitch, uint32_t source_depth_pitch);
 typedef int32_t (*VMSVGA3DDxvkD3D11GetData)(
     void *context, void *query, void *data, uint32_t data_size, uint32_t flags);
 
@@ -2375,6 +2380,51 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
   (void)dxvk;
   (void)destination;
   (void)source;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_update_subresource(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    const struct vmsvga3d_d3d10_box_s *box, const void *data,
+    uint32_t row_pitch, uint32_t depth_pitch) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11UpdateSubresource update = NULL;
+  const VMSVGA3DD3D10Box *source_box = box;
+  VMSVGA3DDxvkD3D11Box native;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL || source_box == NULL ||
+      data == NULL || row_pitch == 0 || depth_pitch == 0 ||
+      surface->d3d9_resident) {
+    return false;
+  }
+  if (!surface->d3d11_resident) {
+    return true;
+  }
+  if (dxvk->d3d11_context == NULL || surface->d3d11_resource == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UPDATE_SUBRESOURCE,
+          &update, sizeof(update))) {
+    return false;
+  }
+  native.left = source_box->left;
+  native.top = source_box->top;
+  native.front = source_box->front;
+  native.right = source_box->right;
+  native.bottom = source_box->bottom;
+  native.back = source_box->back;
+  update(dxvk->d3d11_context, surface->d3d11_resource, subresource, &native,
+         data, row_pitch, depth_pitch);
+  return true;
+#else
+  (void)dxvk;
+  (void)surface;
+  (void)subresource;
+  (void)box;
+  (void)data;
+  (void)row_pitch;
+  (void)depth_pitch;
   return false;
 #endif
 }

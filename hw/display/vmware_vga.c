@@ -915,35 +915,12 @@ static inline size_t vmsvga_legacy_vga_backup_size(
              (size_t)s->vga.vram_size);
 };
 
-static inline size_t
-vmsvga_first_svga_clear_size(struct vmsvga_state_s *s) {
-  DisplaySurface *surface = qemu_console_surface(s->vga.con);
-  size_t clear_size = vmsvga_legacy_vga_backup_size(s);
-
-  /*
-   * VirtualBox clears at least the legacy 512 KiB aperture on the first
-   * VGA -> SVGA ownership transition.  Also discard the complete inherited
-   * firmware framebuffer, using the frontend's real stride and height rather
-   * than assuming a particular resolution such as 1024x768.
-   */
-  if (surface != NULL && surface_stride(surface) > 0 &&
-      surface_height(surface) > 0) {
-    uint64_t inherited_size =
-        (uint64_t)surface_stride(surface) * surface_height(surface);
-    clear_size = (size_t)MIN(inherited_size, (uint64_t)s->vga.vram_size);
-    clear_size = MAX(clear_size, vmsvga_legacy_vga_backup_size(s));
-  };
-
-  return MIN(clear_size, (size_t)s->vga.vram_size);
-};
-
 static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s) {
   return memory_region_get_ram_ptr(&s->vga.vram);
 };
 
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
   size_t backup_size = vmsvga_legacy_vga_backup_size(s);
-  size_t clear_size = vmsvga_first_svga_clear_size(s);
   uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
 
   /*
@@ -952,19 +929,12 @@ static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s) {
    */
   if (s->legacy_vga_size == 0) {
     memcpy(s->legacy_vga_ptr, svga_ptr, backup_size);
-    /*
-     * Clear the inherited firmware framebuffer after preserving the legacy
-     * VGA aperture.  The extent comes from the currently visible frontend
-     * surface, so the handoff is independent of the firmware resolution.
-     */
-    memset(svga_ptr, 0, clear_size);
     s->legacy_vga_size = (uint32_t)backup_size;
   };
   s->vga.vram_ptr = svga_ptr;
   s->svga_surface_bound = false;
-  VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
-                     "VGA_SHADOW enter backup=%zu clear=%zu",
-                     backup_size, clear_size);
+  VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW enter backup=%zu",
+                     backup_size);
 };
 
 static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s) {

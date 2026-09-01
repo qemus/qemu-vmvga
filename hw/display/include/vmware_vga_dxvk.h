@@ -93,6 +93,9 @@ bool vmsvga3d_dxvk_d3d11_query_begin(
 bool vmsvga3d_dxvk_d3d11_query_end(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_end,
     void *data, uint32_t data_size, uint32_t getdata_flags);
+bool vmsvga3d_dxvk_d3d11_set_predication(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool enabled,
+    bool predicate_value);
 void vmsvga3d_dxvk_d3d11_query_context_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid);
 bool vmsvga3d_dxvk_d3d11_clear_render_target_view(

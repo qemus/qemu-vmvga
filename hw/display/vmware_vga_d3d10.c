@@ -5699,6 +5699,42 @@ static bool vmsvga3d_d3d10_query_end_live(
   return success;
 }
 
+static bool vmsvga3d_d3d10_set_predication_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXSetPredication *command)
+{
+  VMSVGA3DD3D10PredicationPlan plan;
+  VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+  SVGA3dQueryType type = SVGA3D_QUERYTYPE_INVALID;
+  uint32_t flags = 0;
+  uint8_t *entry = NULL;
+  bool enabled;
+
+  if (command == NULL || context == NULL) {
+    return false;
+  }
+  enabled = command->queryId != SVGA3D_INVALID_ID;
+  if (enabled) {
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DXQUERY, command->queryId);
+    if (entry == NULL) {
+      return false;
+    }
+    type = (SVGA3dQueryType)entry[0];
+    flags = query_read_u32(entry + 4);
+  }
+  if (!vmsvga3d_d3d10_level_is_vgpu10(
+          vmsvga3d_d3d10_predication_plan(
+              enabled, type, flags, command->predicateValue, &plan))) {
+    return false;
+  }
+
+  context->shadow.predication.queryID = command->queryId;
+  context->shadow.predication.value = command->predicateValue;
+  return vmsvga3d_dxvk_d3d11_set_predication(
+      s->dxvk, cid, command->queryId, plan.enabled, plan.predicate_value);
+}
+
 static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                                        uint32_t cid, uint32_t cmd,
                                        const void *payload, uint32_t size) {
@@ -6038,6 +6074,16 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                context->render_target_count, &plan) !=
                VMSVGA3D_D3D10_LEVEL_INVALID &&
            vmsvga3d_state_dx_apply_render_targets(s, cid, &plan);
+  }
+
+  case SVGA_3D_CMD_DX_SET_PREDICATION: {
+    SVGA3dCmdDXSetPredication command;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_set_predication_live(s, cid, &command);
   }
 
   case SVGA_3D_CMD_DX_SET_SOTARGETS: {

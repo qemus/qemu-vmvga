@@ -207,9 +207,11 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RENDERTARGET_VIEW 9u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_VIEW 10u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_QUERY 24u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PREDICATE 25u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_BEGIN 27u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_END 28u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA 29u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SET_PREDICATION 30u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
@@ -473,6 +475,8 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CreateDepthStencilView)(
     void **view);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateQuery)(
     void *device, const VMSVGA3DDxvkD3D11QueryDesc *desc, void **query);
+typedef int32_t (*VMSVGA3DDxvkD3D11CreatePredicate)(
+    void *device, const VMSVGA3DDxvkD3D11QueryDesc *desc, void **predicate);
 typedef void (*VMSVGA3DDxvkD3D11ClearRenderTargetView)(
     void *context, void *view, const float color[4]);
 typedef void (*VMSVGA3DDxvkD3D11ClearDepthStencilView)(
@@ -481,6 +485,8 @@ typedef void (*VMSVGA3DDxvkD3D11ClearDepthStencilView)(
 typedef void (*VMSVGA3DDxvkD3D11GenerateMips)(void *context, void *view);
 typedef void (*VMSVGA3DDxvkD3D11Begin)(void *context, void *query);
 typedef void (*VMSVGA3DDxvkD3D11End)(void *context, void *query);
+typedef void (*VMSVGA3DDxvkD3D11SetPredication)(
+    void *context, void *predicate, int32_t predicate_value);
 typedef int32_t (*VMSVGA3DDxvkD3D11GetData)(
     void *context, void *query, void *data, uint32_t data_size, uint32_t flags);
 
@@ -2221,6 +2227,62 @@ bool vmsvga3d_dxvk_d3d11_query_end(
   (void)data;
   (void)data_size;
   (void)getdata_flags;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_set_predication(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool enabled,
+    bool predicate_value) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11CreatePredicate create_predicate = NULL;
+  VMSVGA3DDxvkD3D11SetPredication set_predication = NULL;
+  VMSVGA3DDxvkD3D11QueryDesc desc;
+  VMSVGA3DDxvkQuery *query = NULL;
+  void *predicate = NULL;
+  int32_t result;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+      dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SET_PREDICATION,
+          &set_predication, sizeof(set_predication))) {
+    return false;
+  }
+  if (!enabled) {
+    set_predication(dxvk->d3d11_context, NULL, 0);
+    return true;
+  }
+
+  query = vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
+  if (query == NULL || query->query == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PREDICATE,
+          &create_predicate, sizeof(create_predicate))) {
+    return false;
+  }
+  desc.query = query->d3d_query;
+  desc.misc_flags = query->misc_flags;
+  result = create_predicate(dxvk->d3d11_device, &desc, &predicate);
+  if (!vmsvga3d_dxvk_succeeded(result) || predicate == NULL) {
+    if (predicate != NULL) {
+      vmsvga3d_dxvk_release(predicate, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    return false;
+  }
+
+  vmsvga3d_dxvk_release(query->query, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+  query->query = predicate;
+  set_predication(dxvk->d3d11_context, query->query,
+                  predicate_value ? 1 : 0);
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)query_id;
+  (void)enabled;
+  (void)predicate_value;
   return false;
 #endif
 }

@@ -832,6 +832,7 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s) {
   for (i = 0; i < SVGA3D_MAX_CONTEXT_IDS; i++) {
     vmsvga3d_context_free(state, state->contexts[i]);
     vmsvga3d_dxvk_d3d11_query_context_destroy(s->dxvk, i);
+    vmsvga3d_dxvk_d3d11_state_context_destroy(s->dxvk, i);
     vmsvga3d_dx_context_free(state->dx_contexts[i]);
   };
   for (i = 0; i < SVGA3D_MAX_SURFACE_IDS; i++) {
@@ -4145,6 +4146,7 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
   uint32_t entry_size;
   uint32_t capacity_entries;
   uint32_t valid_entries;
+  uint32_t old_valid_entries;
   uint32_t grow_copy_bytes;
 
   if (context == NULL || type >= SVGA_COTABLE_MAX) {
@@ -4156,6 +4158,7 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
   };
 
   binding = &context->cotables[type];
+  old_valid_entries = binding->valid_entries;
   mob = vmsvga3d_mob_get(s, mobid);
   old_mob = vmsvga3d_mob_get(s, binding->mobid);
   if (mob != NULL) {
@@ -4192,7 +4195,8 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
   binding->entry_size = entry_size;
   binding->capacity_entries = capacity_entries;
   binding->valid_entries = valid_entries;
-  return true;
+  return vmsvga3d_d3d10_state_cotable_replay_live(
+      s, cid, type, old_valid_entries, valid_entries);
 }
 
 static void *vmsvga3d_dx_cotable_entry_ptr(struct vmsvga_state_s *s,
@@ -4242,6 +4246,8 @@ static bool vmsvga3d_dx_context_define_backed(struct vmsvga_state_s *s,
     return false;
   }
   vmsvga3d_dxvk_d3d11_query_context_destroy(s->dxvk, cid);
+  vmsvga3d_dxvk_d3d11_state_context_destroy(s->dxvk, cid);
+  vmsvga3d_dxvk_d3d11_shader_context_destroy(s->dxvk, cid);
   return true;
 }
 
@@ -4254,6 +4260,8 @@ static bool vmsvga3d_dx_context_destroy_backed(struct vmsvga_state_s *s,
     return false;
   }
   vmsvga3d_dxvk_d3d11_query_context_destroy(s->dxvk, cid);
+  vmsvga3d_dxvk_d3d11_state_context_destroy(s->dxvk, cid);
+  vmsvga3d_dxvk_d3d11_shader_context_destroy(s->dxvk, cid);
   return true;
 }
 

@@ -3537,6 +3537,19 @@ static VMSVGA3DDxvkQuery *vmsvga3d_dxvk_d3d11_query_find(
   return NULL;
 }
 
+bool vmsvga3d_dxvk_d3d11_query_exists(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id) {
+  VMSVGA3DDxvkQuery *query =
+      vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
+
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  return query != NULL && query->query != NULL;
+#else
+  (void)query;
+  return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_query_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id) {
   VMSVGA3DDxvkQuery **link = NULL;

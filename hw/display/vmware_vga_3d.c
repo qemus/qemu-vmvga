@@ -158,11 +158,72 @@ typedef struct vmsvga3d_dx_cotable_s {
   uint32_t entry_size;
   uint32_t capacity_entries;
   uint32_t valid_entries;
+  uint8_t *host;
+  uint32_t host_size;
 } VMSVGA3DDXCOTable;
+
+#define VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET      UINT64_C(0x00000001)
+#define VMSVGA3D_DX_CTX_F_STATE_CSTARGET          UINT64_C(0x00000002)
+#define VMSVGA3D_DX_CTX_F_STATE_INPUTLAYOUT       UINT64_C(0x00000010)
+#define VMSVGA3D_DX_CTX_F_STATE_TOPOLOGY          UINT64_C(0x00000020)
+#define VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE        UINT64_C(0x00000080)
+#define VMSVGA3D_DX_CTX_F_STATE_DEPTHSTENCILSTATE UINT64_C(0x00000100)
+#define VMSVGA3D_DX_CTX_F_STATE_VIEWPORT          UINT64_C(0x00000400)
+#define VMSVGA3D_DX_CTX_F_STATE_SCISSORRECT       UINT64_C(0x00000800)
+#define VMSVGA3D_DX_CTX_F_STATE_RASTERIZERSTATE   UINT64_C(0x00001000)
+#define VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER       UINT64_C(0x00002000)
+#define VMSVGA3D_DX_CTX_F_STATE_VERTEXBUFFER      UINT64_C(0x00004000)
+#define VMSVGA3D_DX_CTX_F_STATE_SAMPLER_VS        UINT64_C(0x00010000)
+#define VMSVGA3D_DX_CTX_F_STATE_SAMPLER_PS        UINT64_C(0x00020000)
+#define VMSVGA3D_DX_CTX_F_STATE_SAMPLER_GS        UINT64_C(0x00040000)
+#define VMSVGA3D_DX_CTX_F_STATE_SAMPLER_HS        UINT64_C(0x00080000)
+#define VMSVGA3D_DX_CTX_F_STATE_SAMPLER_DS        UINT64_C(0x00100000)
+#define VMSVGA3D_DX_CTX_F_STATE_SAMPLER_CS        UINT64_C(0x00200000)
+#define VMSVGA3D_DX_CTX_F_STATE_SRV_VS            UINT64_C(0x01000000)
+#define VMSVGA3D_DX_CTX_F_STATE_SRV_PS            UINT64_C(0x02000000)
+#define VMSVGA3D_DX_CTX_F_STATE_SRV_GS            UINT64_C(0x04000000)
+#define VMSVGA3D_DX_CTX_F_STATE_SRV_HS            UINT64_C(0x08000000)
+#define VMSVGA3D_DX_CTX_F_STATE_SRV_DS            UINT64_C(0x10000000)
+#define VMSVGA3D_DX_CTX_F_STATE_SRV_CS            UINT64_C(0x20000000)
+
+#define VMSVGA3D_DX_CTX_F_STATE_SAMPLERS \
+  (VMSVGA3D_DX_CTX_F_STATE_SAMPLER_VS | \
+   VMSVGA3D_DX_CTX_F_STATE_SAMPLER_PS | \
+   VMSVGA3D_DX_CTX_F_STATE_SAMPLER_GS | \
+   VMSVGA3D_DX_CTX_F_STATE_SAMPLER_HS | \
+   VMSVGA3D_DX_CTX_F_STATE_SAMPLER_DS | \
+   VMSVGA3D_DX_CTX_F_STATE_SAMPLER_CS)
+#define VMSVGA3D_DX_CTX_F_STATE_SRVS \
+  (VMSVGA3D_DX_CTX_F_STATE_SRV_VS | \
+   VMSVGA3D_DX_CTX_F_STATE_SRV_PS | \
+   VMSVGA3D_DX_CTX_F_STATE_SRV_GS | \
+   VMSVGA3D_DX_CTX_F_STATE_SRV_HS | \
+   VMSVGA3D_DX_CTX_F_STATE_SRV_DS | \
+   VMSVGA3D_DX_CTX_F_STATE_SRV_CS)
+#define VMSVGA3D_DX_CTX_F_STATE_ALL \
+  (VMSVGA3D_DX_CTX_F_STATE_INPUTLAYOUT | \
+   VMSVGA3D_DX_CTX_F_STATE_TOPOLOGY | \
+   VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET | \
+   VMSVGA3D_DX_CTX_F_STATE_CSTARGET | \
+   VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE | \
+   VMSVGA3D_DX_CTX_F_STATE_DEPTHSTENCILSTATE | \
+   VMSVGA3D_DX_CTX_F_STATE_VIEWPORT | \
+   VMSVGA3D_DX_CTX_F_STATE_SCISSORRECT | \
+   VMSVGA3D_DX_CTX_F_STATE_RASTERIZERSTATE | \
+   VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER | \
+   VMSVGA3D_DX_CTX_F_STATE_VERTEXBUFFER | \
+   VMSVGA3D_DX_CTX_F_STATE_SAMPLERS | \
+   VMSVGA3D_DX_CTX_F_STATE_SRVS)
 
 typedef struct vmsvga3d_dx_context_s {
   uint32_t cid;
   uint32_t render_target_count;
+  uint64_t renderer_dirty;
+  uint32_t vertex_buffer_max_bound;
+  uint64_t vertex_buffer_modified;
+  uint32_t constant_buffer_max_bound[SVGA3D_NUM_SHADERTYPE];
+  uint32_t shader_resource_max_bound[SVGA3D_NUM_SHADERTYPE];
+  uint64_t shader_resource_modified[SVGA3D_NUM_SHADERTYPE][2];
   SVGADXContextMobFormat shadow;
   VMSVGA3DDXCOTable cotables[SVGA_COTABLE_MAX];
 } VMSVGA3DDXContext;
@@ -257,6 +318,14 @@ static void vmsvga3d_context_free(struct vmsvga3d_state_s *state,
 };
 
 static void vmsvga3d_dx_context_free(VMSVGA3DDXContext *context) {
+  uint32_t type;
+
+  if (context == NULL) {
+    return;
+  };
+  for (type = 0; type < SVGA_COTABLE_MAX; type++) {
+    g_free(context->cotables[type].host);
+  };
   g_free(context);
 }
 
@@ -4144,11 +4213,12 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
   VMSVGA3DDXCOTable *binding;
   VMSVGA3DMob *mob;
   VMSVGA3DMob *old_mob;
+  uint8_t *new_host = NULL;
   uint32_t entry_size;
   uint32_t capacity_entries;
   uint32_t valid_entries;
-  uint32_t old_valid_entries;
-  uint32_t grow_copy_bytes;
+  uint32_t old_capacity_entries;
+  uint32_t copy_bytes = 0;
 
   if (context == NULL || type >= SVGA_COTABLE_MAX) {
     return false;
@@ -4159,45 +4229,72 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
   };
 
   binding = &context->cotables[type];
-  old_valid_entries = binding->valid_entries;
+  old_capacity_entries = binding->capacity_entries;
   mob = vmsvga3d_mob_get(s, mobid);
   old_mob = vmsvga3d_mob_get(s, binding->mobid);
+  if (mobid != SVGA3D_INVALID_ID && mob == NULL) {
+    return false;
+  };
+
   if (mob != NULL) {
-    if (valid_size > mob->gbo.size ||
-        !vmsvga3d_mob_backing_create(s, mob, valid_size)) {
+    if (valid_size > mob->gbo.size) {
       return false;
     };
-    capacity_entries = mob->gbo.size / entry_size;
-    valid_entries = valid_size / entry_size;
+    if (grow) {
+      uint32_t old_mob_size = old_mob != NULL ? old_mob->gbo.size : 0;
+
+      valid_size = MIN(valid_size, old_mob_size);
+    };
+
+    capacity_entries = MIN(mob->gbo.size / entry_size,
+                           (uint32_t)SVGA_COTABLE_MAX_IDS);
+    valid_entries = MIN(valid_size / entry_size, capacity_entries);
+    valid_size = valid_entries * entry_size;
+
+    new_host = g_try_malloc0(mob->gbo.size);
+    if (new_host == NULL && mob->gbo.size != 0) {
+      return false;
+    };
+
+    if (grow) {
+      copy_bytes = MIN(valid_size,
+                       binding->capacity_entries * binding->entry_size);
+      if (copy_bytes != 0) {
+        if (binding->host == NULL || copy_bytes > binding->host_size) {
+          g_free(new_host);
+          return false;
+        };
+        memcpy(new_host, binding->host, copy_bytes);
+      };
+    } else if (valid_size != 0) {
+      if (vmsvga3d_mob_read(s, mob, 0, new_host, valid_size)) {
+        vmsvga3d_d3d10_cotable_sanitize_live(
+            type, new_host, valid_entries, capacity_entries);
+      } else {
+        memset(new_host, 0, valid_size);
+      };
+    };
   } else {
     valid_size = 0;
     capacity_entries = 0;
     valid_entries = 0;
-    vmsvga3d_mob_backing_delete(old_mob);
   };
 
-  grow_copy_bytes =
-      grow && binding->mobid != SVGA3D_INVALID_ID && valid_entries != 0
-          ? valid_size
-          : 0;
-  if (grow_copy_bytes != 0) {
-    const void *source = vmsvga3d_mob_backing_ptr(old_mob, 0);
-    void *destination = vmsvga3d_mob_backing_ptr(mob, 0);
+  {
+    uint8_t *old_host = binding->host;
 
-    if (source == NULL || destination == NULL) {
-      vmsvga3d_mob_backing_delete(mob);
-      return false;
-    };
-    memcpy(destination, source, grow_copy_bytes);
+    binding->mobid = mob != NULL ? mob->mobid : SVGA3D_INVALID_ID;
+    binding->valid_size = valid_size;
+    binding->entry_size = entry_size;
+    binding->capacity_entries = capacity_entries;
+    binding->valid_entries = valid_entries;
+    binding->host = new_host;
+    binding->host_size = mob != NULL ? mob->gbo.size : 0;
+    g_free(old_host);
   };
 
-  binding->mobid = mob != NULL ? mob->mobid : SVGA3D_INVALID_ID;
-  binding->valid_size = valid_size;
-  binding->entry_size = entry_size;
-  binding->capacity_entries = capacity_entries;
-  binding->valid_entries = valid_entries;
   return vmsvga3d_d3d10_state_cotable_replay_live(
-      s, cid, type, old_valid_entries, valid_entries);
+      s, cid, type, old_capacity_entries, valid_entries, grow);
 }
 
 static void *vmsvga3d_dx_cotable_entry_ptr(struct vmsvga_state_s *s,
@@ -4206,33 +4303,46 @@ static void *vmsvga3d_dx_cotable_entry_ptr(struct vmsvga_state_s *s,
                                             uint32_t index) {
   VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
   VMSVGA3DDXCOTable *binding;
-  VMSVGA3DMob *mob;
+  uint32_t offset;
 
   if (context == NULL || type >= SVGA_COTABLE_MAX) {
     return NULL;
   };
   binding = &context->cotables[type];
-  if (index >= binding->valid_entries || binding->entry_size == 0) {
+  if (index >= binding->capacity_entries || binding->entry_size == 0 ||
+      binding->host == NULL) {
     return NULL;
   };
-  mob = vmsvga3d_mob_get(s, binding->mobid);
-  if (mob == NULL) {
+  offset = index * binding->entry_size;
+  if (offset > binding->host_size ||
+      binding->entry_size > binding->host_size - offset) {
     return NULL;
   };
-  return vmsvga3d_mob_backing_ptr(mob, index * binding->entry_size);
+  return binding->host + offset;
 }
 
 static bool vmsvga3d_dx_cotable_readback(struct vmsvga_state_s *s,
                                          uint32_t cid,
                                          SVGACOTableType type) {
   VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+  VMSVGA3DDXCOTable *binding;
   VMSVGA3DMob *mob;
+  uint32_t write_size;
 
   if (context == NULL || type >= SVGA_COTABLE_MAX) {
     return false;
   };
-  mob = vmsvga3d_mob_get(s, context->cotables[type].mobid);
-  return vmsvga3d_mob_backing_write(s, mob);
+  binding = &context->cotables[type];
+  mob = vmsvga3d_mob_get(s, binding->mobid);
+  if (mob == NULL || binding->host == NULL ||
+      binding->host_size != mob->gbo.size || binding->entry_size == 0) {
+    return false;
+  };
+  write_size = binding->capacity_entries * binding->entry_size;
+  if (write_size > binding->host_size) {
+    return false;
+  };
+  return vmsvga3d_mob_write(s, mob, 0, binding->host, write_size);
 }
 
 static bool vmsvga3d_dx_context_define_backed(struct vmsvga_state_s *s,

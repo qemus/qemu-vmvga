@@ -183,6 +183,8 @@ bool vmsvga3d_dxvk_d3d11_query_define(
     uint32_t d3d_query, uint32_t misc_flags);
 bool vmsvga3d_dxvk_d3d11_query_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id);
+bool vmsvga3d_dxvk_d3d11_query_exists(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id);
 bool vmsvga3d_dxvk_d3d11_query_begin(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_begin);
 bool vmsvga3d_dxvk_d3d11_query_end(

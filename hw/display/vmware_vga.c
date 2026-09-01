@@ -302,6 +302,9 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_REPORT_INTERVAL_US 1000000
 #define VMVGA_TRACE_BAR1_PROBE_SIZE (4U * 1024U * 1024U)
 #define VMVGA_TRACE_BAR1_PROBE_SLOTS 64
+#define VMVGA_TRACE_GMR2_ID 1U
+#define VMVGA_TRACE_GMR2_MAX_PAGES 16384U
+#define VMVGA_TRACE_GMR2_SAMPLE_INTERVAL_US 1000000
 
 #define VMVGA_TRACE_LOCAL_ENABLED(category)                              \
   ((category) &&                                                         \
@@ -515,6 +518,19 @@ struct vmsvga_state_s {
   uint32_t trace_bar1_probe_slot;
   uint64_t trace_bar1_probe_valid;
   uint32_t trace_bar1_probe_hash[VMVGA_TRACE_BAR1_PROBE_SLOTS];
+  uint32_t trace_gmr2_id;
+  uint32_t trace_gmr2_defined_pages;
+  uint32_t trace_gmr2_tracked_pages;
+  uint64_t *trace_gmr2_gpa;
+  uint32_t *trace_gmr2_page_hash;
+  uint8_t *trace_gmr2_page_hash_valid;
+  uint64_t trace_gmr2_samples;
+  uint64_t trace_gmr2_changes;
+  int64_t trace_gmr2_last_sample_us;
+  uint32_t trace_gmr2_last_hash;
+  bool trace_gmr2_hash_valid;
+  uint32_t trace_gmr2_last_scanout_hash;
+  bool trace_gmr2_scanout_hash_valid;
   MemoryRegion fifo_ram;
   MemoryRegion legacy_vga_mem;
   uint8_t *legacy_vga_ptr;
@@ -531,7 +547,10 @@ static inline bool vmsvga_trace_flight_enabled(void) {
   return VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_FLIGHT);
 };
 
+static void vmsvga_trace_gmr2_clear(struct vmsvga_state_s *s);
+
 static inline void vmsvga_trace_flight_reset(struct vmsvga_state_s *s) {
+  vmsvga_trace_gmr2_clear(s);
   if (!vmsvga_trace_flight_enabled()) {
     return;
   };
@@ -4048,6 +4067,296 @@ typedef struct {
 static inline void vmsvga_check_size(struct vmsvga_state_s *s);
 #include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
+
+static void vmsvga_trace_gmr2_clear(struct vmsvga_state_s *s) {
+  g_clear_pointer(&s->trace_gmr2_gpa, g_free);
+  g_clear_pointer(&s->trace_gmr2_page_hash, g_free);
+  g_clear_pointer(&s->trace_gmr2_page_hash_valid, g_free);
+  s->trace_gmr2_id = SVGA_GMR_NULL;
+  s->trace_gmr2_defined_pages = 0;
+  s->trace_gmr2_tracked_pages = 0;
+  s->trace_gmr2_samples = 0;
+  s->trace_gmr2_changes = 0;
+  s->trace_gmr2_last_sample_us = 0;
+  s->trace_gmr2_last_hash = 0;
+  s->trace_gmr2_hash_valid = false;
+  s->trace_gmr2_last_scanout_hash = 0;
+  s->trace_gmr2_scanout_hash_valid = false;
+}
+
+static void vmsvga_trace_gmr2_define(struct vmsvga_state_s *s,
+                                     uint32_t gmr_id, uint32_t num_pages) {
+  uint32_t tracked_pages;
+  uint32_t i;
+
+  if (!vmsvga_trace_flight_enabled() || gmr_id != VMVGA_TRACE_GMR2_ID) {
+    return;
+  }
+
+  vmsvga_trace_gmr2_clear(s);
+  s->trace_gmr2_id = gmr_id;
+  s->trace_gmr2_defined_pages = num_pages;
+  tracked_pages = MIN(num_pages, (uint32_t)VMVGA_TRACE_GMR2_MAX_PAGES);
+  if (tracked_pages == 0) {
+    fprintf(stderr,
+            "VMVGA-GMR2-MONITOR define id=%u pages=0 tracked=0\n",
+            gmr_id);
+    return;
+  }
+
+  s->trace_gmr2_gpa = g_try_new(uint64_t, tracked_pages);
+  s->trace_gmr2_page_hash = g_try_new0(uint32_t, tracked_pages);
+  s->trace_gmr2_page_hash_valid = g_try_new0(uint8_t, tracked_pages);
+  if (s->trace_gmr2_gpa == NULL || s->trace_gmr2_page_hash == NULL ||
+      s->trace_gmr2_page_hash_valid == NULL) {
+    fprintf(stderr,
+            "VMVGA-GMR2-MONITOR define id=%u pages=%u allocation-failed=1\n",
+            gmr_id, num_pages);
+    vmsvga_trace_gmr2_clear(s);
+    return;
+  }
+
+  for (i = 0; i < tracked_pages; i++) {
+    s->trace_gmr2_gpa[i] = UINT64_MAX;
+  }
+  s->trace_gmr2_tracked_pages = tracked_pages;
+  fprintf(stderr,
+          "VMVGA-GMR2-MONITOR define id=%u pages=%u tracked=%u truncated=%u\n",
+          gmr_id, num_pages, tracked_pages, tracked_pages != num_pages);
+}
+
+static bool vmsvga_trace_gmr2_read_ppns(struct vmsvga_state_s *s,
+                                        uint32_t flags, uint32_t num_pages,
+                                        uint8_t **ppn_data,
+                                        size_t *ppn_bytes) {
+  uint64_t entries;
+  size_t entry_size;
+  uint64_t bytes64;
+  uint8_t *data;
+
+  *ppn_data = NULL;
+  *ppn_bytes = 0;
+  entries = (flags & SVGA_REMAP_GMR2_SINGLE_PPN) ? 1 : num_pages;
+  entry_size = (flags & SVGA_REMAP_GMR2_PPN64) ? sizeof(uint64_t) :
+                                                  sizeof(uint32_t);
+  bytes64 = entries * entry_size;
+  if (bytes64 == 0 || bytes64 > SIZE_MAX) {
+    return false;
+  }
+
+  data = g_try_malloc((size_t)bytes64);
+  if (data == NULL) {
+    return false;
+  }
+
+  if (flags & SVGA_REMAP_GMR2_VIA_GMR) {
+    SVGAGuestPtr ptr;
+    uint32_t list_gmr;
+    uint32_t list_offset;
+
+    vmsvga_fifo_peek_raw_data(s, 0, &ptr, sizeof(ptr));
+    list_gmr = le32_to_cpu(ptr.gmrId);
+    list_offset = le32_to_cpu(ptr.offset);
+    if (!vmsvga_gmr_read(s, list_gmr, list_offset, data, (size_t)bytes64)) {
+      g_free(data);
+      return false;
+    }
+  } else {
+    vmsvga_fifo_peek_raw_data(s, 0, data, (size_t)bytes64);
+  }
+
+  *ppn_data = data;
+  *ppn_bytes = (size_t)bytes64;
+  return true;
+}
+
+static void vmsvga_trace_gmr2_remap(struct vmsvga_state_s *s,
+                                    uint32_t gmr_id, uint32_t flags,
+                                    uint32_t offset_pages,
+                                    uint32_t num_pages) {
+  uint8_t *ppn_data;
+  size_t ppn_bytes;
+  uint32_t remapped = 0;
+  uint32_t mapped = 0;
+  uint32_t invalid = 0;
+  uint64_t first_gpa = UINT64_MAX;
+  uint32_t i;
+
+  if (!vmsvga_trace_flight_enabled() || gmr_id != VMVGA_TRACE_GMR2_ID) {
+    return;
+  }
+  if (s->trace_gmr2_gpa == NULL ||
+      s->trace_gmr2_id != VMVGA_TRACE_GMR2_ID) {
+    fprintf(stderr,
+            "VMVGA-GMR2-MONITOR remap id=%u state=undefined offset=%u "
+            "pages=%u flags=0x%08x\n",
+            gmr_id, offset_pages, num_pages, flags);
+    return;
+  }
+  if (!vmsvga_trace_gmr2_read_ppns(s, flags, num_pages,
+                                    &ppn_data, &ppn_bytes)) {
+    fprintf(stderr,
+            "VMVGA-GMR2-MONITOR remap id=%u ppn-read-failed=1 offset=%u "
+            "pages=%u flags=0x%08x\n",
+            gmr_id, offset_pages, num_pages, flags);
+    return;
+  }
+
+  for (i = 0; i < num_pages; i++) {
+    uint64_t ppn;
+    uint64_t gpa;
+    uint64_t page64 = (uint64_t)offset_pages + i;
+    uint32_t ppn_index = (flags & SVGA_REMAP_GMR2_SINGLE_PPN) ? 0 : i;
+
+    if (flags & SVGA_REMAP_GMR2_PPN64) {
+      uint64_t raw;
+      memcpy(&raw, ppn_data + (size_t)ppn_index * sizeof(raw), sizeof(raw));
+      ppn = le64_to_cpu(raw);
+    } else {
+      uint32_t raw;
+      memcpy(&raw, ppn_data + (size_t)ppn_index * sizeof(raw), sizeof(raw));
+      ppn = le32_to_cpu(raw);
+    }
+
+    if (page64 >= s->trace_gmr2_tracked_pages) {
+      continue;
+    }
+    remapped++;
+    if (((flags & SVGA_REMAP_GMR2_PPN64) ? ppn == UINT64_MAX :
+                                             ppn == UINT32_MAX) ||
+        ppn > (UINT64_MAX >> VMSVGA_GMR_PAGE_SHIFT)) {
+      s->trace_gmr2_gpa[page64] = UINT64_MAX;
+      invalid++;
+    } else {
+      gpa = ppn << VMSVGA_GMR_PAGE_SHIFT;
+      s->trace_gmr2_gpa[page64] = gpa;
+      mapped++;
+      if (first_gpa == UINT64_MAX) {
+        first_gpa = gpa;
+      }
+    }
+    s->trace_gmr2_page_hash_valid[page64] = 0;
+  }
+  g_free(ppn_data);
+
+  s->trace_gmr2_hash_valid = false;
+  s->trace_gmr2_last_sample_us = 0;
+  fprintf(stderr,
+          "VMVGA-GMR2-MONITOR remap id=%u flags=0x%08x offset=%u pages=%u "
+          "tracked-remap=%u mapped=%u invalid=%u ppn-bytes=%zu "
+          "first-gpa=0x%" PRIx64 "\n",
+          gmr_id, flags, offset_pages, num_pages, remapped, mapped, invalid,
+          ppn_bytes, first_gpa == UINT64_MAX ? 0 : first_gpa);
+}
+
+static void vmsvga_trace_gmr2_sample(struct vmsvga_state_s *s) {
+  struct pci_vmsvga_state_s *pci_vmsvga;
+  DisplaySurface *surface;
+  uint8_t page[VMSVGA_GMR_PAGE_SIZE];
+  uint32_t aggregate_hash = 2166136261u;
+  uint32_t mapped_pages = 0;
+  uint32_t readable_pages = 0;
+  uint32_t read_failures = 0;
+  uint32_t changed_pages = 0;
+  uint32_t scanout_hash = 0;
+  size_t scanout_bytes = 0;
+  bool aggregate_changed;
+  bool scanout_comparable = false;
+  bool scanout_changed = false;
+  bool frozen_candidate;
+  int64_t now;
+  uint32_t i;
+
+  if (!vmsvga_trace_flight_enabled() || s->trace_gmr2_gpa == NULL ||
+      s->trace_gmr2_id != VMVGA_TRACE_GMR2_ID) {
+    return;
+  }
+  now = g_get_monotonic_time();
+  if (s->trace_gmr2_last_sample_us != 0 &&
+      now - s->trace_gmr2_last_sample_us <
+          VMVGA_TRACE_GMR2_SAMPLE_INTERVAL_US) {
+    return;
+  }
+  s->trace_gmr2_last_sample_us = now;
+  pci_vmsvga = container_of(s, struct pci_vmsvga_state_s, chip);
+
+  for (i = 0; i < s->trace_gmr2_tracked_pages; i++) {
+    uint32_t page_hash;
+    uint32_t page_hash_le;
+
+    if (s->trace_gmr2_gpa[i] == UINT64_MAX) {
+      continue;
+    }
+    mapped_pages++;
+    if (pci_dma_read(PCI_DEVICE(pci_vmsvga), s->trace_gmr2_gpa[i], page,
+                     sizeof(page)) != MEMTX_OK) {
+      read_failures++;
+      continue;
+    }
+    readable_pages++;
+    page_hash = vmsvga_gmr_diag_hash(page, sizeof(page));
+    page_hash_le = cpu_to_le32(page_hash);
+    aggregate_hash = vmsvga_gmr_diag_hash_extend(
+        aggregate_hash, (const uint8_t *)&page_hash_le, sizeof(page_hash_le));
+    if (s->trace_gmr2_page_hash_valid[i] &&
+        s->trace_gmr2_page_hash[i] != page_hash) {
+      changed_pages++;
+    }
+    s->trace_gmr2_page_hash[i] = page_hash;
+    s->trace_gmr2_page_hash_valid[i] = 1;
+  }
+
+  aggregate_changed =
+      s->trace_gmr2_hash_valid && aggregate_hash != s->trace_gmr2_last_hash;
+  surface = qemu_console_surface(s->vga.con);
+  if (s->enable && s->active_valid && surface != NULL &&
+      surface_data(surface) != NULL && surface_stride(surface) > 0 &&
+      surface_height(surface) > 0) {
+    uint64_t bytes64 =
+        (uint64_t)surface_stride(surface) * surface_height(surface);
+    if (bytes64 <= SIZE_MAX) {
+      scanout_bytes = (size_t)bytes64;
+      scanout_hash =
+          vmsvga_gmr_diag_hash(surface_data(surface), scanout_bytes);
+      scanout_comparable = true;
+      scanout_changed = s->trace_gmr2_scanout_hash_valid &&
+                        scanout_hash != s->trace_gmr2_last_scanout_hash;
+    }
+  }
+
+  s->trace_gmr2_samples++;
+  if (aggregate_changed) {
+    s->trace_gmr2_changes++;
+    s->trace_activity_seq++;
+  }
+  frozen_candidate = aggregate_changed && scanout_comparable &&
+                     s->trace_gmr2_scanout_hash_valid && !scanout_changed;
+  fprintf(stderr,
+          "VMVGA-GMR2-ACTIVITY sample=%" PRIu64 " id=%u defined-pages=%u "
+          "tracked-pages=%u mapped-pages=%u readable-pages=%u "
+          "read-failures=%u changed-pages=%u gmr2-hash=0x%08x "
+          "previous=0x%08x hash-valid=%u gmr2-changed=%u changes=%" PRIu64
+          " scanout-data=%p scanout-bytes=0x%zx scanout-hash=0x%08x "
+          "scanout-previous=0x%08x scanout-valid=%u comparable=%u "
+          "scanout-changed=%u frozen-candidate=%u\n",
+          s->trace_gmr2_samples, s->trace_gmr2_id,
+          s->trace_gmr2_defined_pages, s->trace_gmr2_tracked_pages,
+          mapped_pages, readable_pages, read_failures, changed_pages,
+          aggregate_hash, s->trace_gmr2_last_hash, s->trace_gmr2_hash_valid,
+          aggregate_changed, s->trace_gmr2_changes,
+          surface != NULL ? (void *)surface_data(surface) : NULL,
+          scanout_bytes, scanout_hash, s->trace_gmr2_last_scanout_hash,
+          s->trace_gmr2_scanout_hash_valid, scanout_comparable,
+          scanout_changed, frozen_candidate);
+
+  s->trace_gmr2_last_hash = aggregate_hash;
+  s->trace_gmr2_hash_valid = readable_pages != 0;
+  if (scanout_comparable) {
+    s->trace_gmr2_last_scanout_hash = scanout_hash;
+    s->trace_gmr2_scanout_hash_valid = true;
+  }
+}
+
 static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
   VPRINT("vmsvga_fifo_run was just executed\n");
   int32_t len;
@@ -5070,7 +5379,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
              fence_arg);
       break;
     }
-    case SVGA_CMD_DEFINE_GMR2:
+    case SVGA_CMD_DEFINE_GMR2: {
+      uint32_t gmr2_id;
+      uint32_t gmr2_pages;
+      bool accepted;
+
       if (len < (sizeof(SVGAFifoCmdDefineGMR2) / sizeof(uint32_t)) + 1) {
         s->fifo_stop = fifo_start;
         s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -5079,21 +5392,25 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         break;
       };
       len -= sizeof(SVGAFifoCmdDefineGMR2) / sizeof(uint32_t) + 1;
+      gmr2_id = vmsvga_fifo_read(s);
+      gmr2_pages = vmsvga_fifo_read(s);
+      accepted = vmsvga_gmr_define2(s, gmr2_id, gmr2_pages);
       if (trace_flight) {
-        uint32_t gmr2_id = vmsvga_fifo_read(s);
-        uint32_t gmr2_pages = vmsvga_fifo_read(s);
         fprintf(stderr,
                 "VMVGA-GMR2-DIAG define id=%u pages=%u max-ids=%u "
-                "max-pages=0x%x advertised=0\n",
+                "max-pages=0x%x advertised=0 accepted=%u "
+                "shared-namespace=1\n",
                 gmr2_id, gmr2_pages, (unsigned)VMSVGA_GMR_MAX_IDS,
-                (unsigned)VMSVGA_GMR_MAX_PAGES);
-      } else {
-        vmsvga_fifo_read(s);
-        vmsvga_fifo_read(s);
+                (unsigned)VMSVGA_GMR_MAX_PAGES, accepted);
+        vmsvga_trace_gmr2_define(s, gmr2_id, gmr2_pages);
       };
-      /* TODO: Model GMR2 state before advertising SVGA_CAP_GMR2. */
+      /*
+       * Intentionally accept commands already issued by the guest without
+       * advertising SVGA_CAP_GMR2 or SVGA_FIFO_CAP_GMR2 yet.
+       */
       VPRINT("SVGA_CMD_DEFINE_GMR2 command %u in SVGA command FIFO\n", cmd);
       break;
+    }
     case SVGA_CMD_REMAP_GMR2: {
       uint32_t gmr_id;
       uint32_t flags;
@@ -5145,9 +5462,20 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
                 "VMVGA-GMR2-DIAG remap id=%u flags=0x%08x offset-pages=%u "
                 "pages=%u payload-words=%" PRIu64 " advertised=0\n",
                 gmr_id, flags, offset_pages, num_pages, payload_words);
+        vmsvga_trace_gmr2_remap(s, gmr_id, flags, offset_pages, num_pages);
+      };
+      {
+        bool accepted =
+            vmsvga_gmr_remap2(s, gmr_id, flags, offset_pages, num_pages);
+
+        if (trace_flight) {
+          fprintf(stderr,
+                  "VMVGA-GMR2-DIAG remap-result id=%u accepted=%u "
+                  "via-gmr-supported=0 shared-namespace=1\n",
+                  gmr_id, accepted);
+        };
       };
       vmsvga_fifo_skip(s, (uint32_t)payload_words);
-      /* TODO: Apply the remap to GMR2 state once GMR2 is implemented. */
       VPRINT("SVGA_CMD_REMAP_GMR2 command %u in SVGA command FIFO: gmr %u, "
              "offset %u, pages %u\n",
              cmd, gmr_id, offset_pages, num_pages);
@@ -6070,6 +6398,8 @@ static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s) {
           SVGA_FIFO_CAP_PITCHLOCK | SVGA_FIFO_CAP_CURSOR_BYPASS_3 |
           SVGA_FIFO_CAP_RESERVE | SVGA_FIFO_CAP_SCREEN_OBJECT;
 #endif
+  /* GMR2 command handling is intentionally present but not advertised yet. */
+  s->fc &= ~SVGA_FIFO_CAP_GMR2;
 };
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
                                        uint32_t reg) {
@@ -6342,6 +6672,24 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s) {
     vmvga_console_set_surface(s->vga.con, surface);
     s->svga_surface_bound = true;
     s->invalidated = true;
+    if (vmsvga_trace_flight_enabled()) {
+      uint8_t *backing = NULL;
+
+      if (s->screen_defined && s->screen_backing_valid &&
+          s->screen_backing_gmr_id == SVGA_GMR_FRAMEBUFFER) {
+        backing = vmsvga_svga_vram_ptr(s) + s->screen_backing_offset;
+      }
+      fprintf(stderr,
+              "VMVGA-SCANOUT-DIAG source=%s surface=%p data=%p scanout=%p "
+              "backing=%p surface-scanout-match=%u "
+              "surface-backing-match=%u handoff=%u stride=%u size=%ux%u\n",
+              s->screen_defined ? "screen" : "bar1", (void *)surface,
+              (void *)surface_data(surface), (void *)scanout, (void *)backing,
+              surface_data(surface) == scanout,
+              backing != NULL && surface_data(surface) == backing,
+              s->screen_handoff_active, stride, s->active_width,
+              s->active_height);
+    }
     /* A newly bound surface does not necessarily trigger a frontend redraw.
      * Force an initial full update so the display frontend starts consuming
      * the new scanout contents immediately. */
@@ -6589,6 +6937,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     caps |= SVGA_CAP_8BIT_EMULATION;
 #endif
 #endif
+    /* GMR2 command handling is intentionally present but not advertised yet. */
+    caps &= ~SVGA_CAP_GMR2;
     if (!s->svga3d_capable) {
       caps &= ~SVGA_CAP_3D;
     };
@@ -7249,6 +7599,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
     vmsvga_damage_flush(s);
   };
 done:
+  vmsvga_trace_gmr2_sample(s);
   vmsvga_trace_3d_versions(s);
   vmsvga_trace_flight_report(s, "display", false);
   VMVGA_GFX_UPDATE_DONE();
@@ -8145,13 +8496,14 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp) {
   vmsvga_init(DEVICE(dev), &s->chip, pci_address_space(dev),
               pci_address_space_io(dev));
   vmsvga3d_renderer_realize(&s->chip);
-  pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_TYPE_32, &s->chip.vga.vram);
-  pci_register_bar(dev, 2, PCI_BASE_ADDRESS_MEM_TYPE_32, &s->chip.fifo_ram);
+  pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.vga.vram);
+  pci_register_bar(dev, 2, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.fifo_ram);
   vmsvga_trace_resource_snapshot(&s->chip, "realize");
 };
 static void pci_vmsvga_uninit(PCIDevice *dev) {
   struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
   vmsvga_trace_flight_histogram(&s->chip, "uninit");
+  vmsvga_trace_gmr2_clear(&s->chip);
   vmsvga3d_reset(&s->chip);
   vmsvga3d_renderer_unrealize(&s->chip);
   vmsvga_screen_reset(&s->chip);

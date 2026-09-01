@@ -36,6 +36,8 @@ struct vmsvga_gmr_s {
   struct vmsvga_gmr_run_s *runs;
   uint32_t num_runs;
   uint64_t num_pages;
+  uint32_t max_pages;
+  uint64_t *page_gpas;
 };
 
 static void vmsvga_gmr_destroy(struct vmsvga_state_s *s, uint32_t gmr_id) {
@@ -51,6 +53,7 @@ static void vmsvga_gmr_destroy(struct vmsvga_state_s *s, uint32_t gmr_id) {
   };
 
   g_free(gmr->runs);
+  g_free(gmr->page_gpas);
   g_free(gmr);
   s->gmrs[gmr_id] = NULL;
 };
@@ -161,6 +164,187 @@ invalid:
   return false;
 };
 
+static bool vmsvga_gmr_define2(struct vmsvga_state_s *s, uint32_t gmr_id,
+                               uint32_t num_pages) {
+  const uint32_t max_pages =
+      MIN(VMSVGA_GMR_MAX_PAGES, UINT32_MAX / VMSVGA_GMR_PAGE_SIZE);
+  struct vmsvga_gmr_s *gmr;
+
+  if (gmr_id >= ARRAY_SIZE(s->gmrs) || num_pages > max_pages) {
+    return false;
+  };
+
+  if (num_pages == 0) {
+    vmsvga_gmr_destroy(s, gmr_id);
+    return true;
+  };
+
+  gmr = s->gmrs[gmr_id];
+  if (gmr == NULL) {
+    gmr = g_new0(struct vmsvga_gmr_s, 1);
+    s->gmrs[gmr_id] = gmr;
+  };
+
+  /*
+   * Match VirtualBox: DEFINE_GMR2 only changes cMaxPages.  Existing GMR
+   * contents in the shared GMR1/GMR2 namespace survive until REMAP_GMR2
+   * changes them.
+   */
+  gmr->max_pages = num_pages;
+  return true;
+};
+
+static bool vmsvga_gmr2_build_page_map(struct vmsvga_gmr_s *gmr,
+                                       uint32_t total_pages,
+                                       uint64_t **out_page_gpas) {
+  uint64_t *page_gpas;
+  uint64_t page = 0;
+  uint32_t run_index;
+
+  *out_page_gpas = NULL;
+  if (total_pages == 0) {
+    return true;
+  };
+
+  page_gpas = g_try_new(uint64_t, total_pages);
+  if (page_gpas == NULL) {
+    return false;
+  };
+  for (page = 0; page < total_pages; page++) {
+    page_gpas[page] = UINT64_MAX;
+  };
+
+  if (gmr->page_gpas != NULL) {
+    uint64_t old_pages = MIN(gmr->num_pages, (uint64_t)total_pages);
+
+    memcpy(page_gpas, gmr->page_gpas,
+           (size_t)old_pages * sizeof(*page_gpas));
+    *out_page_gpas = page_gpas;
+    return true;
+  };
+
+  page = 0;
+  for (run_index = 0; run_index < gmr->num_runs && page < total_pages;
+       run_index++) {
+    uint32_t run_page;
+
+    for (run_page = 0;
+         run_page < gmr->runs[run_index].num_pages && page < total_pages;
+         run_page++, page++) {
+      page_gpas[page] =
+          gmr->runs[run_index].gpa +
+          (uint64_t)run_page * VMSVGA_GMR_PAGE_SIZE;
+    };
+  };
+
+  if (page != MIN(gmr->num_pages, (uint64_t)total_pages)) {
+    g_free(page_gpas);
+    return false;
+  };
+
+  *out_page_gpas = page_gpas;
+  return true;
+};
+
+static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
+                              uint32_t flags, uint32_t offset_pages,
+                              uint32_t num_pages) {
+  const uint32_t max_pages =
+      MIN(VMSVGA_GMR_MAX_PAGES, UINT32_MAX / VMSVGA_GMR_PAGE_SIZE);
+  struct vmsvga_gmr_s *gmr;
+  uint64_t end_page = (uint64_t)offset_pages + num_pages;
+  uint64_t total_pages64;
+  uint32_t total_pages;
+  uint64_t *page_gpas;
+  uint32_t i;
+  uint32_t mapped = 0;
+  uint32_t invalid = 0;
+
+  if (gmr_id >= ARRAY_SIZE(s->gmrs)) {
+    return false;
+  };
+  gmr = s->gmrs[gmr_id];
+  if (gmr == NULL || gmr->max_pages == 0 || end_page > gmr->max_pages ||
+      end_page > max_pages) {
+    return false;
+  };
+
+  /* VirtualBox currently leaves the VIA_GMR form unimplemented too. */
+  if (flags & SVGA_REMAP_GMR2_VIA_GMR) {
+    return false;
+  };
+
+  if (num_pages == 0) {
+    return true;
+  };
+
+  /* VirtualBox requires an existing mapping for a non-zero remap offset. */
+  if (offset_pages != 0 && gmr->num_pages == 0) {
+    return false;
+  };
+
+  total_pages64 = MAX(gmr->num_pages, end_page);
+  if (total_pages64 > max_pages) {
+    return false;
+  };
+  total_pages = (uint32_t)total_pages64;
+
+  if (!vmsvga_gmr2_build_page_map(gmr, total_pages, &page_gpas)) {
+    return false;
+  };
+
+  for (i = 0; i < num_pages; i++) {
+    uint32_t ppn_index =
+        (flags & SVGA_REMAP_GMR2_SINGLE_PPN) ? 0 : i;
+    uint64_t ppn;
+
+    if (flags & SVGA_REMAP_GMR2_PPN64) {
+      uint64_t raw;
+
+      vmsvga_fifo_peek_raw_data(
+          s, (size_t)ppn_index * sizeof(raw), &raw, sizeof(raw));
+      ppn = le64_to_cpu(raw);
+      if (ppn == UINT64_MAX ||
+          ppn > (UINT64_MAX >> VMSVGA_GMR_PAGE_SHIFT)) {
+        page_gpas[offset_pages + i] = UINT64_MAX;
+        invalid++;
+        continue;
+      };
+    } else {
+      uint32_t raw;
+
+      vmsvga_fifo_peek_raw_data(
+          s, (size_t)ppn_index * sizeof(raw), &raw, sizeof(raw));
+      ppn = le32_to_cpu(raw);
+      if (ppn == UINT32_MAX) {
+        page_gpas[offset_pages + i] = UINT64_MAX;
+        invalid++;
+        continue;
+      };
+    };
+
+    page_gpas[offset_pages + i] = ppn << VMSVGA_GMR_PAGE_SHIFT;
+    mapped++;
+  };
+
+  /* Commit only after the complete remap has been decoded successfully. */
+  g_free(gmr->runs);
+  g_free(gmr->page_gpas);
+  gmr->runs = NULL;
+  gmr->num_runs = 0;
+  gmr->page_gpas = page_gpas;
+  gmr->num_pages = total_pages;
+
+  if (vmsvga_trace_flight_enabled()) {
+    fprintf(stderr,
+            "VMVGA-GMR2-STATE remap id=%u flags=0x%08x offset=%u pages=%u "
+            "total-pages=%u mapped=%u invalid=%u shared-namespace=1\n",
+            gmr_id, flags, offset_pages, num_pages, total_pages, mapped,
+            invalid);
+  };
+  return true;
+};
+
 static bool vmsvga_gmr_descriptor_write(struct vmsvga_state_s *s,
                                          uint32_t descriptor_ppn) {
   uint32_t gmr_id = s->gmrid;
@@ -265,6 +449,44 @@ static bool vmsvga_gmr_transfer(struct vmsvga_state_s *s, uint32_t gmr_id,
 
   pci_vmsvga = container_of(s, struct pci_vmsvga_state_s, chip);
   gmr = s->gmrs[gmr_id];
+
+  if (gmr->page_gpas != NULL) {
+    while (size != 0) {
+      uint64_t page_index = current_offset >> VMSVGA_GMR_PAGE_SHIFT;
+      uint32_t within_page = current_offset & (VMSVGA_GMR_PAGE_SIZE - 1);
+      size_t chunk = MIN(size, (size_t)VMSVGA_GMR_PAGE_SIZE - within_page);
+      uint64_t gpa;
+      MemTxResult result;
+
+      if (page_index >= gmr->num_pages) {
+        return false;
+      };
+      gpa = gmr->page_gpas[page_index];
+      if (gpa == UINT64_MAX) {
+        return false;
+      };
+
+      if (write_to_gmr) {
+        result = pci_dma_write(PCI_DEVICE(pci_vmsvga), gpa + within_page,
+                               src, chunk);
+      } else {
+        result = pci_dma_read(PCI_DEVICE(pci_vmsvga), gpa + within_page,
+                              dst, chunk);
+      };
+      if (result != MEMTX_OK) {
+        return false;
+      };
+
+      if (write_to_gmr) {
+        src += chunk;
+      } else {
+        dst += chunk;
+      };
+      current_offset += chunk;
+      size -= chunk;
+    };
+    return true;
+  };
 
   for (run_index = 0; run_index < gmr->num_runs; run_index++) {
     uint64_t run_size =

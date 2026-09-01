@@ -376,17 +376,17 @@ static void vmsvga_screen_base_clear(struct vmsvga_state_s *s) {
 }
 
 static bool vmsvga_screen_base_resize(struct vmsvga_state_s *s,
-                                      uint32_t width, uint32_t height) {
-  uint64_t stride64 = (uint64_t)width * 4;
-  uint64_t size64 = stride64 * height;
-  uint32_t stride;
+                                      uint32_t width, uint32_t height,
+                                      uint32_t stride) {
+  uint64_t row_bytes = (uint64_t)width * 4;
+  uint64_t size64 = (uint64_t)stride * height;
   size_t size;
   uint8_t *new_base;
 
-  if (stride64 > UINT32_MAX || size64 == 0 || size64 > SIZE_MAX) {
+  if (row_bytes > UINT32_MAX || stride < row_bytes ||
+      size64 == 0 || size64 > SIZE_MAX) {
     return false;
   }
-  stride = (uint32_t)stride64;
   size = (size_t)size64;
   if (s->screen_base != NULL && s->screen_defined &&
       s->screen_width == width && s->screen_height == height &&
@@ -434,9 +434,9 @@ static bool vmsvga_screen_backing_validate(struct vmsvga_state_s *s,
   return true;
 }
 
-static bool vmsvga_screen_storage(struct vmsvga_state_s *s,
-                                  uint8_t **base, size_t *size,
-                                  uint32_t *stride) {
+static bool vmsvga_screen_base_layer_storage(struct vmsvga_state_s *s,
+                                             uint8_t **base, size_t *size,
+                                             uint32_t *stride) {
   uint64_t required;
 
   if (!s->screen_defined || base == NULL || size == NULL || stride == NULL) {
@@ -447,31 +447,14 @@ static bool vmsvga_screen_storage(struct vmsvga_state_s *s,
     if (!vmsvga_screen_backing_validate(
             s, s->screen_width, s->screen_height,
             s->screen_backing_gmr_id, s->screen_backing_offset,
-            s->screen_backing_pitch)) {
+            s->screen_backing_pitch) ||
+        s->screen_backing_gmr_id != SVGA_GMR_FRAMEBUFFER) {
       return false;
     }
-    required = (uint64_t)s->screen_backing_pitch * s->screen_height;
-    /*
-     * Keep the host scanout mirror only during the legacy VGA -> Screen
-     * Object handoff. Once Windows has successfully presented the new Screen
-     * Object, use the real framebuffer backing.
-     */
-    if (s->screen_handoff_active) {
-      if (!vmsvga_screen_base_resize(s, s->screen_width,
-                                     s->screen_height)) {
-        return false;
-      }
-      *base = s->screen_base;
-      *size = s->screen_base_size;
-      *stride = s->screen_stride;
-      return true;
-    }
-    if (s->screen_backing_gmr_id == SVGA_GMR_FRAMEBUFFER) {
-      *base = vmsvga_svga_vram_ptr(s) + s->screen_backing_offset;
-      *size = s->vga.vram_size - s->screen_backing_offset;
-      *stride = s->screen_backing_pitch;
-      return true;
-    }
+    *base = vmsvga_svga_vram_ptr(s) + s->screen_backing_offset;
+    *size = s->vga.vram_size - s->screen_backing_offset;
+    *stride = s->screen_backing_pitch;
+    return true;
   }
 
   required = (uint64_t)s->screen_stride * s->screen_height;
@@ -484,6 +467,28 @@ static bool vmsvga_screen_storage(struct vmsvga_state_s *s,
   *size = s->screen_base_size;
   *stride = s->screen_stride;
   return true;
+}
+
+static bool vmsvga_screen_storage(struct vmsvga_state_s *s,
+                                  uint8_t **base, size_t *size,
+                                  uint32_t *stride) {
+  /*
+   * The Screen Object base layer lives in its advertised backingStore.  The
+   * host mirror is only a temporary scanout shield while the legacy firmware
+   * layout is being replaced by the first guest Screen presentation.
+   */
+  if (s->screen_defined && s->screen_backing_valid &&
+      s->screen_handoff_active) {
+    if (!vmsvga_screen_base_resize(s, s->screen_width, s->screen_height,
+                                   s->screen_backing_pitch)) {
+      return false;
+    }
+    *base = s->screen_base;
+    *size = s->screen_base_size;
+    *stride = s->screen_stride;
+    return true;
+  }
+  return vmsvga_screen_base_layer_storage(s, base, size, stride);
 }
 
 static inline void vmsvga_screen_mark_dirty(struct vmsvga_state_s *s,
@@ -507,6 +512,7 @@ static void vmsvga_screen_reset(struct vmsvga_state_s *s) {
   s->screen_root_x = 0;
   s->screen_root_y = 0;
   s->screen_backing_valid = false;
+  s->screen_handoff_active = false;
   s->screen_backing_gmr_id = SVGA_GMR_NULL;
   s->screen_backing_offset = 0;
   s->screen_backing_pitch = 0;
@@ -538,6 +544,9 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
                                  uint32_t clone_count) {
   uint64_t stride;
   uint64_t size;
+  uint32_t screen_stride;
+  bool handoff_active;
+  DisplaySurface *surface;
   uint32_t supported_flags = SVGA_SCREEN_MUST_BE_SET |
                              SVGA_SCREEN_IS_PRIMARY |
                              SVGA_SCREEN_FULLSCREEN_HINT;
@@ -569,15 +578,33 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         id, backing_gmr_id, backing_offset, backing_pitch, width, height);
     return false;
   }
-  if (!vmsvga_screen_base_resize(s, width, height)) {
+
+  screen_stride = backing_present ? backing_pitch : (uint32_t)stride;
+  surface = qemu_console_surface(s->vga.con);
+  handoff_active =
+      backing_present &&
+      (surface == NULL || surface_width(surface) != width ||
+       surface_height(surface) != height ||
+       surface_bits_per_pixel(surface) != 32 ||
+       surface_stride(surface) != screen_stride);
+
+  if ((!backing_present || handoff_active) &&
+      !vmsvga_screen_base_resize(s, width, height, screen_stride)) {
     VMSVGA_SCREEN_REJECT(
-        "define reason=base-allocation id=%u size=%ux%u bytes=%" PRIu64,
-        id, width, height, size);
+        "define reason=base-allocation id=%u size=%ux%u stride=%u",
+        id, width, height, screen_stride);
     return false;
   }
+  if (handoff_active && s->screen_base != NULL) {
+    memset(s->screen_base, 0, s->screen_base_size);
+  }
+
   s->screen_backing_valid = backing_present;
-  /* Keep the mirror only until the first successful guest Screen update. */
-  s->screen_handoff_active = backing_present;
+  /*
+   * Protect only a genuine layout transition. Same-mode Screen redefines can
+   * bind their real backingStore immediately.
+   */
+  s->screen_handoff_active = handoff_active;
   s->screen_backing_gmr_id = backing_present ? backing_gmr_id : SVGA_GMR_NULL;
   s->screen_backing_offset = backing_present ? backing_offset : 0;
   s->screen_backing_pitch = backing_present ? backing_pitch : 0;
@@ -589,7 +616,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
   s->screen_root_x = root_x;
   s->screen_root_y = root_y;
   s->screen_clone_count = clone_count;
-  s->screen_stride = backing_present ? backing_pitch : (uint32_t)stride;
+  s->screen_stride = screen_stride;
 
   /* The active tuple also describes the Screen Object scanout surface. */
   s->active_valid = true;
@@ -603,57 +630,42 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
   s->svga_surface_bound = false;
   s->invalidated = true;
 
-  /* Bind the Screen Object surface when it is defined, not from the first
-   * guest blit. The first GMRFB-to-screen operation must only update an
-   * already selected scanout surface. */
   if (vmsvga_trace_flight_enabled()) {
-    DisplaySurface *surface = qemu_console_surface(s->vga.con);
     fprintf(stderr,
-            "VMVGA-MIRROR-BIND phase=before surface=%p data=%p image=%p "
-            "size=%dx%d stride=%d bpp=%d mirror=%p mirror-size=%zu "
-            "mirror-stride=%u active=%ux%ux%u/%u handoff=%u bound=%u\n",
-            (void *)surface,
-            surface != NULL ? (void *)surface_data(surface) : NULL,
-            surface != NULL ? (void *)surface->image : NULL,
+            "VMVGA-SCREEN-HANDOFF phase=define deferred=%u old=%dx%d/%d/%d "
+            "new=%ux%u/32/%u mirror=%p backing=%u:0x%08x\n",
+            s->screen_handoff_active,
             surface != NULL ? surface_width(surface) : 0,
             surface != NULL ? surface_height(surface) : 0,
-            surface != NULL ? surface_stride(surface) : 0,
             surface != NULL ? surface_bits_per_pixel(surface) : 0,
-            (void *)s->screen_base, s->screen_base_size, s->screen_stride,
-            s->active_width, s->active_height, s->active_depth,
-            s->active_stride, s->screen_handoff_active,
-            s->svga_surface_bound);
-  };
-  vmsvga_check_size(s);
-  if (vmsvga_trace_flight_enabled()) {
-    DisplaySurface *surface = qemu_console_surface(s->vga.con);
-    fprintf(stderr,
-            "VMVGA-MIRROR-BIND phase=after surface=%p data=%p image=%p "
-            "size=%dx%d stride=%d bpp=%d mirror=%p mirror-match=%u "
-            "handoff=%u bound=%u\n",
-            (void *)surface,
-            surface != NULL ? (void *)surface_data(surface) : NULL,
-            surface != NULL ? (void *)surface->image : NULL,
-            surface != NULL ? surface_width(surface) : 0,
-            surface != NULL ? surface_height(surface) : 0,
             surface != NULL ? surface_stride(surface) : 0,
-            surface != NULL ? surface_bits_per_pixel(surface) : 0,
-            (void *)s->screen_base,
-            surface != NULL && surface_data(surface) == s->screen_base,
-            s->screen_handoff_active, s->svga_surface_bound);
-  };
+            width, height, screen_stride, (void *)s->screen_base,
+            s->screen_backing_valid ? s->screen_backing_gmr_id :
+                                      SVGA_GMR_NULL,
+            s->screen_backing_valid ? s->screen_backing_offset : 0);
+  }
+
+  /*
+   * During a layout transition keep the old frontend surface until FIFO
+   * processing has populated the new Screen base layer. vmsvga_update_display
+   * will bind the mirror if only partial presents arrive. A complete Screen
+   * present ends the handoff and binds BAR1 directly.
+   */
+  if (!s->screen_handoff_active) {
+    vmsvga_check_size(s);
+  }
 
   if (vmsvga_trace_flight_enabled()) {
     fprintf(stderr,
             "VMVGA-SCREEN-BACKING id=%u present=%u gmr=%u offset=0x%08x "
-            "pitch=%u clone=%u size=%ux%u\n",
+            "pitch=%u clone=%u size=%ux%u handoff=%u\n",
             id, s->screen_backing_valid,
             s->screen_backing_valid ? s->screen_backing_gmr_id :
                                       SVGA_GMR_NULL,
             s->screen_backing_valid ? s->screen_backing_offset : 0,
             s->screen_backing_valid ? s->screen_backing_pitch : 0,
-            clone_count, width, height);
-  };
+            clone_count, width, height, s->screen_handoff_active);
+  }
   s->trace_now.screen_defines++;
   vmsvga_screen_trace_activity(s);
   VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
@@ -686,6 +698,7 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
   s->screen_root_x = 0;
   s->screen_root_y = 0;
   s->screen_backing_valid = false;
+  s->screen_handoff_active = false;
   s->screen_backing_gmr_id = SVGA_GMR_NULL;
   s->screen_backing_offset = 0;
   s->screen_backing_pitch = 0;
@@ -891,6 +904,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
   uint8_t *screen_base;
   size_t screen_size;
   uint32_t screen_stride;
+  uint8_t *mirror_base = NULL;
+  uint32_t mirror_stride = 0;
   bool trace_blit;
   uint32_t trace_before_hash = 2166136261u;
   uint32_t trace_source_hash = 2166136261u;
@@ -898,7 +913,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
   uint32_t trace_source_nonzero_rows = 0;
   uint32_t trace_changed_rows = 0;
 
-  if (!vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride) ||
+  if (!vmsvga_screen_base_layer_storage(
+          s, &screen_base, &screen_size, &screen_stride) ||
       !s->gmrfb_defined ||
       !vmsvga_screen_format_decode(s->gmrfb_format, &bpp, &depth, &bypp) ||
       right <= left || bottom <= top) {
@@ -910,6 +926,18 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
     return false;
   }
   (void)screen_size;
+
+  if (s->screen_handoff_active) {
+    if (!vmsvga_screen_base_resize(s, s->screen_width, s->screen_height,
+                                   s->screen_backing_pitch)) {
+      VMSVGA_SCREEN_REJECT(
+          "blit-gmrfb-to-screen reason=handoff-mirror size=%ux%u pitch=%u",
+          s->screen_width, s->screen_height, s->screen_backing_pitch);
+      return false;
+    }
+    mirror_base = s->screen_base;
+    mirror_stride = s->screen_stride;
+  }
 
   if (left < 0) { source_x -= left; left = 0; }
   if (top < 0) { source_y -= top; top = 0; }
@@ -937,6 +965,13 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
     uint8_t *dst = screen_base +
                    (uint64_t)(top + row) * screen_stride +
                    (uint64_t)left * 4;
+    uint8_t *mirror_dst =
+        mirror_base != NULL
+            ? mirror_base + (uint64_t)(top + row) * mirror_stride +
+                                (uint64_t)left * 4
+            : NULL;
+    uint8_t *trace_dst = mirror_dst != NULL ? mirror_dst : dst;
+
     if (!vmsvga_screen_gmrfb_row_offset(s, (int32_t)source_x,
                                         (int32_t)(source_y + row), width,
                                         bypp, &gmr_offset, &row_bytes)) {
@@ -961,11 +996,11 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
     }
     if (trace_blit) {
       uint32_t before_row_hash =
-          vmsvga_gmr_diag_hash(dst, (size_t)width * 4);
+          vmsvga_gmr_diag_hash(trace_dst, (size_t)width * 4);
       size_t i;
 
       trace_before_hash = vmsvga_gmr_diag_hash_extend(
-          trace_before_hash, dst, (size_t)width * 4);
+          trace_before_hash, trace_dst, (size_t)width * 4);
       trace_source_hash = vmsvga_gmr_diag_hash_extend(
           trace_source_hash, s->blit_scratch, row_bytes);
       for (i = 0; i < row_bytes; i++) {
@@ -976,24 +1011,31 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
       }
 
       vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
+      if (mirror_dst != NULL) {
+        memcpy(mirror_dst, dst, (size_t)width * 4);
+      }
       trace_after_hash = vmsvga_gmr_diag_hash_extend(
-          trace_after_hash, dst, (size_t)width * 4);
+          trace_after_hash, trace_dst, (size_t)width * 4);
       if (before_row_hash !=
-          vmsvga_gmr_diag_hash(dst, (size_t)width * 4)) {
+          vmsvga_gmr_diag_hash(trace_dst, (size_t)width * 4)) {
         trace_changed_rows++;
       }
     } else {
       vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
-    };
+      if (mirror_dst != NULL) {
+        memcpy(mirror_dst, dst, (size_t)width * 4);
+      }
+    }
   }
 
   if (trace_blit) {
     fprintf(stderr,
-            "VMVGA-MIRROR-BLIT seq=%" PRIu64 " source=%s gmr=%u "
+            "VMVGA-SCREEN-BLIT seq=%" PRIu64 " target=%s source=%s gmr=%u "
             "rect=%" PRId64 ",%" PRId64 "-%" PRId64 ",%" PRId64 " "
             "rows=%u width=%u before=0x%08x source-hash=0x%08x "
             "after=0x%08x source-nonzero-rows=%u changed-rows=%u\n",
             s->trace_now.gmrfb_to_screen + 1,
+            mirror_base != NULL ? "handoff-mirror" : "backing",
             s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER ? "framebuffer" :
                                                       "gmr-v1",
             s->gmrfb_gmr_id, left, top, right, bottom, height, width,
@@ -1003,32 +1045,43 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
 
   vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,
                            width, height);
-  if (s->svga_surface_bound &&
-      qemu_console_surface(s->vga.con) != NULL) {
-    if (vmsvga_trace_flight_enabled()) {
-      DisplaySurface *surface = qemu_console_surface(s->vga.con);
-      uint64_t seq = s->trace_now.gmrfb_to_screen + 1;
+  {
+    DisplaySurface *surface = qemu_console_surface(s->vga.con);
+    uint8_t *scanout_base = NULL;
+    size_t scanout_size = 0;
+    uint32_t scanout_stride = 0;
+    bool scanout_bound =
+        s->svga_surface_bound && surface != NULL &&
+        vmsvga_screen_storage(s, &scanout_base, &scanout_size,
+                              &scanout_stride) &&
+        surface_data(surface) == scanout_base;
 
-      s->trace_now.damage_rects++;
-      vmsvga_trace_flight_activity(s);
-      if (seq <= 16 || (seq & 63) == 0) {
-        fprintf(stderr,
-                "VMVGA-MIRROR-DAMAGE seq=%" PRIu64 " surface=%p data=%p "
-                "image=%p size=%dx%d stride=%d bpp=%d mirror=%p "
-                "mirror-match=%u rect=%" PRId64 ",%" PRId64 "-%" PRId64
-                ",%" PRId64 " handoff=%u bound=%u\n",
-                seq, (void *)surface, (void *)surface_data(surface),
-                (void *)surface->image, surface_width(surface),
-                surface_height(surface), surface_stride(surface),
-                surface_bits_per_pixel(surface), (void *)screen_base,
-                surface_data(surface) == screen_base, left, top, right, bottom,
-                s->screen_handoff_active, s->svga_surface_bound);
+    (void)scanout_size;
+    (void)scanout_stride;
+    if (scanout_bound) {
+      if (vmsvga_trace_flight_enabled()) {
+        uint64_t seq = s->trace_now.gmrfb_to_screen + 1;
+
+        s->trace_now.damage_rects++;
+        vmsvga_trace_flight_activity(s);
+        if (seq <= 16 || (seq & 63) == 0) {
+          fprintf(stderr,
+                  "VMVGA-SCREEN-DAMAGE seq=%" PRIu64 " surface=%p data=%p "
+                  "size=%dx%d stride=%d scanout=%p scanout-match=%u "
+                  "rect=%" PRId64 ",%" PRId64 "-%" PRId64 ",%" PRId64
+                  " handoff=%u bound=%u\n",
+                  seq, (void *)surface, (void *)surface_data(surface),
+                  surface_width(surface), surface_height(surface),
+                  surface_stride(surface), (void *)scanout_base,
+                  surface_data(surface) == scanout_base, left, top, right,
+                  bottom, s->screen_handoff_active, s->svga_surface_bound);
+        }
       }
+      vmvga_console_update(s->vga.con, (uint32_t)left, (uint32_t)top,
+                           width, height);
+    } else {
+      vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
     }
-    vmvga_console_update(s->vga.con, (uint32_t)left, (uint32_t)top,
-                         width, height);
-  } else {
-    vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
   }
   return true;
 }
@@ -1108,6 +1161,23 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
   ok = vmsvga_screen_blit_one_from_gmrfb(
       s, src_origin->x, src_origin->y, local_left, local_top,
       local_right, local_bottom);
+  if (ok && s->screen_handoff_active &&
+      local_left <= 0 && local_top <= 0 &&
+      local_right >= (int32_t)s->screen_width &&
+      local_bottom >= (int32_t)s->screen_height) {
+    s->screen_handoff_active = false;
+    s->svga_surface_bound = false;
+    s->invalidated = true;
+    if (vmsvga_trace_flight_enabled()) {
+      fprintf(stderr,
+              "VMVGA-SCREEN-HANDOFF phase=complete seq=%" PRIu64
+              " size=%ux%u pitch=%u backing=%u:0x%08x\n",
+              s->trace_now.gmrfb_to_screen + 1, s->screen_width,
+              s->screen_height, s->screen_backing_pitch,
+              s->screen_backing_gmr_id, s->screen_backing_offset);
+    }
+    vmsvga_check_size(s);
+  }
   s->screen_annotation_type = VMSVGA_ANNOTATION_NONE;
   s->trace_now.gmrfb_to_screen++;
   vmsvga_screen_trace_activity(s);
@@ -1124,7 +1194,8 @@ static bool vmsvga_screen_blit_screen_to_gmrfb(
   size_t screen_size;
   uint32_t screen_stride;
 
-  if (!vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride) ||
+  if (!vmsvga_screen_base_layer_storage(
+          s, &screen_base, &screen_size, &screen_stride) ||
       !s->gmrfb_defined || dest_origin == NULL || src_rect == NULL ||
       src_screen_id != VMSVGA_SCREEN_V1_ID ||
       !vmsvga_screen_format_decode(s->gmrfb_format, &bpp, &depth, &bypp)) {

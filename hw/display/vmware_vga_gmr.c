@@ -439,9 +439,20 @@ static bool vmsvga_screen_storage(struct vmsvga_state_s *s,
       return false;
     }
     required = (uint64_t)s->screen_backing_pitch * s->screen_height;
-    *base = vmsvga_svga_vram_ptr(s) + s->screen_backing_offset;
-    *size = (size_t)required;
-    *stride = s->screen_backing_pitch;
+    /*
+     * Keep the host scanout mirror for the active Screen Object.  The guest
+     * framebuffer is the source of GMRFB_TO_SCREEN operations, but BAR1 must
+     * not become the QEMU display surface during the legacy VGA -> Screen
+     * Object transition.  This avoids reinterpreting the previous firmware
+     * framebuffer with the new pitch.
+     */
+    if (!vmsvga_screen_base_resize(s, s->screen_width,
+                                   s->screen_height)) {
+      return false;
+    }
+    *base = s->screen_base;
+    *size = s->screen_base_size;
+    *stride = s->screen_stride;
     return true;
   }
 
@@ -540,7 +551,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         id, backing_gmr_id, backing_offset, backing_pitch, width, height);
     return false;
   }
-  if (!backing_present && !vmsvga_screen_base_resize(s, width, height)) {
+  if (!vmsvga_screen_base_resize(s, width, height)) {
     VMSVGA_SCREEN_REJECT(
         "define reason=base-allocation id=%u size=%ux%u bytes=%" PRIu64,
         id, width, height, size);
@@ -896,8 +907,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
 
   vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,
                            width, height);
-  if (s->screen_backing_valid && s->screen_backing_gmr_id ==
-      SVGA_GMR_FRAMEBUFFER && s->svga_surface_bound &&
+  if (s->svga_surface_bound &&
       qemu_console_surface(s->vga.con) != NULL) {
     if (vmsvga_trace_flight_enabled()) {
       s->trace_now.damage_rects++;

@@ -6942,7 +6942,10 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     caps |= SVGA_CAP_8BIT_EMULATION;
 #endif
 #endif
-    if (!s->svga3d_capable) {
+    if (s->svga3d_capable) {
+      caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_GBOBJECTS | SVGA_CAP_DX |
+              SVGA_CAP_CAP2_REGISTER;
+    } else {
       caps &= ~SVGA_CAP_3D;
     };
     ret = caps;
@@ -6953,7 +6956,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
 #ifdef EXPCAPS
     ret = 0xffffffff;
 #else
-    ret = SVGA_CAP2_NONE;
+    ret = s->svga3d_capable ? SVGA_CAP2_GROW_OTABLE : SVGA_CAP2_NONE;
 #endif
     VPRINT("SVGA_REG_CAP2 register %u with the return of %u\n", s->index, ret);
     break;
@@ -7421,6 +7424,9 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     s->cmd_low = value;
     VPRINT("SVGA_REG_COMMAND_LOW register %u with the value of %u\n", s->index,
            value);
+    if (s->svga3d_capable) {
+      vmsvga3d_command_buffer_submit(s);
+    };
     break;
   case SVGA_REG_COMMAND_HIGH:
     s->cmd_high = value;

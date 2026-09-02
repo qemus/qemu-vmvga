@@ -35,8 +35,10 @@
 typedef struct vmsvga3d_dxvk_query_s VMSVGA3DDxvkQuery;
 typedef struct vmsvga3d_dxvk_state_s VMSVGA3DDxvkState;
 typedef struct vmsvga3d_dxvk_shader_s VMSVGA3DDxvkShader;
+typedef struct vmsvga3d_dxvk_stream_output_s VMSVGA3DDxvkStreamOutput;
 typedef struct vmsvga3d_dxvk_input_layout_s VMSVGA3DDxvkInputLayout;
 typedef struct vmsvga3d_dxvk_constant_buffer_s VMSVGA3DDxvkConstantBuffer;
+typedef struct vmsvga3d_dxvk_view_s VMSVGA3DDxvkView;
 
 struct vmsvga3d_dxvk_s {
   VMSVGA3DDxvkWsi *wsi;
@@ -50,8 +52,10 @@ struct vmsvga3d_dxvk_s {
   VMSVGA3DDxvkQuery *d3d11_queries;
   VMSVGA3DDxvkState *d3d11_states;
   VMSVGA3DDxvkShader *d3d11_shaders;
+  VMSVGA3DDxvkStreamOutput *d3d11_stream_outputs;
   VMSVGA3DDxvkInputLayout *d3d11_input_layouts;
   VMSVGA3DDxvkConstantBuffer *d3d11_constant_buffers;
+  VMSVGA3DDxvkView *d3d11_views;
   void *d3d11_bound_constant_buffers[SVGA3D_NUM_SHADERTYPE_DX10]
                                       [SVGA3D_DX_MAX_CONSTBUFFERS];
   bool d3d11_bound_constant_buffer_valid[SVGA3D_NUM_SHADERTYPE_DX10]
@@ -64,14 +68,31 @@ struct vmsvga3d_dxvk_s {
   uint32_t d3d11_bound_index_format;
   uint32_t d3d11_bound_index_offset;
   bool d3d11_bound_index_buffer_valid;
+  void *d3d11_blit_constant_buffer;
+  void *d3d11_blit_vertex_shader;
+  void *d3d11_blit_pixel_shader;
+  void *d3d11_blit_pixel_shader_srgb;
+  void *d3d11_blit_sampler_state;
+  void *d3d11_blit_rasterizer_state;
+  void *d3d11_blit_blend_state;
+  bool d3d11_blitter_initialized;
   bool ready;
 };
 
-typedef struct vmsvga3d_dxvk_srv_s {
-  VMSVGA3DD3D10SRVDesc desc;
+typedef enum vmsvga3d_dxvk_view_kind_e {
+  VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
+  VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
+  VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL,
+} VMSVGA3DDxvkViewKind;
+
+struct vmsvga3d_dxvk_view_s {
+  uint32_t cid;
+  uint32_t view_id;
+  VMSVGA3DDxvkViewKind kind;
+  VMSVGA3DDxvkSurface *surface;
   void *view;
-  struct vmsvga3d_dxvk_srv_s *next;
-} VMSVGA3DDxvkSRV;
+  VMSVGA3DDxvkView *next;
+};
 
 struct vmsvga3d_dxvk_query_s {
   uint32_t cid;
@@ -97,21 +118,37 @@ struct vmsvga3d_dxvk_state_s {
   VMSVGA3DDxvkState *next;
 };
 
-/* Keep DXBC alive with the native shader for input-layout and SO creation. */
+/* Mirror VirtualBox DXSHADER lifetime: Define creates the backend record,
+ * Bind stores parsed shader information, and pipeline setup later creates
+ * DXBC and the native shader.
+ */
 struct vmsvga3d_dxvk_shader_s {
   uint32_t cid;
   uint32_t shader_id;
   uint32_t shader_type;
+  VMSVGA3DD3D10ShaderInfo info;
+  bool info_valid;
   void *shader;
   uint8_t *bytecode;
   uint32_t bytecode_size;
+  uint32_t stream_output_id;
   VMSVGA3DDxvkShader *next;
+};
+
+/* VirtualBox resolves a stream-output declaration only when a GS first uses
+ * the SO id.  The resolved declaration is then cached per SO id until the
+ * entry is redefined, destroyed, or replayed from a COTable.
+ */
+struct vmsvga3d_dxvk_stream_output_s {
+  uint32_t cid;
+  uint32_t stream_output_id;
+  VMSVGA3DD3D10StreamOutputPlan plan;
+  VMSVGA3DDxvkStreamOutput *next;
 };
 
 struct vmsvga3d_dxvk_input_layout_s {
   uint32_t cid;
   uint32_t layout_id;
-  uint32_t shader_id;
   void *layout;
   VMSVGA3DDxvkInputLayout *next;
 };
@@ -131,6 +168,7 @@ struct vmsvga3d_dxvk_constant_buffer_s {
  */
 struct vmsvga3d_dxvk_surface_s {
   uint32_t sid;
+  VMSVGA3DDxvk *owner;
 
   VMSVGA3DD3D9HostResourceType d3d9_resource_type;
   uint32_t d3d9_usage;
@@ -143,7 +181,6 @@ struct vmsvga3d_dxvk_surface_s {
 
   VMSVGA3DD3D10CreateDesc d3d11_desc;
   void *d3d11_resource;
-  VMSVGA3DDxvkSRV *d3d11_srvs;
   bool d3d11_resident;
 };
 
@@ -271,6 +308,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_INPUT_LAYOUT 11u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_VERTEX_SHADER 12u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER 13u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO 14u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PIXEL_SHADER 15u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BLEND_STATE 20u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_STATE 21u
@@ -278,21 +316,39 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SAMPLER_STATE 23u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_QUERY 24u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PREDICATE 25u
+#define VMSVGA3D_DXVK_ID3D11BUFFER_GET_DESC 10u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_CONSTANT_BUFFERS 7u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER_RESOURCES 8u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER 9u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SAMPLERS 10u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER 11u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INDEXED 12u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW 13u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_MAP 14u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UNMAP 15u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_CONSTANT_BUFFERS 16u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INPUT_LAYOUT 17u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_VERTEX_BUFFERS 18u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INDEX_BUFFER 19u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INDEXED_INSTANCED 20u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INSTANCED 21u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_CONSTANT_BUFFERS 22u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER 23u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_PRIMITIVE_TOPOLOGY 24u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER_RESOURCES 25u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SAMPLERS 26u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_BEGIN 27u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_END 28u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA 29u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SET_PREDICATION 30u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER_RESOURCES 31u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SAMPLERS 32u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS 33u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS_AND_UAVS 34u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_BLEND_STATE 35u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_DEPTH_STENCIL_STATE 36u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SO_SET_TARGETS 37u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_AUTO 38u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_STATE 43u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_VIEWPORTS 44u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_SCISSOR_RECTS 45u
@@ -302,10 +358,44 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_CONSTANT_BUFFERS 72u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER_RESOURCES 73u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER 74u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SAMPLERS 75u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_SHADER 76u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_PRIMITIVE_TOPOLOGY 83u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INPUT_LAYOUT 78u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INDEX_BUFFER 80u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_GET_SHADER 82u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_RENDER_TARGETS 89u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_BLEND_STATE 91u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_STATE 94u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_VIEWPORTS 95u
 #define VMSVGA3D_DXVK_D3D11_USAGE_DEFAULT 0u
+#define VMSVGA3D_DXVK_D3D11_USAGE_IMMUTABLE 1u
+#define VMSVGA3D_DXVK_D3D11_USAGE_DYNAMIC 2u
+#define VMSVGA3D_DXVK_D3D11_USAGE_STAGING 3u
 #define VMSVGA3D_DXVK_D3D11_BIND_VERTEX_BUFFER 0x01u
 #define VMSVGA3D_DXVK_D3D11_BIND_INDEX_BUFFER 0x02u
 #define VMSVGA3D_DXVK_D3D11_BIND_CONSTANT_BUFFER 0x04u
+#define VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT 0x10u
+#define VMSVGA3D_DXVK_D3D11_CPU_ACCESS_WRITE 0x00010000u
+#define VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ 0x00020000u
+#define VMSVGA3D_DXVK_D3D11_MAP_READ 1u
+#define VMSVGA3D_DXVK_D3D11_MAP_WRITE_DISCARD 4u
+#define VMSVGA3D_DXVK_D3D11_FILTER_ANISOTROPIC 0x55u
+#define VMSVGA3D_DXVK_D3D11_TEXTURE_ADDRESS_WRAP 1u
+#define VMSVGA3D_DXVK_D3D11_COMPARISON_ALWAYS 8u
+#define VMSVGA3D_DXVK_D3D11_FILL_SOLID 3u
+#define VMSVGA3D_DXVK_D3D11_CULL_NONE 1u
+#define VMSVGA3D_DXVK_D3D11_BLEND_ZERO 1u
+#define VMSVGA3D_DXVK_D3D11_BLEND_SRC_COLOR 3u
+#define VMSVGA3D_DXVK_D3D11_BLEND_SRC_ALPHA 5u
+#define VMSVGA3D_DXVK_D3D11_BLEND_OP_ADD 1u
+#define VMSVGA3D_DXVK_D3D11_COLOR_WRITE_ENABLE_ALL 0x0fu
+#define VMSVGA3D_DXVK_D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP 5u
+#define VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS 8u
+#define VMSVGA3D_DXVK_D3D11_MAX_VIEWPORTS 16u
 #define VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER 1u
 #define VMSVGA3D_DXVK_DXGI_R32_UINT 42u
 #define VMSVGA3D_DXVK_DXGI_R16_UINT 57u
@@ -558,6 +648,8 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CreateDevice)(
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateBuffer)(
     void *device, const VMSVGA3DDxvkD3D11BufferDesc *desc,
     const VMSVGA3DDxvkSubresourceData *initial_data, void **buffer);
+typedef void (*VMSVGA3DDxvkD3D11BufferGetDesc)(
+    void *buffer, VMSVGA3DDxvkD3D11BufferDesc *desc);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateTexture1D)(
     void *device, const VMSVGA3DDxvkD3D11Texture1DDesc *desc,
     const VMSVGA3DDxvkSubresourceData *initial_data, void **texture);
@@ -583,6 +675,12 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CreateInputLayout)(
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateShader)(
     void *device, const void *bytecode, size_t bytecode_size,
     void *class_linkage, void **shader);
+typedef int32_t (*VMSVGA3DDxvkD3D11CreateGeometryShaderWithSO)(
+    void *device, const void *bytecode, size_t bytecode_size,
+    const VMSVGA3DD3D10StreamOutputDecl *declarations,
+    uint32_t declaration_count, const uint32_t *strides,
+    uint32_t stride_count, uint32_t rasterized_stream,
+    void *class_linkage, void **shader);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateBlendState)(
     void *device, const VMSVGA3DD3D10BlendDesc *desc, void **state);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateDepthStencilState)(
@@ -601,21 +699,83 @@ typedef void (*VMSVGA3DDxvkD3D11ClearDepthStencilView)(
     void *context, void *view, uint32_t clear_flags, float depth,
     uint8_t stencil);
 typedef void (*VMSVGA3DDxvkD3D11GenerateMips)(void *context, void *view);
+typedef void (*VMSVGA3DDxvkD3D11OMSetRenderTargetsAndUAVs)(
+    void *context, uint32_t render_target_count,
+    void *const *render_target_views, void *depth_stencil_view,
+    uint32_t uav_start_slot, uint32_t uav_count,
+    void *const *unordered_access_views, const uint32_t *initial_counts);
 typedef void (*VMSVGA3DDxvkD3D11Begin)(void *context, void *query);
 typedef void (*VMSVGA3DDxvkD3D11End)(void *context, void *query);
 typedef void (*VMSVGA3DDxvkD3D11SetPredication)(
     void *context, void *predicate, int32_t predicate_value);
+typedef void (*VMSVGA3DDxvkD3D11SetShaderResources)(
+    void *context, uint32_t start_slot, uint32_t view_count,
+    void *const *shader_resource_views);
 typedef void (*VMSVGA3DDxvkD3D11SetSamplers)(
     void *context, uint32_t start_slot, uint32_t sampler_count,
     void *const *samplers);
 typedef void (*VMSVGA3DDxvkD3D11SetConstantBuffers)(
     void *context, uint32_t start_slot, uint32_t buffer_count,
     void *const *buffers);
+typedef void (*VMSVGA3DDxvkD3D11SetShader)(
+    void *context, void *shader, void *const *class_instances,
+    uint32_t class_instance_count);
+typedef void (*VMSVGA3DDxvkD3D11GetShader)(
+    void *context, void **shader, void **class_instances,
+    uint32_t *class_instance_count);
+typedef void (*VMSVGA3DDxvkD3D11GetShaderResources)(
+    void *context, uint32_t start_slot, uint32_t view_count, void **views);
+typedef void (*VMSVGA3DDxvkD3D11GetSamplers)(
+    void *context, uint32_t start_slot, uint32_t sampler_count, void **samplers);
+typedef void (*VMSVGA3DDxvkD3D11GetConstantBuffers)(
+    void *context, uint32_t start_slot, uint32_t buffer_count, void **buffers);
+typedef void (*VMSVGA3DDxvkD3D11IAGetInputLayout)(void *context, void **layout);
+typedef void (*VMSVGA3DDxvkD3D11IAGetPrimitiveTopology)(
+    void *context, uint32_t *topology);
+typedef void (*VMSVGA3DDxvkD3D11OMSetRenderTargets)(
+    void *context, uint32_t count, void *const *views, void *depth_stencil);
+typedef void (*VMSVGA3DDxvkD3D11OMGetRenderTargets)(
+    void *context, uint32_t count, void **views, void **depth_stencil);
+typedef void (*VMSVGA3DDxvkD3D11OMGetBlendState)(
+    void *context, void **state, float blend_factor[4], uint32_t *sample_mask);
+typedef void (*VMSVGA3DDxvkD3D11RSGetState)(void *context, void **state);
+typedef void (*VMSVGA3DDxvkD3D11RSGetViewports)(
+    void *context, uint32_t *count, SVGA3dViewport *viewports);
+typedef void (*VMSVGA3DDxvkD3D11IASetInputLayout)(
+    void *context, void *input_layout);
 typedef void (*VMSVGA3DDxvkD3D11IASetVertexBuffers)(
     void *context, uint32_t start_slot, uint32_t buffer_count,
     void *const *buffers, const uint32_t *strides, const uint32_t *offsets);
 typedef void (*VMSVGA3DDxvkD3D11IASetIndexBuffer)(
     void *context, void *buffer, uint32_t format, uint32_t offset);
+typedef void (*VMSVGA3DDxvkD3D11IAGetIndexBuffer)(
+    void *context, void **buffer, uint32_t *format, uint32_t *offset);
+typedef void (*VMSVGA3DDxvkD3D11SOSetTargets)(
+    void *context, uint32_t buffer_count, void *const *buffers,
+    const uint32_t *offsets);
+typedef void (*VMSVGA3DDxvkD3D11DrawIndexed)(
+    void *context, uint32_t index_count, uint32_t start_index_location,
+    int32_t base_vertex_location);
+typedef void (*VMSVGA3DDxvkD3D11Draw)(
+    void *context, uint32_t vertex_count, uint32_t start_vertex_location);
+typedef void (*VMSVGA3DDxvkD3D11DrawIndexedInstanced)(
+    void *context, uint32_t index_count_per_instance, uint32_t instance_count,
+    uint32_t start_index_location, int32_t base_vertex_location,
+    uint32_t start_instance_location);
+typedef void (*VMSVGA3DDxvkD3D11DrawInstanced)(
+    void *context, uint32_t vertex_count_per_instance, uint32_t instance_count,
+    uint32_t start_vertex_location, uint32_t start_instance_location);
+typedef void (*VMSVGA3DDxvkD3D11DrawAuto)(void *context);
+typedef struct vmsvga3d_dxvk_d3d11_mapped_subresource_s {
+  void *data;
+  uint32_t row_pitch;
+  uint32_t depth_pitch;
+} VMSVGA3DDxvkD3D11MappedSubresource;
+typedef int32_t (*VMSVGA3DDxvkD3D11Map)(
+    void *context, void *resource, uint32_t subresource, uint32_t map_type,
+    uint32_t map_flags, VMSVGA3DDxvkD3D11MappedSubresource *mapped);
+typedef void (*VMSVGA3DDxvkD3D11Unmap)(
+    void *context, void *resource, uint32_t subresource);
 typedef void (*VMSVGA3DDxvkD3D11IASetPrimitiveTopology)(
     void *context, uint32_t topology);
 typedef void (*VMSVGA3DDxvkD3D11OMSetBlendState)(
@@ -662,6 +822,12 @@ _Static_assert(sizeof(VMSVGA3DDxvkSubresourceData) ==
                "D3D11_SUBRESOURCE_DATA ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DDxvkD3D11BufferDesc) == 24,
                "D3D11_BUFFER_DESC ABI mismatch");
+_Static_assert(offsetof(VMSVGA3DDxvkD3D11MappedSubresource, row_pitch) ==
+                   sizeof(void *),
+               "D3D11_MAPPED_SUBRESOURCE row pitch ABI mismatch");
+_Static_assert(sizeof(VMSVGA3DDxvkD3D11MappedSubresource) ==
+                   sizeof(void *) + 2 * sizeof(uint32_t),
+               "D3D11_MAPPED_SUBRESOURCE ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DDxvkD3D11Texture1DDesc) == 32,
                "D3D11_TEXTURE1D_DESC ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DDxvkD3D11Texture2DDesc) == 44,
@@ -1539,6 +1705,21 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk) {
     }
     g_free(buffer);
   }
+  while (dxvk->d3d11_views != NULL) {
+    VMSVGA3DDxvkView *view = dxvk->d3d11_views;
+
+    dxvk->d3d11_views = view->next;
+    if (view->view != NULL) {
+      vmsvga3d_dxvk_release(view->view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    g_free(view);
+  }
+  while (dxvk->d3d11_stream_outputs != NULL) {
+    VMSVGA3DDxvkStreamOutput *stream_output = dxvk->d3d11_stream_outputs;
+
+    dxvk->d3d11_stream_outputs = stream_output->next;
+    g_free(stream_output);
+  }
   while (dxvk->d3d11_input_layouts != NULL) {
     VMSVGA3DDxvkInputLayout *layout = dxvk->d3d11_input_layouts;
 
@@ -1555,8 +1736,30 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk) {
     if (shader->shader != NULL) {
       vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
     }
+    if (shader->info_valid) {
+      vmsvga3d_d3d10_shader_release(&shader->info);
+    }
     g_free(shader->bytecode);
     g_free(shader);
+  }
+  {
+    void **objects[] = {
+      &dxvk->d3d11_blit_constant_buffer,
+      &dxvk->d3d11_blit_vertex_shader,
+      &dxvk->d3d11_blit_pixel_shader,
+      &dxvk->d3d11_blit_pixel_shader_srgb,
+      &dxvk->d3d11_blit_sampler_state,
+      &dxvk->d3d11_blit_rasterizer_state,
+      &dxvk->d3d11_blit_blend_state,
+    };
+    uint32_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(objects); i++) {
+      if (*objects[i] != NULL) {
+        vmsvga3d_dxvk_release(*objects[i], VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        *objects[i] = NULL;
+      }
+    }
   }
   if (dxvk->d3d11_context != NULL) {
     vmsvga3d_dxvk_release(dxvk->d3d11_context,
@@ -1601,6 +1804,141 @@ bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk) {
   return dxvk != NULL && dxvk->ready;
 }
 
+static VMSVGA3DDxvkView *vmsvga3d_dxvk_d3d11_view_find(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkViewKind kind, uint32_t cid,
+    uint32_t view_id, VMSVGA3DDxvkView ***link_out) {
+  VMSVGA3DDxvkView **link;
+
+  if (dxvk == NULL) {
+    return NULL;
+  }
+  for (link = &dxvk->d3d11_views; *link != NULL; link = &(*link)->next) {
+    VMSVGA3DDxvkView *view = *link;
+
+    if (view->kind == kind && view->cid == cid && view->view_id == view_id) {
+      if (link_out != NULL) {
+        *link_out = link;
+      }
+      return view;
+    }
+  }
+  return NULL;
+}
+
+static void vmsvga3d_dxvk_d3d11_view_free(VMSVGA3DDxvkView *view) {
+  if (view == NULL) {
+    return;
+  }
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  if (view->view != NULL) {
+    vmsvga3d_dxvk_release(view->view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+  }
+#endif
+  g_free(view);
+}
+
+static bool vmsvga3d_dxvk_d3d11_view_destroy(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkViewKind kind, uint32_t cid,
+    uint32_t view_id) {
+  VMSVGA3DDxvkView **link = NULL;
+  VMSVGA3DDxvkView *view;
+
+  if (dxvk == NULL) {
+    return false;
+  }
+  view = vmsvga3d_dxvk_d3d11_view_find(
+      dxvk, kind, cid, view_id, &link);
+  if (view == NULL) {
+    return true;
+  }
+  *link = view->next;
+  vmsvga3d_dxvk_d3d11_view_free(view);
+  return true;
+}
+
+static bool vmsvga3d_dxvk_d3d11_view_store(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkViewKind kind, uint32_t cid,
+    uint32_t view_id, VMSVGA3DDxvkSurface *surface, void *native_view) {
+  VMSVGA3DDxvkView *view;
+
+  if (dxvk == NULL || surface == NULL || native_view == NULL ||
+      vmsvga3d_dxvk_d3d11_view_find(dxvk, kind, cid, view_id, NULL) != NULL) {
+    return false;
+  }
+  view = g_try_new0(VMSVGA3DDxvkView, 1);
+  if (view == NULL) {
+    return false;
+  }
+  view->cid = cid;
+  view->view_id = view_id;
+  view->kind = kind;
+  view->surface = surface;
+  view->view = native_view;
+  view->next = dxvk->d3d11_views;
+  dxvk->d3d11_views = view;
+  return true;
+}
+
+static void *vmsvga3d_dxvk_d3d11_view_object(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkViewKind kind, uint32_t cid,
+    uint32_t view_id) {
+  VMSVGA3DDxvkView *view;
+
+  if (view_id == SVGA3D_INVALID_ID) {
+    return NULL;
+  }
+  view = vmsvga3d_dxvk_d3d11_view_find(
+      dxvk, kind, cid, view_id, NULL);
+  return view != NULL ? view->view : NULL;
+}
+
+void vmsvga3d_dxvk_d3d11_view_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid) {
+  VMSVGA3DDxvkView **link;
+
+  if (dxvk == NULL) {
+    return;
+  }
+  link = &dxvk->d3d11_views;
+  while (*link != NULL) {
+    VMSVGA3DDxvkView *view = *link;
+
+    if (view->cid != cid) {
+      link = &view->next;
+      continue;
+    }
+    *link = view->next;
+    vmsvga3d_dxvk_d3d11_view_free(view);
+  }
+}
+
+static void vmsvga3d_dxvk_d3d11_view_surface_destroy(
+    VMSVGA3DDxvkSurface *surface) {
+  VMSVGA3DDxvkView **link;
+  VMSVGA3DDxvk *dxvk;
+
+  if (surface == NULL || surface->owner == NULL) {
+    return;
+  }
+  dxvk = surface->owner;
+  link = &dxvk->d3d11_views;
+  while (*link != NULL) {
+    VMSVGA3DDxvkView *view = *link;
+
+    if (view->surface != surface) {
+      link = &view->next;
+      continue;
+    }
+    *link = view->next;
+    vmsvga3d_dxvk_d3d11_view_free(view);
+  }
+}
+
+void vmsvga3d_dxvk_d3d11_surface_invalidate_views(
+    VMSVGA3DDxvkSurface *surface) {
+  vmsvga3d_dxvk_d3d11_view_surface_destroy(surface);
+}
+
 VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,
                                                     uint32_t sid) {
   VMSVGA3DDxvkSurface *surface;
@@ -1613,6 +1951,7 @@ VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,
     return NULL;
   }
   surface->sid = sid;
+  surface->owner = dxvk;
   surface->d3d9_resource_type = VMSVGA3D_D3D9_HOST_RESOURCE_NONE;
   return surface;
 }
@@ -1647,15 +1986,8 @@ static void vmsvga3d_dxvk_surface_evict_d3d11(
   if (surface == NULL) {
     return;
   }
+  vmsvga3d_dxvk_d3d11_view_surface_destroy(surface);
 #if defined(CONFIG_LINUX) && defined(__ELF__)
-  while (surface->d3d11_srvs != NULL) {
-    VMSVGA3DDxvkSRV *srv = surface->d3d11_srvs;
-    surface->d3d11_srvs = srv->next;
-    if (srv->view != NULL) {
-      vmsvga3d_dxvk_release(srv->view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-    }
-    g_free(srv);
-  }
   if (surface->d3d11_resource != NULL) {
     vmsvga3d_dxvk_release(surface->d3d11_resource,
                           VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -1669,6 +2001,13 @@ static void vmsvga3d_dxvk_surface_evict_d3d11(
 void vmsvga3d_dxvk_surface_evict(VMSVGA3DDxvkSurface *surface) {
   vmsvga3d_dxvk_surface_evict_d3d9(surface);
   vmsvga3d_dxvk_surface_evict_d3d11(surface);
+}
+
+void vmsvga3d_dxvk_surface_set_renderer(VMSVGA3DDxvkSurface *surface,
+                                        VMSVGA3DDxvk *dxvk) {
+  if (surface != NULL) {
+    surface->owner = dxvk;
+  }
 }
 
 void vmsvga3d_dxvk_surface_destroy(VMSVGA3DDxvkSurface *surface) {
@@ -2144,68 +2483,29 @@ static bool vmsvga3d_dxvk_d3d11_srv_desc(
 }
 #endif
 
-static bool vmsvga3d_dxvk_d3d11_srv_desc_equal(
-    const VMSVGA3DD3D10SRVDesc *a, const VMSVGA3DD3D10SRVDesc *b) {
-  return a != NULL && b != NULL && a->format == b->format &&
-         a->view_dimension == b->view_dimension &&
-         a->most_detailed_mip == b->most_detailed_mip &&
-         a->mip_levels == b->mip_levels &&
-         a->first_array_slice == b->first_array_slice &&
-         a->array_size == b->array_size &&
-         a->first_element == b->first_element &&
-         a->num_elements == b->num_elements;
-}
-
-static const VMSVGA3DDxvkSRV *vmsvga3d_dxvk_d3d11_srv_find(
-    const VMSVGA3DDxvkSurface *surface,
-    const VMSVGA3DD3D10SRVDesc *view_desc) {
-  const VMSVGA3DDxvkSRV *srv;
-
-  if (surface == NULL || view_desc == NULL) {
-    return NULL;
-  }
-  for (srv = surface->d3d11_srvs; srv != NULL; srv = srv->next) {
-    if (vmsvga3d_dxvk_d3d11_srv_desc_equal(&srv->desc, view_desc)) {
-      return srv;
-    }
-  }
-  return NULL;
-}
-
-bool vmsvga3d_dxvk_d3d11_shader_resource_view_exists(
-    const VMSVGA3DDxvkSurface *surface,
-    const struct vmsvga3d_d3d10_srv_desc_s *desc) {
-  const VMSVGA3DD3D10SRVDesc *view_desc = desc;
-  const VMSVGA3DDxvkSRV *srv;
-
-  if (surface == NULL || view_desc == NULL || !surface->d3d11_resident ||
-      surface->d3d11_resource == NULL) {
-    return false;
-  }
-  srv = vmsvga3d_dxvk_d3d11_srv_find(surface, view_desc);
-  return srv != NULL && srv->view != NULL;
-}
-
 bool vmsvga3d_dxvk_d3d11_shader_resource_view_ensure(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    VMSVGA3DDxvkSurface *surface,
     const struct vmsvga3d_d3d10_srv_desc_s *desc) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11CreateShaderResourceView create_view = NULL;
   VMSVGA3DDxvkD3D11SRVDesc native;
   const VMSVGA3DD3D10SRVDesc *view_desc = desc;
-  VMSVGA3DDxvkSRV *srv;
   void *view = NULL;
   int32_t result;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      surface == NULL || !surface->d3d11_resident ||
-      surface->d3d11_resource == NULL || view_desc == NULL) {
+      view_id == SVGA3D_INVALID_ID || surface == NULL ||
+      !surface->d3d11_resident || surface->d3d11_resource == NULL) {
     return false;
   }
-  if (vmsvga3d_dxvk_d3d11_shader_resource_view_exists(surface, view_desc)) {
+  if (vmsvga3d_dxvk_d3d11_view_find(
+          dxvk, VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE, cid, view_id, NULL) !=
+      NULL) {
     return true;
   }
-  if (!vmsvga3d_dxvk_d3d11_srv_desc(view_desc, &native) ||
+  if (view_desc == NULL ||
+      !vmsvga3d_dxvk_d3d11_srv_desc(view_desc, &native) ||
       !vmsvga3d_dxvk_get_method(
           dxvk->d3d11_device,
           VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SHADER_RESOURCE_VIEW,
@@ -2217,52 +2517,53 @@ bool vmsvga3d_dxvk_d3d11_shader_resource_view_ensure(
   if (!vmsvga3d_dxvk_succeeded(result) || view == NULL) {
     return false;
   }
-
-  srv = g_try_new0(VMSVGA3DDxvkSRV, 1);
-  if (srv == NULL) {
+  if (!vmsvga3d_dxvk_d3d11_view_store(
+          dxvk, VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE, cid, view_id,
+          surface, view)) {
     vmsvga3d_dxvk_release(view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
     return false;
   }
-  srv->desc = *view_desc;
-  srv->view = view;
-  srv->next = surface->d3d11_srvs;
-  surface->d3d11_srvs = srv;
   return true;
 #else
   (void)dxvk;
+  (void)cid;
+  (void)view_id;
   (void)surface;
   (void)desc;
   return false;
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_shader_resource_view_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id) {
+  return vmsvga3d_dxvk_d3d11_view_destroy(
+      dxvk, VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE, cid, view_id);
+}
+
 bool vmsvga3d_dxvk_d3d11_generate_mips(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
-    const struct vmsvga3d_d3d10_srv_desc_s *desc) {
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11GenerateMips generate_mips = NULL;
-  const VMSVGA3DD3D10SRVDesc *view_desc = desc;
-  const VMSVGA3DDxvkSRV *srv;
+  void *view;
 
-  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
-      surface == NULL || !surface->d3d11_resident ||
-      surface->d3d11_resource == NULL || view_desc == NULL) {
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
     return false;
   }
-  srv = vmsvga3d_dxvk_d3d11_srv_find(surface, view_desc);
-  if (srv == NULL || srv->view == NULL ||
+  view = vmsvga3d_dxvk_d3d11_view_object(
+      dxvk, VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE, cid, view_id);
+  if (view == NULL ||
       !vmsvga3d_dxvk_get_method(
           dxvk->d3d11_context,
           VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS,
           &generate_mips, sizeof(generate_mips))) {
     return false;
   }
-  generate_mips(dxvk->d3d11_context, srv->view);
+  generate_mips(dxvk->d3d11_context, view);
   return true;
 #else
   (void)dxvk;
-  (void)surface;
-  (void)desc;
+  (void)cid;
+  (void)view_id;
   return false;
 #endif
 }
@@ -2393,14 +2694,70 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
   return true;
 }
 
+bool vmsvga3d_dxvk_d3d11_set_shader_resources(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
+    uint32_t start_slot, uint32_t view_count, const uint32_t *view_ids) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11SetShaderResources set_views = NULL;
+  void *views[SVGA3D_DX_MAX_SRVIEWS] = { NULL };
+  uint32_t method;
+  uint32_t i;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      stage_index >= SVGA3D_NUM_SHADERTYPE_DX10 ||
+      start_slot > SVGA3D_DX_MAX_SRVIEWS ||
+      view_count > SVGA3D_DX_MAX_SRVIEWS - start_slot ||
+      (view_count != 0 && view_ids == NULL)) {
+    return false;
+  }
+  switch (stage_index) {
+  case 0:
+    method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER_RESOURCES;
+    break;
+  case 1:
+    method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER_RESOURCES;
+    break;
+  case 2:
+    method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER_RESOURCES;
+    break;
+  default:
+    return false;
+  }
+  for (i = 0; i < view_count; i++) {
+    if (view_ids[i] != SVGA3D_INVALID_ID) {
+      views[i] = vmsvga3d_dxvk_d3d11_view_object(
+          dxvk, VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE, cid, view_ids[i]);
+      if (views[i] == NULL) {
+        return false;
+      }
+    }
+  }
+  if (view_count == 0) {
+    return true;
+  }
+  if (!vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, method, &set_views, sizeof(set_views))) {
+    return false;
+  }
+  set_views(dxvk->d3d11_context, start_slot, view_count, views);
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)stage_index;
+  (void)start_slot;
+  (void)view_count;
+  (void)view_ids;
+  return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_set_constant_buffers(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t start_slot, uint32_t buffer_count) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11SetConstantBuffers set_buffers = NULL;
   void *buffers[SVGA3D_DX_MAX_CONSTBUFFERS] = { NULL };
-  uint32_t first_changed = buffer_count;
-  uint32_t last_changed = 0;
   uint32_t method;
   uint32_t i;
 
@@ -2434,28 +2791,16 @@ bool vmsvga3d_dxvk_d3d11_set_constant_buffers(
       }
       buffers[i] = buffer->buffer;
     }
-    if (!dxvk->d3d11_bound_constant_buffer_valid[stage_index]
-                                                     [start_slot + i] ||
-        dxvk->d3d11_bound_constant_buffers[stage_index][start_slot + i] !=
-            buffers[i]) {
-      if (first_changed == buffer_count) {
-        first_changed = i;
-      }
-      last_changed = i;
+  }
+  if (buffer_count != 0) {
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, method,
+            &set_buffers, sizeof(set_buffers))) {
+      return false;
     }
+    set_buffers(dxvk->d3d11_context, start_slot, buffer_count, buffers);
   }
-  if (first_changed == buffer_count) {
-    return true;
-  }
-  if (!vmsvga3d_dxvk_get_method(
-          dxvk->d3d11_context, method,
-          &set_buffers, sizeof(set_buffers))) {
-    return false;
-  }
-  set_buffers(dxvk->d3d11_context, start_slot + first_changed,
-              last_changed - first_changed + 1,
-              &buffers[first_changed]);
-  for (i = first_changed; i <= last_changed; i++) {
+  for (i = 0; i < buffer_count; i++) {
     dxvk->d3d11_bound_constant_buffers[stage_index][start_slot + i] =
         buffers[i];
     dxvk->d3d11_bound_constant_buffer_valid[stage_index][start_slot + i] =
@@ -2496,8 +2841,6 @@ bool vmsvga3d_dxvk_d3d11_set_vertex_buffers(
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11IASetVertexBuffers set_buffers = NULL;
   void *buffers[SVGA3D_DX_MAX_VERTEXBUFFERS] = { NULL };
-  uint32_t first_changed = buffer_count;
-  uint32_t last_changed = 0;
   uint32_t i;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
@@ -2514,29 +2857,18 @@ bool vmsvga3d_dxvk_d3d11_set_vertex_buffers(
             &buffers[i])) {
       return false;
     }
-    if (!dxvk->d3d11_bound_vertex_buffer_valid[start_slot + i] ||
-        dxvk->d3d11_bound_vertex_buffers[start_slot + i] != buffers[i] ||
-        dxvk->d3d11_bound_vertex_strides[start_slot + i] != strides[i] ||
-        dxvk->d3d11_bound_vertex_offsets[start_slot + i] != offsets[i]) {
-      if (first_changed == buffer_count) {
-        first_changed = i;
-      }
-      last_changed = i;
+  }
+  if (buffer_count != 0) {
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_VERTEX_BUFFERS,
+            &set_buffers, sizeof(set_buffers))) {
+      return false;
     }
+    set_buffers(dxvk->d3d11_context, start_slot, buffer_count, buffers,
+                strides, offsets);
   }
-  if (first_changed == buffer_count) {
-    return true;
-  }
-  if (!vmsvga3d_dxvk_get_method(
-          dxvk->d3d11_context,
-          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_VERTEX_BUFFERS,
-          &set_buffers, sizeof(set_buffers))) {
-    return false;
-  }
-  set_buffers(dxvk->d3d11_context, start_slot + first_changed,
-              last_changed - first_changed + 1, &buffers[first_changed],
-              &strides[first_changed], &offsets[first_changed]);
-  for (i = first_changed; i <= last_changed; i++) {
+  for (i = 0; i < buffer_count; i++) {
     dxvk->d3d11_bound_vertex_buffers[start_slot + i] = buffers[i];
     dxvk->d3d11_bound_vertex_strides[start_slot + i] = strides[i];
     dxvk->d3d11_bound_vertex_offsets[start_slot + i] = offsets[i];
@@ -2549,6 +2881,45 @@ bool vmsvga3d_dxvk_d3d11_set_vertex_buffers(
   (void)buffer_count;
   (void)surfaces;
   (void)strides;
+  (void)offsets;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
+    VMSVGA3DDxvk *dxvk,
+    VMSVGA3DDxvkSurface *const surfaces[SVGA3D_DX_MAX_SOTARGETS],
+    const uint32_t offsets[SVGA3D_DX_MAX_SOTARGETS]) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11SOSetTargets set_targets = NULL;
+  void *buffers[SVGA3D_DX_MAX_SOTARGETS] = { NULL };
+  uint32_t i;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      surfaces == NULL || offsets == NULL) {
+    return false;
+  }
+  for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+    if (surfaces[i] != NULL &&
+        !vmsvga3d_dxvk_d3d11_buffer_binding(
+            surfaces[i], VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT,
+            &buffers[i])) {
+      return false;
+    }
+  }
+  if (!vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SO_SET_TARGETS,
+          &set_targets, sizeof(set_targets))) {
+    return false;
+  }
+  /* VirtualBox always rebinds the complete four-target SO table. */
+  set_targets(dxvk->d3d11_context, SVGA3D_DX_MAX_SOTARGETS,
+              buffers, offsets);
+  return true;
+#else
+  (void)dxvk;
+  (void)surfaces;
   (void)offsets;
   return false;
 #endif
@@ -2575,12 +2946,6 @@ bool vmsvga3d_dxvk_d3d11_set_index_buffer(
     format = 0;
     offset = 0;
   }
-  if (dxvk->d3d11_bound_index_buffer_valid &&
-      dxvk->d3d11_bound_index_buffer == buffer &&
-      dxvk->d3d11_bound_index_format == format &&
-      dxvk->d3d11_bound_index_offset == offset) {
-    return true;
-  }
   if (!vmsvga3d_dxvk_get_method(
           dxvk->d3d11_context,
           VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INDEX_BUFFER,
@@ -2598,6 +2963,333 @@ bool vmsvga3d_dxvk_d3d11_set_index_buffer(
   (void)surface;
   (void)format;
   (void)offset;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_create_immutable_index_buffer(
+    VMSVGA3DDxvk *dxvk, const void *indices, uint32_t size,
+    void **buffer) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11CreateBuffer create_buffer = NULL;
+  VMSVGA3DDxvkD3D11BufferDesc desc = {
+    .byte_width = size,
+    .usage = VMSVGA3D_DXVK_D3D11_USAGE_IMMUTABLE,
+    .bind_flags = VMSVGA3D_DXVK_D3D11_BIND_INDEX_BUFFER,
+  };
+  VMSVGA3DDxvkSubresourceData initial_data = {
+    .data = indices,
+    .row_pitch = size,
+    .slice_pitch = size,
+  };
+  int32_t result;
+
+  if (buffer == NULL) {
+    return false;
+  }
+  *buffer = NULL;
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+      indices == NULL || size == 0 ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BUFFER,
+          &create_buffer, sizeof(create_buffer))) {
+    return false;
+  }
+  result = create_buffer(dxvk->d3d11_device, &desc, &initial_data, buffer);
+  if (!vmsvga3d_dxvk_succeeded(result) || *buffer == NULL) {
+    if (*buffer != NULL) {
+      vmsvga3d_dxvk_release(*buffer, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+      *buffer = NULL;
+    }
+    return false;
+  }
+  return true;
+#else
+  (void)dxvk;
+  (void)indices;
+  (void)size;
+  (void)buffer;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_get_index_buffer(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkD3D11IndexBinding *binding) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11IAGetIndexBuffer get_buffer = NULL;
+
+  if (binding == NULL) {
+    return false;
+  }
+  memset(binding, 0, sizeof(*binding));
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INDEX_BUFFER,
+          &get_buffer, sizeof(get_buffer))) {
+    return false;
+  }
+  get_buffer(dxvk->d3d11_context, &binding->buffer, &binding->format,
+             &binding->offset);
+  return true;
+#else
+  (void)dxvk;
+  (void)binding;
+  return false;
+#endif
+}
+
+
+bool vmsvga3d_dxvk_d3d11_read_index_buffer(
+    VMSVGA3DDxvk *dxvk, void *buffer, uint32_t offset, uint32_t bytes,
+    void **data, uint32_t *data_bytes) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11BufferGetDesc get_desc = NULL;
+  VMSVGA3DDxvkD3D11CreateBuffer create_buffer = NULL;
+  VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
+  VMSVGA3DDxvkD3D11Map map = NULL;
+  VMSVGA3DDxvkD3D11Unmap unmap = NULL;
+  VMSVGA3DDxvkD3D11BufferDesc source_desc = {0};
+  VMSVGA3DDxvkD3D11BufferDesc staging_desc = {0};
+  VMSVGA3DDxvkD3D11Box source_box;
+  VMSVGA3DDxvkD3D11MappedSubresource mapped = {0};
+  void *staging_buffer = NULL;
+  void *copy = NULL;
+  int32_t result;
+
+  if (data == NULL || data_bytes == NULL) {
+    return false;
+  }
+  *data = NULL;
+  *data_bytes = 0;
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+      dxvk->d3d11_context == NULL || buffer == NULL || bytes == 0 ||
+      !vmsvga3d_dxvk_get_method(
+          buffer, VMSVGA3D_DXVK_ID3D11BUFFER_GET_DESC,
+          &get_desc, sizeof(get_desc)) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BUFFER,
+          &create_buffer, sizeof(create_buffer)) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION,
+          &copy_region, sizeof(copy_region)) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_MAP,
+          &map, sizeof(map)) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UNMAP,
+          &unmap, sizeof(unmap))) {
+    return false;
+  }
+
+  get_desc(buffer, &source_desc);
+  if (offset >= source_desc.byte_width ||
+      bytes > source_desc.byte_width - offset) {
+    return false;
+  }
+
+  copy = malloc(bytes);
+  if (copy == NULL) {
+    return false;
+  }
+
+  staging_desc.byte_width = bytes;
+  staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
+  staging_desc.cpu_access_flags =
+      VMSVGA3D_DXVK_D3D11_CPU_ACCESS_WRITE |
+      VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
+  result = create_buffer(dxvk->d3d11_device, &staging_desc, NULL,
+                         &staging_buffer);
+  if (!vmsvga3d_dxvk_succeeded(result) || staging_buffer == NULL) {
+    free(copy);
+    return false;
+  }
+
+  source_box.left = offset;
+  source_box.top = 0;
+  source_box.front = 0;
+  source_box.right = offset + bytes;
+  source_box.bottom = 1;
+  source_box.back = 1;
+  copy_region(dxvk->d3d11_context, staging_buffer, 0, 0, 0, 0,
+              buffer, 0, &source_box);
+
+  result = map(dxvk->d3d11_context, staging_buffer, 0,
+               VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
+  if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
+    vmsvga3d_dxvk_release(staging_buffer, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    free(copy);
+    return false;
+  }
+
+  memcpy(copy, mapped.data, bytes);
+  unmap(dxvk->d3d11_context, staging_buffer, 0);
+  vmsvga3d_dxvk_release(staging_buffer, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+  *data = copy;
+  *data_bytes = bytes;
+  return true;
+#else
+  (void)dxvk;
+  (void)buffer;
+  (void)offset;
+  (void)bytes;
+  (void)data;
+  (void)data_bytes;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_set_native_index_buffer(
+    VMSVGA3DDxvk *dxvk, void *buffer, uint32_t format, uint32_t offset) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11IASetIndexBuffer set_buffer = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INDEX_BUFFER,
+          &set_buffer, sizeof(set_buffer))) {
+    return false;
+  }
+  /* Temporary emulation binding: do not alter the cached guest IA state. */
+  set_buffer(dxvk->d3d11_context, buffer, format, offset);
+  return true;
+#else
+  (void)dxvk;
+  (void)buffer;
+  (void)format;
+  (void)offset;
+  return false;
+#endif
+}
+
+void vmsvga3d_dxvk_d3d11_release_index_buffer(void *buffer) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  vmsvga3d_dxvk_release(buffer, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+#else
+  (void)buffer;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_draw(
+    VMSVGA3DDxvk *dxvk, uint32_t vertex_count,
+    uint32_t start_vertex_location) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11Draw draw = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW,
+          &draw, sizeof(draw))) {
+    return false;
+  }
+  draw(dxvk->d3d11_context, vertex_count, start_vertex_location);
+  return true;
+#else
+  (void)dxvk;
+  (void)vertex_count;
+  (void)start_vertex_location;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_draw_indexed(
+    VMSVGA3DDxvk *dxvk, uint32_t index_count,
+    uint32_t start_index_location, int32_t base_vertex_location) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11DrawIndexed draw_indexed = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INDEXED,
+          &draw_indexed, sizeof(draw_indexed))) {
+    return false;
+  }
+  draw_indexed(dxvk->d3d11_context, index_count, start_index_location,
+               base_vertex_location);
+  return true;
+#else
+  (void)dxvk;
+  (void)index_count;
+  (void)start_index_location;
+  (void)base_vertex_location;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_draw_instanced(
+    VMSVGA3DDxvk *dxvk, uint32_t vertex_count_per_instance,
+    uint32_t instance_count, uint32_t start_vertex_location,
+    uint32_t start_instance_location) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11DrawInstanced draw_instanced = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INSTANCED,
+          &draw_instanced, sizeof(draw_instanced))) {
+    return false;
+  }
+  draw_instanced(dxvk->d3d11_context, vertex_count_per_instance,
+                 instance_count, start_vertex_location,
+                 start_instance_location);
+  return true;
+#else
+  (void)dxvk;
+  (void)vertex_count_per_instance;
+  (void)instance_count;
+  (void)start_vertex_location;
+  (void)start_instance_location;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced(
+    VMSVGA3DDxvk *dxvk, uint32_t index_count_per_instance,
+    uint32_t instance_count, uint32_t start_index_location,
+    int32_t base_vertex_location, uint32_t start_instance_location) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11DrawIndexedInstanced draw_indexed_instanced = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INDEXED_INSTANCED,
+          &draw_indexed_instanced, sizeof(draw_indexed_instanced))) {
+    return false;
+  }
+  draw_indexed_instanced(dxvk->d3d11_context, index_count_per_instance,
+                         instance_count, start_index_location,
+                         base_vertex_location, start_instance_location);
+  return true;
+#else
+  (void)dxvk;
+  (void)index_count_per_instance;
+  (void)instance_count;
+  (void)start_index_location;
+  (void)base_vertex_location;
+  (void)start_instance_location;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11DrawAuto draw_auto = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_AUTO,
+          &draw_auto, sizeof(draw_auto))) {
+    return false;
+  }
+  draw_auto(dxvk->d3d11_context);
+  return true;
+#else
+  (void)dxvk;
   return false;
 #endif
 }
@@ -2728,8 +3420,14 @@ bool vmsvga3d_dxvk_d3d11_blend_state_define(
   int32_t result;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      desc == NULL ||
-      !vmsvga3d_dxvk_get_method(
+      desc == NULL) {
+    return false;
+  }
+  if (vmsvga3d_dxvk_d3d11_state_find(
+          dxvk, VMSVGA3D_DXVK_STATE_BLEND, cid, state_id, NULL) != NULL) {
+    return true;
+  }
+  if (!vmsvga3d_dxvk_get_method(
           dxvk->d3d11_device,
           VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BLEND_STATE,
           &create_state, sizeof(create_state))) {
@@ -2772,8 +3470,15 @@ bool vmsvga3d_dxvk_d3d11_depth_stencil_state_define(
   int32_t result;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      desc == NULL ||
-      !vmsvga3d_dxvk_get_method(
+      desc == NULL) {
+    return false;
+  }
+  if (vmsvga3d_dxvk_d3d11_state_find(
+          dxvk, VMSVGA3D_DXVK_STATE_DEPTH_STENCIL, cid, state_id, NULL) !=
+      NULL) {
+    return true;
+  }
+  if (!vmsvga3d_dxvk_get_method(
           dxvk->d3d11_device,
           VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_STATE,
           &create_state, sizeof(create_state))) {
@@ -2816,8 +3521,14 @@ bool vmsvga3d_dxvk_d3d11_rasterizer_state_define(
   int32_t result;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      desc == NULL ||
-      !vmsvga3d_dxvk_get_method(
+      desc == NULL) {
+    return false;
+  }
+  if (vmsvga3d_dxvk_d3d11_state_find(
+          dxvk, VMSVGA3D_DXVK_STATE_RASTERIZER, cid, state_id, NULL) != NULL) {
+    return true;
+  }
+  if (!vmsvga3d_dxvk_get_method(
           dxvk->d3d11_device,
           VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RASTERIZER_STATE,
           &create_state, sizeof(create_state))) {
@@ -2860,8 +3571,14 @@ bool vmsvga3d_dxvk_d3d11_sampler_state_define(
   int32_t result;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      desc == NULL ||
-      !vmsvga3d_dxvk_get_method(
+      desc == NULL) {
+    return false;
+  }
+  if (vmsvga3d_dxvk_d3d11_state_find(
+          dxvk, VMSVGA3D_DXVK_STATE_SAMPLER, cid, state_id, NULL) != NULL) {
+    return true;
+  }
+  if (!vmsvga3d_dxvk_get_method(
           dxvk->d3d11_device,
           VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SAMPLER_STATE,
           &create_state, sizeof(create_state))) {
@@ -2935,13 +3652,61 @@ static bool vmsvga3d_dxvk_d3d11_state_object(
   }
   state = vmsvga3d_dxvk_d3d11_state_find(
       dxvk, kind, cid, state_id, NULL);
-  if (state == NULL || state->state == NULL) {
-    return false;
+  if (state != NULL) {
+    *native_state = state->state;
   }
-  *native_state = state->state;
+  /* VirtualBox still binds NULL when lazy state creation failed. */
   return true;
 }
 #endif
+
+bool vmsvga3d_dxvk_d3d11_set_render_targets(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t render_target_count,
+    const uint32_t *render_target_ids, uint32_t depth_stencil_view_id,
+    uint32_t uav_start_slot) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11OMSetRenderTargetsAndUAVs set_targets = NULL;
+  void *render_targets[SVGA3D_MAX_RENDER_TARGETS] = { NULL };
+  void *depth_stencil = NULL;
+  uint32_t i;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      render_target_count > SVGA3D_MAX_RENDER_TARGETS ||
+      (render_target_count != 0 && render_target_ids == NULL)) {
+    return false;
+  }
+  for (i = 0; i < render_target_count; i++) {
+    if (render_target_ids[i] != SVGA3D_INVALID_ID) {
+      render_targets[i] = vmsvga3d_dxvk_d3d11_view_object(
+          dxvk, VMSVGA3D_DXVK_VIEW_RENDER_TARGET, cid,
+          render_target_ids[i]);
+    }
+  }
+  if (depth_stencil_view_id != SVGA3D_INVALID_ID) {
+    depth_stencil = vmsvga3d_dxvk_d3d11_view_object(
+        dxvk, VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL, cid,
+        depth_stencil_view_id);
+  }
+  if (!vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS_AND_UAVS,
+          &set_targets, sizeof(set_targets))) {
+    return false;
+  }
+
+  set_targets(dxvk->d3d11_context, render_target_count, render_targets,
+              depth_stencil, uav_start_slot, 0, NULL, NULL);
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)render_target_count;
+  (void)render_target_ids;
+  (void)depth_stencil_view_id;
+  (void)uav_start_slot;
+  return false;
+#endif
+}
 
 bool vmsvga3d_dxvk_d3d11_set_blend_state(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
@@ -3152,8 +3917,545 @@ bool vmsvga3d_dxvk_d3d11_set_scissor_rects(
 #endif
 }
 
-static void vmsvga3d_dxvk_d3d11_input_layout_destroy_shader(
-    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id);
+typedef struct vmsvga3d_dxvk_d3d11_blit_constants_s {
+  float src_scale_x;
+  float src_scale_y;
+  float src_offset_x;
+  float src_offset_y;
+  float dst_scale_x;
+  float dst_scale_y;
+  float dst_offset_x;
+  float dst_offset_y;
+} VMSVGA3DDxvkD3D11BlitConstants;
+
+typedef struct vmsvga3d_dxvk_d3d11_blit_saved_state_s {
+  uint32_t topology;
+  void *input_layout;
+  void *vs_constant_buffer;
+  void *vs;
+  void *gs;
+  void *ps_srv;
+  void *ps;
+  void *ps_sampler;
+  void *rasterizer;
+  void *blend;
+  float blend_factor[4];
+  uint32_t sample_mask;
+  void *render_targets[VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS];
+  void *depth_stencil;
+  uint32_t viewport_count;
+  SVGA3dViewport viewports[VMSVGA3D_DXVK_D3D11_MAX_VIEWPORTS];
+} VMSVGA3DDxvkD3D11BlitSavedState;
+
+static void vmsvga3d_dxvk_d3d11_blit_release_saved(
+    VMSVGA3DDxvkD3D11BlitSavedState *saved)
+{
+  void **single[] = {
+    &saved->input_layout, &saved->vs_constant_buffer, &saved->vs,
+    &saved->gs, &saved->ps_srv, &saved->ps, &saved->ps_sampler,
+    &saved->rasterizer, &saved->blend, &saved->depth_stencil,
+  };
+  uint32_t i;
+
+  for (i = 0; i < G_N_ELEMENTS(single); i++) {
+    if (*single[i] != NULL) {
+      vmsvga3d_dxvk_release(*single[i], VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+      *single[i] = NULL;
+    }
+  }
+  for (i = 0; i < VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS; i++) {
+    if (saved->render_targets[i] != NULL) {
+      vmsvga3d_dxvk_release(saved->render_targets[i],
+                            VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+      saved->render_targets[i] = NULL;
+    }
+  }
+}
+
+static bool vmsvga3d_dxvk_d3d11_blit_shader(
+    VMSVGA3DDxvk *dxvk, uint32_t program_type,
+    const uint32_t *tokens, uint32_t token_count, bool vertex, void **shader)
+{
+  VMSVGA3DD3D10ShaderInfo info = { 0 };
+  VMSVGA3DD3D10ShaderDXBC dxbc = { 0 };
+  VMSVGA3DDxvkD3D11CreateShader create_shader = NULL;
+  uint32_t method;
+  int32_t result;
+
+  if (shader == NULL || tokens == NULL || token_count == 0) {
+    return false;
+  }
+  info.program_type = program_type;
+  info.rewritten_bytecode = (void *)tokens;
+  info.rewritten_bytecode_size = token_count * sizeof(tokens[0]);
+  if (vertex) {
+    info.input_signature_count = 1;
+    info.input_signature[0].registerIndex = 0;
+    info.input_signature[0].semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_VERTEX_ID;
+    info.input_signature[0].mask = 1;
+    info.input_signature[0].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_UINT32;
+    info.input_semantic[0].semantic_name = "SV_VertexID";
+
+    info.output_signature_count = 3;
+    info.output_signature[0].registerIndex = 0;
+    info.output_signature[0].semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_POSITION;
+    info.output_signature[0].mask = 0x0f;
+    info.output_signature[0].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
+    info.output_semantic[0].semantic_name = "SV_POSITION";
+    info.output_signature[1].registerIndex = 1;
+    info.output_signature[1].semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED;
+    info.output_signature[1].mask = 0x03;
+    info.output_signature[1].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
+    info.output_semantic[1].semantic_name = "TEXCOORD";
+    info.output_signature[2] = info.output_signature[1];
+    info.output_signature[2].mask = 0x0c;
+    info.output_semantic[2].semantic_name = "TEXCOORD";
+    info.output_semantic[2].semantic_index = 1;
+    method = VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_VERTEX_SHADER;
+  } else {
+    info.input_signature_count = 3;
+    info.input_signature[0].registerIndex = 0;
+    info.input_signature[0].semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_POSITION;
+    info.input_signature[0].mask = 0x0f;
+    info.input_signature[0].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
+    info.input_semantic[0].semantic_name = "SV_POSITION";
+    info.input_signature[1].registerIndex = 1;
+    info.input_signature[1].semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED;
+    info.input_signature[1].mask = 0x03;
+    info.input_signature[1].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
+    info.input_semantic[1].semantic_name = "TEXCOORD";
+    info.input_signature[2] = info.input_signature[1];
+    info.input_signature[2].mask = 0x0c;
+    info.input_semantic[2].semantic_name = "TEXCOORD";
+    info.input_semantic[2].semantic_index = 1;
+    info.output_signature_count = 1;
+    info.output_signature[0].registerIndex = 0;
+    info.output_signature[0].semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED;
+    info.output_signature[0].mask = 0x0f;
+    info.output_signature[0].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
+    info.output_semantic[0].semantic_name = "SV_TARGET";
+    method = VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PIXEL_SHADER;
+  }
+
+  if (vmsvga3d_d3d10_shader_create_dxbc(&info, &dxbc) ==
+          VMSVGA3D_D3D10_LEVEL_INVALID ||
+      dxbc.data == NULL || dxbc.size == 0 ||
+      !vmsvga3d_dxvk_get_method(dxvk->d3d11_device, method,
+                                &create_shader, sizeof(create_shader))) {
+    vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+    return false;
+  }
+  result = create_shader(dxvk->d3d11_device, dxbc.data, dxbc.size, NULL, shader);
+  vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+  return vmsvga3d_dxvk_succeeded(result) && *shader != NULL;
+}
+
+static void vmsvga3d_dxvk_d3d11_blitter_reset(VMSVGA3DDxvk *dxvk)
+{
+  void **objects[] = {
+    &dxvk->d3d11_blit_constant_buffer,
+    &dxvk->d3d11_blit_vertex_shader,
+    &dxvk->d3d11_blit_pixel_shader,
+    &dxvk->d3d11_blit_pixel_shader_srgb,
+    &dxvk->d3d11_blit_sampler_state,
+    &dxvk->d3d11_blit_rasterizer_state,
+    &dxvk->d3d11_blit_blend_state,
+  };
+  uint32_t i;
+
+  for (i = 0; i < G_N_ELEMENTS(objects); i++) {
+    if (*objects[i] != NULL) {
+      vmsvga3d_dxvk_release(*objects[i], VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+      *objects[i] = NULL;
+    }
+  }
+  dxvk->d3d11_blitter_initialized = false;
+}
+
+static bool vmsvga3d_dxvk_d3d11_blitter_init(VMSVGA3DDxvk *dxvk)
+{
+  static const uint32_t vs_tokens[] = {
+    0x00010050,0x00000062,0x0100086a,0x04000059,0x00208e46,0x00000000,0x00000002,0x04000060,0x00101012,0x00000000,0x00000006,
+    0x04000067,0x001020f2,0x00000000,0x00000001,0x03000065,0x00102032,0x00000001,0x03000065,0x001020c2,0x00000001,
+    0x02000068,0x00000001,0x0a000001,0x00100032,0x00000000,0x00101006,0x00000000,0x00004002,0x00000001,0x00000002,0x00000000,0x00000000,
+    0x0f000037,0x001000c2,0x00000000,0x00100406,0x00000000,0x00004002,0x00000000,0x00000000,0x3f800000,0xbf800000,0x00004002,0x00000000,0x00000000,0xbf800000,0x3f800000,
+    0x0d000037,0x00100032,0x00000000,0x00100046,0x00000000,0x00208046,0x00000000,0x00000000,0x00004002,0x00000000,0x00000000,0x00000000,0x00000000,
+    0x08000000,0x00102032,0x00000001,0x00100046,0x00000000,0x00208ae6,0x00000000,0x00000000,
+    0x0b000032,0x00102032,0x00000000,0x00100ae6,0x00000000,0x00208046,0x00000000,0x00000001,0x00208ae6,0x00000000,0x00000001,
+    0x08000036,0x001020c2,0x00000000,0x00004002,0x00000000,0x00000000,0x00000000,0x3f800000,
+    0x08000036,0x001020c2,0x00000001,0x00004002,0x00000000,0x00000000,0x3f800000,0x00000000,0x0100003a,0x0100003e
+  };
+  static const uint32_t ps_tokens[] = {
+    0x00000050,0x0000002c,0x0100086a,0x0300005a,0x00106000,0x00000000,0x04001858,0x00107000,0x00000000,0x00005555,
+    0x03001062,0x00101032,0x00000001,0x03001062,0x00101042,0x00000001,0x03000065,0x001020f2,0x00000000,0x02000068,0x00000001,
+    0x8b000045,0x800000c2,0x00155543,0x00100072,0x00000000,0x00101046,0x00000001,0x00107e46,0x00000000,0x00106000,0x00000000,
+    0x05000036,0x00102072,0x00000000,0x00100246,0x00000000,
+    0x05000036,0x00102082,0x00000000,0x0010102a,0x00000001,0x0100003a,0x0100003e
+  };
+  static const uint32_t ps_srgb_tokens[] = {
+    0x00000050,0x0000003b,0x0100086a,0x0300005a,0x00106000,0x00000000,0x04001858,0x00107000,0x00000000,0x00005555,
+    0x03001062,0x00101032,0x00000001,0x03001062,0x00101042,0x00000001,0x03000065,0x001020f2,0x00000000,0x02000068,0x00000001,
+    0x8b000045,0x800000c2,0x00155543,0x00100072,0x00000000,0x00101046,0x00000001,0x00107e46,0x00000000,0x00106000,0x00000000,
+    0x0500002f,0x00100072,0x00000000,0x00100246,0x00000000,
+    0x0a000038,0x00100072,0x00000000,0x00100246,0x00000000,0x00004002,0x3ee8ba2f,0x3ee8ba2f,0x3ee8ba2f,0x00000000,
+    0x05000019,0x00102072,0x00000000,0x00100246,0x00000000,
+    0x05000036,0x00102082,0x00000000,0x0010102a,0x00000001,0x0100003a,0x0100003e
+  };
+  VMSVGA3DDxvkD3D11CreateBuffer create_buffer = NULL;
+  VMSVGA3DDxvkD3D11CreateSamplerState create_sampler = NULL;
+  VMSVGA3DDxvkD3D11CreateRasterizerState create_rasterizer = NULL;
+  VMSVGA3DDxvkD3D11CreateBlendState create_blend = NULL;
+  VMSVGA3DDxvkD3D11BufferDesc buffer_desc = { 0 };
+  VMSVGA3DD3D10SamplerDesc sampler = { 0 };
+  VMSVGA3DD3D10RasterizerDesc rasterizer = { 0 };
+  VMSVGA3DD3D10BlendDesc blend = { 0 };
+  uint32_t i;
+
+  if (dxvk->d3d11_blitter_initialized) {
+    return true;
+  }
+  if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device,
+          VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BUFFER,
+          &create_buffer, sizeof(create_buffer)) ||
+      !vmsvga3d_dxvk_get_method(dxvk->d3d11_device,
+          VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SAMPLER_STATE,
+          &create_sampler, sizeof(create_sampler)) ||
+      !vmsvga3d_dxvk_get_method(dxvk->d3d11_device,
+          VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RASTERIZER_STATE,
+          &create_rasterizer, sizeof(create_rasterizer)) ||
+      !vmsvga3d_dxvk_get_method(dxvk->d3d11_device,
+          VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BLEND_STATE,
+          &create_blend, sizeof(create_blend))) {
+    return false;
+  }
+
+  buffer_desc.byte_width = sizeof(VMSVGA3DDxvkD3D11BlitConstants);
+  buffer_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_DYNAMIC;
+  buffer_desc.bind_flags = VMSVGA3D_DXVK_D3D11_BIND_CONSTANT_BUFFER;
+  buffer_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_WRITE;
+  if (!vmsvga3d_dxvk_succeeded(create_buffer(dxvk->d3d11_device, &buffer_desc,
+                                              NULL, &dxvk->d3d11_blit_constant_buffer)) ||
+      dxvk->d3d11_blit_constant_buffer == NULL ||
+      !vmsvga3d_dxvk_d3d11_blit_shader(dxvk,
+          VMSVGA3D_D3D10_SHADER_PROGRAM_VERTEX, vs_tokens,
+          G_N_ELEMENTS(vs_tokens), true, &dxvk->d3d11_blit_vertex_shader) ||
+      !vmsvga3d_dxvk_d3d11_blit_shader(dxvk,
+          VMSVGA3D_D3D10_SHADER_PROGRAM_PIXEL, ps_tokens,
+          G_N_ELEMENTS(ps_tokens), false, &dxvk->d3d11_blit_pixel_shader) ||
+      !vmsvga3d_dxvk_d3d11_blit_shader(dxvk,
+          VMSVGA3D_D3D10_SHADER_PROGRAM_PIXEL, ps_srgb_tokens,
+          G_N_ELEMENTS(ps_srgb_tokens), false,
+          &dxvk->d3d11_blit_pixel_shader_srgb)) {
+    goto fail;
+  }
+
+  sampler.filter = VMSVGA3D_DXVK_D3D11_FILTER_ANISOTROPIC;
+  sampler.address_u = VMSVGA3D_DXVK_D3D11_TEXTURE_ADDRESS_WRAP;
+  sampler.address_v = VMSVGA3D_DXVK_D3D11_TEXTURE_ADDRESS_WRAP;
+  sampler.address_w = VMSVGA3D_DXVK_D3D11_TEXTURE_ADDRESS_WRAP;
+  sampler.max_anisotropy = 4;
+  sampler.comparison_func = VMSVGA3D_DXVK_D3D11_COMPARISON_ALWAYS;
+  sampler.max_lod = 0.0f;
+  if (!vmsvga3d_dxvk_succeeded(create_sampler(dxvk->d3d11_device, &sampler,
+                                               &dxvk->d3d11_blit_sampler_state)) ||
+      dxvk->d3d11_blit_sampler_state == NULL) {
+    goto fail;
+  }
+
+  rasterizer.fill_mode = VMSVGA3D_DXVK_D3D11_FILL_SOLID;
+  rasterizer.cull_mode = VMSVGA3D_DXVK_D3D11_CULL_NONE;
+  if (!vmsvga3d_dxvk_succeeded(create_rasterizer(dxvk->d3d11_device,
+          &rasterizer, &dxvk->d3d11_blit_rasterizer_state)) ||
+      dxvk->d3d11_blit_rasterizer_state == NULL) {
+    goto fail;
+  }
+
+  for (i = 0; i < SVGA3D_DX_MAX_RENDER_TARGETS; i++) {
+    blend.render_target[i].src_blend = VMSVGA3D_DXVK_D3D11_BLEND_SRC_COLOR;
+    blend.render_target[i].dest_blend = VMSVGA3D_DXVK_D3D11_BLEND_ZERO;
+    blend.render_target[i].blend_op = VMSVGA3D_DXVK_D3D11_BLEND_OP_ADD;
+    blend.render_target[i].src_blend_alpha = VMSVGA3D_DXVK_D3D11_BLEND_SRC_ALPHA;
+    blend.render_target[i].dest_blend_alpha = VMSVGA3D_DXVK_D3D11_BLEND_ZERO;
+    blend.render_target[i].blend_op_alpha = VMSVGA3D_DXVK_D3D11_BLEND_OP_ADD;
+    blend.render_target[i].write_mask = VMSVGA3D_DXVK_D3D11_COLOR_WRITE_ENABLE_ALL;
+  }
+  if (!vmsvga3d_dxvk_succeeded(create_blend(dxvk->d3d11_device, &blend,
+                                             &dxvk->d3d11_blit_blend_state)) ||
+      dxvk->d3d11_blit_blend_state == NULL) {
+    goto fail;
+  }
+  dxvk->d3d11_blitter_initialized = true;
+  return true;
+
+fail:
+  vmsvga3d_dxvk_d3d11_blitter_reset(dxvk);
+  return false;
+}
+
+static bool vmsvga3d_dxvk_d3d11_blit_save(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkD3D11BlitSavedState *saved)
+{
+  VMSVGA3DDxvkD3D11IAGetPrimitiveTopology get_topology = NULL;
+  VMSVGA3DDxvkD3D11IAGetInputLayout get_layout = NULL;
+  VMSVGA3DDxvkD3D11GetConstantBuffers get_vs_cb = NULL;
+  VMSVGA3DDxvkD3D11GetShader get_vs = NULL, get_gs = NULL, get_ps = NULL;
+  VMSVGA3DDxvkD3D11GetShaderResources get_ps_srv = NULL;
+  VMSVGA3DDxvkD3D11GetSamplers get_ps_sampler = NULL;
+  VMSVGA3DDxvkD3D11RSGetState get_rs = NULL;
+  VMSVGA3DDxvkD3D11OMGetBlendState get_blend = NULL;
+  VMSVGA3DDxvkD3D11OMGetRenderTargets get_rt = NULL;
+  VMSVGA3DDxvkD3D11RSGetViewports get_viewports = NULL;
+
+#define GET_BLIT_METHOD(slot, fn) \
+  vmsvga3d_dxvk_get_method(dxvk->d3d11_context, (slot), &(fn), sizeof(fn))
+  if (!GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_PRIMITIVE_TOPOLOGY, get_topology) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INPUT_LAYOUT, get_layout) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_CONSTANT_BUFFERS, get_vs_cb) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_SHADER, get_vs) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_GET_SHADER, get_gs) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER_RESOURCES, get_ps_srv) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER, get_ps) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SAMPLERS, get_ps_sampler) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_STATE, get_rs) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_BLEND_STATE, get_blend) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_RENDER_TARGETS, get_rt) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_VIEWPORTS, get_viewports)) {
+    return false;
+  }
+#undef GET_BLIT_METHOD
+
+  memset(saved, 0, sizeof(*saved));
+  get_topology(dxvk->d3d11_context, &saved->topology);
+  get_layout(dxvk->d3d11_context, &saved->input_layout);
+  get_vs_cb(dxvk->d3d11_context, 0, 1, &saved->vs_constant_buffer);
+  get_vs(dxvk->d3d11_context, &saved->vs, NULL, NULL);
+  get_gs(dxvk->d3d11_context, &saved->gs, NULL, NULL);
+  get_ps_srv(dxvk->d3d11_context, 0, 1, &saved->ps_srv);
+  get_ps(dxvk->d3d11_context, &saved->ps, NULL, NULL);
+  get_ps_sampler(dxvk->d3d11_context, 0, 1, &saved->ps_sampler);
+  get_rs(dxvk->d3d11_context, &saved->rasterizer);
+  get_blend(dxvk->d3d11_context, &saved->blend, saved->blend_factor,
+            &saved->sample_mask);
+  get_rt(dxvk->d3d11_context, VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS,
+         saved->render_targets, &saved->depth_stencil);
+  saved->viewport_count = VMSVGA3D_DXVK_D3D11_MAX_VIEWPORTS;
+  get_viewports(dxvk->d3d11_context, &saved->viewport_count, saved->viewports);
+  return saved->viewport_count <= VMSVGA3D_DXVK_D3D11_MAX_VIEWPORTS;
+}
+
+static bool vmsvga3d_dxvk_d3d11_blit_restore(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkD3D11BlitSavedState *saved)
+{
+  VMSVGA3DDxvkD3D11IASetPrimitiveTopology set_topology = NULL;
+  VMSVGA3DDxvkD3D11IASetInputLayout set_layout = NULL;
+  VMSVGA3DDxvkD3D11SetConstantBuffers set_vs_cb = NULL;
+  VMSVGA3DDxvkD3D11SetShader set_vs = NULL, set_gs = NULL, set_ps = NULL;
+  VMSVGA3DDxvkD3D11SetShaderResources set_ps_srv = NULL;
+  VMSVGA3DDxvkD3D11SetSamplers set_ps_sampler = NULL;
+  VMSVGA3DDxvkD3D11RSSetState set_rs = NULL;
+  VMSVGA3DDxvkD3D11OMSetBlendState set_blend = NULL;
+  VMSVGA3DDxvkD3D11OMSetRenderTargets set_rt = NULL;
+  VMSVGA3DDxvkD3D11RSSetViewports set_viewports = NULL;
+  bool have_methods;
+
+#define GET_BLIT_METHOD(slot, fn) \
+  vmsvga3d_dxvk_get_method(dxvk->d3d11_context, (slot), &(fn), sizeof(fn))
+  have_methods =
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_PRIMITIVE_TOPOLOGY, set_topology) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INPUT_LAYOUT, set_layout) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_CONSTANT_BUFFERS, set_vs_cb) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER, set_vs) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER, set_gs) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER_RESOURCES, set_ps_srv) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER, set_ps) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SAMPLERS, set_ps_sampler) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_STATE, set_rs) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_BLEND_STATE, set_blend) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS, set_rt) &&
+      GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_VIEWPORTS, set_viewports);
+#undef GET_BLIT_METHOD
+  if (have_methods) {
+    set_topology(dxvk->d3d11_context, saved->topology);
+    set_layout(dxvk->d3d11_context, saved->input_layout);
+    set_vs_cb(dxvk->d3d11_context, 0, 1, &saved->vs_constant_buffer);
+    set_vs(dxvk->d3d11_context, saved->vs, NULL, 0);
+    set_gs(dxvk->d3d11_context, saved->gs, NULL, 0);
+    set_ps_srv(dxvk->d3d11_context, 0, 1, &saved->ps_srv);
+    set_ps(dxvk->d3d11_context, saved->ps, NULL, 0);
+    set_ps_sampler(dxvk->d3d11_context, 0, 1, &saved->ps_sampler);
+    set_rs(dxvk->d3d11_context, saved->rasterizer);
+    set_blend(dxvk->d3d11_context, saved->blend, saved->blend_factor,
+              saved->sample_mask);
+    set_rt(dxvk->d3d11_context, VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS,
+           saved->render_targets, saved->depth_stencil);
+    set_viewports(dxvk->d3d11_context, saved->viewport_count, saved->viewports);
+  }
+  vmsvga3d_dxvk_d3d11_blit_release_saved(saved);
+  return have_methods;
+}
+
+bool vmsvga3d_dxvk_d3d11_present_blt(
+    VMSVGA3DDxvk *dxvk,
+    VMSVGA3DDxvkSurface *source, uint32_t source_subresource,
+    uint32_t source_format, const SVGA3dBox *source_box,
+    const SVGA3dSize *source_size, bool source_srgb,
+    VMSVGA3DDxvkSurface *destination, uint32_t destination_subresource,
+    uint32_t destination_format, const SVGA3dBox *destination_box,
+    const SVGA3dSize *destination_size)
+{
+  VMSVGA3DDxvkD3D11CreateShaderResourceView create_srv = NULL;
+  VMSVGA3DDxvkD3D11CreateRenderTargetView create_rtv = NULL;
+  VMSVGA3DDxvkD3D11SetConstantBuffers set_vs_cb = NULL;
+  VMSVGA3DDxvkD3D11IASetInputLayout set_layout = NULL;
+  VMSVGA3DDxvkD3D11IASetPrimitiveTopology set_topology = NULL;
+  VMSVGA3DDxvkD3D11SetShader set_vs = NULL, set_gs = NULL, set_ps = NULL;
+  VMSVGA3DDxvkD3D11SetShaderResources set_ps_srv = NULL;
+  VMSVGA3DDxvkD3D11SetSamplers set_ps_sampler = NULL;
+  VMSVGA3DDxvkD3D11RSSetState set_rs = NULL;
+  VMSVGA3DDxvkD3D11OMSetBlendState set_blend = NULL;
+  VMSVGA3DDxvkD3D11OMSetRenderTargets set_rt = NULL;
+  VMSVGA3DDxvkD3D11RSSetViewports set_viewports = NULL;
+  VMSVGA3DDxvkD3D11Map map = NULL;
+  VMSVGA3DDxvkD3D11Unmap unmap = NULL;
+  VMSVGA3DDxvkD3D11Draw draw = NULL;
+  VMSVGA3DDxvkD3D11SRVDesc srv_desc = { 0 };
+  VMSVGA3DDxvkD3D11RTVDesc rtv_desc = { 0 };
+  VMSVGA3DDxvkD3D11BlitSavedState saved;
+  VMSVGA3DDxvkD3D11MappedSubresource mapped = { 0 };
+  VMSVGA3DDxvkD3D11BlitConstants constants;
+  SVGA3dViewport viewport = { 0 };
+  float blend_factor[4] = { 0, 0, 0, 0 };
+  void *srv = NULL;
+  void *rtv = NULL;
+  void *null_shader = NULL;
+  int32_t result;
+  bool saved_valid = false;
+  bool mapped_valid = false;
+  bool success = false;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || source == NULL || destination == NULL ||
+      !source->d3d11_resident || !destination->d3d11_resident ||
+      source->d3d11_resource == NULL || destination->d3d11_resource == NULL ||
+      source_box == NULL || destination_box == NULL || source_size == NULL ||
+      destination_size == NULL || source_size->width == 0 ||
+      source_size->height == 0 || destination_size->width == 0 ||
+      destination_size->height == 0 ||
+      !vmsvga3d_dxvk_d3d11_blitter_init(dxvk)) {
+    return false;
+  }
+
+  srv_desc.format = source_format;
+  srv_desc.view_dimension = VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2D;
+  srv_desc.data[0] = source_subresource;
+  srv_desc.data[1] = 1;
+  rtv_desc.format = destination_format;
+  rtv_desc.view_dimension = VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE2D;
+  rtv_desc.data[0] = destination_subresource;
+  if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device,
+          VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SHADER_RESOURCE_VIEW,
+          &create_srv, sizeof(create_srv)) ||
+      !vmsvga3d_dxvk_get_method(dxvk->d3d11_device,
+          VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RENDERTARGET_VIEW,
+          &create_rtv, sizeof(create_rtv))) {
+    return false;
+  }
+  result = create_rtv(dxvk->d3d11_device, destination->d3d11_resource,
+                      &rtv_desc, &rtv);
+  if (!vmsvga3d_dxvk_succeeded(result) || rtv == NULL) {
+    goto out;
+  }
+  result = create_srv(dxvk->d3d11_device, source->d3d11_resource,
+                      &srv_desc, &srv);
+  if (!vmsvga3d_dxvk_succeeded(result) || srv == NULL) {
+    goto out;
+  }
+  if (!vmsvga3d_dxvk_d3d11_blit_save(dxvk, &saved)) {
+    goto out;
+  }
+  saved_valid = true;
+
+#define GET_BLIT_METHOD(slot, fn) \
+  vmsvga3d_dxvk_get_method(dxvk->d3d11_context, (slot), &(fn), sizeof(fn))
+  if (!GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS, set_rt) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_CONSTANT_BUFFERS, set_vs_cb) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INPUT_LAYOUT, set_layout) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_PRIMITIVE_TOPOLOGY, set_topology) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER, set_vs) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER, set_gs) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER_RESOURCES, set_ps_srv) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER, set_ps) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SAMPLERS, set_ps_sampler) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_STATE, set_rs) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_BLEND_STATE, set_blend) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_VIEWPORTS, set_viewports) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_MAP, map) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UNMAP, unmap) ||
+      !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW, draw)) {
+    goto out;
+  }
+#undef GET_BLIT_METHOD
+
+  set_rt(dxvk->d3d11_context, 1, &rtv, NULL);
+  set_vs_cb(dxvk->d3d11_context, 0, 1, &dxvk->d3d11_blit_constant_buffer);
+  set_layout(dxvk->d3d11_context, NULL);
+  set_topology(dxvk->d3d11_context,
+               VMSVGA3D_DXVK_D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+  set_vs(dxvk->d3d11_context, dxvk->d3d11_blit_vertex_shader, NULL, 0);
+  set_gs(dxvk->d3d11_context, null_shader, NULL, 0);
+  set_ps_srv(dxvk->d3d11_context, 0, 1, &srv);
+  set_ps(dxvk->d3d11_context,
+         source_srgb ? dxvk->d3d11_blit_pixel_shader_srgb
+                     : dxvk->d3d11_blit_pixel_shader,
+         NULL, 0);
+  set_ps_sampler(dxvk->d3d11_context, 0, 1, &dxvk->d3d11_blit_sampler_state);
+  set_rs(dxvk->d3d11_context, dxvk->d3d11_blit_rasterizer_state);
+  set_blend(dxvk->d3d11_context, dxvk->d3d11_blit_blend_state,
+            blend_factor, UINT32_MAX);
+
+  viewport.width = (float)destination_size->width;
+  viewport.height = (float)destination_size->height;
+  viewport.maxDepth = 1.0f;
+  set_viewports(dxvk->d3d11_context, 1, &viewport);
+
+  constants.src_scale_x = (float)source_box->w / (float)source_size->width;
+  constants.src_scale_y = (float)source_box->h / (float)source_size->height;
+  constants.src_offset_x = (float)source_box->x / (float)source_size->width;
+  constants.src_offset_y = (float)source_box->y / (float)source_size->height;
+  constants.dst_scale_x = (float)destination_box->w / (float)destination_size->width;
+  constants.dst_scale_y = (float)destination_box->h / (float)destination_size->height;
+  constants.dst_offset_x =
+      (float)(destination_box->x * 2u + destination_box->w) /
+          (float)destination_size->width - 1.0f;
+  constants.dst_offset_y = -((float)(destination_box->y * 2u + destination_box->h) /
+          (float)destination_size->height - 1.0f);
+
+  result = map(dxvk->d3d11_context, dxvk->d3d11_blit_constant_buffer, 0,
+               VMSVGA3D_DXVK_D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+  if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
+    goto out;
+  }
+  mapped_valid = true;
+  memcpy(mapped.data, &constants, sizeof(constants));
+  unmap(dxvk->d3d11_context, dxvk->d3d11_blit_constant_buffer, 0);
+  mapped_valid = false;
+  draw(dxvk->d3d11_context, 4, 0);
+  success = true;
+
+out:
+  if (mapped_valid && unmap != NULL) {
+    unmap(dxvk->d3d11_context, dxvk->d3d11_blit_constant_buffer, 0);
+  }
+  if (saved_valid) {
+    success = vmsvga3d_dxvk_d3d11_blit_restore(dxvk, &saved) && success;
+  }
+  if (srv != NULL) {
+    vmsvga3d_dxvk_release(srv, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+  }
+  if (rtv != NULL) {
+    vmsvga3d_dxvk_release(rtv, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+  }
+  return success;
+}
 
 static VMSVGA3DDxvkShader *vmsvga3d_dxvk_d3d11_shader_find(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
@@ -3185,27 +4487,249 @@ static void vmsvga3d_dxvk_d3d11_shader_free(VMSVGA3DDxvkShader *shader) {
     vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
   }
 #endif
+  if (shader->info_valid) {
+    vmsvga3d_d3d10_shader_release(&shader->info);
+  }
   g_free(shader->bytecode);
   g_free(shader);
 }
 
-bool vmsvga3d_dxvk_d3d11_shader_define(
+bool vmsvga3d_dxvk_d3d11_shader_object_define(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
-    uint32_t shader_type, const void *bytecode, uint32_t bytecode_size) {
+    uint32_t shader_type) {
+  VMSVGA3DDxvkShader *shader;
+
+  if (dxvk == NULL || shader_type < SVGA3D_SHADERTYPE_MIN ||
+      shader_type >= SVGA3D_SHADERTYPE_MAX ||
+      vmsvga3d_dxvk_d3d11_shader_find(dxvk, cid, shader_id, NULL) != NULL) {
+    return false;
+  }
+  shader = g_try_new0(VMSVGA3DDxvkShader, 1);
+  if (shader == NULL) {
+    return false;
+  }
+  shader->cid = cid;
+  shader->shader_id = shader_id;
+  shader->shader_type = shader_type;
+  shader->stream_output_id = SVGA3D_INVALID_ID;
+  shader->next = dxvk->d3d11_shaders;
+  dxvk->d3d11_shaders = shader;
+  return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_shader_object_exists(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t *shader_type) {
+  VMSVGA3DDxvkShader *shader;
+
+  if (dxvk == NULL) {
+    return false;
+  }
+  shader = vmsvga3d_dxvk_d3d11_shader_find(dxvk, cid, shader_id, NULL);
+  if (shader == NULL) {
+    return false;
+  }
+  if (shader_type != NULL) {
+    *shader_type = shader->shader_type;
+  }
+  return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_shader_bind_info(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    VMSVGA3DD3D10ShaderInfo *info) {
+  VMSVGA3DDxvkShader *shader;
+
+  if (dxvk == NULL || info == NULL) {
+    return false;
+  }
+  shader = vmsvga3d_dxvk_d3d11_shader_find(dxvk, cid, shader_id, NULL);
+  if (shader == NULL) {
+    return false;
+  }
+
+  /* VirtualBox drops generated DXBC/native code on a successful rebind, but
+   * retains the backend shader record itself.
+   */
+  if (shader->bytecode != NULL) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    if (shader->shader != NULL) {
+      vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+#endif
+    shader->shader = NULL;
+    g_free(shader->bytecode);
+    shader->bytecode = NULL;
+    shader->bytecode_size = 0;
+  }
+  if (shader->info_valid) {
+    vmsvga3d_d3d10_shader_release(&shader->info);
+  }
+  shader->info = *info;
+  shader->info_valid = true;
+  memset(info, 0, sizeof(*info));
+  return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_shader_info_for_realize(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t shader_type, VMSVGA3DD3D10ShaderInfo **info) {
+  VMSVGA3DDxvkShader *shader;
+
+  if (dxvk == NULL || info == NULL) {
+    return false;
+  }
+  *info = NULL;
+  shader = vmsvga3d_dxvk_d3d11_shader_find(
+      dxvk, cid, shader_id, NULL);
+  if (shader == NULL || shader->shader_type != shader_type ||
+      !shader->info_valid) {
+    return false;
+  }
+
+  /* dxSetupPipeline only patches a shader while its native object is absent.
+   * If an earlier Create*Shader failed after DXBC generation, the Oracle runs
+   * the create-time preparation again on the next setup attempt.
+   */
+  if (shader->shader != NULL) {
+    return true;
+  }
+  if (shader->bytecode != NULL) {
+    g_free(shader->bytecode);
+    shader->bytecode = NULL;
+    shader->bytecode_size = 0;
+  }
+  *info = &shader->info;
+  return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_shader_info(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t shader_type, const VMSVGA3DD3D10ShaderInfo **info) {
+  VMSVGA3DDxvkShader *shader;
+
+  if (dxvk == NULL || info == NULL) {
+    return false;
+  }
+  *info = NULL;
+  shader = vmsvga3d_dxvk_d3d11_shader_find(dxvk, cid, shader_id, NULL);
+  if (shader == NULL || shader->shader_type != shader_type ||
+      !shader->info_valid) {
+    return false;
+  }
+  *info = &shader->info;
+  return true;
+}
+
+static VMSVGA3DDxvkStreamOutput *vmsvga3d_dxvk_d3d11_stream_output_find(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stream_output_id,
+    VMSVGA3DDxvkStreamOutput ***link_out) {
+  VMSVGA3DDxvkStreamOutput **link;
+
+  if (dxvk == NULL) {
+    return NULL;
+  }
+  for (link = &dxvk->d3d11_stream_outputs; *link != NULL;
+       link = &(*link)->next) {
+    if ((*link)->cid == cid &&
+        (*link)->stream_output_id == stream_output_id) {
+      if (link_out != NULL) {
+        *link_out = link;
+      }
+      return *link;
+    }
+  }
+  return NULL;
+}
+
+bool vmsvga3d_dxvk_d3d11_stream_output_cached(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stream_output_id,
+    VMSVGA3DD3D10StreamOutputPlan *plan) {
+  VMSVGA3DDxvkStreamOutput *stream_output;
+
+  if (dxvk == NULL || plan == NULL) {
+    return false;
+  }
+  stream_output = vmsvga3d_dxvk_d3d11_stream_output_find(
+      dxvk, cid, stream_output_id, NULL);
+  /* dxDefineStreamOutput uses cDeclarationEntry == 0 as its cache test.
+   * Therefore an empty declaration is intentionally rebuilt every time.
+   */
+  if (stream_output == NULL || stream_output->plan.declaration_count == 0) {
+    return false;
+  }
+  *plan = stream_output->plan;
+  return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_stream_output_cache(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stream_output_id,
+    const VMSVGA3DD3D10StreamOutputPlan *plan) {
+  VMSVGA3DDxvkStreamOutput *stream_output;
+
+  if (dxvk == NULL || plan == NULL) {
+    return false;
+  }
+  stream_output = vmsvga3d_dxvk_d3d11_stream_output_find(
+      dxvk, cid, stream_output_id, NULL);
+  if (stream_output == NULL) {
+    stream_output = g_try_new0(VMSVGA3DDxvkStreamOutput, 1);
+    if (stream_output == NULL) {
+      return false;
+    }
+    stream_output->cid = cid;
+    stream_output->stream_output_id = stream_output_id;
+    stream_output->next = dxvk->d3d11_stream_outputs;
+    dxvk->d3d11_stream_outputs = stream_output;
+  }
+  stream_output->plan = *plan;
+  return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_stream_output_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stream_output_id) {
+  VMSVGA3DDxvkStreamOutput **link = NULL;
+  VMSVGA3DDxvkStreamOutput *stream_output;
+
+  if (dxvk == NULL) {
+    return false;
+  }
+  stream_output = vmsvga3d_dxvk_d3d11_stream_output_find(
+      dxvk, cid, stream_output_id, &link);
+  if (stream_output != NULL) {
+    *link = stream_output->next;
+    g_free(stream_output);
+  }
+  return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_shader_realize(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t stream_output_id,
+    const VMSVGA3DD3D10StreamOutputPlan *stream_output) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11CreateShader create_shader = NULL;
-  VMSVGA3DDxvkShader **link = NULL;
-  VMSVGA3DDxvkShader *old_shader;
-  VMSVGA3DDxvkShader *new_shader;
+  VMSVGA3DDxvkD3D11CreateGeometryShaderWithSO create_gs_so = NULL;
+  VMSVGA3DDxvkShader *shader;
+  VMSVGA3DD3D10ShaderDXBC dxbc;
+  VMSVGA3DD3D10Level level;
   uint32_t method;
   void *native_shader = NULL;
   int32_t result;
 
-  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      bytecode == NULL || bytecode_size == 0) {
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL) {
     return false;
   }
-  switch (shader_type) {
+  shader = vmsvga3d_dxvk_d3d11_shader_find(
+      dxvk, cid, shader_id, NULL);
+  if (shader == NULL || !shader->info_valid) {
+    return false;
+  }
+  if (shader->shader != NULL) {
+    return true;
+  }
+
+  switch (shader->shader_type) {
   case SVGA3D_SHADERTYPE_VS:
     method = VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_VERTEX_SHADER;
     break;
@@ -3218,13 +4742,53 @@ bool vmsvga3d_dxvk_d3d11_shader_define(
   default:
     return false;
   }
-  if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device, method,
-                                 &create_shader, sizeof(create_shader))) {
-    return false;
+
+  /* Mirror dxSetupPipeline: DXBC belongs to the persistent shader object and
+   * is generated only when the active pipeline first needs the shader.
+   * B3/B4/B5 insert VirtualBox's contextual signature/resource/SO updates
+   * before this realization point.
+   */
+  if (shader->bytecode == NULL) {
+    memset(&dxbc, 0, sizeof(dxbc));
+    level = vmsvga3d_d3d10_shader_create_dxbc(&shader->info, &dxbc);
+    if (level == VMSVGA3D_D3D10_LEVEL_INVALID ||
+        dxbc.data == NULL || dxbc.size == 0) {
+      vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+      return false;
+    }
+    shader->bytecode = g_try_malloc(dxbc.size);
+    if (shader->bytecode == NULL) {
+      vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+      return false;
+    }
+    memcpy(shader->bytecode, dxbc.data, dxbc.size);
+    shader->bytecode_size = dxbc.size;
+    vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
   }
 
-  result = create_shader(dxvk->d3d11_device, bytecode, bytecode_size,
-                         NULL, &native_shader);
+  if (shader->shader_type == SVGA3D_SHADERTYPE_GS &&
+      stream_output_id != SVGA3D_INVALID_ID) {
+    if (stream_output == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO,
+            &create_gs_so, sizeof(create_gs_so))) {
+      return false;
+    }
+    result = create_gs_so(
+        dxvk->d3d11_device, shader->bytecode, shader->bytecode_size,
+        stream_output->declarations, stream_output->declaration_count,
+        stream_output->use_explicit_strides ? stream_output->strides : NULL,
+        stream_output->stride_count, stream_output->rasterized_stream,
+        NULL, &native_shader);
+  } else {
+    if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device, method,
+                                   &create_shader, sizeof(create_shader))) {
+      return false;
+    }
+    result = create_shader(dxvk->d3d11_device, shader->bytecode,
+                           shader->bytecode_size, NULL, &native_shader);
+  }
   if (!vmsvga3d_dxvk_succeeded(result) || native_shader == NULL) {
     if (native_shader != NULL) {
       vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -3232,43 +4796,72 @@ bool vmsvga3d_dxvk_d3d11_shader_define(
     return false;
   }
 
-  new_shader = g_try_new0(VMSVGA3DDxvkShader, 1);
-  if (new_shader == NULL) {
-    vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-    return false;
-  }
-  new_shader->bytecode = g_try_malloc(bytecode_size);
-  if (new_shader->bytecode == NULL) {
-    vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-    g_free(new_shader);
-    return false;
-  }
-  memcpy(new_shader->bytecode, bytecode, bytecode_size);
-  new_shader->cid = cid;
-  new_shader->shader_id = shader_id;
-  new_shader->shader_type = shader_type;
-  new_shader->shader = native_shader;
-  new_shader->bytecode_size = bytecode_size;
-
-  old_shader = vmsvga3d_dxvk_d3d11_shader_find(
-      dxvk, cid, shader_id, &link);
-  vmsvga3d_dxvk_d3d11_input_layout_destroy_shader(dxvk, cid, shader_id);
-  if (old_shader != NULL) {
-    new_shader->next = old_shader->next;
-    *link = new_shader;
-    vmsvga3d_dxvk_d3d11_shader_free(old_shader);
-  } else {
-    new_shader->next = dxvk->d3d11_shaders;
-    dxvk->d3d11_shaders = new_shader;
+  shader->shader = native_shader;
+  if (shader->shader_type == SVGA3D_SHADERTYPE_GS &&
+      stream_output_id != SVGA3D_INVALID_ID) {
+    shader->stream_output_id = stream_output_id;
   }
   return true;
 #else
   (void)dxvk;
   (void)cid;
   (void)shader_id;
+  (void)stream_output_id;
+  (void)stream_output;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_shader_set(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t shader_type) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11SetShader set_shader = NULL;
+  VMSVGA3DDxvkShader *shader = NULL;
+  void *native_shader = NULL;
+  uint32_t method;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+    return false;
+  }
+  switch (shader_type) {
+  case SVGA3D_SHADERTYPE_VS:
+    method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER;
+    break;
+  case SVGA3D_SHADERTYPE_PS:
+    method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER;
+    break;
+  case SVGA3D_SHADERTYPE_GS:
+    method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER;
+    break;
+  default:
+    return false;
+  }
+
+  if (shader_id != SVGA3D_INVALID_ID) {
+    shader = vmsvga3d_dxvk_d3d11_shader_find(
+        dxvk, cid, shader_id, NULL);
+    if (shader == NULL || shader->shader_type != shader_type ||
+        shader->shader == NULL) {
+      return false;
+    }
+    native_shader = shader->shader;
+  }
+
+  if (!vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, method, &set_shader, sizeof(set_shader))) {
+    return false;
+  }
+  /* VirtualBox calls *SetShader for every stage on every dxSetupPipeline,
+   * including NULL to explicitly unbind an inactive stage.
+   */
+  set_shader(dxvk->d3d11_context, native_shader, NULL, 0);
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)shader_id;
   (void)shader_type;
-  (void)bytecode;
-  (void)bytecode_size;
   return false;
 #endif
 }
@@ -3281,7 +4874,6 @@ bool vmsvga3d_dxvk_d3d11_shader_destroy(
   if (dxvk == NULL) {
     return false;
   }
-  vmsvga3d_dxvk_d3d11_input_layout_destroy_shader(dxvk, cid, shader_id);
   shader = vmsvga3d_dxvk_d3d11_shader_find(
       dxvk, cid, shader_id, &link);
   if (shader == NULL) {
@@ -3315,7 +4907,7 @@ bool vmsvga3d_dxvk_d3d11_shader_bytecode(
 
 static VMSVGA3DDxvkInputLayout *vmsvga3d_dxvk_d3d11_input_layout_find(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t layout_id,
-    uint32_t shader_id, VMSVGA3DDxvkInputLayout ***link_out) {
+    VMSVGA3DDxvkInputLayout ***link_out) {
   VMSVGA3DDxvkInputLayout **link;
 
   if (dxvk == NULL) {
@@ -3325,8 +4917,7 @@ static VMSVGA3DDxvkInputLayout *vmsvga3d_dxvk_d3d11_input_layout_find(
        link = &(*link)->next) {
     VMSVGA3DDxvkInputLayout *layout = *link;
 
-    if (layout->cid == cid && layout->layout_id == layout_id &&
-        layout->shader_id == shader_id) {
+    if (layout->cid == cid && layout->layout_id == layout_id) {
       if (link_out != NULL) {
         *link_out = link;
       }
@@ -3349,26 +4940,6 @@ static void vmsvga3d_dxvk_d3d11_input_layout_free(
   g_free(layout);
 }
 
-static void vmsvga3d_dxvk_d3d11_input_layout_destroy_shader(
-    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id) {
-  VMSVGA3DDxvkInputLayout **link;
-
-  if (dxvk == NULL) {
-    return;
-  }
-  link = &dxvk->d3d11_input_layouts;
-  while (*link != NULL) {
-    VMSVGA3DDxvkInputLayout *layout = *link;
-
-    if (layout->cid != cid || layout->shader_id != shader_id) {
-      link = &layout->next;
-      continue;
-    }
-    *link = layout->next;
-    vmsvga3d_dxvk_d3d11_input_layout_free(layout);
-  }
-}
-
 bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t layout_id,
     uint32_t shader_id,
@@ -3389,14 +4960,13 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
     return false;
   }
   if (vmsvga3d_dxvk_d3d11_input_layout_find(
-          dxvk, cid, layout_id, shader_id, NULL) != NULL) {
+          dxvk, cid, layout_id, NULL) != NULL) {
     return true;
   }
   shader = vmsvga3d_dxvk_d3d11_shader_find(
       dxvk, cid, shader_id, NULL);
   if (shader == NULL || shader->shader_type != SVGA3D_SHADERTYPE_VS ||
-      shader->shader == NULL || shader->bytecode == NULL ||
-      shader->bytecode_size == 0 ||
+      shader->bytecode == NULL || shader->bytecode_size == 0 ||
       !vmsvga3d_dxvk_get_method(
           dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_INPUT_LAYOUT,
           &create_input_layout, sizeof(create_input_layout))) {
@@ -3438,7 +5008,6 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
   }
   layout->cid = cid;
   layout->layout_id = layout_id;
-  layout->shader_id = shader_id;
   layout->layout = native_layout;
   layout->next = dxvk->d3d11_input_layouts;
   dxvk->d3d11_input_layouts = layout;
@@ -3450,6 +5019,39 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
   (void)shader_id;
   (void)elements;
   (void)element_count;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_set_input_layout(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t layout_id) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11IASetInputLayout set_layout = NULL;
+  VMSVGA3DDxvkInputLayout *layout = NULL;
+  void *native_layout = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+    return false;
+  }
+  if (layout_id != SVGA3D_INVALID_ID) {
+    layout = vmsvga3d_dxvk_d3d11_input_layout_find(
+        dxvk, cid, layout_id, NULL);
+    if (layout != NULL) {
+      native_layout = layout->layout;
+    }
+  }
+  if (!vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INPUT_LAYOUT,
+          &set_layout, sizeof(set_layout))) {
+    return false;
+  }
+  set_layout(dxvk->d3d11_context, native_layout);
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)layout_id;
   return false;
 #endif
 }
@@ -3503,6 +5105,18 @@ void vmsvga3d_dxvk_d3d11_shader_context_destroy(
     return;
   }
   vmsvga3d_dxvk_d3d11_input_layout_context_destroy(dxvk, cid);
+  {
+    VMSVGA3DDxvkStreamOutput **so_link = &dxvk->d3d11_stream_outputs;
+    while (*so_link != NULL) {
+      VMSVGA3DDxvkStreamOutput *stream_output = *so_link;
+      if (stream_output->cid != cid) {
+        so_link = &stream_output->next;
+        continue;
+      }
+      *so_link = stream_output->next;
+      g_free(stream_output);
+    }
+  }
   link = &dxvk->d3d11_shaders;
   while (*link != NULL) {
     VMSVGA3DDxvkShader *shader = *link;
@@ -3899,6 +5513,218 @@ bool vmsvga3d_dxvk_d3d11_update_subresource(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_readback_subresource(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    void *data, uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
+    uint32_t depth_pitch, uint32_t depth_count) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11CreateBuffer create_buffer = NULL;
+  VMSVGA3DDxvkD3D11CreateTexture1D create_texture1d = NULL;
+  VMSVGA3DDxvkD3D11CreateTexture2D create_texture2d = NULL;
+  VMSVGA3DDxvkD3D11CreateTexture3D create_texture3d = NULL;
+  VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
+  VMSVGA3DDxvkD3D11Map map = NULL;
+  VMSVGA3DDxvkD3D11Unmap unmap = NULL;
+  VMSVGA3DDxvkD3D11MappedSubresource mapped = {0};
+  const VMSVGA3DD3D10CreateDesc *desc;
+  void *staging = NULL;
+  uint32_t mip_level;
+  uint64_t max_subresources;
+  uint32_t z;
+  uint32_t y;
+  int32_t result;
+  bool success = false;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+      dxvk->d3d11_context == NULL || surface == NULL || data == NULL ||
+      row_bytes == 0 || row_pitch < row_bytes || row_count == 0 ||
+      depth_pitch == 0 || depth_count == 0 || surface->d3d9_resident) {
+    return false;
+  }
+  /* Like VirtualBox's map helper, a non-resident resource is already backed
+   * by the CPU shadow and therefore needs no GPU readback. */
+  if (!surface->d3d11_resident) {
+    return true;
+  }
+  if (surface->d3d11_resource == NULL || !surface->d3d11_desc.valid ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION,
+          &copy_region, sizeof(copy_region)) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_MAP,
+          &map, sizeof(map)) ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UNMAP,
+          &unmap, sizeof(unmap))) {
+    return false;
+  }
+  desc = &surface->d3d11_desc;
+
+  switch (desc->resource_dimension) {
+  case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER: {
+    VMSVGA3DDxvkD3D11BufferDesc staging_desc = {0};
+    VMSVGA3DDxvkD3D11Box source_box;
+
+    if (subresource != 0 || row_count != 1 || depth_count != 1 ||
+        row_bytes > desc->byte_width ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BUFFER,
+            &create_buffer, sizeof(create_buffer))) {
+      return false;
+    }
+    staging_desc.byte_width = row_bytes;
+    staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
+    staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
+    result = create_buffer(dxvk->d3d11_device, &staging_desc, NULL,
+                           &staging);
+    if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
+      return false;
+    }
+    source_box.left = 0;
+    source_box.top = 0;
+    source_box.front = 0;
+    source_box.right = row_bytes;
+    source_box.bottom = 1;
+    source_box.back = 1;
+    copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
+                surface->d3d11_resource, 0, &source_box);
+    break;
+  }
+  case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+    VMSVGA3DDxvkD3D11Texture1DDesc staging_desc = {0};
+
+    max_subresources = (uint64_t)desc->mip_levels * desc->array_size;
+    if (desc->mip_levels == 0 || desc->array_size == 0 ||
+        subresource >= max_subresources ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE1D,
+            &create_texture1d, sizeof(create_texture1d))) {
+      return false;
+    }
+    mip_level = subresource % desc->mip_levels;
+    staging_desc.width = MAX(1u, desc->width >> mip_level);
+    staging_desc.mip_levels = 1;
+    staging_desc.array_size = 1;
+    staging_desc.format = desc->format;
+    staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
+    staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
+    result = create_texture1d(dxvk->d3d11_device, &staging_desc, NULL,
+                              &staging);
+    if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
+      return false;
+    }
+    copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
+                surface->d3d11_resource, subresource, NULL);
+    break;
+  }
+  case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+    VMSVGA3DDxvkD3D11Texture2DDesc staging_desc = {0};
+
+    max_subresources = (uint64_t)desc->mip_levels * desc->array_size;
+    if (desc->mip_levels == 0 || desc->array_size == 0 ||
+        desc->sample_count != 1 ||
+        subresource >= max_subresources ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE2D,
+            &create_texture2d, sizeof(create_texture2d))) {
+      return false;
+    }
+    mip_level = subresource % desc->mip_levels;
+    staging_desc.width = MAX(1u, desc->width >> mip_level);
+    staging_desc.height = MAX(1u, desc->height >> mip_level);
+    staging_desc.mip_levels = 1;
+    staging_desc.array_size = 1;
+    staging_desc.format = desc->format;
+    staging_desc.sample_desc.count = 1;
+    staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
+    staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
+    result = create_texture2d(dxvk->d3d11_device, &staging_desc, NULL,
+                              &staging);
+    if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
+      return false;
+    }
+    copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
+                surface->d3d11_resource, subresource, NULL);
+    break;
+  }
+  case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+    VMSVGA3DDxvkD3D11Texture3DDesc staging_desc = {0};
+
+    if (desc->mip_levels == 0 || subresource >= desc->mip_levels ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE3D,
+            &create_texture3d, sizeof(create_texture3d))) {
+      return false;
+    }
+    mip_level = subresource;
+    staging_desc.width = MAX(1u, desc->width >> mip_level);
+    staging_desc.height = MAX(1u, desc->height >> mip_level);
+    staging_desc.depth = MAX(1u, desc->depth >> mip_level);
+    staging_desc.mip_levels = 1;
+    staging_desc.format = desc->format;
+    staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
+    staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
+    result = create_texture3d(dxvk->d3d11_device, &staging_desc, NULL,
+                              &staging);
+    if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
+      return false;
+    }
+    copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
+                surface->d3d11_resource, subresource, NULL);
+    break;
+  }
+  default:
+    return false;
+  }
+
+  result = map(dxvk->d3d11_context, staging, 0,
+               VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
+  if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
+    goto out;
+  }
+  if (desc->resource_dimension ==
+      VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
+    memcpy(data, mapped.data, row_bytes);
+  } else {
+    if (mapped.row_pitch < row_bytes ||
+        (depth_count > 1 && mapped.depth_pitch == 0)) {
+      unmap(dxvk->d3d11_context, staging, 0);
+      goto out;
+    }
+    for (z = 0; z < depth_count; z++) {
+      const uint8_t *source_plane =
+          (const uint8_t *)mapped.data +
+          (size_t)z * (depth_count > 1 ? mapped.depth_pitch : 0);
+      uint8_t *destination_plane = (uint8_t *)data + (size_t)z * depth_pitch;
+
+      for (y = 0; y < row_count; y++) {
+        memcpy(destination_plane + (size_t)y * row_pitch,
+               source_plane + (size_t)y * mapped.row_pitch, row_bytes);
+      }
+    }
+  }
+  unmap(dxvk->d3d11_context, staging, 0);
+  success = true;
+
+out:
+  vmsvga3d_dxvk_release(staging, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+  return success;
+#else
+  (void)dxvk;
+  (void)surface;
+  (void)subresource;
+  (void)data;
+  (void)row_bytes;
+  (void)row_pitch;
+  (void)row_count;
+  (void)depth_pitch;
+  (void)depth_count;
+  return false;
+#endif
+}
+
+
 #if defined(CONFIG_LINUX) && defined(__ELF__)
 static bool vmsvga3d_dxvk_d3d11_rtv_desc(
     const VMSVGA3DD3D10RTVDesc *src, VMSVGA3DDxvkD3D11RTVDesc *dst) {
@@ -3942,45 +5768,89 @@ static bool vmsvga3d_dxvk_d3d11_rtv_desc(
 }
 #endif
 
-bool vmsvga3d_dxvk_d3d11_clear_render_target_view(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
-    const struct vmsvga3d_d3d10_rtv_desc_s *desc, const float color[4]) {
+bool vmsvga3d_dxvk_d3d11_render_target_view_ensure(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_rtv_desc_s *desc) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11CreateRenderTargetView create_view = NULL;
-  VMSVGA3DDxvkD3D11ClearRenderTargetView clear_view = NULL;
   VMSVGA3DDxvkD3D11RTVDesc native;
   const VMSVGA3DD3D10RTVDesc *view_desc = desc;
   void *view = NULL;
   int32_t result;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      dxvk->d3d11_context == NULL || surface == NULL ||
-      !surface->d3d11_resident || surface->d3d11_resource == NULL ||
-      view_desc == NULL || color == NULL ||
+      view_id == SVGA3D_INVALID_ID || surface == NULL ||
+      !surface->d3d11_resident || surface->d3d11_resource == NULL) {
+    return false;
+  }
+  if (vmsvga3d_dxvk_d3d11_view_find(
+          dxvk, VMSVGA3D_DXVK_VIEW_RENDER_TARGET, cid, view_id, NULL) !=
+      NULL) {
+    return true;
+  }
+  if (view_desc == NULL ||
       !vmsvga3d_dxvk_d3d11_rtv_desc(view_desc, &native) ||
       !vmsvga3d_dxvk_get_method(
           dxvk->d3d11_device,
           VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RENDERTARGET_VIEW,
-          &create_view, sizeof(create_view)) ||
+          &create_view, sizeof(create_view))) {
+    return false;
+  }
+  result = create_view(dxvk->d3d11_device, surface->d3d11_resource, &native,
+                       &view);
+  if (!vmsvga3d_dxvk_succeeded(result) || view == NULL) {
+    return false;
+  }
+  if (!vmsvga3d_dxvk_d3d11_view_store(
+          dxvk, VMSVGA3D_DXVK_VIEW_RENDER_TARGET, cid, view_id,
+          surface, view)) {
+    vmsvga3d_dxvk_release(view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    return false;
+  }
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)view_id;
+  (void)surface;
+  (void)desc;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_render_target_view_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id) {
+  return vmsvga3d_dxvk_d3d11_view_destroy(
+      dxvk, VMSVGA3D_DXVK_VIEW_RENDER_TARGET, cid, view_id);
+}
+
+bool vmsvga3d_dxvk_d3d11_clear_render_target_view(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    const float color[4]) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11ClearRenderTargetView clear_view = NULL;
+  void *view;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      color == NULL) {
+    return false;
+  }
+  view = vmsvga3d_dxvk_d3d11_view_object(
+      dxvk, VMSVGA3D_DXVK_VIEW_RENDER_TARGET, cid, view_id);
+  if (view == NULL ||
       !vmsvga3d_dxvk_get_method(
           dxvk->d3d11_context,
           VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW,
           &clear_view, sizeof(clear_view))) {
     return false;
   }
-
-  result = create_view(dxvk->d3d11_device, surface->d3d11_resource, &native,
-                       &view);
-  if (!vmsvga3d_dxvk_succeeded(result) || view == NULL) {
-    return false;
-  }
   clear_view(dxvk->d3d11_context, view, color);
-  vmsvga3d_dxvk_release(view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
   return true;
 #else
   (void)dxvk;
-  (void)surface;
-  (void)desc;
+  (void)cid;
+  (void)view_id;
   (void)color;
   return false;
 #endif
@@ -4020,46 +5890,88 @@ static bool vmsvga3d_dxvk_d3d11_dsv_desc(
 }
 #endif
 
-bool vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
-    const struct vmsvga3d_d3d10_dsv_desc_s *desc, uint32_t clear_flags,
-    float depth, uint8_t stencil) {
+bool vmsvga3d_dxvk_d3d11_depth_stencil_view_ensure(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d10_dsv_desc_s *desc) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11CreateDepthStencilView create_view = NULL;
-  VMSVGA3DDxvkD3D11ClearDepthStencilView clear_view = NULL;
   VMSVGA3DDxvkD3D11DSVDesc native;
   const VMSVGA3DD3D10DSVDesc *view_desc = desc;
   void *view = NULL;
   int32_t result;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      dxvk->d3d11_context == NULL || surface == NULL ||
-      !surface->d3d11_resident || surface->d3d11_resource == NULL ||
-      view_desc == NULL ||
+      view_id == SVGA3D_INVALID_ID || surface == NULL ||
+      !surface->d3d11_resident || surface->d3d11_resource == NULL) {
+    return false;
+  }
+  if (vmsvga3d_dxvk_d3d11_view_find(
+          dxvk, VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL, cid, view_id, NULL) !=
+      NULL) {
+    return true;
+  }
+  if (view_desc == NULL ||
       !vmsvga3d_dxvk_d3d11_dsv_desc(view_desc, &native) ||
       !vmsvga3d_dxvk_get_method(
           dxvk->d3d11_device,
           VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_VIEW,
-          &create_view, sizeof(create_view)) ||
+          &create_view, sizeof(create_view))) {
+    return false;
+  }
+  result = create_view(dxvk->d3d11_device, surface->d3d11_resource, &native,
+                       &view);
+  if (!vmsvga3d_dxvk_succeeded(result) || view == NULL) {
+    return false;
+  }
+  if (!vmsvga3d_dxvk_d3d11_view_store(
+          dxvk, VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL, cid, view_id,
+          surface, view)) {
+    vmsvga3d_dxvk_release(view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    return false;
+  }
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)view_id;
+  (void)surface;
+  (void)desc;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_depth_stencil_view_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id) {
+  return vmsvga3d_dxvk_d3d11_view_destroy(
+      dxvk, VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL, cid, view_id);
+}
+
+bool vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    uint32_t clear_flags, float depth, uint8_t stencil) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11ClearDepthStencilView clear_view = NULL;
+  void *view;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+    return false;
+  }
+  view = vmsvga3d_dxvk_d3d11_view_object(
+      dxvk, VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL, cid, view_id);
+  if (view == NULL ||
       !vmsvga3d_dxvk_get_method(
           dxvk->d3d11_context,
           VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW,
           &clear_view, sizeof(clear_view))) {
     return false;
   }
-
-  result = create_view(dxvk->d3d11_device, surface->d3d11_resource, &native,
-                       &view);
-  if (!vmsvga3d_dxvk_succeeded(result) || view == NULL) {
-    return false;
-  }
   clear_view(dxvk->d3d11_context, view, clear_flags, depth, stencil);
-  vmsvga3d_dxvk_release(view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
   return true;
 #else
   (void)dxvk;
-  (void)surface;
-  (void)desc;
+  (void)cid;
+  (void)view_id;
   (void)clear_flags;
   (void)depth;
   (void)stencil;

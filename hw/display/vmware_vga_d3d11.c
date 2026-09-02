@@ -83,54 +83,15 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_shader_define_entry(
   return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
-VMSVGA3DD3D11Level vmsvga3d_d3d11_shader_create_plan(
-    SVGA3dShaderType type, uint32_t stream_output_id,
-    VMSVGA3DD3D11ShaderCreatePlan *plan)
-{
-  if (!plan || type < SVGA3D_SHADERTYPE_MIN || type >= SVGA3D_SHADERTYPE_MAX) {
-    return VMSVGA3D_D3D11_LEVEL_INVALID;
-  }
-
-  memset(plan, 0, sizeof(*plan));
-  plan->stage_index = (uint32_t)type - (uint32_t)SVGA3D_SHADERTYPE_MIN;
-  plan->stream_output_id = SVGA3D_INVALID_ID;
-  switch (type) {
-  case SVGA3D_SHADERTYPE_VS:
-    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_VERTEX;
-    break;
-  case SVGA3D_SHADERTYPE_PS:
-    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_PIXEL;
-    break;
-  case SVGA3D_SHADERTYPE_GS:
-    if (stream_output_id == SVGA3D_INVALID_ID) {
-      plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_GEOMETRY;
-    } else {
-      plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_GEOMETRY_STREAM_OUTPUT;
-      plan->stream_output_id = stream_output_id;
-      plan->use_stream_output = true;
-    }
-    break;
-  case SVGA3D_SHADERTYPE_HS:
-    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_HULL;
-    break;
-  case SVGA3D_SHADERTYPE_DS:
-    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_DOMAIN;
-    break;
-  case SVGA3D_SHADERTYPE_CS:
-    plan->create_kind = VMSVGA3D_D3D10_SHADER_CREATE_COMPUTE;
-    break;
-  default:
-    return VMSVGA3D_D3D11_LEVEL_INVALID;
-  }
-  return VMSVGA3D_D3D11_LEVEL_11_0;
-}
-
 VMSVGA3DD3D11Level vmsvga3d_d3d11_stream_output_mob_entry(
     const SVGA3dCmdDXDefineStreamOutputWithMob *src,
     SVGACOTableDXStreamOutputEntry *dst)
 {
   if (!src || !dst ||
-      src->numOutputStreamEntries >= SVGA3D_MAX_STREAMOUT_DECLS) {
+      src->numOutputStreamEntries > SVGA3D_MAX_STREAMOUT_DECLS ||
+      src->numOutputStreamStrides > SVGA3D_DX_MAX_SOTARGETS ||
+      (src->rasterizedStream >= SVGA3D_DX_MAX_SOTARGETS &&
+       src->rasterizedStream != SVGA3D_DX_SO_NO_RASTERIZED_STREAM)) {
     return VMSVGA3D_D3D11_LEVEL_INVALID;
   }
 

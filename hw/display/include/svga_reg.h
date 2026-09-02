@@ -688,8 +688,8 @@ struct {
  * SVGA_CAP_GBOBJECTS --
  *    Enable guest-backed objects and surfaces.
  *
- * SVGA_CAP_CMD_BUFFERS_3 --
- *    Enable support for command buffers in a mob.
+ * SVGA_CAP_DX --
+ *    Enable support for DX commands, and command buffers in a mob.
  */
 
 #define SVGA_CAP_NONE               0x00000000
@@ -714,6 +714,7 @@ struct {
 #define SVGA_CAP_CMD_BUFFERS_2      0x04000000
 #define SVGA_CAP_GBOBJECTS          0x08000000
 #define SVGA_CAP_DX                 0x10000000
+/* Older copies of this header used the pre-standard name below. */
 #define SVGA_CAP_CMD_BUFFERS_3      SVGA_CAP_DX
 #define SVGA_CAP_HP_CMD_QUEUE       0x20000000
 #define SVGA_CAP_NO_BB_RESTRICTION  0x40000000

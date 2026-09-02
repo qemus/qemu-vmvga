@@ -678,11 +678,11 @@ static inline void vmsvga_trace_key_reg_read(struct vmsvga_state_s *s,
     s->trace_key_reg_value[reg] = value;
     if (reg == SVGA_REG_CAPABILITIES) {
       fprintf(stderr,
-              "VMVGA-CAP capabilities=0x%08x 3d=%u gmr=%u extfifo=%u "
-              "irqmask=%u traces=%u\n",
+              "VMVGA-CAP capabilities=0x%08x 3d=%u gmr=%u gmr2=%u "
+              "extfifo=%u irqmask=%u traces=%u\n",
               value, !!(value & SVGA_CAP_3D), !!(value & SVGA_CAP_GMR),
-              !!(value & SVGA_CAP_EXTENDED_FIFO), !!(value & SVGA_CAP_IRQMASK),
-              !!(value & SVGA_CAP_TRACES));
+              !!(value & SVGA_CAP_GMR2), !!(value & SVGA_CAP_EXTENDED_FIFO),
+              !!(value & SVGA_CAP_IRQMASK), !!(value & SVGA_CAP_TRACES));
     };
     fprintf(stderr, "VMVGA-REG-FIRST read name=%s reg=%u value=0x%08x\n",
             name, reg, value);
@@ -5398,16 +5398,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       if (trace_flight) {
         fprintf(stderr,
                 "VMVGA-GMR2-DIAG define id=%u pages=%u max-ids=%u "
-                "max-pages=0x%x advertised=0 accepted=%u "
+                "max-pages=0x%x advertised=1 accepted=%u "
                 "shared-namespace=1\n",
                 gmr2_id, gmr2_pages, (unsigned)VMSVGA_GMR_MAX_IDS,
                 (unsigned)VMSVGA_GMR_MAX_PAGES, accepted);
         vmsvga_trace_gmr2_define(s, gmr2_id, gmr2_pages);
       };
-      /*
-       * Intentionally accept commands already issued by the guest without
-       * advertising SVGA_CAP_GMR2 or SVGA_FIFO_CAP_GMR2 yet.
-       */
       VPRINT("SVGA_CMD_DEFINE_GMR2 command %u in SVGA command FIFO\n", cmd);
       break;
     }
@@ -5460,7 +5456,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
       if (trace_flight) {
         fprintf(stderr,
                 "VMVGA-GMR2-DIAG remap id=%u flags=0x%08x offset-pages=%u "
-                "pages=%u payload-words=%" PRIu64 " advertised=0\n",
+                "pages=%u payload-words=%" PRIu64 " advertised=1\n",
                 gmr_id, flags, offset_pages, num_pages, payload_words);
         vmsvga_trace_gmr2_remap(s, gmr_id, flags, offset_pages, num_pages);
       };
@@ -5471,7 +5467,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage) {
         if (trace_flight) {
           fprintf(stderr,
                   "VMVGA-GMR2-DIAG remap-result id=%u accepted=%u "
-                  "via-gmr-supported=0 shared-namespace=1\n",
+                  "via-gmr-supported=1 shared-namespace=1\n",
                   gmr_id, accepted);
         };
       };
@@ -6396,10 +6392,9 @@ static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s) {
   s->ff = SVGA_FIFO_FLAG_NONE;
   s->fc = SVGA_FIFO_CAP_FENCE | SVGA_FIFO_CAP_ACCELFRONT |
           SVGA_FIFO_CAP_PITCHLOCK | SVGA_FIFO_CAP_CURSOR_BYPASS_3 |
-          SVGA_FIFO_CAP_RESERVE | SVGA_FIFO_CAP_SCREEN_OBJECT;
+          SVGA_FIFO_CAP_RESERVE | SVGA_FIFO_CAP_SCREEN_OBJECT |
+          SVGA_FIFO_CAP_GMR2;
 #endif
-  /* GMR2 command handling is intentionally present but not advertised yet. */
-  s->fc &= ~SVGA_FIFO_CAP_GMR2;
 };
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
                                        uint32_t reg) {
@@ -6504,6 +6499,10 @@ static inline void vmsvga_publish_fifo_registers(struct vmsvga_state_s *s) {
   };
   if (vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_HWVERSION)) {
     s->fifo[SVGA_FIFO_3D_HWVERSION] = cpu_to_le32(
+        s->svga3d_capable ? vmsvga3d_host_hwversion() : 0);
+  };
+  if (vmsvga_fifo_has_reg(s, SVGA_FIFO_3D_HWVERSION_REVISED)) {
+    s->fifo[SVGA_FIFO_3D_HWVERSION_REVISED] = cpu_to_le32(
         s->svga3d_capable ? vmsvga3d_host_hwversion() : 0);
   };
   vmsvga3d_publish_fifo_caps(s);
@@ -6931,14 +6930,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
            SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
            SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH | SVGA_CAP_GLYPH_CLIPPING |
            SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_3D |
-           SVGA_CAP_GMR | SVGA_CAP_EXTENDED_FIFO |
+           SVGA_CAP_GMR | SVGA_CAP_GMR2 | SVGA_CAP_EXTENDED_FIFO |
            SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK | SVGA_CAP_TRACES;
 #ifdef CONFIG_PIXMAN
     caps |= SVGA_CAP_8BIT_EMULATION;
 #endif
 #endif
-    /* GMR2 command handling is intentionally present but not advertised yet. */
-    caps &= ~SVGA_CAP_GMR2;
     if (!s->svga3d_capable) {
       caps &= ~SVGA_CAP_3D;
     };

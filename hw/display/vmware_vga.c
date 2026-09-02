@@ -432,9 +432,9 @@ struct vmsvga_state_s {
   uint32_t *fifo;
   uint32_t scratch[VMSVGA_SCRATCH_SIZE];
   struct vmsvga_gmr_s *gmrs[VMSVGA_GMR_MAX_IDS];
-  /* Screen Object ID 0. Backed Screen Objects scan out directly from their
-   * guest-provided BAR1 backingStore. screen_base is retained only for the
-   * optional unbacked Screen Object form. */
+  /* Screen Object ID 0. Backed Screen Objects normally scan out directly
+   * from their guest-provided BAR1 backingStore. screen_base also serves as
+   * the temporary transition mirror during a mode handoff. */
   uint8_t *screen_base;
   size_t screen_base_size;
   uint32_t screen_stride;
@@ -448,6 +448,12 @@ struct vmsvga_state_s {
   bool screen_backing_valid;
   /* Temporary protection during legacy VGA -> Screen Object takeover. */
   bool screen_handoff_active;
+  /* True when a Screen transition reuses the bytes currently scanned out by
+   * the old frontend.  A framebuffer self-present must not reinterpret those
+   * bytes using the new pitch until a genuine new frame has replaced the
+   * transition image. */
+  bool screen_handoff_same_backing;
+  bool screen_handoff_skipped_same_backing_full;
   uint32_t screen_backing_gmr_id;
   uint32_t screen_backing_offset;
   uint32_t screen_backing_pitch;
@@ -7555,15 +7561,11 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
   };
 
   /*
-   * A DEFINE_SCREEN scanout transition allocates a temporary mirror, but the
-   * old frontend surface stays visible until the first Screen present has put
-   * useful pixels into that mirror. A full present completes the handoff in
-   * the FIFO handler and binds BAR1 directly; a partial present queues damage
-   * and is allowed to bind the populated mirror here.
+   * A Screen transition mirror is seeded from the last valid frontend image,
+   * so it is always safe to bind. GMRFB and 3D Screen updates paint on top
+   * of that snapshot until a complete new frame ends the handoff.
    */
-  if (!s->screen_handoff_active || s->damage_count != 0) {
-    vmsvga_check_size(s);
-  }
+  vmsvga_check_size(s);
   /*
    * DEFINE_SCREEN/DESTROY_SCREEN may have changed the required dirty-log
    * policy while processing the FIFO above. Re-evaluate it before scanning.

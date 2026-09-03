@@ -1486,6 +1486,50 @@ static void vmsvga3d_surface_destroy_view_live(
    * on this backend surface.  Unrealized definitions survive SURFACE_DESTROY.
    */
   memset(binding->host + offset, 0, binding->entry_size);
+
+  /* D3D11's immediate context holds references to bound views.  Destroying
+   * the cache object alone therefore does not unbind a view whose underlying
+   * surface is being destroyed or redefined.  Keep the guest shadow IDs, but
+   * dirty every pipeline stage that currently references this realized view
+   * so the next setup resolves the cleared COTable entry to a NULL binding.
+   */
+  switch (kind) {
+  case VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE: {
+    uint32_t stage;
+
+    for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE; stage++) {
+      uint32_t slot;
+
+      for (slot = 0; slot < context->shader_resource_max_bound[stage]; slot++) {
+        if (context->shadow.shaderState[stage].shaderResources[slot] ==
+            view_id) {
+          context->renderer_dirty |=
+              VMSVGA3D_DX_CTX_F_STATE_SRV_VS << stage;
+          break;
+        }
+      }
+    }
+    break;
+  }
+  case VMSVGA3D_DXVK_VIEW_RENDER_TARGET: {
+    uint32_t slot;
+
+    for (slot = 0; slot < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS; slot++) {
+      if (context->shadow.renderState.renderTargetViewIds[slot] == view_id) {
+        context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+        break;
+      }
+    }
+    break;
+  }
+  case VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL:
+    if (context->shadow.renderState.depthStencilViewId == view_id) {
+      context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+    }
+    break;
+  default:
+    break;
+  }
 }
 
 static void vmsvga3d_surface_destroy_live(struct vmsvga_state_s *s,

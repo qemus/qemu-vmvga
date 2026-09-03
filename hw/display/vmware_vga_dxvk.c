@@ -200,7 +200,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_CONFIG_FILE_VALUE "/dev/null"
 #define VMSVGA3D_DXVK_LOG_LEVEL_ENV "DXVK_LOG_LEVEL"
 #define VMSVGA3D_DXVK_LOG_LEVEL_QUIET "none"
-#define VMSVGA3D_DXVK_DEBUG_ENV "DEBUG"
+#define VMSVGA3D_DXVK_DEBUG_ENV "DEBUG_DXVK"
 
 #define VMSVGA3D_DXVK_VULKAN_SONAME "libvulkan.so.1"
 #define VMSVGA3D_DXVK_VULKAN_API_1_3 ((1u << 22) | (3u << 12))

@@ -4654,6 +4654,21 @@ typedef struct {
   const char *name;
 } VMSVGA3DCommandInfo;
 
+/*
+ * These helpers are defined by the included DXVK/D3D10 implementation files
+ * below.  Keep declarations ahead of those definitions so QEMU's
+ * -Wmissing-prototypes build remains clean for the amalgamated translation
+ * unit.
+ */
+bool vmsvga3d_dxvk_d3d11_shader_invalidate(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id);
+VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_mob_entry(
+    const SVGA3dCmdDXDefineStreamOutputWithMob *src,
+    SVGACOTableDXStreamOutputEntry *dst);
+VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_bind_entry(
+    SVGACOTableDXStreamOutputEntry *entry, uint32_t mobid,
+    uint32_t offset_in_bytes, uint32_t size_in_bytes);
+
 #include "vmware_vga_dxvk_wsi.c"
 #include "vmware_vga_dxvk.c"
 #define VMSVGA3D_D3D9_RUNTIME_INTEGRATION 1
@@ -5003,10 +5018,7 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
   old_capacity_entries = binding->capacity_entries;
   mob = vmsvga3d_mob_get(s, mobid);
   old_mob = vmsvga3d_mob_get(s, binding->mobid);
-  if (mobid != SVGA3D_INVALID_ID && mob == NULL) {
-    return false;
-  };
-
+  /* Match VirtualBox: a nonexistent MOB unbinds the current COTable. */
   if (mob != NULL) {
     if (valid_size > mob->gbo.size) {
       return false;
@@ -5105,14 +5117,14 @@ static bool vmsvga3d_dx_cotable_readback(struct vmsvga_state_s *s,
   };
   binding = &context->cotables[type];
   mob = vmsvga3d_mob_get(s, binding->mobid);
-  if (mob == NULL || binding->host == NULL ||
-      binding->host_size != mob->gbo.size || binding->entry_size == 0) {
+  if (mob == NULL || binding->host == NULL || binding->entry_size == 0) {
     return false;
   };
   write_size = binding->capacity_entries * binding->entry_size;
   if (write_size > binding->host_size) {
     return false;
   };
+  write_size = MIN(write_size, mob->gbo.size);
   return vmsvga3d_mob_write(s, mob, 0, binding->host, write_size);
 }
 
@@ -5183,13 +5195,11 @@ static bool vmsvga3d_dx_context_bind_backed(
   };
 
   if (command->mobid != entry.mobid && entry.mobid != SVGA3D_INVALID_ID) {
-    if (!vmsvga3d_state_dx_context_readback(s, command->cid, &saved)) {
-      return false;
-    };
-    mob = vmsvga3d_mob_get(s, entry.mobid);
-    if (mob != NULL &&
-        !vmsvga3d_mob_write(s, mob, 0, &saved, sizeof(saved))) {
-      return false;
+    if (vmsvga3d_state_dx_context_readback(s, command->cid, &saved)) {
+      mob = vmsvga3d_mob_get(s, entry.mobid);
+      if (mob != NULL) {
+        (void)vmsvga3d_mob_write(s, mob, 0, &saved, sizeof(saved));
+      };
     };
   };
 
@@ -6281,7 +6291,7 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
   info = vmsvga3d_command_info(cmd);
   if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
     if (*len >= 2) {
-      uint32_t raw_size;
+      uint32_t raw_size = 0;
 
       vmsvga_fifo_peek_raw_data(s, 0, &raw_size, sizeof(raw_size));
       payload_size = le32_to_cpu(raw_size);

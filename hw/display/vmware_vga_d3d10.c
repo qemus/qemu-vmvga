@@ -8715,16 +8715,29 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
   case SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW: {
     SVGA3dCmdDXDefineRenderTargetView command;
     SVGACOTableDXRTViewEntry *entry;
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    uint32_t slot;
 
-    if (size < sizeof(command)) {
+    if (context == NULL || size < sizeof(command)) {
       return false;
     };
     memcpy(&command, payload, sizeof(command));
     entry = vmsvga3d_dx_cotable_entry_ptr(
         s, cid, SVGA_COTABLE_RTVIEW, command.renderTargetViewId);
-    return entry != NULL &&
-           vmsvga3d_d3d10_rtv_define_entry(&command, entry) !=
-               VMSVGA3D_D3D10_LEVEL_INVALID;
+    if (entry == NULL ||
+        !vmsvga3d_dxvk_d3d11_render_target_view_destroy(
+            s->dxvk, cid, command.renderTargetViewId)) {
+      return false;
+    }
+    for (slot = 0; slot < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS; slot++) {
+      if (context->shadow.renderState.renderTargetViewIds[slot] ==
+          command.renderTargetViewId) {
+        context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+        break;
+      }
+    }
+    return vmsvga3d_d3d10_rtv_define_entry(&command, entry) !=
+           VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
   case SVGA_3D_CMD_DX_DESTROY_RENDERTARGET_VIEW: {
@@ -8753,8 +8766,9 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     SVGA3dCmdDXDefineDepthStencilView command;
     SVGA3dCmdDXDefineDepthStencilView_v2 command_v2;
     SVGACOTableDXDSViewEntry *entry;
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
 
-    if (size < sizeof(command)) {
+    if (context == NULL || size < sizeof(command)) {
       return false;
     };
     memcpy(&command, payload, sizeof(command));
@@ -8769,9 +8783,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     command_v2.flags = 0;
     entry = vmsvga3d_dx_cotable_entry_ptr(
         s, cid, SVGA_COTABLE_DSVIEW, command.depthStencilViewId);
-    return entry != NULL &&
-           vmsvga3d_d3d10_dsv_define_entry(&command_v2, entry) !=
-               VMSVGA3D_D3D10_LEVEL_INVALID;
+    if (entry == NULL ||
+        !vmsvga3d_dxvk_d3d11_depth_stencil_view_destroy(
+            s->dxvk, cid, command.depthStencilViewId)) {
+      return false;
+    }
+    if (context->shadow.renderState.depthStencilViewId ==
+        command.depthStencilViewId) {
+      context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+    }
+    return vmsvga3d_d3d10_dsv_define_entry(&command_v2, entry) !=
+           VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
   case SVGA_3D_CMD_DX_DESTROY_DEPTHSTENCIL_VIEW: {

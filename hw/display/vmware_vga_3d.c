@@ -4915,10 +4915,7 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
   old_capacity_entries = binding->capacity_entries;
   mob = vmsvga3d_mob_get(s, mobid);
   old_mob = vmsvga3d_mob_get(s, binding->mobid);
-  if (mobid != SVGA3D_INVALID_ID && mob == NULL) {
-    return false;
-  };
-
+  /* Match VirtualBox: a nonexistent MOB unbinds the current COTable. */
   if (mob != NULL) {
     if (valid_size > mob->gbo.size) {
       return false;

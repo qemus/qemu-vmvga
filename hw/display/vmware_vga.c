@@ -738,12 +738,16 @@ static inline void vmsvga_trace_key_reg_write(struct vmsvga_state_s *s,
 };
 
 static inline void vmsvga_trace_devcap(struct vmsvga_state_s *s,
-                                        uint32_t index, uint32_t value) {
+                                        uint32_t index, uint32_t value,
+                                        const char *name) {
   uint32_t i;
 
   if (!vmsvga_trace_flight_enabled()) {
     return;
   };
+  fprintf(stderr, "VMVGA-DEVCAP index=%u name=%s value=0x%08x\n",
+          index, name != NULL ? name : "UNKNOWN", value);
+  s->trace_activity_seq++;
   for (i = 0; i < s->trace_devcap_count; i++) {
     if (s->trace_devcap[i].index == index) {
       if (s->trace_devcap[i].value != value) {
@@ -7451,7 +7455,8 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     break;
   case SVGA_REG_DEV_CAP:
     s->devcap_val = s->svga3d_capable ? vmsvga3d_get_devcap(s, value) : 0;
-    vmsvga_trace_devcap(s, value, s->devcap_val);
+    vmsvga_trace_devcap(s, value, s->devcap_val,
+                         vmsvga3d_devcap_name(value));
     VPRINT("SVGA_REG_DEV_CAP register %u with the value of %u\n", s->index,
            value);
     break;

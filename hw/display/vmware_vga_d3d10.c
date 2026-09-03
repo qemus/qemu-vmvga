@@ -6374,7 +6374,7 @@ static bool vmsvga3d_d3d10_buffer_materialize_live(
   uint32_t initial_data_count = 0;
   bool success;
 
-  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk) ||
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
       sid >= SVGA3D_MAX_SURFACE_IDS) {
     return false;
   }
@@ -6408,7 +6408,7 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
   uint32_t i;
 
   if (s == NULL || s->svga3d == NULL || plan == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk) ||
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
       plan->native_target_count != SVGA3D_DX_MAX_SOTARGETS ||
       plan->backend_remembered_count > SVGA3D_DX_MAX_SOTARGETS) {
     return false;
@@ -6570,7 +6570,7 @@ static bool vmsvga3d_d3d10_rtv_realize_live(
   if (view_id == SVGA3D_INVALID_ID) {
     return true;
   }
-  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk)) {
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   entry = vmsvga3d_dx_cotable_entry_ptr(
@@ -6640,7 +6640,7 @@ static bool vmsvga3d_d3d10_dsv_realize_live(
   if (view_id == SVGA3D_INVALID_ID) {
     return true;
   }
-  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk)) {
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   entry = vmsvga3d_dx_cotable_entry_ptr(
@@ -6709,7 +6709,7 @@ static bool vmsvga3d_d3d10_srv_realize_live(
   if (view_id == SVGA3D_INVALID_ID) {
     return true;
   }
-  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk)) {
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   entry = vmsvga3d_dx_cotable_entry_ptr(
@@ -6776,7 +6776,7 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
   bool success;
 
   if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk)) {
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   /* VBox dxEnsureResource reuses an existing backend resource verbatim.
@@ -7261,7 +7261,8 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
   VMSVGA3DD3D10Level level;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk) || vmsvga3d_dx_context(s, cid) == NULL ||
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
+      vmsvga3d_dx_context(s, cid) == NULL ||
       command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
       command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
     return false;
@@ -7303,7 +7304,8 @@ static bool vmsvga3d_d3d10_pred_copy_live(
   VMSVGA3DD3D10Level level;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk) || vmsvga3d_dx_context(s, cid) == NULL ||
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
+      vmsvga3d_dx_context(s, cid) == NULL ||
       command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
       command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
     return false;
@@ -7336,7 +7338,8 @@ static bool vmsvga3d_d3d10_resolve_copy_live(
   VMSVGA3DD3D10Format resolve_format;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk) || vmsvga3d_dx_context(s, cid) == NULL ||
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
+      vmsvga3d_dx_context(s, cid) == NULL ||
       command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
       command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
     return false;
@@ -7371,7 +7374,7 @@ static bool vmsvga3d_d3d10_gen_mips_live(
   VMSVGA3DD3D10Level level;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk)) {
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   context = vmsvga3d_dx_context(s, cid);
@@ -7398,7 +7401,7 @@ static bool vmsvga3d_d3d10_clear_rtv_live(
   VMSVGA3DD3D10Level level;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk)) {
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   context = vmsvga3d_dx_context(s, cid);
@@ -7425,7 +7428,7 @@ static bool vmsvga3d_d3d10_clear_dsv_live(
   VMSVGA3DD3D10Level level;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk)) {
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   context = vmsvga3d_dx_context(s, cid);
@@ -7482,7 +7485,8 @@ static bool vmsvga3d_d3d10_present_blt_live(
   SVGA3dBox destination_box;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk) || vmsvga3d_dx_context(s, cid) == NULL ||
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
+      vmsvga3d_dx_context(s, cid) == NULL ||
       command->boxDest.z != 0 || command->boxDest.d != 1 ||
       command->boxSrc.z != 0 || command->boxSrc.d != 1 ||
       command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
@@ -7556,7 +7560,7 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
   bool ready = false;
   bool success = false;
 
-  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk)) {
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
   }
   entry = vmsvga3d_dx_cotable_entry_ptr(
@@ -7619,7 +7623,7 @@ static bool vmsvga3d_d3d10_query_end_live(
   uint32_t flags;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk)) {
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   entry = vmsvga3d_dx_cotable_entry_ptr(
@@ -7680,7 +7684,7 @@ static void vmsvga3d_d3d10_process_pending_queries(
 {
   uint32_t cid;
 
-  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk)) {
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return;
   }
   for (cid = 0; cid < SVGA3D_MAX_CONTEXT_IDS; cid++) {
@@ -7739,7 +7743,7 @@ static bool vmsvga3d_d3d10_query_begin_live(
   uint32_t query_state;
 
   if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk)) {
+      !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
     return false;
   }
   entry = vmsvga3d_dx_cotable_entry_ptr(

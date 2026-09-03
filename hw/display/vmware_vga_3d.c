@@ -851,6 +851,7 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s) {
     s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
   };
   s->svga3d_capable = false;
+  s->svga3d_dx_capable = false;
   vmsvga3d_renderer_surface_renderer_set(s, NULL, true);
   vmsvga3d_dxvk_destroy(s->dxvk);
   s->dxvk = vmsvga3d_dxvk_create(
@@ -859,6 +860,7 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s) {
   if (vmsvga3d_dxvk_ready(s->dxvk)) {
     vmsvga3d_renderer_surface_renderer_set(s, s->dxvk, false);
     s->svga3d_capable = true;
+    s->svga3d_dx_capable = vmsvga3d_dxvk_d3d11_ready(s->dxvk);
   } else {
     vmsvga3d_dxvk_destroy(s->dxvk);
     s->dxvk = NULL;
@@ -872,6 +874,7 @@ static void vmsvga3d_renderer_unrealize(struct vmsvga_state_s *s) {
     s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
   };
   s->svga3d_capable = false;
+  s->svga3d_dx_capable = false;
   vmsvga3d_renderer_surface_renderer_set(s, NULL, true);
   vmsvga3d_dxvk_destroy(s->dxvk);
   s->dxvk = NULL;
@@ -6193,11 +6196,9 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
 };
 
 /*
- * Legacy devcaps (0..SVGA3D_DEVCAP_DEAD2) describe the intended final D3D9
- * profile.  They are deliberately not reduced merely because execution still
- * needs the future host renderer.  The capability audit tracks those gaps.
- * DXCONTEXT is separate: it enables the vGPU10 command model and remains off
- * until that protocol is deliberately wired.
+ * Legacy devcaps (0..SVGA3D_DEVCAP_DEAD2) describe the intended D3D9 profile.
+ * DX/vGPU10 devcaps are exposed as one bundle only when the optional D3D11
+ * renderer tier passed its realize-time feature-level probe.
  */
 static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
     [SVGA3D_DEVCAP_3D] = 0x00000001,
@@ -6465,8 +6466,13 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
     [SVGA3D_DEVCAP_MAX_FORCED_SAMPLE_COUNT] = 0x00000000,
     [SVGA3D_DEVCAP_GL43] = 0x00000000};
 
-static uint32_t vmsvga3d_get_devcap(uint32_t index) {
+static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
+                                      uint32_t index) {
   if (index >= SVGA3D_DEVCAP_MAX) {
+    return 0;
+  }
+  if (index >= SVGA3D_DEVCAP_DXCONTEXT &&
+      (s == NULL || !s->svga3d_dx_capable)) {
     return 0;
   }
   return vmsvga3d_devcap[index];
@@ -6495,6 +6501,6 @@ static void vmsvga3d_publish_fifo_caps(struct vmsvga_state_s *s) {
 
   for (i = 0; i < SVGA3D_DEVCAP_DEAD1; i++) {
     caps[2 + i * 2] = cpu_to_le32(i);
-    caps[3 + i * 2] = cpu_to_le32(vmsvga3d_get_devcap(i));
+    caps[3 + i * 2] = cpu_to_le32(vmsvga3d_get_devcap(s, i));
   };
 };

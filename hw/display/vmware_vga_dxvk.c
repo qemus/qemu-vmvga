@@ -79,6 +79,7 @@ struct vmsvga3d_dxvk_s {
   void *d3d11_blit_blend_state;
   bool d3d11_blitter_initialized;
   bool ready;
+  bool d3d11_ready;
 };
 
 struct vmsvga3d_dxvk_d3d9_query_s {
@@ -199,7 +200,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_CONFIG_FILE_VALUE "/dev/null"
 #define VMSVGA3D_DXVK_LOG_LEVEL_ENV "DXVK_LOG_LEVEL"
 #define VMSVGA3D_DXVK_LOG_LEVEL_QUIET "none"
-#define VMSVGA3D_DXVK_DEBUG_ENV "DEBUG"
+#define VMSVGA3D_DXVK_DEBUG_ENV "DEBUG_DXVK"
 
 #define VMSVGA3D_DXVK_VULKAN_SONAME "libvulkan.so.1"
 #define VMSVGA3D_DXVK_VULKAN_API_1_3 ((1u << 22) | (3u << 12))
@@ -1094,7 +1095,7 @@ static bool vmsvga3d_dxvk_create_d3d11(VMSVGA3DDxvk *dxvk, Error **errp) {
   uint32_t feature_level = 0;
   int32_t result;
 
-  if (dxvk == NULL) {
+  if (dxvk == NULL || !dxvk->ready) {
     return false;
   }
 
@@ -1111,9 +1112,14 @@ static bool vmsvga3d_dxvk_create_d3d11(VMSVGA3DDxvk *dxvk, Error **errp) {
   if (create_device == NULL) {
     error_setg(errp, "%s has no D3D11CreateDevice entry point",
                VMSVGA3D_DXVK_D3D11_SONAME);
-    return false;
+    goto fail;
   }
 
+  /*
+   * Treat feature level 11.0 as one all-or-nothing vGPU10 host bundle.
+   * We deliberately do not expose individual DX features: either DXVK can
+   * provide the complete level we target, or the renderer remains D3D9-only.
+   */
   result = create_device(
       NULL, VMSVGA3D_DXVK_D3D_DRIVER_TYPE_HARDWARE, NULL, 0, feature_levels,
       G_N_ELEMENTS(feature_levels), VMSVGA3D_DXVK_D3D11_SDK_VERSION,
@@ -1123,9 +1129,26 @@ static bool vmsvga3d_dxvk_create_d3d11(VMSVGA3DDxvk *dxvk, Error **errp) {
       feature_level != VMSVGA3D_DXVK_D3D_FEATURE_LEVEL_11_0) {
     error_setg(errp, "DXVK D3D11 device creation failed (HRESULT 0x%08x)",
                (uint32_t)result);
-    return false;
+    goto fail;
   }
   return true;
+
+fail:
+  if (dxvk->d3d11_context != NULL) {
+    vmsvga3d_dxvk_release(dxvk->d3d11_context,
+                          VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    dxvk->d3d11_context = NULL;
+  }
+  if (dxvk->d3d11_device != NULL) {
+    vmsvga3d_dxvk_release(dxvk->d3d11_device,
+                          VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    dxvk->d3d11_device = NULL;
+  }
+  if (dxvk->d3d11_library != NULL) {
+    dlclose(dxvk->d3d11_library);
+    dxvk->d3d11_library = NULL;
+  }
+  return false;
 }
 #endif
 
@@ -1691,8 +1714,16 @@ VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
     error_setg(errp, "DXVK D3D9 default state-block creation failed");
     goto fail;
   }
-  if (!vmsvga3d_dxvk_create_d3d11(dxvk, errp)) {
-    goto fail;
+
+  /* D3D9 is the required base renderer. D3D11 is only an optional upgrade. */
+  dxvk->ready = true;
+  {
+    Error *d3d11_err = NULL;
+
+    if (vmsvga3d_dxvk_create_d3d11(dxvk, &d3d11_err)) {
+      dxvk->d3d11_ready = true;
+    }
+    error_free(d3d11_err);
   }
 
   vmsvga3d_dxvk_restore_wsi_environment(restore_wsi_environment);
@@ -1702,7 +1733,6 @@ VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
   vmsvga3d_dxvk_restore_log_environment(saved_log_level,
                                          restore_log_environment);
   g_mutex_unlock(&vmsvga3d_dxvk_init_lock);
-  dxvk->ready = true;
   return dxvk;
 
 fail:
@@ -1729,6 +1759,7 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk) {
     return;
   }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
+  dxvk->d3d11_ready = false;
   dxvk->ready = false;
   while (dxvk->d3d11_queries != NULL) {
     VMSVGA3DDxvkQuery *query = dxvk->d3d11_queries;
@@ -1865,6 +1896,10 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk) {
 
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk) {
   return dxvk != NULL && dxvk->ready;
+}
+
+bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk) {
+  return dxvk != NULL && dxvk->ready && dxvk->d3d11_ready;
 }
 
 static VMSVGA3DDxvkView *vmsvga3d_dxvk_d3d11_view_find(

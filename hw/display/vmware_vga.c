@@ -470,8 +470,9 @@ struct vmsvga_state_s {
   uint32_t screen_annotation_src_id;
   struct vmsvga3d_state_s *svga3d;
   struct vmsvga3d_dxvk_s *dxvk;
-  /* Guest-visible 3D capability is latched once during device realization. */
+  /* Guest-visible renderer capabilities are latched during realization. */
   bool svga3d_capable;
+  bool svga3d_dx_capable;
   struct vmsvga_object_s *objects[VMSVGA_MAX_OBJECTS];
   struct vmsvga_fifo_upload_s fifo_upload;
   QEMUCursor *cursor_cache[VMSVGA_MAX_CURSORS];
@@ -6942,11 +6943,15 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     caps |= SVGA_CAP_8BIT_EMULATION;
 #endif
 #endif
-    if (s->svga3d_capable) {
+    if (!s->svga3d_capable) {
+      caps &= ~SVGA_CAP_3D;
+    };
+    if (s->svga3d_dx_capable) {
       caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_GBOBJECTS | SVGA_CAP_DX |
               SVGA_CAP_CAP2_REGISTER;
     } else {
-      caps &= ~SVGA_CAP_3D;
+      caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_GBOBJECTS | SVGA_CAP_DX |
+                SVGA_CAP_CAP2_REGISTER);
     };
     ret = caps;
     VPRINT("SVGA_REG_CAPABILITIES register %u with the return of %u\n",
@@ -6954,9 +6959,9 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address) {
     break;
   case SVGA_REG_CAP2:
 #ifdef EXPCAPS
-    ret = 0xffffffff;
+    ret = s->svga3d_dx_capable ? 0xffffffff : SVGA_CAP2_NONE;
 #else
-    ret = s->svga3d_capable ? SVGA_CAP2_GROW_OTABLE : SVGA_CAP2_NONE;
+    ret = s->svga3d_dx_capable ? SVGA_CAP2_GROW_OTABLE : SVGA_CAP2_NONE;
 #endif
     VPRINT("SVGA_REG_CAP2 register %u with the return of %u\n", s->index, ret);
     break;
@@ -7424,7 +7429,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     s->cmd_low = value;
     VPRINT("SVGA_REG_COMMAND_LOW register %u with the value of %u\n", s->index,
            value);
-    if (s->svga3d_capable) {
+    if (s->svga3d_dx_capable) {
       vmsvga3d_command_buffer_submit(s);
     };
     break;
@@ -7445,7 +7450,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
            s->index, value);
     break;
   case SVGA_REG_DEV_CAP:
-    s->devcap_val = s->svga3d_capable ? vmsvga3d_get_devcap(value) : 0;
+    s->devcap_val = s->svga3d_capable ? vmsvga3d_get_devcap(s, value) : 0;
     vmsvga_trace_devcap(s, value, s->devcap_val);
     VPRINT("SVGA_REG_DEV_CAP register %u with the value of %u\n", s->index,
            value);

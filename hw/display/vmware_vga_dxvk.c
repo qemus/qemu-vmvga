@@ -5404,9 +5404,6 @@ bool vmsvga3d_dxvk_d3d9_query_end(
   if (result == 0) {
     return true;
   }
-  if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
-    g_thread_yield();
-  }
   vmsvga3d_dxvk_d3d9_query_delete_link(link);
   return false;
 #else
@@ -5442,6 +5439,9 @@ bool vmsvga3d_dxvk_d3d9_query_get_data(
   }
   do {
     result = get_data(query->query, &data, data_size, flags);
+    if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+      g_thread_yield();
+    }
   } while (result == VMSVGA3D_DXVK_D3D_S_FALSE);
 
   if (result != 0) {

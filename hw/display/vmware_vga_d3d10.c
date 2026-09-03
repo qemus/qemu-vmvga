@@ -4961,6 +4961,8 @@ static bool vmsvga3d_d3d10_dsv_realize_live(
 static bool vmsvga3d_d3d10_srv_realize_live(
     struct vmsvga_state_s *s, uint32_t cid,
     SVGA3dShaderResourceViewId view_id);
+static bool vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
+    struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid);
 
 /*
  * First part of VirtualBox dxSetupPipeline: make every currently referenced
@@ -6205,7 +6207,18 @@ static bool vmsvga3d_d3d10_state_cotable_replay_live(
     /* VirtualBox preserves the backend prefix allocation on GROW, then resets
      * every initialized preserved SO entry so its semantic mapping is rebuilt
      * when a GS next uses it. SET drops the whole old backend range.
+     *
+     * A native D3D11 geometry shader embeds its stream-output declaration at
+     * creation time. Replacing the SO COTable can therefore invalidate the
+     * declaration of the currently selected SO even though the GS id itself
+     * did not change. Drop that native GS realization so the next draw
+     * rebuilds it from the replacement table.
      */
+    if (!grow &&
+        !vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
+            s, context, cid)) {
+      return false;
+    }
     for (i = first_destroy; i < old_capacity_entries; i++) {
       if (!vmsvga3d_dxvk_d3d11_stream_output_destroy(
               s->dxvk, cid, i)) {
@@ -9542,6 +9555,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
   case SVGA_3D_CMD_DX_DESTROY_STREAMOUTPUT: {
     SVGA3dCmdDXDestroyStreamOutput command;
     SVGACOTableDXStreamOutputEntry *entry;
+    VMSVGA3DDXContext *context;
 
     if (size < sizeof(command)) {
       return false;
@@ -9549,11 +9563,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     memcpy(&command, payload, sizeof(command));
     entry = vmsvga3d_dx_cotable_entry_ptr(
         s, cid, SVGA_COTABLE_STREAMOUTPUT, command.soid);
-    return entry != NULL &&
-           vmsvga3d_dxvk_d3d11_stream_output_destroy(
-               s->dxvk, cid, command.soid) &&
-           vmsvga3d_d3d10_stream_output_destroy_entry(entry) !=
-               VMSVGA3D_D3D10_LEVEL_INVALID;
+    context = vmsvga3d_dx_context(s, cid);
+    if (entry == NULL || context == NULL ||
+        !vmsvga3d_dxvk_d3d11_stream_output_destroy(
+            s->dxvk, cid, command.soid) ||
+        (context->shadow.streamOut.soid == command.soid &&
+         !vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
+             s, context, cid))) {
+      return false;
+    }
+    return vmsvga3d_d3d10_stream_output_destroy_entry(entry) !=
+           VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
   case SVGA_3D_CMD_DX_MOB_FENCE_64: {

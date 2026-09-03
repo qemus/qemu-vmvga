@@ -294,8 +294,8 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_STREAM  0
 #define VMVGA_TRACE_FIFO    0
 #define VMVGA_TRACE_3D      1
-#define VMVGA_TRACE_FLIGHT  1
-#define VMVGA_TRACE_QEMU    1
+#define VMVGA_TRACE_FLIGHT  0
+#define VMVGA_TRACE_QEMU    0
 
 #define VMVGA_TRACE_CMD_MAX 256
 #define VMVGA_TRACE_DEVCAP_MAX 256

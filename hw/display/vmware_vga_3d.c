@@ -1212,20 +1212,44 @@ static void vmsvga3d_surface_install(
   uint64_t storage_bytes = 0;
   uint32_t i;
 
-  if (sid >= SVGA3D_MAX_SURFACE_IDS ||
-      !vmsvga3d_surface_faces_valid(surface_flags, face, array_elements,
-                                     mip_count) ||
-      !vmsvga3d_surface_sizes_valid(surface_flags, format, face, mip_sizes,
+  if (sid >= SVGA3D_MAX_SURFACE_IDS) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=SID_RANGE sid=%u "
+                      "format=%u flags=0x%08x mips=%u arrays=%u",
+                      sid, format, surface_flags, mip_count, array_elements);
+    return;
+  };
+  if (!vmsvga3d_surface_faces_valid(surface_flags, face, array_elements,
+                                     mip_count)) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=FACES sid=%u "
+                      "format=%u flags=0x%08x mips=%u arrays=%u",
+                      sid, format, surface_flags, mip_count, array_elements);
+    return;
+  };
+  if (!vmsvga3d_surface_sizes_valid(surface_flags, format, face, mip_sizes,
                                     array_elements, mip_count)) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=SIZES sid=%u "
+                      "format=%u flags=0x%08x mips=%u arrays=%u",
+                      sid, format, surface_flags, mip_count, array_elements);
     return;
   };
 
   surface = g_try_new0(VMSVGA3DSurface, 1);
   if (surface == NULL) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=ALLOC_SURFACE sid=%u "
+                      "format=%u flags=0x%08x mips=%u arrays=%u",
+                      sid, format, surface_flags, mip_count, array_elements);
     return;
   };
   surface->mips = g_try_new0(VMSVGA3DSurfaceImage, mip_count);
   if (surface->mips == NULL) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=ALLOC_MIPS sid=%u "
+                      "format=%u flags=0x%08x mips=%u arrays=%u",
+                      sid, format, surface_flags, mip_count, array_elements);
     g_free(surface);
     return;
   };
@@ -1241,11 +1265,22 @@ static void vmsvga3d_surface_install(
   for (i = 0; i < mip_count; i++) {
     if (!vmsvga3d_surface_image_layout(format, &mip_sizes[i],
                                        multisample_count, &surface->mips[i])) {
+      VMVGA_TRACE_LOCAL(
+          VMVGA_TRACE_3D,
+          "D3D9-SURFACE result=REJECT reason=IMAGE_LAYOUT sid=%u format=%u "
+          "flags=0x%08x mip=%u size=%ux%ux%u samples=%u",
+          sid, format, surface_flags, i, mip_sizes[i].width,
+          mip_sizes[i].height, mip_sizes[i].depth, multisample_count);
       vmsvga3d_surface_free(surface);
       return;
     };
     storage_bytes += surface->mips[i].data_size;
     if (storage_bytes > SIZE_MAX) {
+      VMVGA_TRACE_LOCAL(
+          VMVGA_TRACE_3D,
+          "D3D9-SURFACE result=REJECT reason=STORAGE_OVERFLOW sid=%u "
+          "format=%u flags=0x%08x mip=%u bytes=%" PRIu64,
+          sid, format, surface_flags, i, storage_bytes);
       vmsvga3d_surface_free(surface);
       return;
     };
@@ -1254,6 +1289,10 @@ static void vmsvga3d_surface_install(
 
   state = vmsvga3d_state_ensure(s);
   if (state == NULL) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=STATE sid=%u "
+                      "format=%u flags=0x%08x bytes=%zu",
+                      sid, format, surface_flags, surface->storage_bytes);
     vmsvga3d_surface_free(surface);
     return;
   };
@@ -1262,6 +1301,12 @@ static void vmsvga3d_surface_install(
   limit = vmsvga_surface_memory_size(s);
   if (surface->storage_bytes > limit || state->surface_bytes < old_bytes ||
       state->surface_bytes - old_bytes > limit - surface->storage_bytes) {
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "D3D9-SURFACE result=REJECT reason=SURFACE_MEMORY sid=%u format=%u "
+        "flags=0x%08x bytes=%zu current=%zu old=%zu limit=%zu",
+        sid, format, surface_flags, surface->storage_bytes,
+        state->surface_bytes, old_bytes, limit);
     vmsvga3d_surface_free(surface);
     return;
   };
@@ -1269,12 +1314,22 @@ static void vmsvga3d_surface_install(
   for (i = 0; i < mip_count; i++) {
     surface->mips[i].data = g_try_malloc0(surface->mips[i].data_size);
     if (surface->mips[i].data == NULL) {
+      VMVGA_TRACE_LOCAL(
+          VMVGA_TRACE_3D,
+          "D3D9-SURFACE result=REJECT reason=ALLOC_IMAGE sid=%u format=%u "
+          "flags=0x%08x mip=%u bytes=%u",
+          sid, format, surface_flags, i, surface->mips[i].data_size);
       vmsvga3d_surface_free(surface);
       return;
     };
   };
   surface->dxvk_surface = vmsvga3d_dxvk_surface_create(s->dxvk, sid);
   if (surface->dxvk_surface == NULL) {
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "D3D9-SURFACE result=REJECT reason=DXVK_SURFACE_CREATE sid=%u "
+        "format=%u flags=0x%08x bytes=%zu",
+        sid, format, surface_flags, surface->storage_bytes);
     vmsvga3d_surface_free(surface);
     return;
   };
@@ -1289,6 +1344,15 @@ static void vmsvga3d_surface_install(
   vmsvga3d_surface_free(old_surface);
   state->surfaces[sid] = surface;
   state->surface_bytes += surface->storage_bytes;
+  VMVGA_TRACE_LOCAL(
+      VMVGA_TRACE_3D,
+      "D3D9-SURFACE result=OK sid=%u format=%u flags=0x%08x mips=%u "
+      "arrays=%u size=%ux%ux%u samples=%u bytes=%zu total=%zu redefined=%u",
+      sid, format, surface_flags, mip_count, array_elements,
+      mip_count != 0 ? mip_sizes[0].width : 0,
+      mip_count != 0 ? mip_sizes[0].height : 0,
+      mip_count != 0 ? mip_sizes[0].depth : 0, multisample_count,
+      surface->storage_bytes, state->surface_bytes, old_surface != NULL);
 };
 
 static bool vmsvga3d_gb_surface_define_live(
@@ -1461,14 +1525,26 @@ static bool vmsvga3d_handle_surface_define(struct vmsvga_state_s *s,
 
   (void)cmd;
   if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=PAYLOAD_READ "
+                      "fifo=0x%08x",
+                      fifo_start);
     return true;
   };
   if (size < sizeof(*body)) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=PACKET_SHORT "
+                      "fifo=0x%08x bytes=%u expected=%zu",
+                      fifo_start, size, sizeof(*body));
     g_free(payload);
     return true;
   };
   mip_bytes = size - sizeof(*body);
   if (mip_bytes % sizeof(SVGA3dSize) != 0) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=MIP_PAYLOAD "
+                      "fifo=0x%08x bytes=%u mip_bytes=%u",
+                      fifo_start, size, mip_bytes);
     g_free(payload);
     return true;
   };
@@ -1497,14 +1573,26 @@ static bool vmsvga3d_handle_surface_define_v2(struct vmsvga_state_s *s,
 
   (void)cmd;
   if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=PAYLOAD_READ_V2 "
+                      "fifo=0x%08x",
+                      fifo_start);
     return true;
   };
   if (size < sizeof(*body)) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=PACKET_SHORT_V2 "
+                      "fifo=0x%08x bytes=%u expected=%zu",
+                      fifo_start, size, sizeof(*body));
     g_free(payload);
     return true;
   };
   mip_bytes = size - sizeof(*body);
   if (mip_bytes % sizeof(SVGA3dSize) != 0) {
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                      "D3D9-SURFACE result=REJECT reason=MIP_PAYLOAD_V2 "
+                      "fifo=0x%08x bytes=%u mip_bytes=%u",
+                      fifo_start, size, mip_bytes);
     g_free(payload);
     return true;
   };
@@ -4915,7 +5003,10 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
   old_capacity_entries = binding->capacity_entries;
   mob = vmsvga3d_mob_get(s, mobid);
   old_mob = vmsvga3d_mob_get(s, binding->mobid);
-  /* Match VirtualBox: a nonexistent MOB unbinds the current COTable. */
+  if (mobid != SVGA3D_INVALID_ID && mob == NULL) {
+    return false;
+  };
+
   if (mob != NULL) {
     if (valid_size > mob->gbo.size) {
       return false;
@@ -6122,11 +6213,35 @@ static const VMSVGA3DCommandInfo *vmsvga3d_command_info(uint32_t cmd) {
 
 static bool vmsvga3d_trace_fifo_command(uint32_t cmd) {
   switch (cmd) {
-  case SVGA_3D_CMD_CONTEXT_DEFINE:
   case SVGA_3D_CMD_SURFACE_DEFINE:
   case SVGA_3D_CMD_SURFACE_DEFINE_V2:
+  case SVGA_3D_CMD_SURFACE_DESTROY:
+  case SVGA_3D_CMD_SURFACE_COPY:
+  case SVGA_3D_CMD_SURFACE_STRETCHBLT:
+  case SVGA_3D_CMD_SURFACE_DMA:
+  case SVGA_3D_CMD_CONTEXT_DEFINE:
+  case SVGA_3D_CMD_CONTEXT_DESTROY:
+  case SVGA_3D_CMD_SETTRANSFORM:
+  case SVGA_3D_CMD_SETZRANGE:
+  case SVGA_3D_CMD_SETRENDERSTATE:
+  case SVGA_3D_CMD_SETRENDERTARGET:
+  case SVGA_3D_CMD_SETTEXTURESTATE:
+  case SVGA_3D_CMD_SETMATERIAL:
+  case SVGA_3D_CMD_SETLIGHTDATA:
+  case SVGA_3D_CMD_SETLIGHTENABLED:
+  case SVGA_3D_CMD_SETVIEWPORT:
+  case SVGA_3D_CMD_SETCLIPPLANE:
+  case SVGA_3D_CMD_CLEAR:
   case SVGA_3D_CMD_DRAW_PRIMITIVES:
   case SVGA_3D_CMD_PRESENT:
+  case SVGA_3D_CMD_PRESENT_READBACK:
+  case SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN:
+  case SVGA_3D_CMD_SHADER_DEFINE:
+  case SVGA_3D_CMD_SHADER_DESTROY:
+  case SVGA_3D_CMD_SET_SHADER:
+  case SVGA_3D_CMD_SET_SHADER_CONST:
+  case SVGA_3D_CMD_SETSCISSORRECT:
+  case SVGA_3D_CMD_GENERATE_MIPMAPS:
     return true;
   default:
     return cmd >= SVGA_3D_CMD_DX_MIN && cmd <= SVGA_3D_CMD_DX_MAX;
@@ -6180,6 +6295,10 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
   };
 
   if (info->action == VMSVGA3D_COMMAND_STALL) {
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "3D-STALL path=%s name=%s id=%u fifo=0x%08x",
+        vmsvga3d_trace_command_path(cmd), info->name, cmd, fifo_start);
     vmsvga3d_fifo_rewind(s, len, fifo_start);
     VPRINT("%s command %u in SVGA command FIFO\n", info->name, cmd);
     return true;

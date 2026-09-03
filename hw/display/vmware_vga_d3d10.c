@@ -1518,7 +1518,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_topology_set_plan(
   VMSVGA3DD3D10Level level;
 
   if (!plan || topology < SVGA3D_PRIMITIVE_MIN ||
-      topology >= SVGA3D_PRIMITIVE_DX10_MAX) {
+      topology >= SVGA3D_PRIMITIVE_MAX) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
   memset(plan, 0, sizeof(*plan));
@@ -5003,10 +5003,14 @@ static void vmsvga3d_d3d10_pipeline_constant_buffers_live(
     if (count == 0) {
       continue;
     }
-    if (start_slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+    /* The SVGA protocol shadows 16 constant-buffer slots, while the native
+     * D3D10/D3D11 API exposes only 14.  VirtualBox preserves slots 14-15 in
+     * the context MOB but clips the backend SetConstantBuffers call here.
+     */
+    if (start_slot >= 14u) {
       count = 0;
-    } else if (count > SVGA3D_DX_MAX_CONSTBUFFERS - start_slot) {
-      count = SVGA3D_DX_MAX_CONSTBUFFERS - start_slot;
+    } else if (count > 14u - start_slot) {
+      count = 14u - start_slot;
     }
     if (count != 0) {
       (void)vmsvga3d_dxvk_d3d11_set_constant_buffers(
@@ -9024,7 +9028,6 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     SVGA3dCmdDXDefineSamplerState command;
     SVGACOTableDXSamplerEntry *entry;
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
-    bool found = false;
     uint32_t stage;
     uint32_t slot;
 
@@ -9039,13 +9042,12 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
             s->dxvk, cid, command.samplerId)) {
       return false;
     }
-    for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE && !found; stage++) {
+    for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE; stage++) {
       for (slot = 0; slot < SVGA3D_DX_MAX_SAMPLERS; slot++) {
         if (context->shadow.shaderState[stage].samplers[slot] ==
             command.samplerId) {
           context->renderer_dirty |=
               VMSVGA3D_DX_CTX_F_STATE_SAMPLER_VS << stage;
-          found = true;
           break;
         }
       }

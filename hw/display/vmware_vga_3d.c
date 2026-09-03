@@ -362,6 +362,36 @@ static void vmsvga3d_surface_free(VMSVGA3DSurface *surface) {
   g_free(surface);
 };
 
+static void vmsvga3d_surface_clear_legacy_bindings(
+    struct vmsvga3d_state_s *state, uint32_t sid) {
+  uint32_t cid;
+
+  if (state == NULL) {
+    return;
+  };
+  for (cid = 0; cid < SVGA3D_MAX_CONTEXT_IDS; cid++) {
+    VMSVGA3DContext *context = state->contexts[cid];
+    uint32_t i;
+
+    if (context == NULL) {
+      continue;
+    };
+    for (i = 0; i < VMSVGA3D_MAX_SAMPLERS; i++) {
+      VMSVGA3DStateValue *binding =
+          &context->texture_state[i][SVGA3D_TS_BIND_TEXTURE];
+
+      if (binding->valid && binding->value == sid) {
+        binding->value = SVGA3D_INVALID_ID;
+      };
+    };
+    for (i = 0; i < SVGA3D_RT_MAX; i++) {
+      if (context->render_targets[i].sid == sid) {
+        context->render_targets[i].sid = SVGA3D_INVALID_ID;
+      };
+    };
+  };
+};
+
 static struct vmsvga3d_state_s *
 vmsvga3d_state_ensure(struct vmsvga_state_s *s);
 
@@ -1335,6 +1365,12 @@ static void vmsvga3d_surface_install(
   };
 
   state->surface_bytes -= old_bytes;
+  if (old_surface != NULL) {
+    /* VBox redefinition goes through SurfaceDestroy, which also removes the
+     * old SID from every legacy context's active texture and render-target
+     * state before the backend surface is destroyed. */
+    vmsvga3d_surface_clear_legacy_bindings(state, sid);
+  }
   if (old_surface != NULL && old_surface->dxvk_surface != NULL) {
     /* VBox redefinition goes through SurfaceDestroy(..., true), so realized
      * DX view COTable entries are cleared before this SID is reused. */
@@ -1505,6 +1541,10 @@ static void vmsvga3d_surface_destroy_live(struct vmsvga_state_s *s,
   } else {
     state->surface_bytes = 0;
   }
+  /* Match VBox SurfaceDestroy: remove the SID from every legacy context's
+   * active texture and render-target state before destroying the backend
+   * surface. */
+  vmsvga3d_surface_clear_legacy_bindings(state, sid);
   if (surface->dxvk_surface != NULL) {
     vmsvga3d_dxvk_d3d11_surface_visit_views(
         surface->dxvk_surface, vmsvga3d_surface_destroy_view_live, s);

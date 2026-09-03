@@ -1402,9 +1402,15 @@ static void vmsvga3d_surface_destroy_view_live(
       binding->entry_size != expected_entry_size) {
     return;
   }
-  offset = view_id * binding->entry_size;
-  if (offset > binding->host_size ||
-      binding->entry_size > binding->host_size - offset) {
+  {
+    uint64_t offset64 = (uint64_t)view_id * (uint64_t)binding->entry_size;
+
+    if (offset64 > binding->host_size) {
+      return;
+    }
+    offset = (uint32_t)offset64;
+  }
+  if (binding->entry_size > binding->host_size - offset) {
     return;
   }
 

@@ -44,13 +44,6 @@ typedef struct {
   SVGA3dSize size;
 } SVGA3dCmdSize;
 
-/* vmware_vga_d3d10.c is included below after the legacy command handlers.
- * SurfaceCopy needs the same vGPU10 resource materializer when either side
- * has already become D3D11-resident, matching the VirtualBox D3D11 backend.
- */
-static bool vmsvga3d_d3d10_copy_surface_materialize_live(
-    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
-    VMSVGA3DD3D10ResourceCreateKind create_kind);
 static void vmsvga3d_surface_destroy_view_live(
     void *opaque, VMSVGA3DDxvkViewKind kind, uint32_t cid, uint32_t view_id);
 
@@ -265,6 +258,14 @@ typedef struct vmsvga3d_surface_s {
   VMSVGA3DSurfaceImage *mips;
   VMSVGA3DDxvkSurface *dxvk_surface;
 } VMSVGA3DSurface;
+
+/* vmware_vga_d3d10.c is included below after the legacy command handlers.
+ * SurfaceCopy needs the same vGPU10 resource materializer when either side
+ * has already become D3D11-resident, matching the VirtualBox D3D11 backend.
+ */
+static bool vmsvga3d_d3d10_copy_surface_materialize_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DD3D10ResourceCreateKind create_kind);
 
 struct vmsvga3d_state_s {
   VMSVGA3DContext *contexts[SVGA3D_MAX_CONTEXT_IDS];

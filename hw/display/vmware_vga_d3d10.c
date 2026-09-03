@@ -5159,7 +5159,10 @@ static void vmsvga3d_d3d10_pipeline_state_realize_live(
   if ((context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE) != 0) {
     uint32_t id = context->shadow.renderState.blendStateId;
     bool realized = id == SVGA3D_INVALID_ID;
+    float blend_factor[4];
 
+    memcpy(blend_factor, context->shadow.renderState.blendFactor,
+           sizeof(blend_factor));
     context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE;
     if (id != SVGA3D_INVALID_ID) {
       SVGACOTableDXBlendStateEntry *entry = vmsvga3d_dx_cotable_entry_ptr(
@@ -5172,9 +5175,7 @@ static void vmsvga3d_d3d10_pipeline_state_realize_live(
     }
     (void)vmsvga3d_dxvk_d3d11_set_blend_state(
         s->dxvk, cid, realized ? id : SVGA3D_INVALID_ID,
-        realized && id != SVGA3D_INVALID_ID
-            ? context->shadow.renderState.blendFactor
-            : NULL,
+        realized && id != SVGA3D_INVALID_ID ? blend_factor : NULL,
         realized && id != SVGA3D_INVALID_ID
             ? context->shadow.renderState.sampleMask
             : 0);

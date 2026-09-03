@@ -7163,6 +7163,71 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
   return true;
 }
 
+static bool vmsvga3d_d3d10_buffer_copy_live(
+    struct vmsvga_state_s *s,
+    const SVGA3dCmdDXBufferCopy *command) {
+  VMSVGA3DSurface *source;
+  VMSVGA3DSurface *destination;
+  VMSVGA3DSurfaceImage *source_image;
+  VMSVGA3DSurfaceImage *destination_image;
+  VMSVGA3DD3D10Box native_box;
+  bool copy_ok = false;
+  bool update_ok;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      command->src >= SVGA3D_MAX_SURFACE_IDS ||
+      command->dest >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  source = s->svga3d->surfaces[command->src];
+  destination = s->svga3d->surfaces[command->dest];
+  if (source == NULL || destination == NULL || source->mips == NULL ||
+      destination->mips == NULL || source->mip_count == 0 ||
+      destination->mip_count == 0 || source->dxvk_surface == NULL ||
+      destination->dxvk_surface == NULL) {
+    return false;
+  }
+  source_image = &source->mips[0];
+  destination_image = &destination->mips[0];
+  if (source_image->data == NULL || destination_image->data == NULL ||
+      source_image->pitch == 0 || destination_image->pitch == 0 ||
+      destination_image->plane_size == 0 ||
+      !vmsvga3d_d3d10_readback_image_live(s, source, 0)) {
+    return false;
+  }
+
+  /* Current VirtualBox maps both surfaces before checking that they really
+   * are one-dimensional buffers.  It accepts a zero-byte copy as long as
+   * both offsets themselves are in range. */
+  if (source->format == SVGA3D_BUFFER &&
+      source_image->size.height == 1 && source_image->size.depth == 1 &&
+      destination->format == SVGA3D_BUFFER &&
+      destination_image->size.height == 1 &&
+      destination_image->size.depth == 1 &&
+      command->srcX < source_image->pitch &&
+      command->width <= source_image->pitch - command->srcX &&
+      command->destX < destination_image->pitch &&
+      command->width <= destination_image->pitch - command->destX) {
+    memcpy(destination_image->data + command->destX,
+           source_image->data + command->srcX, command->width);
+    copy_ok = true;
+  }
+
+  native_box.left = 0;
+  native_box.top = 0;
+  native_box.front = 0;
+  native_box.right = destination_image->size.width;
+  native_box.bottom = destination_image->size.height;
+  native_box.back = destination_image->size.depth;
+  /* VBox unmaps the destination as written even after a type or range error,
+   * so preserve that observable writeback ordering for resident resources. */
+  update_ok = vmsvga3d_dxvk_d3d11_update_subresource(
+      s->dxvk, destination->dxvk_surface, 0, &native_box,
+      destination_image->data, destination_image->pitch,
+      destination_image->plane_size);
+  return copy_ok && update_ok;
+}
+
 static bool vmsvga3d_d3d10_transfer_from_buffer_live(
     struct vmsvga_state_s *s,
     const SVGA3dCmdDXTransferFromBuffer *command) {
@@ -7520,8 +7585,8 @@ static bool vmsvga3d_d3d10_present_blt_live(
 
   source_format = vmsvga3d_d3d10_surface_format(source->format);
   destination_format = vmsvga3d_d3d10_surface_format(destination->format);
-  if (!vmsvga3d_d3d10_level_is_vgpu10(source_format.level) ||
-      !vmsvga3d_d3d10_level_is_vgpu10(destination_format.level)) {
+  if (!vmsvga3d_d3d10_level_is_vgpu10(source_format.min_level) ||
+      !vmsvga3d_d3d10_level_is_vgpu10(destination_format.min_level)) {
     return false;
   }
 
@@ -9173,6 +9238,16 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     }
     memcpy(&command, payload, sizeof(command));
     return vmsvga3d_d3d10_bind_all_query_live(s, &command);
+  }
+
+  case SVGA_3D_CMD_DX_BUFFER_COPY: {
+    SVGA3dCmdDXBufferCopy command;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_buffer_copy_live(s, &command);
   }
 
   case SVGA_3D_CMD_DX_TRANSFER_FROM_BUFFER: {

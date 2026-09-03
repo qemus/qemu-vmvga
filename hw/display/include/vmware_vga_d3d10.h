@@ -154,6 +154,7 @@ typedef struct vmsvga3d_d3d10_rtv_desc_s {
 typedef struct vmsvga3d_d3d10_dsv_desc_s {
   uint32_t format;
   uint32_t view_dimension;
+  uint32_t flags;
   uint32_t mip_slice;
   uint32_t first_array_slice;
   uint32_t array_size;

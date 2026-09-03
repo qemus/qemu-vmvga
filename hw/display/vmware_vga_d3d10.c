@@ -4071,6 +4071,52 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_legacy_entry(
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_mob_entry(
+    const SVGA3dCmdDXDefineStreamOutputWithMob *src,
+    SVGACOTableDXStreamOutputEntry *dst)
+{
+  if (src == NULL || dst == NULL ||
+      src->numOutputStreamEntries > SVGA3D_MAX_STREAMOUT_DECLS ||
+      src->numOutputStreamStrides > SVGA3D_DX_MAX_SOTARGETS ||
+      (src->rasterizedStream >= SVGA3D_DX_MAX_SOTARGETS &&
+       src->rasterizedStream != SVGA3D_DX_SO_NO_RASTERIZED_STREAM)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  memset(dst, 0, sizeof(*dst));
+  dst->numOutputStreamEntries = src->numOutputStreamEntries;
+  memcpy(dst->streamOutputStrideInBytes, src->streamOutputStrideInBytes,
+         sizeof(dst->streamOutputStrideInBytes));
+  dst->rasterizedStream = src->rasterizedStream;
+  dst->numOutputStreamStrides = src->numOutputStreamStrides;
+  dst->mobid = SVGA3D_INVALID_ID;
+  dst->offsetInBytes = 0;
+  dst->usesMob = 1;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_bind_entry(
+    SVGACOTableDXStreamOutputEntry *entry, uint32_t mobid,
+    uint32_t offset_in_bytes, uint32_t size_in_bytes)
+{
+  uint64_t required_bytes;
+
+  if (entry == NULL || !entry->usesMob) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+  required_bytes = (uint64_t)entry->numOutputStreamEntries *
+                   sizeof(SVGA3dStreamOutputDeclarationEntry);
+  if (size_in_bytes < required_bytes) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  entry->mobid = mobid;
+  entry->offsetInBytes = offset_in_bytes;
+  entry->usesMob = 1;
+  return VMSVGA3D_D3D10_LEVEL_10_0;
+}
+
 VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_plan(
     const SVGACOTableDXStreamOutputEntry *entry,
     const SVGA3dStreamOutputDeclarationEntry *declarations,
@@ -4701,6 +4747,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_dsv_desc(
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
   dst->format = format.dxgi_format;
+  dst->flags = src->flags;
   level = format.min_level;
   if (src->flags) {
     level = max_level(level, VMSVGA3D_D3D10_LEVEL_11_0);
@@ -6685,7 +6732,8 @@ static bool vmsvga3d_d3d10_dsv_realize_live(
   level = vmsvga3d_d3d10_dsv_desc(
       entry, surface_info.array_elements, surface_info.multisample_count,
       &dsv_desc);
-  if (!vmsvga3d_d3d10_level_is_vgpu10(level)) {
+  if (level < VMSVGA3D_D3D10_LEVEL_10_0 ||
+      level > VMSVGA3D_D3D10_LEVEL_11_0) {
     goto out;
   }
   success = vmsvga3d_dxvk_d3d11_depth_stencil_view_ensure(
@@ -8153,6 +8201,22 @@ static bool vmsvga3d_d3d10_rasterizer_state_live(
              s->dxvk, cid, plan->rasterizer_id);
 }
 
+static bool vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
+    struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid)
+{
+  uint32_t stage = SVGA3D_SHADERTYPE_GS - SVGA3D_SHADERTYPE_MIN;
+  uint32_t shader_id;
+
+  if (context == NULL || stage >= SVGA3D_NUM_SHADERTYPE) {
+    return false;
+  }
+  shader_id = context->shadow.shaderState[stage].shaderId;
+  if (shader_id == SVGA3D_INVALID_ID) {
+    return true;
+  }
+  return vmsvga3d_dxvk_d3d11_shader_invalidate(s->dxvk, cid, shader_id);
+}
+
 static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                                        uint32_t cid, uint32_t cmd,
                                        const void *payload, uint32_t size) {
@@ -8641,11 +8705,18 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
       return false;
     };
     memcpy(&command, payload, sizeof(command));
-    return vmsvga3d_d3d10_stream_output_set_plan(
-               command.soid,
-               context->cotables[SVGA_COTABLE_STREAMOUTPUT].capacity_entries,
-               &plan) != VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_state_dx_apply_stream_output(s, cid, &plan);
+    if (vmsvga3d_d3d10_stream_output_set_plan(
+            command.soid,
+            context->cotables[SVGA_COTABLE_STREAMOUTPUT].capacity_entries,
+            &plan) == VMSVGA3D_D3D10_LEVEL_INVALID) {
+      return false;
+    }
+    if (context->shadow.streamOut.soid != command.soid &&
+        !vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
+            s, context, cid)) {
+      return false;
+    }
+    return vmsvga3d_state_dx_apply_stream_output(s, cid, &plan);
   }
 
   case SVGA_3D_CMD_DX_DEFINE_SHADERRESOURCE_VIEW: {
@@ -8797,6 +8868,30 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
       context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
     }
     return vmsvga3d_d3d10_dsv_define_entry(&command_v2, entry) !=
+           VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
+  case SVGA_3D_CMD_DX_DEFINE_DEPTHSTENCIL_VIEW_V2: {
+    SVGA3dCmdDXDefineDepthStencilView_v2 command;
+    SVGACOTableDXDSViewEntry *entry;
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+    if (context == NULL || size < sizeof(command)) {
+      return false;
+    };
+    memcpy(&command, payload, sizeof(command));
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DSVIEW, command.depthStencilViewId);
+    if (entry == NULL ||
+        !vmsvga3d_dxvk_d3d11_depth_stencil_view_destroy(
+            s->dxvk, cid, command.depthStencilViewId)) {
+      return false;
+    }
+    if (context->shadow.renderState.depthStencilViewId ==
+        command.depthStencilViewId) {
+      context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+    }
+    return vmsvga3d_d3d10_dsv_define_entry(&command, entry) !=
            VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
@@ -9380,11 +9475,68 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     memcpy(&command, payload, sizeof(command));
     entry = vmsvga3d_dx_cotable_entry_ptr(
         s, cid, SVGA_COTABLE_STREAMOUTPUT, command.soid);
-    return entry != NULL &&
-           vmsvga3d_d3d10_stream_output_legacy_entry(&command, entry) !=
-               VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_dxvk_d3d11_stream_output_destroy(
-               s->dxvk, cid, command.soid);
+    if (entry == NULL ||
+        vmsvga3d_d3d10_stream_output_legacy_entry(&command, entry) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID ||
+        !vmsvga3d_dxvk_d3d11_stream_output_destroy(
+            s->dxvk, cid, command.soid)) {
+      return false;
+    }
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    return context != NULL &&
+           (context->shadow.streamOut.soid != command.soid ||
+            vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
+                s, context, cid));
+  }
+
+  case SVGA_3D_CMD_DX_DEFINE_STREAMOUTPUT_WITH_MOB: {
+    SVGA3dCmdDXDefineStreamOutputWithMob command;
+    SVGACOTableDXStreamOutputEntry *entry;
+
+    if (size < sizeof(command)) {
+      return false;
+    };
+    memcpy(&command, payload, sizeof(command));
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_STREAMOUTPUT, command.soid);
+    if (entry == NULL ||
+        vmsvga3d_d3d10_stream_output_mob_entry(&command, entry) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID ||
+        !vmsvga3d_dxvk_d3d11_stream_output_destroy(
+            s->dxvk, cid, command.soid)) {
+      return false;
+    }
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    return context != NULL &&
+           (context->shadow.streamOut.soid != command.soid ||
+            vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
+                s, context, cid));
+  }
+
+  case SVGA_3D_CMD_DX_BIND_STREAMOUTPUT: {
+    SVGA3dCmdDXBindStreamOutput command;
+    SVGACOTableDXStreamOutputEntry *entry;
+    if (size < sizeof(command)) {
+      return false;
+    };
+    memcpy(&command, payload, sizeof(command));
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_STREAMOUTPUT, command.soid);
+    if (entry == NULL ||
+        vmsvga3d_d3d10_stream_output_bind_entry(
+            entry, command.mobid, command.offsetInBytes, command.sizeInBytes) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID) {
+      return false;
+    }
+    if (!vmsvga3d_dxvk_d3d11_stream_output_destroy(
+            s->dxvk, cid, command.soid)) {
+      return false;
+    }
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    return context != NULL &&
+           (context->shadow.streamOut.soid != command.soid ||
+            vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
+                s, context, cid));
   }
 
   case SVGA_3D_CMD_DX_DESTROY_STREAMOUTPUT: {

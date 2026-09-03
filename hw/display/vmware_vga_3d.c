@@ -6279,26 +6279,30 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
   };
 
   info = vmsvga3d_command_info(cmd);
-  if (*len >= 2) {
-    uint32_t raw_size;
+  if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+    if (*len >= 2) {
+      uint32_t raw_size;
 
-    vmsvga_fifo_peek_raw_data(s, 0, &raw_size, sizeof(raw_size));
-    payload_size = le32_to_cpu(raw_size);
+      vmsvga_fifo_peek_raw_data(s, 0, &raw_size, sizeof(raw_size));
+      payload_size = le32_to_cpu(raw_size);
+    };
+    fprintf(
+        stderr,
+        "VMVGA-3D-RAW id=%u name=%s size=%s%u action=%s fifo=0x%08x "
+        "words=%d\n",
+        cmd, info != NULL ? info->name : "UNKNOWN",
+        payload_size == UINT32_MAX ? "INVALID/" : "",
+        payload_size == UINT32_MAX ? 0 : payload_size,
+        info != NULL ? vmsvga3d_trace_command_action(info) : "STALL",
+        fifo_start, *len);
   };
-  VMVGA_TRACE_LOCAL(
-      VMVGA_TRACE_3D,
-      "3D-RAW id=%u name=%s size=%s%u action=%s fifo=0x%08x words=%d",
-      cmd, info != NULL ? info->name : "UNKNOWN",
-      payload_size == UINT32_MAX ? "INVALID/" : "",
-      payload_size == UINT32_MAX ? 0 : payload_size,
-      info != NULL ? vmsvga3d_trace_command_action(info) : "STALL",
-      fifo_start, *len);
 
   if (info == NULL) {
     return false;
   };
 
-  if (vmsvga3d_trace_fifo_command(cmd)) {
+  if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D) &&
+      vmsvga3d_trace_fifo_command(cmd)) {
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "3D-CMD path=%s name=%s id=%u action=%s fifo=0x%08x",
@@ -6597,7 +6601,6 @@ static const char *vmsvga3d_devcap_name(uint32_t index) {
       [259] = "SVGA3D_DEVCAP_MULTISAMPLE_8X",
       [260] = "SVGA3D_DEVCAP_MAX_FORCED_SAMPLE_COUNT",
       [261] = "SVGA3D_DEVCAP_GL43",
-      [262] = "SVGA3D_DEVCAP_MAX",
   };
 
   if (index >= SVGA3D_DEVCAP_MAX || names[index] == NULL) {

@@ -5037,6 +5037,27 @@ bool vmsvga3d_dxvk_d3d11_shader_set(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_shader_invalidate(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id) {
+  VMSVGA3DDxvkShader *shader;
+
+  if (dxvk == NULL) {
+    return false;
+  }
+  shader = vmsvga3d_dxvk_d3d11_shader_find(dxvk, cid, shader_id, NULL);
+  if (shader == NULL) {
+    return true;
+  }
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  if (shader->shader != NULL) {
+    vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    shader->shader = NULL;
+  }
+#endif
+  shader->stream_output_id = SVGA3D_INVALID_ID;
+  return true;
+}
+
 bool vmsvga3d_dxvk_d3d11_shader_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id) {
   VMSVGA3DDxvkShader **link = NULL;
@@ -6327,6 +6348,7 @@ static bool vmsvga3d_dxvk_d3d11_dsv_desc(
   memset(dst, 0, sizeof(*dst));
   dst->format = src->format;
   dst->view_dimension = src->view_dimension;
+  dst->flags = src->flags;
 
   switch (src->view_dimension) {
   case VMSVGA3D_DXVK_D3D11_DSV_DIMENSION_TEXTURE1D:

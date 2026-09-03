@@ -294,6 +294,7 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_STREAM  0
 #define VMVGA_TRACE_FIFO    0
 #define VMVGA_TRACE_3D      1
+#define VMVGA_TRACE_DEVCAP  1
 #define VMVGA_TRACE_FLIGHT  0
 #define VMVGA_TRACE_QEMU    0
 
@@ -550,6 +551,10 @@ struct pci_vmsvga_state_s {
   MemoryRegion io_bar;
 };
 
+static inline bool vmsvga_trace_devcap_enabled(void) {
+  return VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_DEVCAP);
+};
+
 static inline bool vmsvga_trace_flight_enabled(void) {
   return VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_FLIGHT);
 };
@@ -742,7 +747,7 @@ static inline void vmsvga_trace_devcap(struct vmsvga_state_s *s,
                                         const char *name) {
   uint32_t i;
 
-  if (!vmsvga_trace_flight_enabled()) {
+  if (!vmsvga_trace_devcap_enabled()) {
     return;
   };
   fprintf(stderr, "VMVGA-DEVCAP index=%u name=%s value=0x%08x\n",
@@ -7455,8 +7460,10 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value) {
     break;
   case SVGA_REG_DEV_CAP:
     s->devcap_val = s->svga3d_capable ? vmsvga3d_get_devcap(s, value) : 0;
-    vmsvga_trace_devcap(s, value, s->devcap_val,
-                         vmsvga3d_devcap_name(value));
+    if (vmsvga_trace_devcap_enabled()) {
+      vmsvga_trace_devcap(s, value, s->devcap_val,
+                           vmsvga3d_devcap_name(value));
+    };
     VPRINT("SVGA_REG_DEV_CAP register %u with the value of %u\n", s->index,
            value);
     break;

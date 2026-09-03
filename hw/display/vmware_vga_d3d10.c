@@ -9389,6 +9389,13 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     return vmsvga3d_d3d10_mob_fence64_live(s, &command);
   }
 
+  case SVGA_3D_CMD_DX_HINT:
+    /* Residency hints are advisory.  The renderer may ignore both the hint
+     * and its variable-sized payload without changing guest-visible state.
+     */
+    return size >= sizeof(SVGA3dCmdDXHint) &&
+           vmsvga3d_dx_context(s, cid) != NULL;
+
   case SVGA_3D_CMD_DX_SET_VS_CONSTANT_BUFFER_OFFSET:
   case SVGA_3D_CMD_DX_SET_PS_CONSTANT_BUFFER_OFFSET:
   case SVGA_3D_CMD_DX_SET_GS_CONSTANT_BUFFER_OFFSET: {

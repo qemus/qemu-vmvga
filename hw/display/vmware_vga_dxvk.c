@@ -5404,6 +5404,9 @@ bool vmsvga3d_dxvk_d3d9_query_end(
   if (result == 0) {
     return true;
   }
+  if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+    g_thread_yield();
+  }
   vmsvga3d_dxvk_d3d9_query_delete_link(link);
   return false;
 #else

@@ -228,6 +228,8 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_DEVICE_DEFAULT_HEIGHT 480u
 #define VMSVGA3D_DXVK_IUNKNOWN_ADDREF 1u
 #define VMSVGA3D_DXVK_IDIRECT3D9_RELEASE 2u
+#define VMSVGA3D_DXVK_IDIRECT3D9_CHECK_DEVICE_FORMAT 10u
+#define VMSVGA3D_DXVK_IDIRECT3D9_CHECK_DEPTH_STENCIL_MATCH 12u
 #define VMSVGA3D_DXVK_IDIRECT3D9_CREATE_DEVICE 16u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE 2u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_TEXTURE 23u
@@ -294,10 +296,21 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_IDIRECT3DSTATEBLOCK9_APPLY 5u
 #define VMSVGA3D_DXVK_D3D9_RTYPE_SURFACE 1u
 #define VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE 3u
+#define VMSVGA3D_DXVK_D3D9_RTYPE_VOLUMETEXTURE 4u
+#define VMSVGA3D_DXVK_D3D9_RTYPE_CUBETEXTURE 5u
 #define VMSVGA3D_DXVK_D3D9_RTYPE_VERTEX_BUFFER 6u
 #define VMSVGA3D_DXVK_D3D9_RTYPE_INDEX_BUFFER 7u
 #define VMSVGA3D_DXVK_D3DUSAGE_RENDERTARGET 0x00000001u
 #define VMSVGA3D_DXVK_D3DUSAGE_DEPTHSTENCIL 0x00000002u
+#define VMSVGA3D_DXVK_D3DUSAGE_AUTOGENMIPMAP 0x00000400u
+#define VMSVGA3D_DXVK_D3DUSAGE_DMAP 0x00004000u
+#define VMSVGA3D_DXVK_D3DUSAGE_QUERY_LEGACYBUMPMAP 0x00008000u
+#define VMSVGA3D_DXVK_D3DUSAGE_QUERY_SRGBREAD 0x00010000u
+#define VMSVGA3D_DXVK_D3DUSAGE_QUERY_FILTER 0x00020000u
+#define VMSVGA3D_DXVK_D3DUSAGE_QUERY_SRGBWRITE 0x00040000u
+#define VMSVGA3D_DXVK_D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING 0x00080000u
+#define VMSVGA3D_DXVK_D3DUSAGE_QUERY_VERTEXTEXTURE 0x00100000u
+#define VMSVGA3D_DXVK_D3DUSAGE_QUERY_WRAPANDMIP 0x00200000u
 #define VMSVGA3D_DXVK_D3DPOOL_DEFAULT 0u
 #define VMSVGA3D_DXVK_D3DPOOL_SYSTEMMEM 2u
 #define VMSVGA3D_DXVK_D3DLOCK_READONLY 0x00000010u
@@ -326,6 +339,14 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SAMPLER_STATE 23u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_QUERY 24u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PREDICATE 25u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CHECK_FORMAT_SUPPORT 29u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CHECK_MULTISAMPLE_QUALITY_LEVELS 30u
+#define VMSVGA3D_DXVK_DXGI_FORMAT_R8G8B8A8_UNORM 28u
+#define VMSVGA3D_DXVK_DXGI_FORMAT_D24_UNORM_S8_UINT 45u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BUFFER 0x00000001u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURE2D 0x00000020u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_DEPTH_STENCIL 0x00010000u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE 0x00000200u
 #define VMSVGA3D_DXVK_ID3D11BUFFER_GET_DESC 10u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_CONSTANT_BUFFERS 7u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER_RESOURCES 8u
@@ -452,6 +473,12 @@ typedef uint32_t (*VMSVGA3DDxvkRelease)(void *object);
 typedef int32_t (*VMSVGA3DDxvkCreateDevice)(
     void *d3d9, uint32_t adapter, uint32_t device_type, void *focus_window,
     uint32_t behavior_flags, void *present_parameters, void **device);
+typedef int32_t (*VMSVGA3DDxvkCheckDeviceFormat)(
+    void *d3d9, uint32_t adapter, uint32_t device_type, uint32_t adapter_format,
+    uint32_t usage, uint32_t resource_type, uint32_t check_format);
+typedef int32_t (*VMSVGA3DDxvkCheckDepthStencilMatch)(
+    void *d3d9, uint32_t adapter, uint32_t device_type, uint32_t adapter_format,
+    uint32_t render_target_format, uint32_t depth_stencil_format);
 typedef int32_t (*VMSVGA3DDxvkCreateTexture)(
     void *device, uint32_t width, uint32_t height, uint32_t levels,
     uint32_t usage, uint32_t format, uint32_t pool, void **texture,
@@ -713,6 +740,11 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CreateQuery)(
     void *device, const VMSVGA3DDxvkD3D11QueryDesc *desc, void **query);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreatePredicate)(
     void *device, const VMSVGA3DDxvkD3D11QueryDesc *desc, void **predicate);
+typedef int32_t (*VMSVGA3DDxvkD3D11CheckFormatSupport)(
+    void *device, uint32_t format, uint32_t *support);
+typedef int32_t (*VMSVGA3DDxvkD3D11CheckMultisampleQualityLevels)(
+    void *device, uint32_t format, uint32_t sample_count,
+    uint32_t *quality_levels);
 typedef void (*VMSVGA3DDxvkD3D11ClearRenderTargetView)(
     void *context, void *view, const float color[4]);
 typedef void (*VMSVGA3DDxvkD3D11ClearDepthStencilView)(
@@ -1894,6 +1926,298 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk) {
   g_free(dxvk);
 }
 
+static bool vmsvga3d_dxvk_d3d9_check_format(
+    const VMSVGA3DDxvk *dxvk, uint32_t format, uint32_t usage,
+    uint32_t resource_type) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkComFunction entry;
+  VMSVGA3DDxvkCheckDeviceFormat check_format = NULL;
+
+  if (dxvk == NULL || !dxvk->ready || dxvk->d3d9 == NULL || format == 0) {
+    return false;
+  }
+  entry = vmsvga3d_dxvk_vtable_entry(
+      dxvk->d3d9, VMSVGA3D_DXVK_IDIRECT3D9_CHECK_DEVICE_FORMAT);
+  memcpy(&check_format, &entry, sizeof(check_format));
+  return check_format != NULL &&
+         check_format(dxvk->d3d9, VMSVGA3D_DXVK_D3DADAPTER_DEFAULT,
+                      VMSVGA3D_DXVK_D3DDEVTYPE_HAL,
+                      VMSVGA3D_DXVK_D3DFMT_X8R8G8B8, usage, resource_type,
+                      format) >= 0;
+#else
+  (void)dxvk;
+  (void)format;
+  (void)usage;
+  (void)resource_type;
+  return false;
+#endif
+}
+
+static bool vmsvga3d_dxvk_d3d9_check_depth_match(
+    const VMSVGA3DDxvk *dxvk, uint32_t format) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkComFunction entry;
+  VMSVGA3DDxvkCheckDepthStencilMatch check_match = NULL;
+
+  if (dxvk == NULL || !dxvk->ready || dxvk->d3d9 == NULL || format == 0) {
+    return false;
+  }
+  entry = vmsvga3d_dxvk_vtable_entry(
+      dxvk->d3d9, VMSVGA3D_DXVK_IDIRECT3D9_CHECK_DEPTH_STENCIL_MATCH);
+  memcpy(&check_match, &entry, sizeof(check_match));
+  return check_match != NULL &&
+         check_match(dxvk->d3d9, VMSVGA3D_DXVK_D3DADAPTER_DEFAULT,
+                     VMSVGA3D_DXVK_D3DDEVTYPE_HAL,
+                     VMSVGA3D_DXVK_D3DFMT_X8R8G8B8,
+                     VMSVGA3D_DXVK_D3DFMT_X8R8G8B8, format) >= 0;
+#else
+  (void)dxvk;
+  (void)format;
+  return false;
+#endif
+}
+
+
+static bool vmsvga3d_dxvk_d3d11_multisample_format_supported(
+    const VMSVGA3DDxvk *dxvk, uint32_t format, uint32_t sample_count) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkComFunction entry;
+  VMSVGA3DDxvkD3D11CheckMultisampleQualityLevels check_msaa = NULL;
+  uint32_t quality_levels = 0;
+
+  if (dxvk == NULL || !dxvk->d3d11_ready || dxvk->d3d11_device == NULL ||
+      format == 0 || sample_count <= 1) {
+    return false;
+  }
+  entry = vmsvga3d_dxvk_vtable_entry(
+      dxvk->d3d11_device,
+      VMSVGA3D_DXVK_ID3D11DEVICE_CHECK_MULTISAMPLE_QUALITY_LEVELS);
+  memcpy(&check_msaa, &entry, sizeof(check_msaa));
+  return check_msaa != NULL &&
+         check_msaa(dxvk->d3d11_device, format, sample_count,
+                    &quality_levels) >= 0 &&
+         quality_levels != 0;
+#else
+  (void)dxvk;
+  (void)format;
+  (void)sample_count;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_supports_multisample(
+    const VMSVGA3DDxvk *dxvk, uint32_t sample_count) {
+  static const uint32_t formats[] = {
+      VMSVGA3D_DXVK_DXGI_FORMAT_R8G8B8A8_UNORM,
+      VMSVGA3D_DXVK_DXGI_FORMAT_D24_UNORM_S8_UINT,
+  };
+  uint32_t i;
+
+  for (i = 0; i < ARRAY_SIZE(formats); i++) {
+    if (!vmsvga3d_dxvk_d3d11_multisample_format_supported(
+            dxvk, formats[i], sample_count)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+uint32_t vmsvga3d_dxvk_d3d11_qualify_format_caps(
+    const VMSVGA3DDxvk *dxvk, uint32_t format, bool buffer, uint32_t caps) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkComFunction entry;
+  VMSVGA3DDxvkD3D11CheckFormatSupport check_format_support = NULL;
+  uint32_t support = 0;
+  uint32_t required;
+
+  if (caps == 0 || dxvk == NULL || !dxvk->d3d11_ready ||
+      dxvk->d3d11_device == NULL || (!buffer && format == 0)) {
+    return 0;
+  }
+
+  entry = vmsvga3d_dxvk_vtable_entry(
+      dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CHECK_FORMAT_SUPPORT);
+  memcpy(&check_format_support, &entry, sizeof(check_format_support));
+  if (check_format_support == NULL ||
+      check_format_support(dxvk->d3d11_device, format, &support) < 0) {
+    return 0;
+  }
+
+  /*
+   * DXFMT devcap values are VMware's own compact capability masks, not
+   * D3D11_FORMAT_SUPPORT bitfields.  Use CheckFormatSupport as an
+   * adapter-viability gate and otherwise preserve the canonical VMware mask;
+   * the MSAA-specific per-format bit is qualified separately below.
+   */
+  required = buffer ? VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BUFFER
+                    : VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURE2D;
+  if ((support & required) != required) {
+    return 0;
+  }
+
+  /*
+   * The canonical VMware depth masks all carry bit 3.  For those formats,
+   * also require native D3D11 depth/stencil support before exposing them.
+   * Bit 3 is deliberately used only as a classifier here; the DXFMT mask
+   * itself is never interpreted as D3D11_FORMAT_SUPPORT.
+   */
+  if (!buffer && (caps & 0x00000008u) != 0 &&
+      (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_DEPTH_STENCIL) == 0) {
+    return 0;
+  }
+
+  /*
+   * MULTISAMPLE is a per-format DXFMT bit while the 2x/4x devcaps are
+   * global.  The guest combines both when answering D3D10 format/sample
+   * queries, so preserve this bit only when the format supports every
+   * sample count that this adapter will advertise globally.
+   */
+  if (!buffer && (caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE) != 0) {
+    static const uint32_t sample_counts[] = {2u, 4u};
+    bool any_global_msaa = false;
+    uint32_t i;
+
+    for (i = 0; i < ARRAY_SIZE(sample_counts); i++) {
+      if (vmsvga3d_dxvk_d3d11_supports_multisample(
+              dxvk, sample_counts[i])) {
+        any_global_msaa = true;
+        if (!vmsvga3d_dxvk_d3d11_multisample_format_supported(
+                dxvk, format, sample_counts[i])) {
+          caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE;
+          break;
+        }
+      }
+    }
+    if (!any_global_msaa) {
+      caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE;
+    }
+  }
+
+  return caps;
+#else
+  (void)dxvk;
+  (void)format;
+  (void)buffer;
+  (void)caps;
+  return 0;
+#endif
+}
+
+uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
+    const VMSVGA3DDxvk *dxvk, uint32_t format, uint32_t caps) {
+  const uint32_t resource_ops =
+      SVGA3DFORMAT_OP_TEXTURE | SVGA3DFORMAT_OP_VOLUMETEXTURE |
+      SVGA3DFORMAT_OP_CUBETEXTURE | SVGA3DFORMAT_OP_OFFSCREEN_RENDERTARGET |
+      SVGA3DFORMAT_OP_SAME_FORMAT_RENDERTARGET |
+      SVGA3DFORMAT_OP_SAME_FORMAT_UP_TO_ALPHA_RENDERTARGET |
+      SVGA3DFORMAT_OP_ZSTENCIL |
+      SVGA3DFORMAT_OP_ZSTENCIL_WITH_ARBITRARY_COLOR_DEPTH |
+      SVGA3DFORMAT_OP_OFFSCREENPLAIN;
+  const uint32_t rt_ops =
+      SVGA3DFORMAT_OP_OFFSCREEN_RENDERTARGET |
+      SVGA3DFORMAT_OP_SAME_FORMAT_RENDERTARGET |
+      SVGA3DFORMAT_OP_SAME_FORMAT_UP_TO_ALPHA_RENDERTARGET;
+  uint32_t result = caps;
+
+  if (caps == 0 || format == 0 || dxvk == NULL || !dxvk->ready) {
+    return 0;
+  }
+  if ((result & SVGA3DFORMAT_OP_TEXTURE) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, 0, VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_TEXTURE;
+  }
+  if ((result & SVGA3DFORMAT_OP_VOLUMETEXTURE) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, 0, VMSVGA3D_DXVK_D3D9_RTYPE_VOLUMETEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_VOLUMETEXTURE;
+  }
+  if ((result & SVGA3DFORMAT_OP_CUBETEXTURE) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, 0, VMSVGA3D_DXVK_D3D9_RTYPE_CUBETEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_CUBETEXTURE;
+  }
+  if ((result & SVGA3DFORMAT_OP_OFFSCREENPLAIN) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, 0, VMSVGA3D_DXVK_D3D9_RTYPE_SURFACE)) {
+    result &= ~SVGA3DFORMAT_OP_OFFSCREENPLAIN;
+  }
+  if ((result & rt_ops) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_RENDERTARGET,
+          VMSVGA3D_DXVK_D3D9_RTYPE_SURFACE)) {
+    result &= ~rt_ops;
+  }
+  if ((result & SVGA3DFORMAT_OP_ZSTENCIL) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_DEPTHSTENCIL,
+          VMSVGA3D_DXVK_D3D9_RTYPE_SURFACE)) {
+    result &= ~(SVGA3DFORMAT_OP_ZSTENCIL |
+                SVGA3DFORMAT_OP_ZSTENCIL_WITH_ARBITRARY_COLOR_DEPTH);
+  } else if ((result & SVGA3DFORMAT_OP_ZSTENCIL_WITH_ARBITRARY_COLOR_DEPTH) != 0 &&
+             !vmsvga3d_dxvk_d3d9_check_depth_match(dxvk, format)) {
+    result &= ~SVGA3DFORMAT_OP_ZSTENCIL_WITH_ARBITRARY_COLOR_DEPTH;
+  }
+  if ((result & SVGA3DFORMAT_OP_SRGBREAD) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_QUERY_SRGBREAD,
+          VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_SRGBREAD;
+  }
+  if ((result & SVGA3DFORMAT_OP_SRGBWRITE) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_QUERY_SRGBWRITE,
+          VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_SRGBWRITE;
+  }
+  if ((result & SVGA3DFORMAT_OP_AUTOGENMIPMAP) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_AUTOGENMIPMAP,
+          VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_AUTOGENMIPMAP;
+  }
+  if ((result & SVGA3DFORMAT_OP_VERTEXTEXTURE) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_QUERY_VERTEXTEXTURE,
+          VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_VERTEXTEXTURE;
+  }
+  if ((result & SVGA3DFORMAT_OP_DMAP) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_DMAP,
+          VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_DMAP;
+  }
+  if ((result & SVGA3DFORMAT_OP_BUMPMAP) != 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_QUERY_LEGACYBUMPMAP,
+          VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result &= ~SVGA3DFORMAT_OP_BUMPMAP;
+  }
+  if ((result & SVGA3DFORMAT_OP_TEXTURE) != 0 &&
+      (result & SVGA3DFORMAT_OP_NOFILTER) == 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_QUERY_FILTER,
+          VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result |= SVGA3DFORMAT_OP_NOFILTER;
+  }
+  if ((result & rt_ops) != 0 && (result & SVGA3DFORMAT_OP_NOALPHABLEND) == 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING,
+          VMSVGA3D_DXVK_D3D9_RTYPE_SURFACE)) {
+    result |= SVGA3DFORMAT_OP_NOALPHABLEND;
+  }
+  if ((result & SVGA3DFORMAT_OP_TEXTURE) != 0 &&
+      (result & SVGA3DFORMAT_OP_NOTEXCOORDWRAPNORMIP) == 0 &&
+      !vmsvga3d_dxvk_d3d9_check_format(
+          dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_QUERY_WRAPANDMIP,
+          VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+    result |= SVGA3DFORMAT_OP_NOTEXCOORDWRAPNORMIP;
+  }
+
+  return (result & resource_ops) != 0 ? result : 0;
+}
+
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk) {
   return dxvk != NULL && dxvk->ready;
 }
@@ -2552,6 +2876,9 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
 
     if (native.width == 0 || native.height == 0 || native.mip_levels == 0 ||
         native.array_size == 0 || native.sample_desc.count == 0 ||
+        (native.sample_desc.count > 1 &&
+         !vmsvga3d_dxvk_d3d11_multisample_format_supported(
+             dxvk, native.format, native.sample_desc.count)) ||
         !vmsvga3d_dxvk_get_method(
             dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE2D,
             &create_texture2d, sizeof(create_texture2d))) {

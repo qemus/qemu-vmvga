@@ -82,6 +82,16 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk);
 /* vGPU10/DX is an optional upgrade and is never attempted before D3D9. */
 bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk);
+/* Intersect a legacy VMware format-op mask with the live D3D9 adapter. */
+uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
+    const VMSVGA3DDxvk *dxvk, uint32_t format, uint32_t caps);
+/* Keep a canonical VMware DXFMT mask only if the live D3D11 adapter can use it. */
+uint32_t vmsvga3d_dxvk_d3d11_qualify_format_caps(
+    const VMSVGA3DDxvk *dxvk, uint32_t format, bool buffer, uint32_t caps);
+/* True when the live D3D11 adapter supports standard MSAA for both
+ * representative color and depth targets at this sample count. */
+bool vmsvga3d_dxvk_d3d11_supports_multisample(
+    const VMSVGA3DDxvk *dxvk, uint32_t sample_count);
 
 /* Guest surface lifetime is tracked immediately; D3D9 residency is lazy. */
 VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,

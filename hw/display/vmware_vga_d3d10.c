@@ -134,6 +134,7 @@ enum {
   DXGI_AYUV = 100,
   DXGI_NV12 = 103,
   DXGI_YUY2 = 107,
+  DXGI_B4G4R4A4_UNORM = 115,
 };
 
 /* D3D10 / D3D10.1 ABI values shared by the corresponding D3D11 enums. */
@@ -259,11 +260,36 @@ VMSVGA3DD3D10Format vmsvga3d_d3d10_surface_format(SVGA3dSurfaceFormat format)
   case SVGA3D_R5G6B5:                   return fmt(DXGI_B5G6R5_UNORM, VMSVGA3D_D3D10_LEVEL_10_1);
   case SVGA3D_X1R5G5B5:
   case SVGA3D_A1R5G5B5:                 return fmt(DXGI_B5G5R5A1_UNORM, VMSVGA3D_D3D10_LEVEL_10_1);
+  case SVGA3D_A4R4G4B4:                 return fmt(DXGI_B4G4R4A4_UNORM, VMSVGA3D_D3D10_LEVEL_11_1);
   case SVGA3D_Z_D16:
+  case SVGA3D_Z_DF16:
   case SVGA3D_D16_UNORM:                return fmt(DXGI_D16_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_Z_D24S8:
+  case SVGA3D_Z_DF24:
   case SVGA3D_Z_D24S8_INT:
   case SVGA3D_D24_UNORM_S8_UINT:        return fmt(DXGI_D24_UNORM_S8_UINT, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_DXT1:                     return fmt(DXGI_BC1_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_DXT2:
+  case SVGA3D_DXT3:                     return fmt(DXGI_BC2_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_DXT4:
+  case SVGA3D_DXT5:                     return fmt(DXGI_BC3_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_BUMPU8V8:
+  case SVGA3D_V8U8:                     return fmt(DXGI_R8G8_SNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_Q8W8V8U8:                 return fmt(DXGI_R8G8B8A8_SNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_ARGB_S10E5:               return fmt(DXGI_R16G16B16A16_FLOAT, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_ARGB_S23E8:               return fmt(DXGI_R32G32B32A32_FLOAT, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_A2R10G10B10:              return fmt(DXGI_R10G10B10A2_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_ALPHA8:                    return fmt(DXGI_A8_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_R_S10E5:                  return fmt(DXGI_R16_FLOAT, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_R_S23E8:                  return fmt(DXGI_R32_FLOAT, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_RG_S10E5:                 return fmt(DXGI_R16G16_FLOAT, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_RG_S23E8:                 return fmt(DXGI_R32G32_FLOAT, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_Z_D24X8:                  return fmt(DXGI_D24_UNORM_S8_UINT, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_V16U16:                   return fmt(DXGI_R16G16_SNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_G16R16:                   return fmt(DXGI_R16G16_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_A16B16G16R16:             return fmt(DXGI_R16G16B16A16_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_YUY2:                     return fmt(DXGI_YUY2, VMSVGA3D_D3D10_LEVEL_11_0);
+  case SVGA3D_NV12:                     return fmt(DXGI_NV12, VMSVGA3D_D3D10_LEVEL_11_0);
   case SVGA3D_R32G32B32A32_TYPELESS:    return fmt(DXGI_R32G32B32A32_TYPELESS, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_R32G32B32A32_FLOAT:       return fmt(DXGI_R32G32B32A32_FLOAT, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_R32G32B32A32_UINT:        return fmt(DXGI_R32G32B32A32_UINT, VMSVGA3D_D3D10_LEVEL_10_0);
@@ -340,9 +366,11 @@ VMSVGA3DD3D10Format vmsvga3d_d3d10_surface_format(SVGA3dSurfaceFormat format)
   case SVGA3D_BC3_UNORM:                return fmt(DXGI_BC3_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_BC3_UNORM_SRGB:           return fmt(DXGI_BC3_UNORM_SRGB, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_BC4_TYPELESS:             return fmt(DXGI_BC4_TYPELESS, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_ATI1:
   case SVGA3D_BC4_UNORM:                return fmt(DXGI_BC4_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_BC4_SNORM:                return fmt(DXGI_BC4_SNORM, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_BC5_TYPELESS:             return fmt(DXGI_BC5_TYPELESS, VMSVGA3D_D3D10_LEVEL_10_0);
+  case SVGA3D_ATI2:
   case SVGA3D_BC5_UNORM:                return fmt(DXGI_BC5_UNORM, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_BC5_SNORM:                return fmt(DXGI_BC5_SNORM, VMSVGA3D_D3D10_LEVEL_10_0);
   case SVGA3D_R10G10B10_XR_BIAS_A2_UNORM:
@@ -555,7 +583,14 @@ static void d3d10_texture_desc(VMSVGA3DD3D10CreateDesc *desc,
     desc->depth = 0;
   } else if (resource_dimension == D3D10_RESOURCE_DIMENSION_TEXTURE2D) {
     desc->depth = 0;
-    desc->sample_count = 1;
+    desc->sample_count = MAX(surface->multisample_count, 1u);
+    desc->sample_quality = 0;
+    if (desc->sample_count > 1) {
+      /* D3D10/11 multisampled textures have one mip level and cannot be
+       * initialized from guest backing at creation time.  VBox likewise
+       * skips guest-backed transfers for multisampled surfaces. */
+      desc->initial_subresource_count = 0;
+    }
   } else {
     desc->array_size = 0;
   }
@@ -694,9 +729,20 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_resource_plan(
     dimension = D3D10_RESOURCE_DIMENSION_TEXTURE2D;
   }
 
+  if (surface->multisample_count > 1 &&
+      (dimension != D3D10_RESOURCE_DIMENSION_TEXTURE2D ||
+       surface->mip_levels != 1 ||
+       (surface->surface_flags & (SVGA3D_SURFACE_CUBEMAP |
+                                  SVGA3D_SURFACE_1D |
+                                  SVGA3D_SURFACE_VOLUME)) != 0)) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
+
   d3d10_texture_desc(&plan->primary, surface, dimension,
                      plan->resource_format, &policy);
-  d3d10_texture_companions(surface, plan);
+  if (surface->multisample_count <= 1) {
+    d3d10_texture_companions(surface, plan);
+  }
   return level;
 }
 
@@ -4605,7 +4651,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_srv_desc(
   if (!src || !dst) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
-  (void)multisample_count;
   memset(dst, 0, sizeof(*dst));
   format = vmsvga3d_d3d10_surface_format(src->format);
   if (format.min_level == VMSVGA3D_D3D10_LEVEL_INVALID && src->format != SVGA3D_BUFFER) {
@@ -4631,15 +4676,25 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_srv_desc(
     }
     break;
   case SVGA3D_RESOURCE_TEXTURE2D:
-    if (array_elements <= 1) {
-      dst->view_dimension = D3D10_SRV_TEXTURE2D;
+    if (multisample_count > 1) {
+      if (array_elements <= 1) {
+        dst->view_dimension = D3D10_SRV_TEXTURE2DMS;
+      } else {
+        dst->view_dimension = D3D10_SRV_TEXTURE2DMSARRAY;
+        dst->first_array_slice = src->desc.tex.firstArraySlice;
+        dst->array_size = src->desc.tex.arraySize;
+      }
     } else {
-      dst->view_dimension = D3D10_SRV_TEXTURE2DARRAY;
-      dst->first_array_slice = src->desc.tex.firstArraySlice;
-      dst->array_size = src->desc.tex.arraySize;
+      if (array_elements <= 1) {
+        dst->view_dimension = D3D10_SRV_TEXTURE2D;
+      } else {
+        dst->view_dimension = D3D10_SRV_TEXTURE2DARRAY;
+        dst->first_array_slice = src->desc.tex.firstArraySlice;
+        dst->array_size = src->desc.tex.arraySize;
+      }
+      dst->most_detailed_mip = src->desc.tex.mostDetailedMip;
+      dst->mip_levels = src->desc.tex.mipLevels;
     }
-    dst->most_detailed_mip = src->desc.tex.mostDetailedMip;
-    dst->mip_levels = src->desc.tex.mipLevels;
     break;
   case SVGA3D_RESOURCE_TEXTURE3D:
     dst->view_dimension = D3D10_SRV_TEXTURE3D;
@@ -4676,7 +4731,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_rtv_desc(
   if (!src || !dst) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
-  (void)multisample_count;
   memset(dst, 0, sizeof(*dst));
   format = vmsvga3d_d3d10_surface_format(src->format);
   if (format.min_level == VMSVGA3D_D3D10_LEVEL_INVALID && src->format != SVGA3D_BUFFER) {
@@ -4701,14 +4755,24 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_rtv_desc(
     }
     break;
   case SVGA3D_RESOURCE_TEXTURE2D:
-    if (array_elements <= 1) {
-      dst->view_dimension = D3D10_RTV_TEXTURE2D;
+    if (multisample_count > 1) {
+      if (array_elements <= 1) {
+        dst->view_dimension = D3D10_RTV_TEXTURE2DMS;
+      } else {
+        dst->view_dimension = D3D10_RTV_TEXTURE2DMSARRAY;
+        dst->first_array_slice = src->desc.tex.firstArraySlice;
+        dst->array_size = src->desc.tex.arraySize;
+      }
     } else {
-      dst->view_dimension = D3D10_RTV_TEXTURE2DARRAY;
-      dst->first_array_slice = src->desc.tex.firstArraySlice;
-      dst->array_size = src->desc.tex.arraySize;
+      if (array_elements <= 1) {
+        dst->view_dimension = D3D10_RTV_TEXTURE2D;
+      } else {
+        dst->view_dimension = D3D10_RTV_TEXTURE2DARRAY;
+        dst->first_array_slice = src->desc.tex.firstArraySlice;
+        dst->array_size = src->desc.tex.arraySize;
+      }
+      dst->mip_slice = src->desc.tex.mipSlice;
     }
-    dst->mip_slice = src->desc.tex.mipSlice;
     break;
   case SVGA3D_RESOURCE_TEXTURE3D:
     dst->view_dimension = D3D10_RTV_TEXTURE3D;
@@ -4740,7 +4804,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_dsv_desc(
   if (!src || !dst) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
-  (void)multisample_count;
   memset(dst, 0, sizeof(*dst));
   format = vmsvga3d_d3d10_surface_format(src->format);
   if (format.min_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
@@ -4763,14 +4826,24 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_dsv_desc(
     }
     break;
   case SVGA3D_RESOURCE_TEXTURE2D:
-    if (array_elements <= 1) {
-      dst->view_dimension = D3D10_DSV_TEXTURE2D;
+    if (multisample_count > 1) {
+      if (array_elements <= 1) {
+        dst->view_dimension = D3D10_DSV_TEXTURE2DMS;
+      } else {
+        dst->view_dimension = D3D10_DSV_TEXTURE2DMSARRAY;
+        dst->first_array_slice = src->firstArraySlice;
+        dst->array_size = src->arraySize;
+      }
     } else {
-      dst->view_dimension = D3D10_DSV_TEXTURE2DARRAY;
-      dst->first_array_slice = src->firstArraySlice;
-      dst->array_size = src->arraySize;
+      if (array_elements <= 1) {
+        dst->view_dimension = D3D10_DSV_TEXTURE2D;
+      } else {
+        dst->view_dimension = D3D10_DSV_TEXTURE2DARRAY;
+        dst->first_array_slice = src->firstArraySlice;
+        dst->array_size = src->arraySize;
+      }
+      dst->mip_slice = src->mipSlice;
     }
-    dst->mip_slice = src->mipSlice;
     break;
   default:
     return VMSVGA3D_D3D10_LEVEL_INVALID;

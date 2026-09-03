@@ -1382,7 +1382,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_samplers_set_plan(
   plan->start_sampler = start_sampler;
   plan->count = count;
   plan->partial_shadow_update_on_failure = true;
-  plan->bind_timing = VMSVGA3D_D3D10_BIND_DRAW_SETUP;
+  plan->bind_timing = VMSVGA3D_D3D10_BIND_IMMEDIATE;
 
   for (i = 0; i < count; i++) {
     if (ids[i] >= sampler_table_count && ids[i] != SVGA3D_INVALID_ID) {
@@ -1508,7 +1508,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_viewports_set_plan(
   plan->count = count;
   plan->shadow_update = true;
   plan->preserve_unspecified_slots = true;
-  plan->immediate_bind = false;
+  plan->immediate_bind = true;
   return level;
 }
 
@@ -1529,7 +1529,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_topology_set_plan(
   }
   plan->topology = topology;
   plan->shadow_update = true;
-  plan->immediate_bind = false;
+  plan->immediate_bind = true;
   return level;
 }
 
@@ -1548,7 +1548,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_blend_state_set_plan(
          sizeof(plan->blend_factor));
   plan->sample_mask = command->sampleMask;
   plan->shadow_update = true;
-  plan->immediate_bind = false;
+  plan->immediate_bind = true;
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
@@ -1565,7 +1565,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_depth_stencil_state_set_plan(
   plan->depth_stencil_id = command->depthStencilId;
   plan->stencil_ref = command->stencilRef;
   plan->shadow_update = true;
-  plan->immediate_bind = false;
+  plan->immediate_bind = true;
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
@@ -1580,7 +1580,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_rasterizer_state_set_plan(
   memset(plan, 0, sizeof(*plan));
   plan->rasterizer_id = rasterizer_id;
   plan->shadow_update = true;
-  plan->immediate_bind = false;
+  plan->immediate_bind = true;
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
@@ -1600,7 +1600,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_scissor_plan(
   }
   plan->shadow_update = true;
   plan->native_layout_identical = true;
-  plan->immediate_bind = false;
+  plan->immediate_bind = true;
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
@@ -1716,35 +1716,33 @@ static VMSVGA3DD3D10ResourceCreateKind copy_resource_create_kind(
 }
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_copy_resource_plan(
-    SVGA3dSurfaceFormat source_format, bool source_resource_exists,
-    bool destination_resource_exists, VMSVGA3DD3D10CopyResourcePlan *plan)
+    SVGA3dSurfaceFormat source_format, SVGA3dSurfaceFormat destination_format,
+    bool source_resource_exists, bool destination_resource_exists,
+    VMSVGA3DD3D10CopyResourcePlan *plan)
 {
-  VMSVGA3DD3D10ResourceCreateKind kind;
 
   if (!plan) {
     return VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
   memset(plan, 0, sizeof(*plan));
-  kind = copy_resource_create_kind(source_format);
   plan->ensure_source_resource = !source_resource_exists;
   plan->ensure_destination_resource = !destination_resource_exists;
-  plan->source_create_kind = kind;
-  plan->destination_create_kind = kind;
-  plan->destination_create_kind_uses_source_format = true;
+  plan->source_create_kind = copy_resource_create_kind(source_format);
+  plan->destination_create_kind = copy_resource_create_kind(destination_format);
   plan->issue_copy_resource = true;
   plan->mark_destination_drawing_context = true;
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_copy_subresource_plan(
-    SVGA3dSurfaceFormat source_format, bool source_resource_exists,
-    bool destination_resource_exists, uint32_t destination_subresource,
+    SVGA3dSurfaceFormat source_format, SVGA3dSurfaceFormat destination_format,
+    bool source_resource_exists, bool destination_resource_exists,
+    uint32_t destination_subresource,
     uint32_t source_subresource, const SVGA3dSize *source_size,
     const SVGA3dSize *destination_size, const SVGA3dCopyBox *box,
     VMSVGA3DD3D10CopySubresourcePlan *plan)
 {
-  VMSVGA3DD3D10ResourceCreateKind kind;
   VMSVGA3DD3D10Level level;
 
   if (!plan) {
@@ -1752,12 +1750,10 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_copy_subresource_plan(
   }
 
   memset(plan, 0, sizeof(*plan));
-  kind = copy_resource_create_kind(source_format);
   plan->ensure_source_resource = !source_resource_exists;
   plan->ensure_destination_resource = !destination_resource_exists;
-  plan->source_create_kind = kind;
-  plan->destination_create_kind = kind;
-  plan->destination_create_kind_uses_source_format = true;
+  plan->source_create_kind = copy_resource_create_kind(source_format);
+  plan->destination_create_kind = copy_resource_create_kind(destination_format);
   plan->destination_subresource = destination_subresource;
   plan->source_subresource = source_subresource;
   level = vmsvga3d_d3d10_copy_region_plan(source_size, destination_size,
@@ -4276,6 +4272,13 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_query_info(
   }
   *info = base[type];
   info->predicate_hint = !!(flags & SVGA3D_DXQUERY_FLAG_PREDICATEHINT);
+  /* Current VirtualBox creates an ID3D11Predicate at DEFINE time only for
+   * OCCLUSIONPREDICATE + PREDICATEHINT. Other hinted query types are rejected
+   * before the backend object is created.
+   */
+  if (info->predicate_hint && type != SVGA3D_QUERYTYPE_OCCLUSIONPREDICATE) {
+    return VMSVGA3D_D3D10_LEVEL_INVALID;
+  }
   return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
@@ -4404,14 +4407,20 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_query_execution_plan(
   /* Skip Begin only for timestamp queries. */
   plan->issue_begin = type != SVGA3D_QUERYTYPE_TIMESTAMP;
   plan->issue_end = true;
-  plan->get_data_after_end = true;
+  /* Current VirtualBox ends predicate-hint queries but deliberately does not
+   * call GetData for them: the completed ID3D11Predicate remains pending in
+   * the guest query state and is consumed directly by SetPredication.
+   */
+  plan->get_data_after_end = !info.predicate_hint;
   plan->getdata_flags = 0;
-  plan->wait_until_ready = true;
-  /* Retry every non-S_OK return, not only S_FALSE. */
-  plan->retry_non_s_ok = true;
-  plan->yield_while_waiting = true;
+  /* Current VirtualBox never waits in DX_END_QUERY.  It probes GetData once,
+   * queues S_FALSE queries for ProcessPendingTasks, and treats real failures
+   * as terminal. */
+  plan->wait_until_ready = false;
+  plan->retry_non_s_ok = false;
+  plan->yield_while_waiting = false;
 
-  /* Queries are completed synchronously, so explicit readback is a NOP. */
+  /* The device does not cache query results, so explicit readback is a NOP. */
   plan->readback_is_noop = true;
   return level;
 }
@@ -4513,8 +4522,9 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_predication_plan(
   }
 
   memset(plan, 0, sizeof(*plan));
+  plan->predicate_value = predicate_value != 0;
   if (!enabled) {
-    /* SVGA3D_INVALID_ID maps directly to SetPredication(NULL, FALSE). */
+    /* Current VirtualBox forwards predicateValue even with a NULL predicate. */
     return VMSVGA3D_D3D10_LEVEL_10_0;
   }
 
@@ -4524,14 +4534,18 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_predication_plan(
   }
 
   plan->enabled = true;
-  plan->release_existing_query = true;
-  plan->create_predicate = true;
+  /* Current VirtualBox binds the query's existing backend object. Predicate
+   * creation moved to DEFINE_QUERY; SET_PREDICATION must not replace it.
+   */
+  plan->release_existing_query = false;
+  plan->create_predicate = false;
   plan->d3d_query = info.d3d_query;
   plan->misc_flags = info.predicate_hint
                    ? VMSVGA3D_D3D10_QUERY_MISC_PREDICATEHINT : 0;
-  plan->predicate_value = predicate_value != 0;
 
-  /* Do not pre-check whether the query type is predicate-compatible. */
+  /* The backend only asserts predicate compatibility; do not add a guest
+   * validation here that VirtualBox release builds do not perform.
+   */
   return level;
 }
 
@@ -6448,7 +6462,13 @@ static bool vmsvga3d_d3d10_context_switch_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
   VMSVGA3DDXContext *context;
+  VMSVGA3DDXContext *old_context = NULL;
   VMSVGA3DD3D10SOTargetsPlan plan;
+  uint32_t null_views[SVGA3D_DX_MAX_SRVIEWS];
+  uint32_t old_cid;
+  uint32_t stage;
+  uint32_t slot;
+  uint32_t old_vb_count;
 
   if (s == NULL || s->svga3d == NULL || cid >= SVGA3D_MAX_CONTEXT_IDS) {
     return false;
@@ -6457,8 +6477,65 @@ static bool vmsvga3d_d3d10_context_switch_live(
   if (context == NULL) {
     return false;
   }
-  if (s->svga3d->active_dx_context_id == cid) {
+  old_cid = s->svga3d->active_dx_context_id;
+  if (old_cid == cid) {
     return true;
+  }
+  if (old_cid != SVGA3D_INVALID_ID && old_cid < SVGA3D_MAX_CONTEXT_IDS) {
+    old_context = vmsvga3d_dx_context(s, old_cid);
+  }
+
+  /* Current VirtualBox DX_STATE_TRACKER marks every frontend pipeline state
+   * dirty before switching the D3D11 backend context.  The next Draw will
+   * therefore replay the complete new-context state from its shadow MOB.
+   */
+  context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_ALL;
+
+  /* The backend makes every constant-buffer slot pending again on a context
+   * switch.  vGPU10 exposes only VS/PS/GS, so mirror the 14 API slots for
+   * those three stages here.
+   */
+  for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE_DX10; stage++) {
+    context->constant_buffer_start_slot[stage] = 0;
+    context->constant_buffer_num_buffers[stage] = SVGA3D_DX_MAX_CONSTBUFFERS;
+  }
+
+  /* Old SRVs are explicitly NULL-unbound before setupPipeline binds the new
+   * context.  This is required because RTV/DSV targets are installed before
+   * SRVs and stale views from the prior context could otherwise conflict.
+   */
+  for (slot = 0; slot < SVGA3D_DX_MAX_SRVIEWS; slot++) {
+    null_views[slot] = SVGA3D_INVALID_ID;
+  }
+  for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE_DX10; stage++) {
+    uint32_t count = old_context != NULL
+                         ? MIN(old_context->shader_resource_max_bound[stage],
+                               (uint32_t)SVGA3D_DX_MAX_SRVIEWS)
+                         : SVGA3D_DX_MAX_SRVIEWS;
+
+    if (count != 0 &&
+        !vmsvga3d_dxvk_d3d11_set_shader_resources(
+            s->dxvk, cid, stage, 0, count, null_views)) {
+      return false;
+    }
+  }
+
+  /* Preserve VirtualBox's exact modified-mask quirk: the new context's VB
+   * mask is reset to the span that was bound by the old context (all 32 slots
+   * on the first switch).  Do not silently widen this to the new context's
+   * cMaxBound even though that would look more intuitive.
+   */
+  old_vb_count = old_context != NULL
+                     ? MIN(old_context->vertex_buffer_max_bound,
+                           (uint32_t)SVGA3D_DX_MAX_VERTEXBUFFERS)
+                     : SVGA3D_DX_MAX_VERTEXBUFFERS;
+  if (old_vb_count == 0) {
+    context->vertex_buffer_modified = 0;
+  } else if (old_vb_count >= 64) {
+    context->vertex_buffer_modified = UINT64_MAX;
+  } else {
+    context->vertex_buffer_modified =
+        (UINT64_C(1) << old_vb_count) - UINT64_C(1);
   }
 
   /* VirtualBox restores SO targets on every DX context switch.  The context
@@ -6475,7 +6552,6 @@ static bool vmsvga3d_d3d10_context_switch_live(
   s->svga3d->active_dx_context_id = cid;
   return true;
 }
-
 
 static bool vmsvga3d_d3d10_rtv_realize_live(
     struct vmsvga_state_s *s, uint32_t cid, SVGA3dRenderTargetViewId view_id)
@@ -6703,6 +6779,12 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
       !vmsvga3d_dxvk_ready(s->dxvk)) {
     return false;
   }
+  /* VBox dxEnsureResource reuses an existing backend resource verbatim.
+   * Do not reject a resident resource merely because a later caller would
+   * have chosen a different creation policy for a fresh resource. */
+  if (vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+    return true;
+  }
   if (!vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
     return false;
   }
@@ -6751,7 +6833,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
   surface = s->svga3d->surfaces[sid];
   if (surface == NULL || surface->mips == NULL || surface->mip_count == 0 ||
       !vmsvga3d_d3d10_copy_surface_materialize_live(
-          s, surface, VMSVGA3D_D3D10_CREATE_TEXTURE2D)) {
+          s, surface, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
     return false;
   }
 
@@ -6835,6 +6917,62 @@ static bool vmsvga3d_d3d10_update_box_live(
   layout->row_count = (layout->box.h + block_height - 1) / block_height;
   layout->depth_count = (layout->box.d + block_depth - 1) / block_depth;
   return layout->row_count != 0 && layout->depth_count != 0;
+}
+
+static bool vmsvga3d_d3d10_invalidate_subresource_live(
+    struct vmsvga_state_s *s,
+    const SVGA3dCmdDXInvalidateSubResource *command) {
+  SVGAOTableSurfaceEntry entry;
+  VMSVGA3DSurface *surface;
+  uint32_t otable_mip_levels;
+  uint32_t local_mip_levels;
+  uint32_t face = 0;
+  uint32_t mipmap = 0;
+  uint64_t local_subresource;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      command->sid >= SVGA3D_MAX_SURFACE_IDS ||
+      !vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, command->sid,
+                            sizeof(entry), &entry, sizeof(entry))) {
+    return false;
+  }
+
+  /* VBox derives face/mipmap from the OTable copy, not from the live
+   * surface.  Its helper falls back to face=0,mipmap=0 when numMipLevels is
+   * zero after an assertion, so preserve that release-build behavior.
+   */
+  otable_mip_levels = le32_to_cpu(entry.numMipLevels);
+  if (otable_mip_levels != 0) {
+    face = command->subResource / otable_mip_levels;
+    mipmap = command->subResource % otable_mip_levels;
+  }
+
+  /* vmsvga3dCmdDXInvalidateSubResource returns the OTable-read status and
+   * deliberately ignores vmsvga3dSurfaceInvalidate's status.  A stale OTable
+   * entry or an invalid live image is therefore still command success.
+   */
+  surface = s->svga3d->surfaces[command->sid];
+  if (surface == NULL || surface->mips == NULL) {
+    return true;
+  }
+  local_mip_levels = surface->face[0].numMipLevels;
+  if (local_mip_levels == 0 || surface->array_elements == 0 ||
+      face >= surface->array_elements || mipmap >= local_mip_levels) {
+    return true;
+  }
+  local_subresource = (uint64_t)face * local_mip_levels + mipmap;
+  if (local_subresource >= surface->mip_count) {
+    return true;
+  }
+
+  /* VBox D3D11 leaves buffer invalidation as a no-op.  For textures it
+   * destroys all cached views on the surface, even though only one image was
+   * requested; they are lazily recreated on their next use.
+   */
+  if (surface->format != SVGA3D_BUFFER && surface->dxvk_surface != NULL) {
+    vmsvga3d_dxvk_d3d11_surface_invalidate_views(surface->dxvk_surface);
+  }
+  return true;
 }
 
 static bool vmsvga3d_d3d10_update_subresource_live(
@@ -7137,7 +7275,8 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
   }
 
   level = vmsvga3d_d3d10_copy_subresource_plan(
-      source->format, false, false, command->dstSubResource,
+      source->format, destination->format, false, false,
+      command->dstSubResource,
       command->srcSubResource, &source->mips[command->srcSubResource].size,
       &destination->mips[command->dstSubResource].size, &command->box, &plan);
   if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
@@ -7176,7 +7315,7 @@ static bool vmsvga3d_d3d10_pred_copy_live(
   }
 
   level = vmsvga3d_d3d10_copy_resource_plan(
-      source->format, false, false, &plan);
+      source->format, destination->format, false, false, &plan);
   if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
       !vmsvga3d_d3d10_copy_surface_materialize_live(
           s, source, plan.source_create_kind) ||
@@ -7186,6 +7325,41 @@ static bool vmsvga3d_d3d10_pred_copy_live(
   }
   return vmsvga3d_dxvk_d3d11_copy_resource(
       s->dxvk, destination->dxvk_surface, source->dxvk_surface);
+}
+
+static bool vmsvga3d_d3d10_resolve_copy_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXResolveCopy *command)
+{
+  VMSVGA3DSurface *source;
+  VMSVGA3DSurface *destination;
+  VMSVGA3DD3D10Format resolve_format;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk) || vmsvga3d_dx_context(s, cid) == NULL ||
+      command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
+      command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
+    return false;
+  }
+  source = s->svga3d->surfaces[command->srcSid];
+  destination = s->svga3d->surfaces[command->dstSid];
+  if (source == NULL || destination == NULL || source->dxvk_surface == NULL ||
+      destination->dxvk_surface == NULL ||
+      !vmsvga3d_d3d10_copy_surface_materialize_live(
+          s, source, copy_resource_create_kind(source->format)) ||
+      !vmsvga3d_d3d10_copy_surface_materialize_live(
+          s, destination, copy_resource_create_kind(destination->format))) {
+    return false;
+  }
+
+  /* Current VirtualBox translates copyFormat but does not validate the
+   * result before issuing the void ResolveSubresource call.  Preserve that
+   * behavior, including DXGI_FORMAT_UNKNOWN for an unmapped format. */
+  resolve_format = vmsvga3d_d3d10_surface_format(command->copyFormat);
+  return vmsvga3d_dxvk_d3d11_resolve_subresource(
+      s->dxvk, destination->dxvk_surface, command->dstSubResource,
+      source->dxvk_surface, command->srcSubResource,
+      resolve_format.dxgi_format);
 }
 
 static bool vmsvga3d_d3d10_gen_mips_live(
@@ -7322,9 +7496,9 @@ static bool vmsvga3d_d3d10_present_blt_live(
       destination->mips == NULL || command->srcSubResource >= source->mip_count ||
       command->destSubResource >= destination->mip_count ||
       !vmsvga3d_d3d10_copy_surface_materialize_live(
-          s, source, VMSVGA3D_D3D10_CREATE_TEXTURE2D) ||
+          s, source, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
       !vmsvga3d_d3d10_copy_surface_materialize_live(
-          s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE2D)) {
+          s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
     return false;
   }
 
@@ -7358,9 +7532,15 @@ static bool vmsvga3d_d3d10_present_blt_live(
       &destination_image->size);
 }
 
-static bool vmsvga3d_d3d10_query_end_live(
-    struct vmsvga_state_s *s, uint32_t cid,
-    const SVGA3dCmdDXEndQuery *command)
+typedef enum vmsvga3d_d3d10_query_poll_result_e {
+  VMSVGA3D_D3D10_QUERY_POLL_FAILED = 0,
+  VMSVGA3D_D3D10_QUERY_POLL_PENDING,
+  VMSVGA3D_D3D10_QUERY_POLL_FINISHED,
+} VMSVGA3DD3D10QueryPollResult;
+
+static VMSVGA3DD3D10QueryPollResult
+vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
+                                uint32_t query_id)
 {
   VMSVGA3DD3D10QueryExecutionPlan plan;
   SVGADXQueryResultUnion svga_result = { 0 };
@@ -7373,41 +7553,37 @@ static bool vmsvga3d_d3d10_query_end_live(
   uint32_t offset;
   uint32_t svga_result_size = 0;
   uint32_t query_state;
+  bool ready = false;
   bool success = false;
 
-  if (s == NULL || command == NULL || s->svga3d == NULL ||
-      !vmsvga3d_dxvk_ready(s->dxvk)) {
-    return false;
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
   }
   entry = vmsvga3d_dx_cotable_entry_ptr(
-      s, cid, SVGA_COTABLE_DXQUERY, command->queryId);
-  if (entry == NULL) {
-    return false;
+      s, cid, SVGA_COTABLE_DXQUERY, query_id);
+  if (entry == NULL ||
+      !vmsvga3d_dxvk_d3d11_query_pending(s->dxvk, cid, query_id)) {
+    return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
   }
   type = (SVGA3dQueryType)entry[0];
   flags = query_read_u32(entry + 4);
   if (type >= SVGA3D_QUERYTYPE_DX10_MAX ||
       vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
           VMSVGA3D_D3D10_LEVEL_INVALID ||
+      !plan.get_data_after_end ||
       plan.d3d_result_size > sizeof(d3d_result)) {
-    return false;
-  }
-  if (entry[3] == SVGADX_QDSTATE_FINISHED) {
-    return true;
-  }
-  if (entry[3] != SVGADX_QDSTATE_ACTIVE &&
-      entry[3] != SVGADX_QDSTATE_IDLE) {
-    return false;
+    return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
   }
 
-  entry[3] = SVGADX_QDSTATE_PENDING;
-  if (vmsvga3d_dxvk_d3d11_query_end(
-          s->dxvk, cid, command->queryId, plan.issue_end, d3d_result,
-          plan.d3d_result_size, plan.getdata_flags) &&
-      vmsvga3d_d3d10_query_result(
-          type, d3d_result, plan.d3d_result_size, &svga_result,
-          &svga_result_size) != VMSVGA3D_D3D10_LEVEL_INVALID) {
-    success = true;
+  if (vmsvga3d_dxvk_d3d11_query_get_data(
+          s->dxvk, cid, query_id, d3d_result, plan.d3d_result_size,
+          plan.getdata_flags, &ready)) {
+    if (!ready) {
+      return VMSVGA3D_D3D10_QUERY_POLL_PENDING;
+    }
+    success = vmsvga3d_d3d10_query_result(
+                  type, d3d_result, plan.d3d_result_size, &svga_result,
+                  &svga_result_size) != VMSVGA3D_D3D10_LEVEL_INVALID;
   }
 
   mobid = query_read_u32(entry + 8);
@@ -7423,10 +7599,206 @@ static bool vmsvga3d_d3d10_query_end_live(
     (void)vmsvga3d_mob_write(
         s, mob, offset, &query_state, sizeof(query_state));
   }
-  if (success) {
-    entry[3] = SVGADX_QDSTATE_FINISHED;
+
+  /* vmsvga3dDXCbFinishQuery marks both successful and failed completions
+   * FINISHED.  Only S_FALSE stays on the backend pending list.  In the odd
+   * repeated-BEGIN case VBox may overwrite an ACTIVE guest state here too. */
+  entry[3] = SVGADX_QDSTATE_FINISHED;
+  return success ? VMSVGA3D_D3D10_QUERY_POLL_FINISHED
+                 : VMSVGA3D_D3D10_QUERY_POLL_FAILED;
+}
+
+static bool vmsvga3d_d3d10_query_end_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXEndQuery *command)
+{
+  VMSVGA3DD3D10QueryExecutionPlan plan;
+  VMSVGA3DD3D10QueryPollResult poll;
+  uint8_t *entry;
+  SVGA3dQueryType type;
+  uint32_t flags;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return false;
   }
-  return success;
+  entry = vmsvga3d_dx_cotable_entry_ptr(
+      s, cid, SVGA_COTABLE_DXQUERY, command->queryId);
+  if (entry == NULL) {
+    return false;
+  }
+  type = (SVGA3dQueryType)entry[0];
+  flags = query_read_u32(entry + 4);
+  if (type >= SVGA3D_QUERYTYPE_DX10_MAX ||
+      vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
+          VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return false;
+  }
+  if (entry[3] == SVGADX_QDSTATE_FINISHED) {
+    return true;
+  }
+  if (entry[3] != SVGADX_QDSTATE_ACTIVE &&
+      entry[3] != SVGADX_QDSTATE_IDLE) {
+    return false;
+  }
+
+  /* Timestamp queries have no BEGIN, so END is the first operation that
+   * exposes the pending state to the guest result MOB.  VirtualBox writes
+   * that state before issuing the native End call. */
+  if (type == SVGA3D_QUERYTYPE_TIMESTAMP) {
+    VMSVGA3DMob *mob = vmsvga3d_mob_get(s, query_read_u32(entry + 8));
+
+    if (mob != NULL) {
+      uint32_t query_state = SVGA3D_QUERYSTATE_PENDING;
+
+      (void)vmsvga3d_mob_write(
+          s, mob, query_read_u32(entry + 12), &query_state,
+          sizeof(query_state));
+    }
+  }
+
+  entry[3] = SVGADX_QDSTATE_PENDING;
+  if (!vmsvga3d_dxvk_d3d11_query_end(
+          s->dxvk, cid, command->queryId, plan.issue_end)) {
+    return false;
+  }
+  if (!plan.get_data_after_end) {
+    /* Predicate-hint queries intentionally remain pending forever from the
+     * guest-status perspective; SetPredication consumes the native predicate. */
+    return true;
+  }
+
+  /* VBox probes once here.  S_OK may finish immediately, S_FALSE stays
+   * pending for ProcessPendingTasks, and any real HRESULT failure finishes
+   * the guest query with FAILED. */
+  poll = vmsvga3d_d3d10_query_poll_live(s, cid, command->queryId);
+  return poll != VMSVGA3D_D3D10_QUERY_POLL_FAILED;
+}
+
+static void vmsvga3d_d3d10_process_pending_queries(
+    struct vmsvga_state_s *s)
+{
+  uint32_t cid;
+
+  if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return;
+  }
+  for (cid = 0; cid < SVGA3D_MAX_CONTEXT_IDS; cid++) {
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    VMSVGA3DDXCOTable *binding;
+    SVGACOTableDXQueryEntry *entries;
+    uint32_t query_id;
+
+    if (context == NULL) {
+      continue;
+    }
+    binding = &context->cotables[SVGA_COTABLE_DXQUERY];
+    if (binding->capacity_entries == 0 || binding->host == NULL ||
+        binding->entry_size != sizeof(SVGACOTableDXQueryEntry) ||
+        binding->host_size / sizeof(SVGACOTableDXQueryEntry) <
+            binding->capacity_entries) {
+      continue;
+    }
+    entries = (SVGACOTableDXQueryEntry *)binding->host;
+    for (query_id = 0; query_id < binding->capacity_entries; query_id++) {
+      VMSVGA3DD3D10QueryExecutionPlan plan;
+      SVGA3dQueryType type;
+
+      if (!vmsvga3d_dxvk_d3d11_query_pending(
+              s->dxvk, cid, query_id)) {
+        continue;
+      }
+      {
+        const uint8_t *entry = (const uint8_t *)&entries[query_id];
+
+        type = (SVGA3dQueryType)entry[0];
+        if (type >= SVGA3D_QUERYTYPE_DX10_MAX ||
+            vmsvga3d_d3d10_query_execution_plan(
+                type, query_read_u32(entry + 4), &plan) ==
+              VMSVGA3D_D3D10_LEVEL_INVALID ||
+            !plan.get_data_after_end) {
+          continue;
+        }
+      }
+      (void)vmsvga3d_d3d10_query_poll_live(s, cid, query_id);
+    }
+  }
+}
+
+static bool vmsvga3d_d3d10_query_begin_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXBeginQuery *command)
+{
+  VMSVGA3DD3D10QueryExecutionPlan plan;
+  uint8_t *entry;
+  VMSVGA3DMob *mob;
+  SVGA3dQueryType type;
+  uint32_t flags;
+  uint32_t mobid;
+  uint32_t offset;
+  uint32_t query_state;
+
+  if (s == NULL || command == NULL || s->svga3d == NULL ||
+      !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return false;
+  }
+  entry = vmsvga3d_dx_cotable_entry_ptr(
+      s, cid, SVGA_COTABLE_DXQUERY, command->queryId);
+  if (entry == NULL) {
+    return false;
+  }
+  type = (SVGA3dQueryType)entry[0];
+  flags = query_read_u32(entry + 4);
+  if (type >= SVGA3D_QUERYTYPE_DX10_MAX ||
+      vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
+          VMSVGA3D_D3D10_LEVEL_INVALID) {
+    return false;
+  }
+
+  /* Current VirtualBox treats BEGIN(timestamp) as a complete no-op: it does
+   * not issue ID3D11DeviceContext::Begin and does not change the query state.
+   */
+  if (!plan.issue_begin) {
+    return true;
+  }
+
+  /* A second BEGIN on an active query first ends the previous interval and
+   * then begins a new one.  This matters for predicate-hint queries too: END
+   * leaves them pending, after which the same predicate is begun again.
+   */
+  if (entry[3] == SVGADX_QDSTATE_ACTIVE) {
+    SVGA3dCmdDXEndQuery end_command = { .queryId = command->queryId };
+
+    if (!vmsvga3d_d3d10_query_end_live(s, cid, &end_command)) {
+      return false;
+    }
+  }
+  if (entry[3] != SVGADX_QDSTATE_IDLE &&
+      entry[3] != SVGADX_QDSTATE_PENDING &&
+      entry[3] != SVGADX_QDSTATE_FINISHED) {
+    return false;
+  }
+
+  mobid = query_read_u32(entry + 8);
+  offset = query_read_u32(entry + 12);
+  mob = vmsvga3d_mob_get(s, mobid);
+  if (!vmsvga3d_dxvk_d3d11_query_begin(
+          s->dxvk, cid, command->queryId, true)) {
+    if (mob != NULL) {
+      query_state = SVGA3D_QUERYSTATE_FAILED;
+      (void)vmsvga3d_mob_write(
+          s, mob, offset, &query_state, sizeof(query_state));
+    }
+    return false;
+  }
+
+  entry[3] = SVGADX_QDSTATE_ACTIVE;
+  if (mob != NULL) {
+    query_state = SVGA3D_QUERYSTATE_PENDING;
+    (void)vmsvga3d_mob_write(
+        s, mob, offset, &query_state, sizeof(query_state));
+  }
+  return true;
 }
 
 static bool vmsvga3d_d3d10_bind_all_query_live(
@@ -7638,7 +8010,7 @@ static bool vmsvga3d_d3d10_constant_buffer_offset_live(
          vmsvga3d_d3d10_constant_buffer_live(s, cid, &plan, surface);
 }
 
-static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_samplers_live(
+static bool vmsvga3d_d3d10_samplers_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10SamplerSetPlan *plan, uint32_t bind_count)
 {
@@ -7652,7 +8024,7 @@ static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_samplers_live(
       bind_count != 0 ? plan->ids : NULL);
 }
 
-static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_topology_live(
+static bool vmsvga3d_d3d10_topology_live(
     struct vmsvga_state_s *s, const VMSVGA3DD3D10TopologySetPlan *plan)
 {
   return s != NULL && plan != NULL && plan->immediate_bind &&
@@ -7660,7 +8032,7 @@ static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_topology_live(
              s->dxvk, plan->native_topology);
 }
 
-static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_viewports_live(
+static bool vmsvga3d_d3d10_viewports_live(
     struct vmsvga_state_s *s, const VMSVGA3DD3D10ViewportsSetPlan *plan)
 {
   return s != NULL && plan != NULL && plan->immediate_bind &&
@@ -7669,7 +8041,7 @@ static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_viewports_live(
              plan->count != 0 ? plan->viewports : NULL);
 }
 
-static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_scissors_live(
+static bool vmsvga3d_d3d10_scissors_live(
     struct vmsvga_state_s *s, const VMSVGA3DD3D10ScissorPlan *plan)
 {
   return s != NULL && plan != NULL && plan->immediate_bind &&
@@ -7679,7 +8051,7 @@ static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_scissors_live(
              plan->count != 0 ? plan->rects : NULL);
 }
 
-static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_blend_state_live(
+static bool vmsvga3d_d3d10_blend_state_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10BlendStateSetPlan *plan)
 {
@@ -7689,7 +8061,7 @@ static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_blend_state_live(
              plan->sample_mask);
 }
 
-static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_depth_stencil_state_live(
+static bool vmsvga3d_d3d10_depth_stencil_state_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10DepthStencilStateSetPlan *plan)
 {
@@ -7698,7 +8070,7 @@ static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_depth_stencil_state_live(
              s->dxvk, cid, plan->depth_stencil_id, plan->stencil_ref);
 }
 
-static bool VMSVGA3D_D3D10_LIVE_UNUSED vmsvga3d_d3d10_rasterizer_state_live(
+static bool vmsvga3d_d3d10_rasterizer_state_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10RasterizerStateSetPlan *plan)
 {
@@ -7770,24 +8142,12 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
   case SVGA_3D_CMD_DX_INVALIDATE_SUBRESOURCE: {
     SVGA3dCmdDXInvalidateSubResource command;
-    VMSVGA3DSurface *surface;
 
     if (size < sizeof(command)) {
       return false;
     }
     memcpy(&command, payload, sizeof(command));
-    if (s == NULL || s->svga3d == NULL ||
-        command.sid >= SVGA3D_MAX_SURFACE_IDS) {
-      return false;
-    }
-    surface = s->svga3d->surfaces[command.sid];
-    if (surface == NULL || surface->mips == NULL ||
-        command.subResource >= surface->mip_count) {
-      return false;
-    }
-
-    /* Invalidation is advisory: retaining the current contents is valid. */
-    return true;
+    return vmsvga3d_d3d10_invalidate_subresource_live(s, &command);
   }
 
   case SVGA_3D_CMD_DX_PRED_COPY_REGION: {
@@ -7808,6 +8168,16 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     }
     memcpy(&command, payload, sizeof(command));
     return vmsvga3d_d3d10_pred_copy_live(s, cid, &command);
+  }
+
+  case SVGA_3D_CMD_DX_RESOLVE_COPY: {
+    SVGA3dCmdDXResolveCopy command;
+
+    if (size < sizeof(command)) {
+      return false;
+    }
+    memcpy(&command, payload, sizeof(command));
+    return vmsvga3d_d3d10_resolve_copy_live(s, cid, &command);
   }
 
   case SVGA_3D_CMD_DX_GENMIPS: {
@@ -7941,7 +8311,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
       };
       return false;
     };
-    return vmsvga3d_state_dx_apply_samplers(s, cid, &plan);
+    return vmsvga3d_state_dx_apply_samplers(s, cid, &plan) &&
+           vmsvga3d_d3d10_samplers_live(s, cid, &plan, count);
   }
 
   case SVGA_3D_CMD_DX_DRAW: {
@@ -8066,7 +8437,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     memcpy(&command, payload, sizeof(command));
     return vmsvga3d_d3d10_topology_set_plan(command.topology, &plan) !=
                VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_state_dx_apply_topology(s, cid, &plan);
+           vmsvga3d_state_dx_apply_topology(s, cid, &plan) &&
+           vmsvga3d_d3d10_topology_live(s, &plan);
   }
 
   case SVGA_3D_CMD_DX_SET_VIEWPORTS: {
@@ -8089,7 +8461,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     return vmsvga3d_d3d10_viewports_set_plan(
                count, count != 0 ? viewports : NULL, &plan) !=
                VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_state_dx_apply_viewports(s, cid, &plan);
+           vmsvga3d_state_dx_apply_viewports(s, cid, &plan) &&
+           vmsvga3d_d3d10_viewports_live(s, &plan);
   }
 
   case SVGA_3D_CMD_DX_SET_SCISSORRECTS: {
@@ -8112,7 +8485,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     return vmsvga3d_d3d10_scissor_plan(
                count, count != 0 ? rects : NULL, &plan) !=
                VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_state_dx_apply_scissors(s, cid, &plan);
+           vmsvga3d_state_dx_apply_scissors(s, cid, &plan) &&
+           vmsvga3d_d3d10_scissors_live(s, &plan);
   }
 
   case SVGA_3D_CMD_DX_SET_RENDERTARGETS: {
@@ -8635,7 +9009,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                &command,
                context->cotables[SVGA_COTABLE_BLENDSTATE].capacity_entries,
                &plan) != VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_state_dx_apply_blend_state(s, cid, &plan);
+           vmsvga3d_state_dx_apply_blend_state(s, cid, &plan) &&
+           vmsvga3d_d3d10_blend_state_live(s, cid, &plan);
   }
 
   case SVGA_3D_CMD_DX_SET_DEPTHSTENCIL_STATE: {
@@ -8651,7 +9026,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                &command,
                context->cotables[SVGA_COTABLE_DEPTHSTENCIL].capacity_entries,
                &plan) != VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_state_dx_apply_depth_stencil_state(s, cid, &plan);
+           vmsvga3d_state_dx_apply_depth_stencil_state(s, cid, &plan) &&
+           vmsvga3d_d3d10_depth_stencil_state_live(s, cid, &plan);
   }
 
   case SVGA_3D_CMD_DX_SET_RASTERIZER_STATE: {
@@ -8667,7 +9043,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                command.rasterizerId,
                context->cotables[SVGA_COTABLE_RASTERIZERSTATE].capacity_entries,
                &plan) != VMSVGA3D_D3D10_LEVEL_INVALID &&
-           vmsvga3d_state_dx_apply_rasterizer_state(s, cid, &plan);
+           vmsvga3d_state_dx_apply_rasterizer_state(s, cid, &plan) &&
+           vmsvga3d_d3d10_rasterizer_state_live(s, cid, &plan);
   }
 
   case SVGA_3D_CMD_DX_DEFINE_QUERY: {
@@ -8716,52 +9093,12 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
   case SVGA_3D_CMD_DX_BEGIN_QUERY: {
     SVGA3dCmdDXBeginQuery command;
-    VMSVGA3DD3D10QueryExecutionPlan plan;
-    uint8_t *entry;
-    VMSVGA3DMob *mob;
-    SVGA3dQueryType type;
-    uint32_t flags;
-    uint32_t mobid;
-    uint32_t offset;
-    uint32_t query_state = SVGA3D_QUERYSTATE_PENDING;
 
     if (size < sizeof(command)) {
       return false;
     };
     memcpy(&command, payload, sizeof(command));
-    entry = vmsvga3d_dx_cotable_entry_ptr(
-        s, cid, SVGA_COTABLE_DXQUERY, command.queryId);
-    if (entry == NULL) {
-      return false;
-    }
-    type = (SVGA3dQueryType)entry[0];
-    flags = query_read_u32(entry + 4);
-    if (type >= SVGA3D_QUERYTYPE_DX10_MAX ||
-        vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
-            VMSVGA3D_D3D10_LEVEL_INVALID) {
-      return false;
-    }
-    if (entry[3] == SVGADX_QDSTATE_ACTIVE) {
-      return true;
-    }
-    if (entry[3] != SVGADX_QDSTATE_IDLE &&
-        entry[3] != SVGADX_QDSTATE_PENDING &&
-        entry[3] != SVGADX_QDSTATE_FINISHED) {
-      return false;
-    }
-    if (!vmsvga3d_dxvk_d3d11_query_begin(
-            s->dxvk, cid, command.queryId, plan.issue_begin)) {
-      return false;
-    }
-    entry[3] = SVGADX_QDSTATE_ACTIVE;
-    mobid = query_read_u32(entry + 8);
-    offset = query_read_u32(entry + 12);
-    mob = vmsvga3d_mob_get(s, mobid);
-    if (mob != NULL) {
-      (void)vmsvga3d_mob_write(
-          s, mob, offset, &query_state, sizeof(query_state));
-    }
-    return true;
+    return vmsvga3d_d3d10_query_begin_live(s, cid, &command);
   }
 
   case SVGA_3D_CMD_DX_END_QUERY: {
@@ -8818,7 +9155,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
       return false;
     };
     memcpy(&command, payload, sizeof(command));
-    /* Query completion is synchronous; explicit readback is a validated NOP. */
+    /* The device does not cache queries; pending completion is handled by
+     * the renderer task pump, so explicit readback remains a validated NOP. */
     return vmsvga3d_dx_cotable_entry_ptr(
                s, cid, SVGA_COTABLE_DXQUERY, command.queryId) != NULL;
   }

@@ -32,6 +32,7 @@
 #include "include/vmware_vga_dxvk.h"
 #include "include/vmware_vga_dxvk_wsi.h"
 
+typedef struct vmsvga3d_dxvk_d3d9_query_s VMSVGA3DDxvkD3D9Query;
 typedef struct vmsvga3d_dxvk_query_s VMSVGA3DDxvkQuery;
 typedef struct vmsvga3d_dxvk_state_s VMSVGA3DDxvkState;
 typedef struct vmsvga3d_dxvk_shader_s VMSVGA3DDxvkShader;
@@ -47,6 +48,7 @@ struct vmsvga3d_dxvk_s {
   void *d3d9;
   void *d3d9_device;
   void *d3d9_pristine_state;
+  VMSVGA3DDxvkD3D9Query *d3d9_queries;
   void *d3d11_device;
   void *d3d11_context;
   VMSVGA3DDxvkQuery *d3d11_queries;
@@ -79,11 +81,11 @@ struct vmsvga3d_dxvk_s {
   bool ready;
 };
 
-typedef enum vmsvga3d_dxvk_view_kind_e {
-  VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
-  VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
-  VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL,
-} VMSVGA3DDxvkViewKind;
+struct vmsvga3d_dxvk_d3d9_query_s {
+  uint32_t cid;
+  void *query;
+  VMSVGA3DDxvkD3D9Query *next;
+};
 
 struct vmsvga3d_dxvk_view_s {
   uint32_t cid;
@@ -99,6 +101,7 @@ struct vmsvga3d_dxvk_query_s {
   uint32_t query_id;
   uint32_t d3d_query;
   uint32_t misc_flags;
+  bool pending;
   void *query;
   VMSVGA3DDxvkQuery *next;
 };
@@ -187,7 +190,6 @@ struct vmsvga3d_dxvk_surface_s {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
 
 #include <dlfcn.h>
-#include <sched.h>
 
 #define VMSVGA3D_DXVK_D3D9_SONAME "libdxvk_d3d9.so.0"
 #define VMSVGA3D_DXVK_D3D11_SONAME "libdxvk_d3d11.so.0"
@@ -273,6 +275,13 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_PIXEL_SHADER_CONSTANT_F 109u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_PIXEL_SHADER_CONSTANT_I 111u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_PIXEL_SHADER_CONSTANT_B 113u
+#define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_QUERY 118u
+#define VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE 2u
+#define VMSVGA3D_DXVK_IDIRECT3DQUERY9_ISSUE 6u
+#define VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA 7u
+#define VMSVGA3D_DXVK_D3D_S_FALSE 1
+#define VMSVGA3D_DXVK_IDIRECT3DBASETEXTURE9_SET_AUTOGEN_FILTER_TYPE 14u
+#define VMSVGA3D_DXVK_IDIRECT3DBASETEXTURE9_GENERATE_MIP_SUB_LEVELS 16u
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_GET_SURFACE_LEVEL 18u
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_LOCK_RECT 19u
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_UNLOCK_RECT 20u
@@ -358,6 +367,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RESOLVE_SUBRESOURCE 57u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_CONSTANT_BUFFERS 72u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER_RESOURCES 73u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER 74u
@@ -539,10 +549,19 @@ typedef int32_t (*VMSVGA3DDxvkSetStreamSourceFreq)(void *device,
                                                    uint32_t stream,
                                                    uint32_t frequency);
 typedef int32_t (*VMSVGA3DDxvkSetIndices)(void *device, void *buffer);
+typedef int32_t (*VMSVGA3DDxvkCreateQuery)(void *device, uint32_t type,
+                                           void **query);
+typedef int32_t (*VMSVGA3DDxvkQueryIssue)(void *query, uint32_t flags);
+typedef int32_t (*VMSVGA3DDxvkQueryGetData)(void *query, void *data,
+                                             uint32_t size, uint32_t flags);
 typedef int32_t (*VMSVGA3DDxvkBufferLock)(void *buffer, uint32_t offset,
                                           uint32_t size, void **data,
                                           uint32_t flags);
 typedef int32_t (*VMSVGA3DDxvkBufferUnlock)(void *buffer);
+typedef int32_t (*VMSVGA3DDxvkBaseTextureSetAutoGenFilterType)(
+    void *texture, uint32_t filter);
+typedef void (*VMSVGA3DDxvkBaseTextureGenerateMipSubLevels)(
+    void *texture);
 typedef int32_t (*VMSVGA3DDxvkTextureGetSurfaceLevel)(void *texture,
                                                        uint32_t level,
                                                        void **surface);
@@ -804,6 +823,9 @@ typedef void (*VMSVGA3DDxvkD3D11CopySubresourceRegion)(
     const VMSVGA3DDxvkD3D11Box *source_box);
 typedef void (*VMSVGA3DDxvkD3D11CopyResource)(
     void *context, void *destination, void *source);
+typedef void (*VMSVGA3DDxvkD3D11ResolveSubresource)(
+    void *context, void *destination, uint32_t destination_subresource,
+    void *source, uint32_t source_subresource, uint32_t format);
 typedef void (*VMSVGA3DDxvkD3D11UpdateSubresource)(
     void *context, void *destination, uint32_t destination_subresource,
     const VMSVGA3DDxvkD3D11Box *destination_box, const void *source_data,
@@ -1019,6 +1041,37 @@ static bool vmsvga3d_dxvk_get_method(void *object, uint32_t index,
 }
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
+static bool vmsvga3d_dxvk_d3d9_set_autogen_filter(void *texture,
+                                                    uint32_t filter) {
+  VMSVGA3DDxvkBaseTextureSetAutoGenFilterType set_filter = NULL;
+
+  if (!vmsvga3d_dxvk_get_method(
+          texture,
+          VMSVGA3D_DXVK_IDIRECT3DBASETEXTURE9_SET_AUTOGEN_FILTER_TYPE,
+          &set_filter, sizeof(set_filter))) {
+    return false;
+  }
+
+  /* VirtualBox only asserts the HRESULT and continues in release builds. */
+  (void)set_filter(texture, filter);
+  return true;
+}
+
+static bool vmsvga3d_dxvk_d3d9_generate_mip_sublevels(void *texture,
+                                                        uint32_t filter) {
+  VMSVGA3DDxvkBaseTextureGenerateMipSubLevels generate_mips = NULL;
+
+  if (!vmsvga3d_dxvk_d3d9_set_autogen_filter(texture, filter) ||
+      !vmsvga3d_dxvk_get_method(
+          texture,
+          VMSVGA3D_DXVK_IDIRECT3DBASETEXTURE9_GENERATE_MIP_SUB_LEVELS,
+          &generate_mips, sizeof(generate_mips))) {
+    return false;
+  }
+  generate_mips(texture);
+  return true;
+}
+
 static bool vmsvga3d_dxvk_capture_pristine_state(VMSVGA3DDxvk *dxvk) {
   VMSVGA3DDxvkCreateStateBlock create_state_block = NULL;
   int32_t result;
@@ -1775,6 +1828,16 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk) {
     dlclose(dxvk->d3d11_library);
     dxvk->d3d11_library = NULL;
   }
+  while (dxvk->d3d9_queries != NULL) {
+    VMSVGA3DDxvkD3D9Query *query = dxvk->d3d9_queries;
+
+    dxvk->d3d9_queries = query->next;
+    if (query->query != NULL) {
+      vmsvga3d_dxvk_release(query->query,
+                            VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE);
+    }
+    g_free(query);
+  }
   if (dxvk->d3d9_pristine_state != NULL) {
     vmsvga3d_dxvk_release(dxvk->d3d9_pristine_state,
                           VMSVGA3D_DXVK_IDIRECT3DSTATEBLOCK9_RELEASE);
@@ -1937,6 +2000,26 @@ static void vmsvga3d_dxvk_d3d11_view_surface_destroy(
 void vmsvga3d_dxvk_d3d11_surface_invalidate_views(
     VMSVGA3DDxvkSurface *surface) {
   vmsvga3d_dxvk_d3d11_view_surface_destroy(surface);
+}
+
+void vmsvga3d_dxvk_d3d11_surface_visit_views(
+    VMSVGA3DDxvkSurface *surface, VMSVGA3DDxvkSurfaceViewVisitor visitor,
+    void *opaque) {
+  VMSVGA3DDxvkView *view;
+
+  if (surface == NULL || surface->owner == NULL || visitor == NULL) {
+    return;
+  }
+  for (view = surface->owner->d3d11_views; view != NULL; view = view->next) {
+    if (view->surface == surface) {
+      visitor(opaque, view->kind, view->cid, view->view_id);
+    }
+  }
+}
+
+bool vmsvga3d_dxvk_d3d11_surface_resident(
+    const VMSVGA3DDxvkSurface *surface) {
+  return surface != NULL && surface->d3d11_resident;
 }
 
 VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,
@@ -2256,6 +2339,14 @@ bool vmsvga3d_dxvk_surface_materialize(
   surface->d3d9_format = primary_desc->format;
   surface->d3d9_length = primary_desc->length;
   surface->d3d9_resident = true;
+
+  if (resource_plan->set_autogen_filter &&
+      surface->d3d9_resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+      !vmsvga3d_dxvk_d3d9_set_autogen_filter(
+          surface->d3d9_resource, resource_plan->autogen_filter)) {
+    vmsvga3d_dxvk_surface_evict_d3d9(surface);
+    return false;
+  }
   return true;
 #else
   (void)dxvk;
@@ -2265,22 +2356,24 @@ bool vmsvga3d_dxvk_surface_materialize(
 #endif
 }
 
+bool vmsvga3d_dxvk_surface_generate_mipmaps(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t filter) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
-static bool vmsvga3d_dxvk_d3d11_desc_equal(
-    const VMSVGA3DD3D10CreateDesc *a,
-    const VMSVGA3DD3D10CreateDesc *b) {
-  return a != NULL && b != NULL && a->valid == b->valid &&
-         a->resource_dimension == b->resource_dimension &&
-         a->byte_width == b->byte_width && a->width == b->width &&
-         a->height == b->height && a->depth == b->depth &&
-         a->mip_levels == b->mip_levels && a->array_size == b->array_size &&
-         a->format == b->format && a->sample_count == b->sample_count &&
-         a->sample_quality == b->sample_quality && a->usage == b->usage &&
-         a->bind_flags == b->bind_flags &&
-         a->cpu_access_flags == b->cpu_access_flags &&
-         a->misc_flags == b->misc_flags;
-}
+  if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
+      surface->owner != dxvk || surface->d3d11_resident ||
+      !surface->d3d9_resident || surface->d3d9_resource == NULL ||
+      surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE) {
+    return false;
+  }
+  return vmsvga3d_dxvk_d3d9_generate_mip_sublevels(
+      surface->d3d9_resource, filter);
+#else
+  (void)dxvk;
+  (void)surface;
+  (void)filter;
+  return false;
 #endif
+}
 
 bool vmsvga3d_dxvk_d3d11_surface_materialize(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
@@ -2301,8 +2394,19 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
   uint32_t i;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      surface == NULL || resource_desc == NULL || !resource_desc->valid ||
-      surface->d3d9_resident ||
+      surface == NULL || surface->d3d9_resident) {
+    return false;
+  }
+
+  /* VirtualBox dxEnsureResource returns an already-created backend resource
+   * verbatim.  In particular, it does not revalidate that resource against
+   * whatever usage policy caused a later caller to ask for it again.
+   * Validate creation descriptors and initial data only when a resource
+   * actually has to be created. */
+  if (surface->d3d11_resident) {
+    return surface->d3d11_resource != NULL;
+  }
+  if (resource_desc == NULL || !resource_desc->valid ||
       initial_data_count != resource_desc->initial_subresource_count ||
       (initial_data_count != 0 && initial_data == NULL)) {
     return false;
@@ -2311,11 +2415,6 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
     if (initial_data[i].data == NULL) {
       return false;
     }
-  }
-  if (surface->d3d11_resident) {
-    return surface->d3d11_resource != NULL &&
-           vmsvga3d_dxvk_d3d11_desc_equal(&surface->d3d11_desc,
-                                           resource_desc);
   }
 
   switch (resource_desc->resource_dimension) {
@@ -3716,7 +3815,7 @@ bool vmsvga3d_dxvk_d3d11_set_blend_state(
   void *state = NULL;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
-      blend_factor == NULL ||
+      (state_id != SVGA3D_INVALID_ID && blend_factor == NULL) ||
       !vmsvga3d_dxvk_d3d11_state_object(
           dxvk, VMSVGA3D_DXVK_STATE_BLEND, cid, state_id, &state) ||
       !vmsvga3d_dxvk_get_method(
@@ -3725,7 +3824,9 @@ bool vmsvga3d_dxvk_d3d11_set_blend_state(
           &set_state, sizeof(set_state))) {
     return false;
   }
-  set_state(dxvk->d3d11_context, state, blend_factor, sample_mask);
+  set_state(dxvk->d3d11_context, state,
+            state_id == SVGA3D_INVALID_ID ? NULL : blend_factor,
+            state_id == SVGA3D_INVALID_ID ? 0u : sample_mask);
   return true;
 #else
   (void)dxvk;
@@ -3753,7 +3854,8 @@ bool vmsvga3d_dxvk_d3d11_set_depth_stencil_state(
           &set_state, sizeof(set_state))) {
     return false;
   }
-  set_state(dxvk->d3d11_context, state, stencil_ref);
+  set_state(dxvk->d3d11_context, state,
+            state_id == SVGA3D_INVALID_ID ? 0u : stencil_ref);
   return true;
 #else
   (void)dxvk;
@@ -3817,9 +3919,6 @@ bool vmsvga3d_dxvk_d3d11_set_samplers(
     break;
   default:
     return false;
-  }
-  if (sampler_count == 0) {
-    return true;
   }
   for (i = 0; i < sampler_count; i++) {
     if (!vmsvga3d_dxvk_d3d11_state_object(
@@ -5130,6 +5229,216 @@ void vmsvga3d_dxvk_d3d11_shader_context_destroy(
   }
 }
 
+static VMSVGA3DDxvkD3D9Query *vmsvga3d_dxvk_d3d9_query_find(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, VMSVGA3DDxvkD3D9Query ***link_out) {
+  VMSVGA3DDxvkD3D9Query **link;
+
+  if (dxvk == NULL) {
+    return NULL;
+  }
+  link = &dxvk->d3d9_queries;
+  while (*link != NULL) {
+    if ((*link)->cid == cid) {
+      if (link_out != NULL) {
+        *link_out = link;
+      }
+      return *link;
+    }
+    link = &(*link)->next;
+  }
+  if (link_out != NULL) {
+    *link_out = link;
+  }
+  return NULL;
+}
+
+static void vmsvga3d_dxvk_d3d9_query_delete_link(
+    VMSVGA3DDxvkD3D9Query **link) {
+  VMSVGA3DDxvkD3D9Query *query;
+
+  if (link == NULL || *link == NULL) {
+    return;
+  }
+  query = *link;
+  *link = query->next;
+  if (query->query != NULL) {
+    vmsvga3d_dxvk_release(query->query,
+                          VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE);
+  }
+  g_free(query);
+}
+
+static VMSVGA3DDxvkD3D9Query *vmsvga3d_dxvk_d3d9_query_ensure(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkCreateQuery create_query = NULL;
+  VMSVGA3DDxvkD3D9Query *query;
+  int32_t result;
+
+  if (!vmsvga3d_dxvk_ready(dxvk)) {
+    return NULL;
+  }
+  query = vmsvga3d_dxvk_d3d9_query_find(dxvk, cid, NULL);
+  if (query != NULL) {
+    return query->query != NULL ? query : NULL;
+  }
+  if (!vmsvga3d_dxvk_get_method(
+          dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_QUERY,
+          &create_query, sizeof(create_query))) {
+    return NULL;
+  }
+  query = g_try_new0(VMSVGA3DDxvkD3D9Query, 1);
+  if (query == NULL) {
+    return NULL;
+  }
+  result = create_query(dxvk->d3d9_device, query_type, &query->query);
+  if (result != 0 || query->query == NULL) {
+    if (query->query != NULL) {
+      vmsvga3d_dxvk_release(query->query,
+                            VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE);
+    }
+    g_free(query);
+    return NULL;
+  }
+  query->cid = cid;
+  query->next = dxvk->d3d9_queries;
+  dxvk->d3d9_queries = query;
+  return query;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)query_type;
+  return NULL;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d9_query_begin(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type,
+    uint32_t issue_flags) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D9Query **link = NULL;
+  VMSVGA3DDxvkD3D9Query *query;
+  VMSVGA3DDxvkQueryIssue issue = NULL;
+  int32_t result;
+
+  query = vmsvga3d_dxvk_d3d9_query_ensure(dxvk, cid, query_type);
+  if (query == NULL) {
+    return false;
+  }
+  (void)vmsvga3d_dxvk_d3d9_query_find(dxvk, cid, &link);
+  if (!vmsvga3d_dxvk_get_method(query->query,
+                                 VMSVGA3D_DXVK_IDIRECT3DQUERY9_ISSUE,
+                                 &issue, sizeof(issue))) {
+    vmsvga3d_dxvk_d3d9_query_delete_link(link);
+    return false;
+  }
+  result = issue(query->query, issue_flags);
+  if (result == 0) {
+    return true;
+  }
+  vmsvga3d_dxvk_d3d9_query_delete_link(link);
+  return false;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)query_type;
+  (void)issue_flags;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d9_query_end(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t issue_flags) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D9Query **link = NULL;
+  VMSVGA3DDxvkD3D9Query *query;
+  VMSVGA3DDxvkQueryIssue issue = NULL;
+  int32_t result;
+
+  query = vmsvga3d_dxvk_d3d9_query_find(dxvk, cid, &link);
+  if (query == NULL || query->query == NULL) {
+    return false;
+  }
+  if (!vmsvga3d_dxvk_get_method(query->query,
+                                 VMSVGA3D_DXVK_IDIRECT3DQUERY9_ISSUE,
+                                 &issue, sizeof(issue))) {
+    vmsvga3d_dxvk_d3d9_query_delete_link(link);
+    return false;
+  }
+  result = issue(query->query, issue_flags);
+  if (result == 0) {
+    return true;
+  }
+  vmsvga3d_dxvk_d3d9_query_delete_link(link);
+  return false;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)issue_flags;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d9_query_get_data(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t data_size,
+    uint32_t flags, uint32_t *value) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D9Query **link = NULL;
+  VMSVGA3DDxvkD3D9Query *query;
+  VMSVGA3DDxvkQueryGetData get_data = NULL;
+  int32_t result;
+  uint32_t data = 0;
+
+  if (value == NULL || data_size != sizeof(data)) {
+    return false;
+  }
+  query = vmsvga3d_dxvk_d3d9_query_find(dxvk, cid, &link);
+  if (query == NULL || query->query == NULL) {
+    return false;
+  }
+  if (!vmsvga3d_dxvk_get_method(query->query,
+                                 VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+                                 &get_data, sizeof(get_data))) {
+    vmsvga3d_dxvk_d3d9_query_delete_link(link);
+    return false;
+  }
+  do {
+    result = get_data(query->query, &data, data_size, flags);
+    if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+      g_thread_yield();
+    }
+  } while (result == VMSVGA3D_DXVK_D3D_S_FALSE);
+
+  if (result != 0) {
+    vmsvga3d_dxvk_d3d9_query_delete_link(link);
+    return false;
+  }
+  *value = data;
+  return true;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)data_size;
+  (void)flags;
+  (void)value;
+  return false;
+#endif
+}
+
+void vmsvga3d_dxvk_d3d9_query_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D9Query **link = NULL;
+
+  if (vmsvga3d_dxvk_d3d9_query_find(dxvk, cid, &link) != NULL) {
+    vmsvga3d_dxvk_d3d9_query_delete_link(link);
+  }
+#else
+  (void)dxvk;
+  (void)cid;
+#endif
+}
+
 static VMSVGA3DDxvkQuery *vmsvga3d_dxvk_d3d11_query_find(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id,
     VMSVGA3DDxvkQuery ***link_out) {
@@ -5216,6 +5525,7 @@ bool vmsvga3d_dxvk_d3d11_query_define(
     uint32_t d3d_query, uint32_t misc_flags) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11CreateQuery create_query = NULL;
+  VMSVGA3DDxvkD3D11CreatePredicate create_predicate = NULL;
   VMSVGA3DDxvkD3D11QueryDesc desc = {
     .query = d3d_query,
     .misc_flags = misc_flags,
@@ -5224,17 +5534,31 @@ bool vmsvga3d_dxvk_d3d11_query_define(
   int32_t result;
 
   if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      !vmsvga3d_dxvk_d3d11_query_destroy(dxvk, cid, query_id) ||
-      !vmsvga3d_dxvk_get_method(
-          dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_QUERY,
-          &create_query, sizeof(create_query))) {
+      !vmsvga3d_dxvk_d3d11_query_destroy(dxvk, cid, query_id)) {
+    return false;
+  }
+  if ((misc_flags & VMSVGA3D_D3D10_QUERY_MISC_PREDICATEHINT) != 0) {
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PREDICATE,
+            &create_predicate, sizeof(create_predicate))) {
+      return false;
+    }
+  } else if (!vmsvga3d_dxvk_get_method(
+                 dxvk->d3d11_device,
+                 VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_QUERY,
+                 &create_query, sizeof(create_query))) {
     return false;
   }
   query = g_try_new0(VMSVGA3DDxvkQuery, 1);
   if (query == NULL) {
     return false;
   }
-  result = create_query(dxvk->d3d11_device, &desc, &query->query);
+  if ((misc_flags & VMSVGA3D_D3D10_QUERY_MISC_PREDICATEHINT) != 0) {
+    result = create_predicate(dxvk->d3d11_device, &desc, &query->query);
+  } else {
+    result = create_query(dxvk->d3d11_device, &desc, &query->query);
+  }
   if (!vmsvga3d_dxvk_succeeded(result) || query->query == NULL) {
     if (query->query != NULL) {
       vmsvga3d_dxvk_release(query->query, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -5292,50 +5616,100 @@ bool vmsvga3d_dxvk_d3d11_query_begin(
 }
 
 bool vmsvga3d_dxvk_d3d11_query_end(
-    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_end,
-    void *data, uint32_t data_size, uint32_t getdata_flags) {
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_end) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
   VMSVGA3DDxvkD3D11End end_query = NULL;
-  VMSVGA3DDxvkD3D11GetData get_data = NULL;
   VMSVGA3DDxvkQuery *query;
-  int32_t result;
 
-  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
-      data == NULL || data_size == 0) {
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
     return false;
   }
   query = vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
-  if (query == NULL || query->query == NULL ||
-      !vmsvga3d_dxvk_get_method(
-          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA,
-          &get_data, sizeof(get_data))) {
+  if (query == NULL || query->query == NULL) {
     return false;
   }
-  if (issue_end) {
-    if (!vmsvga3d_dxvk_get_method(
-            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_END,
-            &end_query, sizeof(end_query))) {
-      return false;
-    }
-    end_query(dxvk->d3d11_context, query->query);
+  if (!issue_end) {
+    return true;
   }
-
-  do {
-    result = get_data(dxvk->d3d11_context, query->query, data, data_size,
-                      getdata_flags);
-    if (result != 0) {
-      sched_yield();
-    }
-  } while (result != 0);
+  if (!vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_END,
+          &end_query, sizeof(end_query))) {
+    return false;
+  }
+  end_query(dxvk->d3d11_context, query->query);
+  /* VBox keeps backend-pending membership separate from the guest COTable
+   * state.  Predicate-hint queries deliberately never enter that list. */
+  query->pending =
+      (query->misc_flags & VMSVGA3D_D3D10_QUERY_MISC_PREDICATEHINT) == 0;
   return true;
 #else
   (void)dxvk;
   (void)cid;
   (void)query_id;
   (void)issue_end;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_query_get_data(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, void *data,
+    uint32_t data_size, uint32_t getdata_flags, bool *ready) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11GetData get_data = NULL;
+  VMSVGA3DDxvkQuery *query;
+  int32_t result;
+
+  if (ready != NULL) {
+    *ready = false;
+  }
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      data == NULL || data_size == 0 || ready == NULL) {
+    return false;
+  }
+  query = vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
+  if (query == NULL || query->query == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA,
+          &get_data, sizeof(get_data))) {
+    return false;
+  }
+
+  result = get_data(dxvk->d3d11_context, query->query, data, data_size,
+                    getdata_flags);
+  if (result == 0) { /* S_OK */
+    query->pending = false;
+    *ready = true;
+    return true;
+  }
+  if (result == 1) { /* S_FALSE: query is still pending. */
+    return true;
+  }
+  query->pending = false;
+  return false;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)query_id;
   (void)data;
   (void)data_size;
   (void)getdata_flags;
+  (void)ready;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_query_pending(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkQuery *query =
+      vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
+
+  return query != NULL && query->query != NULL && query->pending;
+#else
+  (void)dxvk;
+  (void)cid;
+  (void)query_id;
   return false;
 #endif
 }
@@ -5344,46 +5718,30 @@ bool vmsvga3d_dxvk_d3d11_set_predication(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool enabled,
     bool predicate_value) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
-  VMSVGA3DDxvkD3D11CreatePredicate create_predicate = NULL;
   VMSVGA3DDxvkD3D11SetPredication set_predication = NULL;
-  VMSVGA3DDxvkD3D11QueryDesc desc;
   VMSVGA3DDxvkQuery *query = NULL;
   void *predicate = NULL;
-  int32_t result;
 
-  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-      dxvk->d3d11_context == NULL ||
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
       !vmsvga3d_dxvk_get_method(
           dxvk->d3d11_context,
           VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SET_PREDICATION,
           &set_predication, sizeof(set_predication))) {
     return false;
   }
-  if (!enabled) {
-    set_predication(dxvk->d3d11_context, NULL, 0);
-    return true;
-  }
-
-  query = vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
-  if (query == NULL || query->query == NULL ||
-      !vmsvga3d_dxvk_get_method(
-          dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PREDICATE,
-          &create_predicate, sizeof(create_predicate))) {
-    return false;
-  }
-  desc.query = query->d3d_query;
-  desc.misc_flags = query->misc_flags;
-  result = create_predicate(dxvk->d3d11_device, &desc, &predicate);
-  if (!vmsvga3d_dxvk_succeeded(result) || predicate == NULL) {
-    if (predicate != NULL) {
-      vmsvga3d_dxvk_release(predicate, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+  if (enabled) {
+    query = vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
+    if (query == NULL || query->query == NULL) {
+      return false;
     }
-    return false;
+    /* Current VirtualBox binds the object created by DEFINE_QUERY.  In debug
+     * builds it asserts that this was a predicate-hint query, but release
+     * builds do not add a guest-visible validation here.
+     */
+    predicate = query->query;
   }
 
-  vmsvga3d_dxvk_release(query->query, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-  query->query = predicate;
-  set_predication(dxvk->d3d11_context, query->query,
+  set_predication(dxvk->d3d11_context, predicate,
                   predicate_value ? 1 : 0);
   return true;
 #else
@@ -5464,6 +5822,38 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
   (void)dxvk;
   (void)destination;
   (void)source;
+  return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_resolve_subresource(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
+    uint32_t destination_subresource, VMSVGA3DDxvkSurface *source,
+    uint32_t source_subresource, uint32_t format) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11ResolveSubresource resolve_subresource = NULL;
+
+  if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      destination == NULL || source == NULL ||
+      !destination->d3d11_resident || destination->d3d11_resource == NULL ||
+      !source->d3d11_resident || source->d3d11_resource == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context,
+          VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RESOLVE_SUBRESOURCE,
+          &resolve_subresource, sizeof(resolve_subresource))) {
+    return false;
+  }
+  resolve_subresource(dxvk->d3d11_context, destination->d3d11_resource,
+                      destination_subresource, source->d3d11_resource,
+                      source_subresource, format);
+  return true;
+#else
+  (void)dxvk;
+  (void)destination;
+  (void)destination_subresource;
+  (void)source;
+  (void)source_subresource;
+  (void)format;
   return false;
 #endif
 }

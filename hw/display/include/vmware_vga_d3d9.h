@@ -610,6 +610,9 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_dma(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceDMA *command,
     const SVGA3dCopyBox *boxes, uint32_t box_count, uint32_t maximum_offset,
     const VMSVGA3DD3D9DmaPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_generate_mipmaps(
+    struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
+    SVGA3dTextureFilter filter);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     struct vmsvga_state_s *s, const SVGA3dCmdClear *command,
     const SVGA3dRect *rects, uint32_t rect_count,

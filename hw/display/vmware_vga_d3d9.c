@@ -2983,6 +2983,26 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
   return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }
 
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_generate_mipmaps(
+    struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
+    SVGA3dTextureFilter filter) {
+  if (s == NULL || surface == NULL ||
+      filter < SVGA3D_TEX_FILTER_MIN || filter >= SVGA3D_TEX_FILTER_MAX ||
+      !vmsvga3d_dxvk_ready(s->dxvk)) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  if (vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  if (!vmsvga3d_dxvk_materialize_texture(s, surface)) {
+    return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+  }
+  return vmsvga3d_dxvk_surface_generate_mipmaps(
+             s->dxvk, surface->dxvk_surface, (uint32_t)filter)
+             ? VMSVGA3D_D3D9_ACCEL_COMPLETE
+             : VMSVGA3D_D3D9_ACCEL_FAILED;
+}
+
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     struct vmsvga_state_s *s, const SVGA3dCmdClear *command,
     const SVGA3dRect *rects, uint32_t rect_count,

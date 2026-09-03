@@ -926,11 +926,8 @@ static bool vmsvga3d_state_generate_mipmaps(struct vmsvga_state_s *s,
     return false;
   };
 
-  /*
-   * Preserve the requested autogen state now. Actual mip generation belongs
-   * to D3D execution; the CPU surface store remains authoritative until that
-   * path is connected.
-   */
+  /* Keep the guest-visible autogen choice in the surface shadow.  The FIFO
+   * execution layer applies it to the D3D9 texture and generates the mips. */
   surface->autogen_filter = filter;
   return true;
 };

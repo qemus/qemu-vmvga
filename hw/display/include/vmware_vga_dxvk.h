@@ -34,6 +34,15 @@
 
 typedef struct vmsvga3d_dxvk_s VMSVGA3DDxvk;
 typedef struct vmsvga3d_dxvk_surface_s VMSVGA3DDxvkSurface;
+
+typedef enum vmsvga3d_dxvk_view_kind_e {
+  VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
+  VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
+  VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL,
+} VMSVGA3DDxvkViewKind;
+
+typedef void (*VMSVGA3DDxvkSurfaceViewVisitor)(
+    void *opaque, VMSVGA3DDxvkViewKind kind, uint32_t cid, uint32_t view_id);
 struct vmsvga3d_d3d9_resource_plan_s;
 struct vmsvga3d_d3d9_rect_s;
 struct vmsvga3d_d3d9_transfer_surface_s;
@@ -69,7 +78,10 @@ typedef struct vmsvga3d_dxvk_d3d11_index_binding_s {
 VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
                                     Error **errp);
 void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk);
+/* Legacy SVGA3D is available once the D3D9 runtime is ready. */
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk);
+/* vGPU10/DX is an optional upgrade and is never attempted before D3D9. */
+bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk);
 
 /* Guest surface lifetime is tracked immediately; D3D9 residency is lazy. */
 VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,
@@ -81,6 +93,18 @@ bool vmsvga3d_dxvk_surface_info(
 bool vmsvga3d_dxvk_surface_materialize(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const struct vmsvga3d_d3d9_resource_plan_s *plan);
+bool vmsvga3d_dxvk_surface_generate_mipmaps(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t filter);
+bool vmsvga3d_dxvk_d3d9_query_begin(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type,
+    uint32_t issue_flags);
+bool vmsvga3d_dxvk_d3d9_query_end(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t issue_flags);
+bool vmsvga3d_dxvk_d3d9_query_get_data(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t data_size,
+    uint32_t flags, uint32_t *result);
+void vmsvga3d_dxvk_d3d9_query_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid);
 
 /* D3D11 residency is distinct from the legacy D3D9 resource path. */
 bool vmsvga3d_dxvk_d3d11_surface_materialize(
@@ -112,6 +136,11 @@ void vmsvga3d_dxvk_d3d11_view_context_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid);
 void vmsvga3d_dxvk_d3d11_surface_invalidate_views(
     VMSVGA3DDxvkSurface *surface);
+void vmsvga3d_dxvk_d3d11_surface_visit_views(
+    VMSVGA3DDxvkSurface *surface, VMSVGA3DDxvkSurfaceViewVisitor visitor,
+    void *opaque);
+bool vmsvga3d_dxvk_d3d11_surface_resident(
+    const VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
     uint32_t destination_subresource, uint32_t destination_x,
@@ -121,6 +150,10 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
 bool vmsvga3d_dxvk_d3d11_copy_resource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
     VMSVGA3DDxvkSurface *source);
+bool vmsvga3d_dxvk_d3d11_resolve_subresource(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
+    uint32_t destination_subresource, VMSVGA3DDxvkSurface *source,
+    uint32_t source_subresource, uint32_t format);
 bool vmsvga3d_dxvk_d3d11_update_subresource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d10_box_s *box, const void *data,
@@ -285,8 +318,12 @@ bool vmsvga3d_dxvk_d3d11_query_exists(
 bool vmsvga3d_dxvk_d3d11_query_begin(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_begin);
 bool vmsvga3d_dxvk_d3d11_query_end(
-    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_end,
-    void *data, uint32_t data_size, uint32_t getdata_flags);
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool issue_end);
+bool vmsvga3d_dxvk_d3d11_query_get_data(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, void *data,
+    uint32_t data_size, uint32_t getdata_flags, bool *ready);
+bool vmsvga3d_dxvk_d3d11_query_pending(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id);
 bool vmsvga3d_dxvk_d3d11_set_predication(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool enabled,
     bool predicate_value);

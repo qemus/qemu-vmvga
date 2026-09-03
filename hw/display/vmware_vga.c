@@ -7545,6 +7545,11 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque) {
     cursor_update_from_fifo(s);
   };
 
+  /* Current VirtualBox completes D3D11 DX queries from its pending-task
+   * pump rather than blocking DX_END_QUERY on GetData.  The display refresh
+   * callback is QEMU's regular renderer-service point. */
+  vmsvga3d_d3d10_process_pending_queries(s);
+
   if (!s->enable) {
     vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
     s->svga_surface_bound = false;

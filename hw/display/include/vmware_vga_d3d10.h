@@ -611,7 +611,6 @@ typedef struct vmsvga3d_d3d10_copy_resource_plan_s {
   bool ensure_destination_resource;
   VMSVGA3DD3D10ResourceCreateKind source_create_kind;
   VMSVGA3DD3D10ResourceCreateKind destination_create_kind;
-  bool destination_create_kind_uses_source_format;
   bool issue_copy_resource;
   bool mark_destination_drawing_context;
 } VMSVGA3DD3D10CopyResourcePlan;
@@ -621,7 +620,6 @@ typedef struct vmsvga3d_d3d10_copy_subresource_plan_s {
   bool ensure_destination_resource;
   VMSVGA3DD3D10ResourceCreateKind source_create_kind;
   VMSVGA3DD3D10ResourceCreateKind destination_create_kind;
-  bool destination_create_kind_uses_source_format;
   uint32_t destination_subresource;
   uint32_t source_subresource;
   VMSVGA3DD3D10CopyRegionPlan region;
@@ -871,11 +869,13 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_clear_dsv_plan(
     uint32_t stencil, uint32_t dsv_table_count,
     VMSVGA3DD3D10ClearDSVPlan *plan);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_copy_resource_plan(
-    SVGA3dSurfaceFormat source_format, bool source_resource_exists,
-    bool destination_resource_exists, VMSVGA3DD3D10CopyResourcePlan *plan);
+    SVGA3dSurfaceFormat source_format, SVGA3dSurfaceFormat destination_format,
+    bool source_resource_exists, bool destination_resource_exists,
+    VMSVGA3DD3D10CopyResourcePlan *plan);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_copy_subresource_plan(
-    SVGA3dSurfaceFormat source_format, bool source_resource_exists,
-    bool destination_resource_exists, uint32_t destination_subresource,
+    SVGA3dSurfaceFormat source_format, SVGA3dSurfaceFormat destination_format,
+    bool source_resource_exists, bool destination_resource_exists,
+    uint32_t destination_subresource,
     uint32_t source_subresource, const SVGA3dSize *source_size,
     const SVGA3dSize *destination_size, const SVGA3dCopyBox *box,
     VMSVGA3DD3D10CopySubresourcePlan *plan);

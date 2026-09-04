@@ -29,6 +29,7 @@
 
 #include "include/vmware_vga_d3d9.h"
 #include "include/vmware_vga_d3d10.h"
+#include "include/vmware_vga_d3d11.h"
 #include "include/vmware_vga_dxvk.h"
 #include "include/vmware_vga_dxvk_wsi.h"
 
@@ -695,6 +696,12 @@ typedef struct vmsvga3d_dxvk_d3d11_dsv_desc_s {
     uint32_t data[3];
 } VMSVGA3DDxvkD3D11DSVDesc;
 
+typedef struct vmsvga3d_dxvk_d3d11_uav_desc_s {
+    uint32_t format;
+    uint32_t view_dimension;
+    uint32_t data[3];
+} VMSVGA3DDxvkD3D11UAVDesc;
+
 typedef struct vmsvga3d_dxvk_d3d11_query_desc_s {
     uint32_t query;
     uint32_t misc_flags;
@@ -733,7 +740,8 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CreateShaderResourceView)(
     void *device, void *resource, const VMSVGA3DDxvkD3D11SRVDesc *desc,
     void **view);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateUnorderedAccessView)(
-    void *device, void *resource, const void *desc, void **view);
+    void *device, void *resource, const VMSVGA3DDxvkD3D11UAVDesc *desc,
+    void **view);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateRenderTargetView)(
     void *device, void *resource, const VMSVGA3DDxvkD3D11RTVDesc *desc,
     void **view);
@@ -7298,6 +7306,188 @@ static bool vmsvga3d_dxvk_d3d11_rtv_desc(
     return true;
 }
 #endif
+
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+static bool vmsvga3d_dxvk_d3d11_uav_desc(
+    const VMSVGA3DD3D11UAVDesc *src, VMSVGA3DDxvkD3D11UAVDesc *dst)
+{
+    if (src == NULL || dst == NULL) {
+        return false;
+    }
+
+    memset(dst, 0, sizeof(*dst));
+    dst->format = src->format;
+    dst->view_dimension = src->view_dimension;
+
+    switch (src->view_dimension) {
+    case 0:
+        dst->data[0] = src->mip_slice;
+        dst->data[1] = src->first_w_slice;
+        dst->data[2] = src->w_size;
+        break;
+    case 1:
+        dst->data[0] = src->first_element;
+        dst->data[1] = src->num_elements;
+        dst->data[2] = src->flags;
+        break;
+    case 2:
+    case 4:
+        dst->data[0] = src->mip_slice;
+        break;
+    case 3:
+    case 5:
+        dst->data[0] = src->mip_slice;
+        dst->data[1] = src->first_array_slice;
+        dst->data[2] = src->array_size;
+        break;
+    case 8:
+        dst->data[0] = src->mip_slice;
+        dst->data[1] = src->first_w_slice;
+        dst->data[2] = src->w_size;
+        break;
+    default:
+        return false;
+    }
+
+    return true;
+}
+#endif
+
+bool vmsvga3d_dxvk_d3d11_unordered_access_view_ensure(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d11_uav_desc_s *desc)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CreateUnorderedAccessView create_view = NULL;
+    VMSVGA3DDxvkD3D11UAVDesc native;
+    const VMSVGA3DD3D11UAVDesc *view_desc = desc;
+    void *view = NULL;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+        view_id == SVGA3D_INVALID_ID || surface == NULL ||
+        !surface->d3d11_resident || surface->d3d11_resource == NULL) {
+        return false;
+    }
+
+    if (vmsvga3d_dxvk_d3d11_view_find(
+            dxvk, VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS, cid, view_id, NULL) !=
+        NULL) {
+        return true;
+    }
+
+    if (view_desc == NULL ||
+        !vmsvga3d_dxvk_d3d11_uav_desc(view_desc, &native) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_UNORDERED_ACCESS_VIEW,
+            &create_view, sizeof(create_view))) {
+        return false;
+    }
+
+    result = create_view(dxvk->d3d11_device, surface->d3d11_resource, &native,
+                         &view);
+    if (!vmsvga3d_dxvk_succeeded(result) || view == NULL) {
+        return false;
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_view_store(
+            dxvk, VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS, cid, view_id,
+            surface, view)) {
+        vmsvga3d_dxvk_release(view, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        return false;
+    }
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)view_id;
+    (void)surface;
+    (void)desc;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_unordered_access_view_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id)
+{
+    return vmsvga3d_dxvk_d3d11_view_destroy(
+        dxvk, VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS, cid, view_id);
+}
+
+bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_uint(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    const uint32_t values[4])
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11ClearUnorderedAccessViewUint clear_view = NULL;
+    void *view;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        values == NULL) {
+        return false;
+    }
+
+    view = vmsvga3d_dxvk_d3d11_view_object(
+        dxvk, VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS, cid, view_id);
+
+    if (view == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_UNORDERED_ACCESS_VIEW_UINT,
+            &clear_view, sizeof(clear_view))) {
+        return false;
+    }
+
+    clear_view(dxvk->d3d11_context, view, values);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)view_id;
+    (void)values;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_float(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    const float values[4])
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11ClearUnorderedAccessViewFloat clear_view = NULL;
+    void *view;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        values == NULL) {
+        return false;
+    }
+
+    view = vmsvga3d_dxvk_d3d11_view_object(
+        dxvk, VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS, cid, view_id);
+
+    if (view == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_UNORDERED_ACCESS_VIEW_FLOAT,
+            &clear_view, sizeof(clear_view))) {
+        return false;
+    }
+
+    clear_view(dxvk->d3d11_context, view, values);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)view_id;
+    (void)values;
+    return false;
+#endif
+}
 
 bool vmsvga3d_dxvk_d3d11_render_target_view_ensure(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,

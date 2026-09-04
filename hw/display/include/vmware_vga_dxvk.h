@@ -39,6 +39,7 @@ typedef enum vmsvga3d_dxvk_view_kind_e {
     VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
     VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
     VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL,
+    VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS,
 } VMSVGA3DDxvkViewKind;
 
 typedef void (*VMSVGA3DDxvkSurfaceViewVisitor)(
@@ -62,6 +63,7 @@ struct vmsvga3d_d3d10_blend_desc_s;
 struct vmsvga3d_d3d10_depth_stencil_desc_s;
 struct vmsvga3d_d3d10_rasterizer_desc_s;
 struct vmsvga3d_d3d10_sampler_desc_s;
+struct vmsvga3d_d3d11_uav_desc_s;
 
 typedef struct vmsvga3d_dxvk_subresource_data_s {
     const void *data;
@@ -141,6 +143,18 @@ bool vmsvga3d_dxvk_d3d11_depth_stencil_view_ensure(
     const struct vmsvga3d_d3d10_dsv_desc_s *desc);
 bool vmsvga3d_dxvk_d3d11_depth_stencil_view_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id);
+bool vmsvga3d_dxvk_d3d11_unordered_access_view_ensure(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    VMSVGA3DDxvkSurface *surface,
+    const struct vmsvga3d_d3d11_uav_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_unordered_access_view_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id);
+bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_uint(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    const uint32_t values[4]);
+bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_float(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
+    const float values[4]);
 bool vmsvga3d_dxvk_d3d11_generate_mips(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id);
 void vmsvga3d_dxvk_d3d11_view_context_destroy(

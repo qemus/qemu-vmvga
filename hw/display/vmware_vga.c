@@ -6209,6 +6209,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
               uint32_t size;
               uint64_t payload_words;
               uint64_t total_words;
+              uint32_t consumed_words = 0;
+
               if (len < (sizeof(SVGAFifoCmdEscape) / sizeof(uint32_t)) + 1) {
                   s->fifo_stop = fifo_start;
                   s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -6218,7 +6220,6 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
               }
               nsid = vmsvga_fifo_read(s);
               size = vmsvga_fifo_read(s);
-              (void)nsid;
               payload_words = ((uint64_t)size + 3) >> 2;
               total_words = sizeof(SVGAFifoCmdEscape) / sizeof(uint32_t) + 1 +
                             payload_words;
@@ -6230,8 +6231,51 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
                   break;
               }
               len -= (int32_t)total_words;
-              vmsvga_fifo_skip(s, (uint32_t)payload_words);
-              /* TODO: Dispatch supported escape namespaces before advertising ESCAPE. */
+
+              if (nsid == SVGA_ESCAPE_NSID_VMWARE && size >= sizeof(uint32_t)) {
+                  uint32_t escape_cmd = vmsvga_fifo_read(s);
+
+                  consumed_words++;
+                  switch (escape_cmd) {
+                  case SVGA_ESCAPE_VMWARE_VIDEO_SET_REGS:
+                      if (size >= sizeof(uint32_t) * 2) {
+                          uint32_t stream_id = vmsvga_fifo_read(s);
+                          uint32_t reg_count =
+                              (size - sizeof(uint32_t) * 2) /
+                              (sizeof(uint32_t) * 2);
+
+                          consumed_words++;
+                          VPRINT("SVGA_ESCAPE_VMWARE_VIDEO_SET_REGS: stream "
+                                 "0x%x\n",
+                                 stream_id);
+                          for (uint32_t i = 0; i < reg_count; i++) {
+                              uint32_t reg = vmsvga_fifo_read(s);
+                              uint32_t value = vmsvga_fifo_read(s);
+
+                              consumed_words += 2;
+                              VPRINT("SVGA_ESCAPE_VMWARE_VIDEO_SET_REGS: reg "
+                                     "0x%x val 0x%x\n",
+                                     reg, value);
+                          }
+                      }
+                      break;
+                  case SVGA_ESCAPE_VMWARE_VIDEO_FLUSH:
+                      if (size >= sizeof(SVGAEscapeVideoFlush)) {
+                          uint32_t stream_id = vmsvga_fifo_read(s);
+
+                          consumed_words++;
+                          VPRINT("SVGA_ESCAPE_VMWARE_VIDEO_FLUSH: stream "
+                                 "0x%x\n",
+                                 stream_id);
+                      }
+                      break;
+                  default:
+                      VPRINT("SVGA_CMD_ESCAPE: unknown VMware escape 0x%x\n",
+                             escape_cmd);
+                      break;
+                  }
+              }
+              vmsvga_fifo_skip(s, (uint32_t)payload_words - consumed_words);
               VPRINT("SVGA_CMD_ESCAPE command %u in SVGA command FIFO: nsid %u, "
                      "size %u\n",
                      cmd, nsid, size);

@@ -199,6 +199,11 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
 bool vmsvga3d_dxvk_d3d11_set_constant_buffers(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t start_slot, uint32_t buffer_count);
+bool vmsvga3d_dxvk_d3d11_context1_acquire(VMSVGA3DDxvk *dxvk);
+bool vmsvga3d_dxvk_d3d11_set_constant_buffers1(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
+    uint32_t start_slot, uint32_t buffer_count,
+    const uint32_t *first_constants, const uint32_t *constant_counts);
 bool vmsvga3d_dxvk_d3d11_set_shader_resources(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t start_slot, uint32_t view_count, const uint32_t *view_ids);

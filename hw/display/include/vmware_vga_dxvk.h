@@ -36,9 +36,9 @@ typedef struct vmsvga3d_dxvk_s VMSVGA3DDxvk;
 typedef struct vmsvga3d_dxvk_surface_s VMSVGA3DDxvkSurface;
 
 typedef enum vmsvga3d_dxvk_view_kind_e {
-  VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
-  VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
-  VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL,
+    VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
+    VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
+    VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL,
 } VMSVGA3DDxvkViewKind;
 
 typedef void (*VMSVGA3DDxvkSurfaceViewVisitor)(
@@ -64,15 +64,15 @@ struct vmsvga3d_d3d10_rasterizer_desc_s;
 struct vmsvga3d_d3d10_sampler_desc_s;
 
 typedef struct vmsvga3d_dxvk_subresource_data_s {
-  const void *data;
-  uint32_t row_pitch;
-  uint32_t slice_pitch;
+    const void *data;
+    uint32_t row_pitch;
+    uint32_t slice_pitch;
 } VMSVGA3DDxvkSubresourceData;
 
 typedef struct vmsvga3d_dxvk_d3d11_index_binding_s {
-  void *buffer;
-  uint32_t format;
-  uint32_t offset;
+    void *buffer;
+    uint32_t format;
+    uint32_t offset;
 } VMSVGA3DDxvkD3D11IndexBinding;
 
 VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,

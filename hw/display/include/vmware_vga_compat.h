@@ -65,9 +65,9 @@ static inline void vmvga_console_mouse_set(QemuConsole *con, int x, int y,
                                             bool on)
 {
 #if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
-    qemu_console_set_mouse(con, x, y, on);
+      qemu_console_set_mouse(con, x, y, on);
 #else
-    dpy_mouse_set(con, x, y, on);
+      dpy_mouse_set(con, x, y, on);
 #endif
 }
 
@@ -75,9 +75,9 @@ static inline void vmvga_console_update(QemuConsole *con, int x, int y,
                                         int w, int h)
 {
 #if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
-    qemu_console_update(con, x, y, w, h);
+      qemu_console_update(con, x, y, w, h);
 #else
-    dpy_gfx_update(con, x, y, w, h);
+      dpy_gfx_update(con, x, y, w, h);
 #endif
 }
 
@@ -85,9 +85,9 @@ static inline void vmvga_console_set_cursor(QemuConsole *con,
                                             QEMUCursor *cursor)
 {
 #if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
-    qemu_console_set_cursor(con, cursor);
+      qemu_console_set_cursor(con, cursor);
 #else
-    dpy_cursor_define(con, cursor);
+      dpy_cursor_define(con, cursor);
 #endif
 }
 
@@ -95,9 +95,9 @@ static inline void vmvga_console_set_surface(QemuConsole *con,
                                              DisplaySurface *surface)
 {
 #if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
-    qemu_console_set_surface(con, surface);
+      qemu_console_set_surface(con, surface);
 #else
-    dpy_gfx_replace_surface(con, surface);
+      dpy_gfx_replace_surface(con, surface);
 #endif
 }
 
@@ -105,18 +105,18 @@ static inline QemuConsole *vmvga_graphic_console_create(
     DeviceState *dev, uint32_t head, const GraphicHwOps *ops, void *opaque)
 {
 #if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
-    return qemu_graphic_console_create(dev, head, ops, opaque);
+      return qemu_graphic_console_create(dev, head, ops, opaque);
 #else
-    return graphic_console_init(dev, head, ops, opaque);
+      return graphic_console_init(dev, head, ops, opaque);
 #endif
 }
 
 static inline void vmvga_cursor_unref(QEMUCursor *cursor)
 {
 #if QEMU_VERSION_MAJOR == 7
-    cursor_put(cursor);
+      cursor_put(cursor);
 #else
-    cursor_unref(cursor);
+      cursor_unref(cursor);
 #endif
 }
 
@@ -130,8 +130,8 @@ static inline void vmvga_ram_set_migration_id(MemoryRegion *mr,
                                                DeviceState *dev,
                                                const char *name)
 {
-    qemu_ram_unset_idstr(mr->ram_block);
-    qemu_ram_set_idstr(mr->ram_block, name, dev);
+      qemu_ram_unset_idstr(mr->ram_block);
+      qemu_ram_set_idstr(mr->ram_block, name, dev);
 }
 
 #if QEMU_VERSION_MAJOR == 7
@@ -168,8 +168,8 @@ static inline void vmvga_ram_set_migration_id(MemoryRegion *mr,
 #define VMVGA_GFX_UPDATE_RET void
 #define VMVGA_GFX_UPDATE_FALLBACK(_s) \
     do { \
-        (_s)->vga.hw_ops->gfx_update(&(_s)->vga); \
-        return; \
+          (_s)->vga.hw_ops->gfx_update(&(_s)->vga); \
+          return; \
     } while (0)
 #define VMVGA_GFX_UPDATE_DONE() return
 #endif

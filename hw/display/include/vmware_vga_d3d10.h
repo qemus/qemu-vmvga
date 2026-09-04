@@ -44,223 +44,223 @@
  */
 
 typedef enum vmsvga3d_d3d10_level_e {
-  VMSVGA3D_D3D10_LEVEL_INVALID = 0,
-  VMSVGA3D_D3D10_LEVEL_10_0,
-  VMSVGA3D_D3D10_LEVEL_10_1,
-  VMSVGA3D_D3D10_LEVEL_11_0,
-  VMSVGA3D_D3D10_LEVEL_11_1,
+    VMSVGA3D_D3D10_LEVEL_INVALID = 0,
+    VMSVGA3D_D3D10_LEVEL_10_0,
+    VMSVGA3D_D3D10_LEVEL_10_1,
+    VMSVGA3D_D3D10_LEVEL_11_0,
+    VMSVGA3D_D3D10_LEVEL_11_1,
 } VMSVGA3DD3D10Level;
 
 typedef struct vmsvga3d_d3d10_format_s {
-  uint32_t dxgi_format;
-  VMSVGA3DD3D10Level min_level;
+    uint32_t dxgi_format;
+    VMSVGA3DD3D10Level min_level;
 } VMSVGA3DD3D10Format;
 
 #define VMSVGA3D_D3D10_INPUT_SEMANTIC "ATTRIB"
 
 typedef struct vmsvga3d_d3d10_input_element_s {
-  uint32_t semantic_index;
-  uint32_t format;
-  uint32_t input_slot;
-  uint32_t aligned_byte_offset;
-  uint32_t input_slot_class;
-  uint32_t instance_data_step_rate;
+    uint32_t semantic_index;
+    uint32_t format;
+    uint32_t input_slot;
+    uint32_t aligned_byte_offset;
+    uint32_t input_slot_class;
+    uint32_t instance_data_step_rate;
 } VMSVGA3DD3D10InputElement;
 
 typedef struct vmsvga3d_d3d10_rt_blend_s {
-  uint32_t blend_enable;
-  uint32_t src_blend;
-  uint32_t dest_blend;
-  uint32_t blend_op;
-  uint32_t src_blend_alpha;
-  uint32_t dest_blend_alpha;
-  uint32_t blend_op_alpha;
-  uint8_t write_mask;
+    uint32_t blend_enable;
+    uint32_t src_blend;
+    uint32_t dest_blend;
+    uint32_t blend_op;
+    uint32_t src_blend_alpha;
+    uint32_t dest_blend_alpha;
+    uint32_t blend_op_alpha;
+    uint8_t write_mask;
 } VMSVGA3DD3D10RTBlend;
 
 typedef struct vmsvga3d_d3d10_blend_desc_s {
-  uint32_t alpha_to_coverage_enable;
-  uint32_t independent_blend_enable;
-  VMSVGA3DD3D10RTBlend render_target[SVGA3D_DX_MAX_RENDER_TARGETS];
+    uint32_t alpha_to_coverage_enable;
+    uint32_t independent_blend_enable;
+    VMSVGA3DD3D10RTBlend render_target[SVGA3D_DX_MAX_RENDER_TARGETS];
 } VMSVGA3DD3D10BlendDesc;
 
 typedef struct vmsvga3d_d3d10_stencil_face_s {
-  uint32_t fail_op;
-  uint32_t depth_fail_op;
-  uint32_t pass_op;
-  uint32_t func;
+    uint32_t fail_op;
+    uint32_t depth_fail_op;
+    uint32_t pass_op;
+    uint32_t func;
 } VMSVGA3DD3D10StencilFace;
 
 typedef struct vmsvga3d_d3d10_depth_stencil_desc_s {
-  uint32_t depth_enable;
-  uint32_t depth_write_mask;
-  uint32_t depth_func;
-  uint32_t stencil_enable;
-  uint8_t stencil_read_mask;
-  uint8_t stencil_write_mask;
-  VMSVGA3DD3D10StencilFace front_face;
-  VMSVGA3DD3D10StencilFace back_face;
+    uint32_t depth_enable;
+    uint32_t depth_write_mask;
+    uint32_t depth_func;
+    uint32_t stencil_enable;
+    uint8_t stencil_read_mask;
+    uint8_t stencil_write_mask;
+    VMSVGA3DD3D10StencilFace front_face;
+    VMSVGA3DD3D10StencilFace back_face;
 } VMSVGA3DD3D10DepthStencilDesc;
 
 typedef struct vmsvga3d_d3d10_rasterizer_desc_s {
-  uint32_t fill_mode;
-  uint32_t cull_mode;
-  uint32_t front_counter_clockwise;
-  int32_t depth_bias;
-  float depth_bias_clamp;
-  float slope_scaled_depth_bias;
-  uint32_t depth_clip_enable;
-  uint32_t scissor_enable;
-  uint32_t multisample_enable;
-  uint32_t antialiased_line_enable;
+    uint32_t fill_mode;
+    uint32_t cull_mode;
+    uint32_t front_counter_clockwise;
+    int32_t depth_bias;
+    float depth_bias_clamp;
+    float slope_scaled_depth_bias;
+    uint32_t depth_clip_enable;
+    uint32_t scissor_enable;
+    uint32_t multisample_enable;
+    uint32_t antialiased_line_enable;
 } VMSVGA3DD3D10RasterizerDesc;
 
 typedef struct vmsvga3d_d3d10_sampler_desc_s {
-  uint32_t filter;
-  uint32_t address_u;
-  uint32_t address_v;
-  uint32_t address_w;
-  float mip_lod_bias;
-  uint32_t max_anisotropy;
-  uint32_t comparison_func;
-  float border_color[4];
-  float min_lod;
-  float max_lod;
+    uint32_t filter;
+    uint32_t address_u;
+    uint32_t address_v;
+    uint32_t address_w;
+    float mip_lod_bias;
+    uint32_t max_anisotropy;
+    uint32_t comparison_func;
+    float border_color[4];
+    float min_lod;
+    float max_lod;
 } VMSVGA3DD3D10SamplerDesc;
 
 typedef struct vmsvga3d_d3d10_srv_desc_s {
-  uint32_t format;
-  uint32_t view_dimension;
-  uint32_t most_detailed_mip;
-  uint32_t mip_levels;
-  uint32_t first_array_slice;
-  uint32_t array_size;
-  uint32_t first_element;
-  uint32_t num_elements;
+    uint32_t format;
+    uint32_t view_dimension;
+    uint32_t most_detailed_mip;
+    uint32_t mip_levels;
+    uint32_t first_array_slice;
+    uint32_t array_size;
+    uint32_t first_element;
+    uint32_t num_elements;
 } VMSVGA3DD3D10SRVDesc;
 
 typedef struct vmsvga3d_d3d10_rtv_desc_s {
-  uint32_t format;
-  uint32_t view_dimension;
-  uint32_t mip_slice;
-  uint32_t first_array_slice;
-  uint32_t array_size;
-  uint32_t first_w_slice;
-  uint32_t w_size;
-  uint32_t first_element;
-  uint32_t num_elements;
+    uint32_t format;
+    uint32_t view_dimension;
+    uint32_t mip_slice;
+    uint32_t first_array_slice;
+    uint32_t array_size;
+    uint32_t first_w_slice;
+    uint32_t w_size;
+    uint32_t first_element;
+    uint32_t num_elements;
 } VMSVGA3DD3D10RTVDesc;
 
 typedef struct vmsvga3d_d3d10_dsv_desc_s {
-  uint32_t format;
-  uint32_t view_dimension;
-  uint32_t flags;
-  uint32_t mip_slice;
-  uint32_t first_array_slice;
-  uint32_t array_size;
+    uint32_t format;
+    uint32_t view_dimension;
+    uint32_t flags;
+    uint32_t mip_slice;
+    uint32_t first_array_slice;
+    uint32_t array_size;
 } VMSVGA3DD3D10DSVDesc;
 
 
 typedef struct vmsvga3d_d3d10_resource_policy_s {
-  uint32_t usage;
-  uint32_t bind_flags;
-  uint32_t cpu_access_flags;
-  uint32_t misc_flags;
+    uint32_t usage;
+    uint32_t bind_flags;
+    uint32_t cpu_access_flags;
+    uint32_t misc_flags;
 } VMSVGA3DD3D10ResourcePolicy;
 
 typedef enum vmsvga3d_d3d10_resource_use_e {
-  VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE = 0,
-  VMSVGA3D_D3D10_RESOURCE_USE_BUFFER,
-  VMSVGA3D_D3D10_RESOURCE_USE_STREAM_OUTPUT_BUFFER,
-  VMSVGA3D_D3D10_RESOURCE_USE_GENERIC_BUFFER,
+    VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE = 0,
+    VMSVGA3D_D3D10_RESOURCE_USE_BUFFER,
+    VMSVGA3D_D3D10_RESOURCE_USE_STREAM_OUTPUT_BUFFER,
+    VMSVGA3D_D3D10_RESOURCE_USE_GENERIC_BUFFER,
 } VMSVGA3DD3D10ResourceUse;
 
 typedef struct vmsvga3d_d3d10_surface_info_s {
-  SVGA3dSurfaceAllFlags surface_flags;
-  SVGA3dSurfaceFormat format;
-  /* Block-aligned native resource extent for compressed/block formats. */
-  SVGA3dSize size;
-  uint32_t mip_levels;
-  /* Normalized array count; cubemaps already contain 6 elements per cube. */
-  uint32_t array_elements;
-  uint32_t multisample_count;
-  SVGA3dTextureFilter autogen_filter;
-  /* Byte size of mip 0 when this surface is used as a buffer. */
-  uint32_t surface_bytes;
-  bool has_initial_data;
+    SVGA3dSurfaceAllFlags surface_flags;
+    SVGA3dSurfaceFormat format;
+    /* Block-aligned native resource extent for compressed/block formats. */
+    SVGA3dSize size;
+    uint32_t mip_levels;
+    /* Normalized array count; cubemaps already contain 6 elements per cube. */
+    uint32_t array_elements;
+    uint32_t multisample_count;
+    SVGA3dTextureFilter autogen_filter;
+    /* Byte size of mip 0 when this surface is used as a buffer. */
+    uint32_t surface_bytes;
+    bool has_initial_data;
 } VMSVGA3DD3D10SurfaceInfo;
 
 typedef struct vmsvga3d_d3d10_create_desc_s {
-  bool valid;
-  uint32_t resource_dimension;
-  uint32_t byte_width;
-  uint32_t width;
-  uint32_t height;
-  uint32_t depth;
-  uint32_t mip_levels;
-  uint32_t array_size;
-  uint32_t format;
-  uint32_t sample_count;
-  uint32_t sample_quality;
-  uint32_t usage;
-  uint32_t bind_flags;
-  uint32_t cpu_access_flags;
-  uint32_t misc_flags;
-  uint32_t initial_subresource_count;
+    bool valid;
+    uint32_t resource_dimension;
+    uint32_t byte_width;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t mip_levels;
+    uint32_t array_size;
+    uint32_t format;
+    uint32_t sample_count;
+    uint32_t sample_quality;
+    uint32_t usage;
+    uint32_t bind_flags;
+    uint32_t cpu_access_flags;
+    uint32_t misc_flags;
+    uint32_t initial_subresource_count;
 } VMSVGA3DD3D10CreateDesc;
 
 typedef struct vmsvga3d_d3d10_resource_plan_s {
-  VMSVGA3DD3D10ResourceUse use;
-  uint32_t requested_format;
-  uint32_t resource_format;
-  uint32_t dynamic_format;
-  uint32_t staging_format;
-  VMSVGA3DD3D10CreateDesc primary;
-  VMSVGA3DD3D10CreateDesc dynamic;
-  VMSVGA3DD3D10CreateDesc staging;
-  bool has_dynamic;
-  bool has_staging;
-  bool uses_common_staging_buffer;
+    VMSVGA3DD3D10ResourceUse use;
+    uint32_t requested_format;
+    uint32_t resource_format;
+    uint32_t dynamic_format;
+    uint32_t staging_format;
+    VMSVGA3DD3D10CreateDesc primary;
+    VMSVGA3DD3D10CreateDesc dynamic;
+    VMSVGA3DD3D10CreateDesc staging;
+    bool has_dynamic;
+    bool has_staging;
+    bool uses_common_staging_buffer;
 } VMSVGA3DD3D10ResourcePlan;
 
 typedef struct vmsvga3d_d3d10_box_s {
-  uint32_t left;
-  uint32_t top;
-  uint32_t front;
-  uint32_t right;
-  uint32_t bottom;
-  uint32_t back;
+    uint32_t left;
+    uint32_t top;
+    uint32_t front;
+    uint32_t right;
+    uint32_t bottom;
+    uint32_t back;
 } VMSVGA3DD3D10Box;
 
 typedef struct vmsvga3d_d3d10_copy_region_plan_s {
-  SVGA3dCopyBox clipped_box;
-  uint32_t destination_x;
-  uint32_t destination_y;
-  uint32_t destination_z;
-  VMSVGA3DD3D10Box source_box;
+    SVGA3dCopyBox clipped_box;
+    uint32_t destination_x;
+    uint32_t destination_y;
+    uint32_t destination_z;
+    VMSVGA3DD3D10Box source_box;
 } VMSVGA3DD3D10CopyRegionPlan;
 
 #define VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES 32u
 
 typedef enum vmsvga3d_d3d10_shader_program_type_e {
-  VMSVGA3D_D3D10_SHADER_PROGRAM_PIXEL = 0,
-  VMSVGA3D_D3D10_SHADER_PROGRAM_VERTEX = 1,
-  VMSVGA3D_D3D10_SHADER_PROGRAM_GEOMETRY = 2,
-  VMSVGA3D_D3D10_SHADER_PROGRAM_HULL = 3,
-  VMSVGA3D_D3D10_SHADER_PROGRAM_DOMAIN = 4,
-  VMSVGA3D_D3D10_SHADER_PROGRAM_COMPUTE = 5,
+    VMSVGA3D_D3D10_SHADER_PROGRAM_PIXEL = 0,
+    VMSVGA3D_D3D10_SHADER_PROGRAM_VERTEX = 1,
+    VMSVGA3D_D3D10_SHADER_PROGRAM_GEOMETRY = 2,
+    VMSVGA3D_D3D10_SHADER_PROGRAM_HULL = 3,
+    VMSVGA3D_D3D10_SHADER_PROGRAM_DOMAIN = 4,
+    VMSVGA3D_D3D10_SHADER_PROGRAM_COMPUTE = 5,
 } VMSVGA3DD3D10ShaderProgramType;
 
 typedef enum vmsvga3d_d3d10_shader_component_type_e {
-  VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN = 0,
-  VMSVGA3D_D3D10_SHADER_COMPONENT_UINT32 = 1,
-  VMSVGA3D_D3D10_SHADER_COMPONENT_SINT32 = 2,
-  VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32 = 3,
+    VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN = 0,
+    VMSVGA3D_D3D10_SHADER_COMPONENT_UINT32 = 1,
+    VMSVGA3D_D3D10_SHADER_COMPONENT_SINT32 = 2,
+    VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32 = 3,
 } VMSVGA3DD3D10ShaderComponentType;
 
 typedef struct vmsvga3d_d3d10_shader_semantic_s {
-  const char *semantic_name;
-  uint32_t semantic_index;
+    const char *semantic_name;
+    uint32_t semantic_index;
 } VMSVGA3DD3D10ShaderSemantic;
 
 /*
@@ -271,70 +271,70 @@ typedef struct vmsvga3d_d3d10_shader_semantic_s {
  * own rewritten bytecode.
  */
 typedef struct vmsvga3d_d3d10_shader_info_s {
-  uint32_t program_type;
-  uint32_t major_version;
-  uint32_t minor_version;
-  uint32_t token_count;
-  uint32_t bytecode_size;
-  void *rewritten_bytecode;
-  uint32_t rewritten_bytecode_size;
-  uint32_t resource_declaration_count;
-  uint32_t resource_declaration_offsets[SVGA3D_DX_MAX_SRVIEWS];
-  bool guest_signatures;
-  bool semantics_complete;
-  bool match_masks_covered;
-  uint32_t input_signature_count;
-  uint32_t output_signature_count;
-  uint32_t patch_signature_count;
-  SVGA3dDXShaderSignatureEntry
-      input_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
-  SVGA3dDXShaderSignatureEntry
-      output_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
-  SVGA3dDXShaderSignatureEntry
-      patch_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
-  VMSVGA3DD3D10ShaderSemantic
-      input_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
-  VMSVGA3DD3D10ShaderSemantic
-      output_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
-  VMSVGA3DD3D10ShaderSemantic
-      patch_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    uint32_t program_type;
+    uint32_t major_version;
+    uint32_t minor_version;
+    uint32_t token_count;
+    uint32_t bytecode_size;
+    void *rewritten_bytecode;
+    uint32_t rewritten_bytecode_size;
+    uint32_t resource_declaration_count;
+    uint32_t resource_declaration_offsets[SVGA3D_DX_MAX_SRVIEWS];
+    bool guest_signatures;
+    bool semantics_complete;
+    bool match_masks_covered;
+    uint32_t input_signature_count;
+    uint32_t output_signature_count;
+    uint32_t patch_signature_count;
+    SVGA3dDXShaderSignatureEntry
+        input_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    SVGA3dDXShaderSignatureEntry
+        output_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    SVGA3dDXShaderSignatureEntry
+        patch_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    VMSVGA3DD3D10ShaderSemantic
+        input_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    VMSVGA3DD3D10ShaderSemantic
+        output_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    VMSVGA3DD3D10ShaderSemantic
+        patch_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
 } VMSVGA3DD3D10ShaderInfo;
 
 typedef struct vmsvga3d_d3d10_shader_output_semantic_s {
-  uint32_t register_index;
-  uint32_t mask;
-  const char *semantic_name;
-  uint32_t semantic_index;
+    uint32_t register_index;
+    uint32_t mask;
+    const char *semantic_name;
+    uint32_t semantic_index;
 } VMSVGA3DD3D10ShaderOutputSemantic;
 
 typedef enum vmsvga3d_d3d10_shader_resource_dimension_e {
-  VMSVGA3D_D3D10_SHADER_RESOURCE_UNKNOWN = 0,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_BUFFER = 1,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE1D = 2,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2D = 3,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2DMS = 4,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE3D = 5,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURECUBE = 6,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE1DARRAY = 7,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2DARRAY = 8,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2DMSARRAY = 9,
-  VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURECUBEARRAY = 10,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_UNKNOWN = 0,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_BUFFER = 1,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE1D = 2,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2D = 3,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2DMS = 4,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE3D = 5,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURECUBE = 6,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE1DARRAY = 7,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2DARRAY = 8,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURE2DMSARRAY = 9,
+    VMSVGA3D_D3D10_SHADER_RESOURCE_TEXTURECUBEARRAY = 10,
 } VMSVGA3DD3D10ShaderResourceDimension;
 
 typedef enum vmsvga3d_d3d10_shader_resource_return_type_e {
-  VMSVGA3D_D3D10_SHADER_RETURN_NONE = 0,
-  VMSVGA3D_D3D10_SHADER_RETURN_UNORM = 1,
-  VMSVGA3D_D3D10_SHADER_RETURN_SNORM = 2,
-  VMSVGA3D_D3D10_SHADER_RETURN_SINT = 3,
-  VMSVGA3D_D3D10_SHADER_RETURN_UINT = 4,
-  VMSVGA3D_D3D10_SHADER_RETURN_FLOAT = 5,
-  VMSVGA3D_D3D10_SHADER_RETURN_MIXED = 6,
+    VMSVGA3D_D3D10_SHADER_RETURN_NONE = 0,
+    VMSVGA3D_D3D10_SHADER_RETURN_UNORM = 1,
+    VMSVGA3D_D3D10_SHADER_RETURN_SNORM = 2,
+    VMSVGA3D_D3D10_SHADER_RETURN_SINT = 3,
+    VMSVGA3D_D3D10_SHADER_RETURN_UINT = 4,
+    VMSVGA3D_D3D10_SHADER_RETURN_FLOAT = 5,
+    VMSVGA3D_D3D10_SHADER_RETURN_MIXED = 6,
 } VMSVGA3DD3D10ShaderResourceReturnType;
 
 typedef struct vmsvga3d_d3d10_shader_resource_binding_s {
-  uint32_t resource_dimension;
-  uint32_t return_type;
-  SVGA3dSurfaceFormat format;
+    uint32_t resource_dimension;
+    uint32_t return_type;
+    SVGA3dSurfaceFormat format;
 } VMSVGA3DD3D10ShaderResourceBinding;
 
 /*
@@ -342,324 +342,324 @@ typedef struct vmsvga3d_d3d10_shader_resource_binding_s {
  * with shader_dxbc_release(); callers must not reuse an owning output object.
  */
 typedef struct vmsvga3d_d3d10_shader_dxbc_s {
-  void *data;
-  uint32_t size;
+    void *data;
+    uint32_t size;
 } VMSVGA3DD3D10ShaderDXBC;
 
 typedef struct vmsvga3d_d3d10_stream_output_decl_s {
-  uint32_t stream;
-  const char *semantic_name;
-  uint32_t semantic_index;
-  uint8_t start_component;
-  uint8_t component_count;
-  uint8_t output_slot;
+    uint32_t stream;
+    const char *semantic_name;
+    uint32_t semantic_index;
+    uint8_t start_component;
+    uint8_t component_count;
+    uint8_t output_slot;
 } VMSVGA3DD3D10StreamOutputDecl;
 
 typedef struct vmsvga3d_d3d10_stream_output_plan_s {
-  uint32_t declaration_count;
-  VMSVGA3DD3D10StreamOutputDecl declarations[SVGA3D_MAX_STREAMOUT_DECLS];
-  uint32_t strides[SVGA3D_DX_MAX_SOTARGETS];
-  uint32_t stride_count;
-  uint32_t rasterized_stream;
-  bool use_explicit_strides;
-  bool uses_mob;
-  bool all_semantics_resolved;
+    uint32_t declaration_count;
+    VMSVGA3DD3D10StreamOutputDecl declarations[SVGA3D_MAX_STREAMOUT_DECLS];
+    uint32_t strides[SVGA3D_DX_MAX_SOTARGETS];
+    uint32_t stride_count;
+    uint32_t rasterized_stream;
+    bool use_explicit_strides;
+    bool uses_mob;
+    bool all_semantics_resolved;
 } VMSVGA3DD3D10StreamOutputPlan;
 
 typedef struct vmsvga3d_d3d10_so_target_binding_s {
-  SVGA3dSurfaceId sid;
-  uint32_t offset;
-  uint32_t size_in_bytes;
-  bool active;
-  bool ensure_stream_output_buffer;
+    SVGA3dSurfaceId sid;
+    uint32_t offset;
+    uint32_t size_in_bytes;
+    bool active;
+    bool ensure_stream_output_buffer;
 } VMSVGA3DD3D10SOTargetBinding;
 
 typedef struct vmsvga3d_d3d10_so_targets_plan_s {
-  uint32_t guest_count;
-  SVGA3dSurfaceId shadow_targets[SVGA3D_DX_MAX_SOTARGETS];
-  VMSVGA3DD3D10SOTargetBinding bindings[SVGA3D_DX_MAX_SOTARGETS];
-  uint32_t native_target_count;
-  uint32_t backend_remembered_count;
-  bool shadow_update;
-  bool shadow_update_before_backend;
-  bool shadow_stores_only_surface_ids;
-  bool shadow_clears_unspecified_slots;
-  bool prepare_targets_sequentially;
-  bool size_in_bytes_ignored;
-  bool bind_full_native_table;
-  bool immediate_bind;
+    uint32_t guest_count;
+    SVGA3dSurfaceId shadow_targets[SVGA3D_DX_MAX_SOTARGETS];
+    VMSVGA3DD3D10SOTargetBinding bindings[SVGA3D_DX_MAX_SOTARGETS];
+    uint32_t native_target_count;
+    uint32_t backend_remembered_count;
+    bool shadow_update;
+    bool shadow_update_before_backend;
+    bool shadow_stores_only_surface_ids;
+    bool shadow_clears_unspecified_slots;
+    bool prepare_targets_sequentially;
+    bool size_in_bytes_ignored;
+    bool bind_full_native_table;
+    bool immediate_bind;
 } VMSVGA3DD3D10SOTargetsPlan;
 
 typedef struct vmsvga3d_d3d10_stream_output_set_plan_s {
-  SVGA3dStreamOutputId stream_output_id;
-  bool shadow_update;
-  bool backend_set_is_noop;
-  bool affects_geometry_shader_creation;
+    SVGA3dStreamOutputId stream_output_id;
+    bool shadow_update;
+    bool backend_set_is_noop;
+    bool affects_geometry_shader_creation;
 } VMSVGA3DD3D10StreamOutputSetPlan;
 
 typedef enum vmsvga3d_d3d10_bind_timing_e {
-  VMSVGA3D_D3D10_BIND_IMMEDIATE = 0,
-  VMSVGA3D_D3D10_BIND_DRAW_SETUP,
+    VMSVGA3D_D3D10_BIND_IMMEDIATE = 0,
+    VMSVGA3D_D3D10_BIND_DRAW_SETUP,
 } VMSVGA3DD3D10BindTiming;
 
 typedef struct vmsvga3d_d3d10_constant_buffer_plan_s {
-  uint32_t stage_index;
-  uint32_t slot;
-  SVGA3dSurfaceId sid;
-  uint32_t offset_in_bytes;
-  uint32_t size_in_bytes;
-  bool shadow_update;
-  bool unbind;
-  bool create_buffer;
-  bool has_initial_data;
-  uint32_t initial_data_offset;
-  uint32_t backend_copy_size;
-  uint32_t backend_buffer_size;
-  bool replace_only_on_create_success;
-  bool preserve_old_buffer_on_create_failure;
-  bool create_failure_is_success;
-  bool bind_only_if_pipeline_differs;
-  VMSVGA3DD3D10BindTiming bind_timing;
-  VMSVGA3DD3D10CreateDesc create_desc;
+    uint32_t stage_index;
+    uint32_t slot;
+    SVGA3dSurfaceId sid;
+    uint32_t offset_in_bytes;
+    uint32_t size_in_bytes;
+    bool shadow_update;
+    bool unbind;
+    bool create_buffer;
+    bool has_initial_data;
+    uint32_t initial_data_offset;
+    uint32_t backend_copy_size;
+    uint32_t backend_buffer_size;
+    bool replace_only_on_create_success;
+    bool preserve_old_buffer_on_create_failure;
+    bool create_failure_is_success;
+    bool bind_only_if_pipeline_differs;
+    VMSVGA3DD3D10BindTiming bind_timing;
+    VMSVGA3DD3D10CreateDesc create_desc;
 } VMSVGA3DD3D10ConstantBufferPlan;
 
 typedef struct vmsvga3d_d3d10_shader_resource_set_plan_s {
-  uint32_t stage_index;
-  uint32_t start_view;
-  uint32_t count;
-  uint32_t ids[SVGA3D_DX_MAX_SRVIEWS];
-  uint32_t shadow_update_count;
-  bool shadow_update_atomic;
-  bool ensure_views_at_draw;
-  bool bind_full_table_at_draw;
-  bool bind_every_draw;
-  VMSVGA3DD3D10BindTiming bind_timing;
+    uint32_t stage_index;
+    uint32_t start_view;
+    uint32_t count;
+    uint32_t ids[SVGA3D_DX_MAX_SRVIEWS];
+    uint32_t shadow_update_count;
+    bool shadow_update_atomic;
+    bool ensure_views_at_draw;
+    bool bind_full_table_at_draw;
+    bool bind_every_draw;
+    VMSVGA3DD3D10BindTiming bind_timing;
 } VMSVGA3DD3D10ShaderResourceSetPlan;
 
 typedef struct vmsvga3d_d3d10_shader_set_plan_s {
-  uint32_t stage_index;
-  SVGA3dShaderId shader_id;
-  bool shadow_update;
-  bool unbind;
-  bool create_if_missing_at_draw;
-  bool patch_pixel_resources_on_create;
-  bool update_vs_input_signature_on_create;
-  bool match_signatures_on_create;
-  bool stream_output_affects_geometry_creation;
-  bool bind_every_draw;
-  VMSVGA3DD3D10BindTiming bind_timing;
+    uint32_t stage_index;
+    SVGA3dShaderId shader_id;
+    bool shadow_update;
+    bool unbind;
+    bool create_if_missing_at_draw;
+    bool patch_pixel_resources_on_create;
+    bool update_vs_input_signature_on_create;
+    bool match_signatures_on_create;
+    bool stream_output_affects_geometry_creation;
+    bool bind_every_draw;
+    VMSVGA3DD3D10BindTiming bind_timing;
 } VMSVGA3DD3D10ShaderSetPlan;
 
 typedef struct vmsvga3d_d3d10_sampler_set_plan_s {
-  uint32_t stage_index;
-  uint32_t start_sampler;
-  uint32_t count;
-  uint32_t ids[SVGA3D_DX_MAX_SAMPLERS];
-  uint32_t shadow_update_count;
-  bool partial_shadow_update_on_failure;
-  VMSVGA3DD3D10BindTiming bind_timing;
+    uint32_t stage_index;
+    uint32_t start_sampler;
+    uint32_t count;
+    uint32_t ids[SVGA3D_DX_MAX_SAMPLERS];
+    uint32_t shadow_update_count;
+    bool partial_shadow_update_on_failure;
+    VMSVGA3DD3D10BindTiming bind_timing;
 } VMSVGA3DD3D10SamplerSetPlan;
 
 typedef struct vmsvga3d_d3d10_input_layout_set_plan_s {
-  SVGA3dElementLayoutId layout_id;
-  bool shadow_update;
-  bool unbind;
-  bool create_lazily_at_draw;
-  bool requires_vertex_shader_dxbc;
-  bool bind_every_draw;
-  VMSVGA3DD3D10BindTiming bind_timing;
+    SVGA3dElementLayoutId layout_id;
+    bool shadow_update;
+    bool unbind;
+    bool create_lazily_at_draw;
+    bool requires_vertex_shader_dxbc;
+    bool bind_every_draw;
+    VMSVGA3DD3D10BindTiming bind_timing;
 } VMSVGA3DD3D10InputLayoutSetPlan;
 
 typedef struct vmsvga3d_d3d10_vertex_buffer_binding_s {
-  SVGA3dSurfaceId sid;
-  uint32_t stride;
-  uint32_t offset;
-  bool unbind;
-  bool ensure_buffer_on_set;
+    SVGA3dSurfaceId sid;
+    uint32_t stride;
+    uint32_t offset;
+    bool unbind;
+    bool ensure_buffer_on_set;
 } VMSVGA3DD3D10VertexBufferBinding;
 
 typedef struct vmsvga3d_d3d10_vertex_buffer_set_plan_s {
-  uint32_t start_buffer;
-  uint32_t count;
-  VMSVGA3DD3D10VertexBufferBinding bindings[SVGA3D_DX_MAX_VERTEXBUFFERS];
-  uint32_t shadow_update_count;
-  bool prepare_backend_on_set;
-  bool backend_updates_sequentially;
-  bool bind_from_slot_zero_at_draw;
-  bool bind_only_if_pipeline_differs;
-  VMSVGA3DD3D10BindTiming bind_timing;
+    uint32_t start_buffer;
+    uint32_t count;
+    VMSVGA3DD3D10VertexBufferBinding bindings[SVGA3D_DX_MAX_VERTEXBUFFERS];
+    uint32_t shadow_update_count;
+    bool prepare_backend_on_set;
+    bool backend_updates_sequentially;
+    bool bind_from_slot_zero_at_draw;
+    bool bind_only_if_pipeline_differs;
+    VMSVGA3DD3D10BindTiming bind_timing;
 } VMSVGA3DD3D10VertexBufferSetPlan;
 
 typedef struct vmsvga3d_d3d10_vertex_buffer_pipeline_binding_s {
-  uint32_t stride;
-  uint32_t offset;
+    uint32_t stride;
+    uint32_t offset;
 } VMSVGA3DD3D10VertexBufferPipelineBinding;
 
 typedef struct vmsvga3d_d3d10_index_buffer_set_plan_s {
-  SVGA3dSurfaceId sid;
-  SVGA3dSurfaceFormat format;
-  uint32_t offset;
-  uint32_t backend_offset;
-  uint32_t dxgi_format;
-  uint32_t bytes_per_index;
-  bool shadow_update;
-  bool unbind;
-  bool ensure_buffer_on_set;
-  bool backend_reject;
-  bool bind_only_if_pipeline_differs;
-  VMSVGA3DD3D10BindTiming bind_timing;
+    SVGA3dSurfaceId sid;
+    SVGA3dSurfaceFormat format;
+    uint32_t offset;
+    uint32_t backend_offset;
+    uint32_t dxgi_format;
+    uint32_t bytes_per_index;
+    bool shadow_update;
+    bool unbind;
+    bool ensure_buffer_on_set;
+    bool backend_reject;
+    bool bind_only_if_pipeline_differs;
+    VMSVGA3DD3D10BindTiming bind_timing;
 } VMSVGA3DD3D10IndexBufferSetPlan;
 
 typedef struct vmsvga3d_d3d10_viewports_set_plan_s {
-  uint32_t count;
-  SVGA3dViewport viewports[SVGA3D_DX_MAX_VIEWPORTS];
-  bool shadow_update;
-  bool preserve_unspecified_slots;
-  bool immediate_bind;
+    uint32_t count;
+    SVGA3dViewport viewports[SVGA3D_DX_MAX_VIEWPORTS];
+    bool shadow_update;
+    bool preserve_unspecified_slots;
+    bool immediate_bind;
 } VMSVGA3DD3D10ViewportsSetPlan;
 
 typedef struct vmsvga3d_d3d10_topology_set_plan_s {
-  SVGA3dPrimitiveType topology;
-  uint32_t native_topology;
-  bool shadow_update;
-  bool immediate_bind;
+    SVGA3dPrimitiveType topology;
+    uint32_t native_topology;
+    bool shadow_update;
+    bool immediate_bind;
 } VMSVGA3DD3D10TopologySetPlan;
 
 typedef struct vmsvga3d_d3d10_blend_state_set_plan_s {
-  SVGA3dBlendStateId blend_id;
-  float blend_factor[4];
-  uint32_t sample_mask;
-  bool shadow_update;
-  bool immediate_bind;
+    SVGA3dBlendStateId blend_id;
+    float blend_factor[4];
+    uint32_t sample_mask;
+    bool shadow_update;
+    bool immediate_bind;
 } VMSVGA3DD3D10BlendStateSetPlan;
 
 typedef struct vmsvga3d_d3d10_depth_stencil_state_set_plan_s {
-  SVGA3dDepthStencilStateId depth_stencil_id;
-  uint32_t stencil_ref;
-  bool shadow_update;
-  bool immediate_bind;
+    SVGA3dDepthStencilStateId depth_stencil_id;
+    uint32_t stencil_ref;
+    bool shadow_update;
+    bool immediate_bind;
 } VMSVGA3DD3D10DepthStencilStateSetPlan;
 
 typedef struct vmsvga3d_d3d10_rasterizer_state_set_plan_s {
-  SVGA3dRasterizerStateId rasterizer_id;
-  bool shadow_update;
-  bool immediate_bind;
+    SVGA3dRasterizerStateId rasterizer_id;
+    bool shadow_update;
+    bool immediate_bind;
 } VMSVGA3DD3D10RasterizerStateSetPlan;
 
 typedef struct vmsvga3d_d3d10_scissor_plan_s {
-  uint32_t count;
-  SVGASignedRect rects[SVGA3D_DX_MAX_SCISSORRECTS];
-  bool shadow_update;
-  bool native_layout_identical;
-  bool immediate_bind;
+    uint32_t count;
+    SVGASignedRect rects[SVGA3D_DX_MAX_SCISSORRECTS];
+    bool shadow_update;
+    bool native_layout_identical;
+    bool immediate_bind;
 } VMSVGA3DD3D10ScissorPlan;
 
 typedef struct vmsvga3d_d3d10_render_targets_set_plan_s {
-  SVGA3dDepthStencilViewId depth_stencil_view_id;
-  uint32_t supplied_count;
-  uint32_t previous_remembered_count;
-  uint32_t remembered_count;
-  SVGA3dRenderTargetViewId ids[SVGA3D_MAX_RENDER_TARGETS];
-  uint32_t shadow_update_count;
-  bool shadow_update_atomic;
-  bool preserve_unspecified_slots;
-  bool backend_set_is_noop;
-  bool ensure_dsv_at_draw;
-  bool ensure_all_rtv_slots_at_draw;
-  bool bind_at_draw_setup;
+    SVGA3dDepthStencilViewId depth_stencil_view_id;
+    uint32_t supplied_count;
+    uint32_t previous_remembered_count;
+    uint32_t remembered_count;
+    SVGA3dRenderTargetViewId ids[SVGA3D_MAX_RENDER_TARGETS];
+    uint32_t shadow_update_count;
+    bool shadow_update_atomic;
+    bool preserve_unspecified_slots;
+    bool backend_set_is_noop;
+    bool ensure_dsv_at_draw;
+    bool ensure_all_rtv_slots_at_draw;
+    bool bind_at_draw_setup;
 } VMSVGA3DD3D10RenderTargetsSetPlan;
 
 typedef struct vmsvga3d_d3d10_gen_mips_plan_s {
-  SVGA3dShaderResourceViewId view_id;
-  bool require_existing_backend_view;
-  bool do_not_create_view_on_call;
-  bool require_view_entry;
-  bool require_surface;
-  bool require_backend_surface;
-  bool immediate_generate_mips;
-  bool mark_surface_drawing_context;
+    SVGA3dShaderResourceViewId view_id;
+    bool require_existing_backend_view;
+    bool do_not_create_view_on_call;
+    bool require_view_entry;
+    bool require_surface;
+    bool require_backend_surface;
+    bool immediate_generate_mips;
+    bool mark_surface_drawing_context;
 } VMSVGA3DD3D10GenMipsPlan;
 
 typedef enum vmsvga3d_d3d10_clear_kind_e {
-  VMSVGA3D_D3D10_CLEAR_RENDER_TARGET = 0,
-  VMSVGA3D_D3D10_CLEAR_DEPTH_STENCIL,
+    VMSVGA3D_D3D10_CLEAR_RENDER_TARGET = 0,
+    VMSVGA3D_D3D10_CLEAR_DEPTH_STENCIL,
 } VMSVGA3DD3D10ClearKind;
 
 typedef struct vmsvga3d_d3d10_clear_rtv_plan_s {
-  SVGA3dRenderTargetViewId view_id;
-  float color[4];
-  bool ensure_view_on_clear;
-  bool immediate_clear;
+    SVGA3dRenderTargetViewId view_id;
+    float color[4];
+    bool ensure_view_on_clear;
+    bool immediate_clear;
 } VMSVGA3DD3D10ClearRTVPlan;
 
 typedef struct vmsvga3d_d3d10_clear_dsv_plan_s {
-  SVGA3dDepthStencilViewId view_id;
-  uint32_t guest_flags;
-  uint32_t d3d_clear_flags;
-  float depth;
-  uint8_t stencil;
-  bool ensure_view_on_clear;
-  bool immediate_clear;
+    SVGA3dDepthStencilViewId view_id;
+    uint32_t guest_flags;
+    uint32_t d3d_clear_flags;
+    float depth;
+    uint8_t stencil;
+    bool ensure_view_on_clear;
+    bool immediate_clear;
 } VMSVGA3DD3D10ClearDSVPlan;
 
 typedef enum vmsvga3d_d3d10_resource_create_kind_e {
-  VMSVGA3D_D3D10_CREATE_TEXTURE = 0,
-  VMSVGA3D_D3D10_CREATE_BUFFER,
+    VMSVGA3D_D3D10_CREATE_TEXTURE = 0,
+    VMSVGA3D_D3D10_CREATE_BUFFER,
 } VMSVGA3DD3D10ResourceCreateKind;
 
 typedef struct vmsvga3d_d3d10_copy_resource_plan_s {
-  bool ensure_source_resource;
-  bool ensure_destination_resource;
-  VMSVGA3DD3D10ResourceCreateKind source_create_kind;
-  VMSVGA3DD3D10ResourceCreateKind destination_create_kind;
-  bool issue_copy_resource;
-  bool mark_destination_drawing_context;
+    bool ensure_source_resource;
+    bool ensure_destination_resource;
+    VMSVGA3DD3D10ResourceCreateKind source_create_kind;
+    VMSVGA3DD3D10ResourceCreateKind destination_create_kind;
+    bool issue_copy_resource;
+    bool mark_destination_drawing_context;
 } VMSVGA3DD3D10CopyResourcePlan;
 
 typedef struct vmsvga3d_d3d10_copy_subresource_plan_s {
-  bool ensure_source_resource;
-  bool ensure_destination_resource;
-  VMSVGA3DD3D10ResourceCreateKind source_create_kind;
-  VMSVGA3DD3D10ResourceCreateKind destination_create_kind;
-  uint32_t destination_subresource;
-  uint32_t source_subresource;
-  VMSVGA3DD3D10CopyRegionPlan region;
-  bool issue_copy_subresource_region;
-  bool mark_destination_drawing_context;
+    bool ensure_source_resource;
+    bool ensure_destination_resource;
+    VMSVGA3DD3D10ResourceCreateKind source_create_kind;
+    VMSVGA3DD3D10ResourceCreateKind destination_create_kind;
+    uint32_t destination_subresource;
+    uint32_t source_subresource;
+    VMSVGA3DD3D10CopyRegionPlan region;
+    bool issue_copy_subresource_region;
+    bool mark_destination_drawing_context;
 } VMSVGA3DD3D10CopySubresourcePlan;
 
 typedef struct vmsvga3d_d3d10_query_info_s {
-  uint32_t d3d_query;
-  uint32_t svga_result_size;
-  uint32_t d3d_result_size;
-  bool boolean_result;
-  bool predicate_hint;
+    uint32_t d3d_query;
+    uint32_t svga_result_size;
+    uint32_t d3d_result_size;
+    bool boolean_result;
+    bool predicate_hint;
 } VMSVGA3DD3D10QueryInfo;
 
 #define VMSVGA3D_D3D10_QUERY_MISC_PREDICATEHINT 0x1u
 
 typedef struct vmsvga3d_d3d10_query_execution_plan_s {
-  uint32_t d3d_query;
-  uint32_t misc_flags;
-  uint32_t svga_result_size;
-  uint32_t d3d_result_size;
-  uint32_t getdata_flags;
-  bool issue_begin;
-  bool issue_end;
-  bool get_data_after_end;
-  bool wait_until_ready;
-  bool retry_non_s_ok;
-  bool yield_while_waiting;
-  bool readback_is_noop;
+    uint32_t d3d_query;
+    uint32_t misc_flags;
+    uint32_t svga_result_size;
+    uint32_t d3d_result_size;
+    uint32_t getdata_flags;
+    bool issue_begin;
+    bool issue_end;
+    bool get_data_after_end;
+    bool wait_until_ready;
+    bool retry_non_s_ok;
+    bool yield_while_waiting;
+    bool readback_is_noop;
 } VMSVGA3DD3D10QueryExecutionPlan;
 
 typedef struct vmsvga3d_d3d10_predication_plan_s {
-  bool enabled;
-  bool release_existing_query;
-  bool create_predicate;
-  uint32_t d3d_query;
-  uint32_t misc_flags;
-  bool predicate_value;
+    bool enabled;
+    bool release_existing_query;
+    bool create_predicate;
+    uint32_t d3d_query;
+    uint32_t misc_flags;
+    bool predicate_value;
 } VMSVGA3DD3D10PredicationPlan;
 
 #ifdef __cplusplus

@@ -41,14 +41,14 @@
  */
 
 typedef enum vmsvga3d_d3d11_level_e {
-  VMSVGA3D_D3D11_LEVEL_INVALID = 0,
-  VMSVGA3D_D3D11_LEVEL_11_0,
-  VMSVGA3D_D3D11_LEVEL_11_1,
+    VMSVGA3D_D3D11_LEVEL_INVALID = 0,
+    VMSVGA3D_D3D11_LEVEL_11_0,
+    VMSVGA3D_D3D11_LEVEL_11_1,
 } VMSVGA3DD3D11Level;
 
 typedef struct vmsvga3d_d3d11_format_s {
-  uint32_t dxgi_format;
-  VMSVGA3DD3D11Level min_level;
+    uint32_t dxgi_format;
+    VMSVGA3DD3D11Level min_level;
 } VMSVGA3DD3D11Format;
 
 #define VMSVGA3D_D3D11_INPUT_SEMANTIC VMSVGA3D_D3D10_INPUT_SEMANTIC
@@ -61,78 +61,78 @@ typedef VMSVGA3DD3D10RTVDesc VMSVGA3DD3D11RTVDesc;
 typedef VMSVGA3DD3D10QueryInfo VMSVGA3DD3D11QueryInfo;
 
 typedef struct vmsvga3d_d3d11_rt_blend_s {
-  uint32_t blend_enable;
-  uint32_t logic_op_enable;
-  uint32_t src_blend;
-  uint32_t dest_blend;
-  uint32_t blend_op;
-  uint32_t src_blend_alpha;
-  uint32_t dest_blend_alpha;
-  uint32_t blend_op_alpha;
-  uint32_t logic_op;
-  uint8_t write_mask;
+    uint32_t blend_enable;
+    uint32_t logic_op_enable;
+    uint32_t src_blend;
+    uint32_t dest_blend;
+    uint32_t blend_op;
+    uint32_t src_blend_alpha;
+    uint32_t dest_blend_alpha;
+    uint32_t blend_op_alpha;
+    uint32_t logic_op;
+    uint8_t write_mask;
 } VMSVGA3DD3D11RTBlend;
 
 typedef struct vmsvga3d_d3d11_blend_desc_s {
-  uint32_t alpha_to_coverage_enable;
-  uint32_t independent_blend_enable;
-  VMSVGA3DD3D11RTBlend render_target[SVGA3D_DX_MAX_RENDER_TARGETS];
+    uint32_t alpha_to_coverage_enable;
+    uint32_t independent_blend_enable;
+    VMSVGA3DD3D11RTBlend render_target[SVGA3D_DX_MAX_RENDER_TARGETS];
 } VMSVGA3DD3D11BlendDesc;
 
 typedef struct vmsvga3d_d3d11_rasterizer_desc_s {
-  uint32_t fill_mode;
-  uint32_t cull_mode;
-  uint32_t front_counter_clockwise;
-  int32_t depth_bias;
-  float depth_bias_clamp;
-  float slope_scaled_depth_bias;
-  uint32_t depth_clip_enable;
-  uint32_t scissor_enable;
-  uint32_t multisample_enable;
-  uint32_t antialiased_line_enable;
-  uint32_t forced_sample_count;
+    uint32_t fill_mode;
+    uint32_t cull_mode;
+    uint32_t front_counter_clockwise;
+    int32_t depth_bias;
+    float depth_bias_clamp;
+    float slope_scaled_depth_bias;
+    uint32_t depth_clip_enable;
+    uint32_t scissor_enable;
+    uint32_t multisample_enable;
+    uint32_t antialiased_line_enable;
+    uint32_t forced_sample_count;
 } VMSVGA3DD3D11RasterizerDesc;
 
 typedef struct vmsvga3d_d3d11_resource_policy_s {
-  uint32_t usage;
-  uint32_t bind_flags;
-  uint32_t cpu_access_flags;
-  uint32_t misc_flags;
-  uint32_t structure_byte_stride;
+    uint32_t usage;
+    uint32_t bind_flags;
+    uint32_t cpu_access_flags;
+    uint32_t misc_flags;
+    uint32_t structure_byte_stride;
 } VMSVGA3DD3D11ResourcePolicy;
 
 typedef struct vmsvga3d_d3d11_srv_desc_s {
-  uint32_t format;
-  uint32_t view_dimension;
-  uint32_t most_detailed_mip;
-  uint32_t mip_levels;
-  uint32_t first_array_slice;
-  uint32_t array_size;
-  uint32_t first_element;
-  uint32_t num_elements;
-  uint32_t flags;
+    uint32_t format;
+    uint32_t view_dimension;
+    uint32_t most_detailed_mip;
+    uint32_t mip_levels;
+    uint32_t first_array_slice;
+    uint32_t array_size;
+    uint32_t first_element;
+    uint32_t num_elements;
+    uint32_t flags;
 } VMSVGA3DD3D11SRVDesc;
 
 typedef struct vmsvga3d_d3d11_dsv_desc_s {
-  uint32_t format;
-  uint32_t view_dimension;
-  uint32_t flags;
-  uint32_t mip_slice;
-  uint32_t first_array_slice;
-  uint32_t array_size;
+    uint32_t format;
+    uint32_t view_dimension;
+    uint32_t flags;
+    uint32_t mip_slice;
+    uint32_t first_array_slice;
+    uint32_t array_size;
 } VMSVGA3DD3D11DSVDesc;
 
 typedef struct vmsvga3d_d3d11_uav_desc_s {
-  uint32_t format;
-  uint32_t view_dimension;
-  uint32_t mip_slice;
-  uint32_t first_array_slice;
-  uint32_t array_size;
-  uint32_t first_w_slice;
-  uint32_t w_size;
-  uint32_t first_element;
-  uint32_t num_elements;
-  uint32_t flags;
+    uint32_t format;
+    uint32_t view_dimension;
+    uint32_t mip_slice;
+    uint32_t first_array_slice;
+    uint32_t array_size;
+    uint32_t first_w_slice;
+    uint32_t w_size;
+    uint32_t first_element;
+    uint32_t num_elements;
+    uint32_t flags;
 } VMSVGA3DD3D11UAVDesc;
 
 #ifdef __cplusplus

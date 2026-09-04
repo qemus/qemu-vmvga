@@ -6777,6 +6777,25 @@ static void vmsvga3d_d3d10_cotable_sanitize_live(
     }
 }
 
+static bool vmsvga3d_d3d11_uav_destroy_range_live(
+    struct vmsvga_state_s *s, uint32_t cid, uint32_t first, uint32_t count)
+{
+    uint32_t i;
+
+    if (s == NULL || first > count) {
+        return false;
+    }
+
+    for (i = first; i < count; i++) {
+        if (!vmsvga3d_dxvk_d3d11_unordered_access_view_destroy(
+                s->dxvk, cid, i)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static bool vmsvga3d_d3d10_state_cotable_replay_live(
     struct vmsvga_state_s *s, uint32_t cid, SVGACOTableType type,
     uint32_t old_capacity_entries, uint32_t new_valid_entries, bool grow)
@@ -6986,6 +7005,15 @@ static bool vmsvga3d_d3d10_state_cotable_replay_live(
         }
         break;
     case SVGA_COTABLE_UAVIEW:
+        /* VirtualBox's DX_STATE_TRACKER preserves the valid UAV prefix on
+         * GROW, but drops every native UAV on SET so setupPipeline recreates
+         * views from the replacement COTable.  Our generic view list does not
+         * move on GROW, so only the disappearing range needs destruction.
+         */
+        if (!vmsvga3d_d3d11_uav_destroy_range_live(
+                s, cid, first_destroy, old_capacity_entries)) {
+            return false;
+        }
         if (!grow && new_valid_entries != 0) {
             context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET |
                                        VMSVGA3D_DX_CTX_F_STATE_CSTARGET;

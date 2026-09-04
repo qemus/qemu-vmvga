@@ -155,6 +155,9 @@ bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_uint(
 bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_float(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
     const float values[4]);
+bool vmsvga3d_dxvk_d3d11_copy_structure_count(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
+    uint32_t destination_byte_offset, uint32_t cid, uint32_t source_view_id);
 bool vmsvga3d_dxvk_d3d11_generate_mips(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id);
 void vmsvga3d_dxvk_d3d11_view_context_destroy(
@@ -235,7 +238,16 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced(
     VMSVGA3DDxvk *dxvk, uint32_t index_count_per_instance,
     uint32_t instance_count, uint32_t start_index_location,
     int32_t base_vertex_location, uint32_t start_instance_location);
+bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced_indirect(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset);
+bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset);
 bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk);
+bool vmsvga3d_dxvk_d3d11_dispatch(
+    VMSVGA3DDxvk *dxvk, uint32_t thread_group_count_x,
+    uint32_t thread_group_count_y, uint32_t thread_group_count_z);
 bool vmsvga3d_dxvk_d3d11_present_blt(
     VMSVGA3DDxvk *dxvk,
     VMSVGA3DDxvkSurface *source, uint32_t source_subresource,
@@ -360,6 +372,15 @@ bool vmsvga3d_dxvk_d3d11_clear_render_target_view(
 bool vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
     uint32_t clear_flags, float depth, uint8_t stencil);
+bool vmsvga3d_dxvk_d3d11_set_cs_unordered_access_views(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t start_slot,
+    uint32_t view_count, const uint32_t *view_ids,
+    const uint32_t *initial_counts);
+bool vmsvga3d_dxvk_d3d11_set_render_targets_and_uavs(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t render_target_count,
+    const uint32_t *render_target_ids, uint32_t depth_stencil_view_id,
+    uint32_t uav_start_slot, uint32_t uav_count,
+    const uint32_t *uav_ids, const uint32_t *initial_counts);
 bool vmsvga3d_dxvk_d3d11_set_render_targets(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t render_target_count,
     const uint32_t *render_target_ids, uint32_t depth_stencil_view_id,

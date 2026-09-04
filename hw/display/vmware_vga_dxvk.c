@@ -4138,6 +4138,88 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced_indirect(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11DrawIndexedInstancedIndirect draw_indirect = NULL;
+    void *buffer = NULL;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+        return false;
+    }
+
+    if (args_buffer != NULL) {
+        if (!args_buffer->d3d11_resident ||
+            args_buffer->d3d11_resource == NULL ||
+            !args_buffer->d3d11_desc.valid ||
+            args_buffer->d3d11_desc.resource_dimension !=
+                VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
+            return false;
+        }
+        buffer = args_buffer->d3d11_resource;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INDEXED_INSTANCED_INDIRECT,
+            &draw_indirect, sizeof(draw_indirect))) {
+        return false;
+    }
+
+    draw_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)args_buffer;
+    (void)aligned_byte_offset;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11DrawInstancedIndirect draw_indirect = NULL;
+    void *buffer = NULL;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+        return false;
+    }
+
+    if (args_buffer != NULL) {
+        if (!args_buffer->d3d11_resident ||
+            args_buffer->d3d11_resource == NULL ||
+            !args_buffer->d3d11_desc.valid ||
+            args_buffer->d3d11_desc.resource_dimension !=
+                VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
+            return false;
+        }
+        buffer = args_buffer->d3d11_resource;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INSTANCED_INDIRECT,
+            &draw_indirect, sizeof(draw_indirect))) {
+        return false;
+    }
+
+    draw_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)args_buffer;
+    (void)aligned_byte_offset;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -4155,6 +4237,33 @@ bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk)
     return true;
 #else
     (void)dxvk;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_dispatch(
+    VMSVGA3DDxvk *dxvk, uint32_t thread_group_count_x,
+    uint32_t thread_group_count_y, uint32_t thread_group_count_z)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11Dispatch dispatch = NULL;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DISPATCH,
+            &dispatch, sizeof(dispatch))) {
+        return false;
+    }
+
+    dispatch(dxvk->d3d11_context, thread_group_count_x, thread_group_count_y,
+             thread_group_count_z);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)thread_group_count_x;
+    (void)thread_group_count_y;
+    (void)thread_group_count_z;
     return false;
 #endif
 }
@@ -4580,6 +4689,141 @@ static bool vmsvga3d_dxvk_d3d11_state_object(
     return true;
 }
 #endif
+
+bool vmsvga3d_dxvk_d3d11_set_cs_unordered_access_views(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t start_slot,
+    uint32_t view_count, const uint32_t *view_ids,
+    const uint32_t *initial_counts)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CSSetUnorderedAccessViews set_views = NULL;
+    void *views[SVGA3D_MAX_UAVIEWS] = { NULL };
+    uint32_t i;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        start_slot > SVGA3D_MAX_UAVIEWS ||
+        view_count > SVGA3D_MAX_UAVIEWS - start_slot ||
+        (view_count != 0 &&
+         (view_ids == NULL || initial_counts == NULL))) {
+        return false;
+    }
+
+    for (i = 0; i < view_count; i++) {
+        if (view_ids[i] != SVGA3D_INVALID_ID) {
+            views[i] = vmsvga3d_dxvk_d3d11_view_object(
+                dxvk, VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS, cid,
+                view_ids[i]);
+            if (views[i] == NULL) {
+                return false;
+            }
+        }
+    }
+
+    if (view_count == 0) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_UNORDERED_ACCESS_VIEWS,
+            &set_views, sizeof(set_views))) {
+        return false;
+    }
+
+    set_views(dxvk->d3d11_context, start_slot, view_count, views,
+              initial_counts);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)start_slot;
+    (void)view_count;
+    (void)view_ids;
+    (void)initial_counts;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_set_render_targets_and_uavs(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t render_target_count,
+    const uint32_t *render_target_ids, uint32_t depth_stencil_view_id,
+    uint32_t uav_start_slot, uint32_t uav_count,
+    const uint32_t *uav_ids, const uint32_t *initial_counts)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11OMSetRenderTargetsAndUAVs set_targets = NULL;
+    void *render_targets[SVGA3D_MAX_RENDER_TARGETS] = { NULL };
+    void *unordered_access_views[SVGA3D_MAX_UAVIEWS] = { NULL };
+    void *depth_stencil = NULL;
+    uint32_t i;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        render_target_count > SVGA3D_MAX_RENDER_TARGETS ||
+        uav_start_slot > SVGA3D_MAX_UAVIEWS ||
+        uav_count > SVGA3D_MAX_UAVIEWS - uav_start_slot ||
+        (render_target_count != 0 && render_target_ids == NULL) ||
+        (uav_count != 0 &&
+         (uav_ids == NULL || initial_counts == NULL))) {
+        return false;
+    }
+
+    for (i = 0; i < render_target_count; i++) {
+        if (render_target_ids[i] != SVGA3D_INVALID_ID) {
+            render_targets[i] = vmsvga3d_dxvk_d3d11_view_object(
+                dxvk, VMSVGA3D_DXVK_VIEW_RENDER_TARGET, cid,
+                render_target_ids[i]);
+            if (render_targets[i] == NULL) {
+                return false;
+            }
+        }
+    }
+
+    if (depth_stencil_view_id != SVGA3D_INVALID_ID) {
+        depth_stencil = vmsvga3d_dxvk_d3d11_view_object(
+            dxvk, VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL, cid,
+            depth_stencil_view_id);
+        if (depth_stencil == NULL) {
+            return false;
+        }
+    }
+
+    for (i = 0; i < uav_count; i++) {
+        if (uav_ids[i] != SVGA3D_INVALID_ID) {
+            unordered_access_views[i] = vmsvga3d_dxvk_d3d11_view_object(
+                dxvk, VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS, cid,
+                uav_ids[i]);
+            if (unordered_access_views[i] == NULL) {
+                return false;
+            }
+        }
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS_AND_UAVS,
+            &set_targets, sizeof(set_targets))) {
+        return false;
+    }
+
+    set_targets(dxvk->d3d11_context, render_target_count, render_targets,
+                depth_stencil, uav_start_slot, uav_count,
+                unordered_access_views, initial_counts);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)render_target_count;
+    (void)render_target_ids;
+    (void)depth_stencil_view_id;
+    (void)uav_start_slot;
+    (void)uav_count;
+    (void)uav_ids;
+    (void)initial_counts;
+    return false;
+#endif
+}
 
 bool vmsvga3d_dxvk_d3d11_set_render_targets(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t render_target_count,
@@ -7485,6 +7729,59 @@ bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_float(
     (void)cid;
     (void)view_id;
     (void)values;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_copy_structure_count(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
+    uint32_t destination_byte_offset, uint32_t cid, uint32_t source_view_id)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CopyStructureCount copy_structure_count = NULL;
+    void *destination_buffer = NULL;
+    void *source_view = NULL;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+        return false;
+    }
+
+    if (destination != NULL) {
+        if (!destination->d3d11_resident ||
+            destination->d3d11_resource == NULL ||
+            !destination->d3d11_desc.valid ||
+            destination->d3d11_desc.resource_dimension !=
+                VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
+            return false;
+        }
+        destination_buffer = destination->d3d11_resource;
+    }
+
+    if (source_view_id != SVGA3D_INVALID_ID) {
+        source_view = vmsvga3d_dxvk_d3d11_view_object(
+            dxvk, VMSVGA3D_DXVK_VIEW_UNORDERED_ACCESS, cid, source_view_id);
+        if (source_view == NULL) {
+            return false;
+        }
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_STRUCTURE_COUNT,
+            &copy_structure_count, sizeof(copy_structure_count))) {
+        return false;
+    }
+
+    copy_structure_count(dxvk->d3d11_context, destination_buffer,
+                         destination_byte_offset, source_view);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)destination;
+    (void)destination_byte_offset;
+    (void)cid;
+    (void)source_view_id;
     return false;
 #endif
 }

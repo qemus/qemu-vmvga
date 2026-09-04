@@ -1,10 +1,10 @@
-# QEMU VMVGA 🖥️
-  
-Enhanced VMware SVGA II (`vmware-svga`) graphics device implementation for QEMU.
+# VMVGA 🖥️
+
+VMVGA is a virtual graphics adapter for QEMU implementing the VMware SVGA/SVGA3D interfaces.
 
 ## Purpose 🎯
 
-QEMU’s stock VMware SVGA II device provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, and VMware's 3D acceleration interfaces are not implemented.
+QEMU’s stock VMware SVGA II device (`vmware-svga`) provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, and VMware's 3D acceleration interfaces are not implemented.
 
 This fork provides a substantially more complete and compatible VMware SVGA II device, with both 2D and 3D graphics acceleration.
 
@@ -13,7 +13,6 @@ The core device implementation has also been improved substantially, including:
 - PCI compatibility
 - Register and FIFO behavior
 - VRAM and surface-memory
-- Bounds checking
 - Dirty-memory scanning
 - Damage tracking
 - Command batching
@@ -23,7 +22,7 @@ Together, these improvements provide better VMware driver compatibility, more re
 
 ### 3D acceleration
 
-The device supports accelerated Direct3D 11 workloads. VMware SVGA 3D commands are processed by the QEMU device and rendered through [DXVK](https://github.com/doitsujin/dxvk), which translates the Direct3D graphics operations to Vulkan on the host.
+The device supports DirectX 9 and 11 acceleration. VMware SVGA 3D commands are processed by the QEMU device and rendered through [DXVK](https://github.com/doitsujin/dxvk), which translates the Direct3D graphics operations to Vulkan on the host.
 
 It requires a Vulkan-capable graphics card, and the DXVK package to be present on the host, otherwise it automatically falls back to 2D acceleration.
 
@@ -54,13 +53,7 @@ Once included in QEMU, the device is exposed using QEMU's existing VMware SVGA i
 -vga vmware
 ```
 
-or:
-
-```text
--device vmware-svga
-```
-
-The guest still requires a compatible VMware SVGA display driver to use the device-specific acceleration features.
+The guest requires a compatible VMware SVGA display driver to use the device-specific acceleration features.
 
 ## Acknowledgements 🙏
 

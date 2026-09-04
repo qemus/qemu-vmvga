@@ -200,6 +200,13 @@ bool vmsvga3d_dxvk_d3d11_set_constant_buffers(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t start_slot, uint32_t buffer_count);
 bool vmsvga3d_dxvk_d3d11_context1_acquire(VMSVGA3DDxvk *dxvk);
+bool vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
+    VMSVGA3DDxvk *dxvk, uint32_t stage_index, uint32_t slot,
+    uint32_t first_constant, uint32_t num_constants);
+bool vmsvga3d_dxvk_d3d11_constant_buffers1_flush(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index);
+bool vmsvga3d_dxvk_d3d11_constant_buffers1_flush_all(
+    VMSVGA3DDxvk *dxvk, uint32_t cid);
 bool vmsvga3d_dxvk_d3d11_set_constant_buffers1(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t start_slot, uint32_t buffer_count,

@@ -164,6 +164,46 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_rasterizer_define_entry(
     return VMSVGA3D_D3D11_LEVEL_11_1;
 }
 
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_define_entry(
+    const SVGA3dCmdDXDefineUAView *src, SVGACOTableDXUAViewEntry *dst)
+{
+    if (!src || !dst) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    dst->sid = src->sid;
+    dst->format = src->format;
+    dst->resourceDimension = src->resourceDimension;
+    dst->desc = src->desc;
+    dst->structureCount = 0;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_destroy_entry(
+    SVGACOTableDXUAViewEntry *entry)
+{
+    if (!entry) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    memset(entry, 0, sizeof(*entry));
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_structure_count(
+    SVGACOTableDXUAViewEntry *entry, uint32_t structure_count)
+{
+    if (!entry) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    entry->structureCount = structure_count;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
 VMSVGA3DD3D11Level vmsvga3d_d3d11_query_define_entry(
     const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst)
 {

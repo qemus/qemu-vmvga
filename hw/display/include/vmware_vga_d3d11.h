@@ -151,6 +151,12 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_stream_output_bind(
 VMSVGA3DD3D11Level vmsvga3d_d3d11_rasterizer_define_entry(
     const SVGA3dCmdDXDefineRasterizerState_v2 *src,
     SVGACOTableDXRasterizerStateEntry *entry);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_define_entry(
+    const SVGA3dCmdDXDefineUAView *src, SVGACOTableDXUAViewEntry *dst);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_destroy_entry(
+    SVGACOTableDXUAViewEntry *entry);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_structure_count(
+    SVGACOTableDXUAViewEntry *entry, uint32_t structure_count);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_query_define_entry(
     const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(

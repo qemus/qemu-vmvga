@@ -34,12 +34,12 @@ static bool vmsvga3d_state_context_define(struct vmsvga_state_s *s,
     if (cid >= SVGA3D_MAX_CONTEXT_IDS) {
         return false;
     }
- 
+
     context = g_try_new0(VMSVGA3DContext, 1);
     if (context == NULL) {
         return false;
     }
- 
+
     state = vmsvga3d_state_ensure(s);
     if (state == NULL) {
         g_free(context);
@@ -50,13 +50,13 @@ static bool vmsvga3d_state_context_define(struct vmsvga_state_s *s,
     for (i = 0; i < SVGA3D_RT_MAX; i++) {
         context->render_targets[i].sid = SVGA3D_INVALID_ID;
     }
- 
+
     for (i = 0; i < SVGA3D_NUM_SHADERTYPE_PREDX; i++) {
         context->bound_shader[i] = SVGA3D_INVALID_ID;
     }
- 
+
     vmsvga3d_context_free(state, state->contexts[cid]);
- 
+
     state->contexts[cid] = context;
     return true;
 }
@@ -69,9 +69,9 @@ static bool vmsvga3d_state_context_destroy(struct vmsvga_state_s *s,
     if (state == NULL || cid >= SVGA3D_MAX_CONTEXT_IDS) {
         return false;
     }
- 
+
     vmsvga3d_context_free(state, state->contexts[cid]);
- 
+
     state->contexts[cid] = NULL;
     return true;
 }
@@ -91,29 +91,29 @@ static void vmsvga3d_state_dx_context_init_shadow(
     memset(shadow, 0xff, sizeof(*shadow));
 
     shadow->inputAssembly.layoutId = SVGA3D_INVALID_ID;
- 
+
     for (i = 0; i < SVGA3D_DX_MAX_VERTEXBUFFERS; i++) {
         shadow->inputAssembly.vertexBuffers[i].bufferId = SVGA3D_INVALID_ID;
         shadow->inputAssembly.vertexBuffers[i].stride = 0;
         shadow->inputAssembly.vertexBuffers[i].offset = 0;
     }
- 
+
     shadow->inputAssembly.indexBufferSid = SVGA3D_INVALID_ID;
     shadow->inputAssembly.indexBufferOffset = 0;
     shadow->inputAssembly.indexBufferFormat = SVGA3D_FORMAT_INVALID;
     shadow->inputAssembly.topology = SVGA3D_PRIMITIVE_INVALID;
 
     shadow->renderState.blendStateId = SVGA3D_INVALID_ID;
- 
+
     memset(shadow->renderState.blendFactor, 0,
            sizeof(shadow->renderState.blendFactor));
- 
+
     shadow->renderState.sampleMask = 0;
     shadow->renderState.depthStencilStateId = SVGA3D_INVALID_ID;
     shadow->renderState.stencilRef = 0;
     shadow->renderState.rasterizerStateId = SVGA3D_INVALID_ID;
     shadow->renderState.depthStencilViewId = SVGA3D_INVALID_ID;
- 
+
     for (i = 0; i < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS; i++) {
         shadow->renderState.renderTargetViewIds[i] = SVGA3D_INVALID_ID;
     }
@@ -121,13 +121,13 @@ static void vmsvga3d_state_dx_context_init_shadow(
     for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
         shadow->streamOut.targets[i] = SVGA3D_INVALID_ID;
     }
- 
+
     shadow->streamOut.soid = SVGA3D_INVALID_ID;
 
     shadow->uavSpliceIndex = 0;
     shadow->numViewports = 0;
     shadow->numScissorRects = 0;
- 
+
     memset(shadow->viewports, 0, sizeof(shadow->viewports));
     memset(shadow->scissorRects, 0, sizeof(shadow->scissorRects));
 
@@ -154,11 +154,11 @@ static void vmsvga3d_state_dx_context_init_shadow(
     for (i = 0; i < SVGA3D_MAX_QUERY; i++) {
         shadow->queryID[i] = SVGA3D_INVALID_ID;
     }
- 
+
     for (i = 0; i < SVGA_COTABLE_MAX; i++) {
         shadow->cotables[i].mobid = SVGA3D_INVALID_ID;
     }
- 
+
     for (i = 0; i < SVGA3D_DX11_1_MAX_UAVIEWS; i++) {
         shadow->uaViewIds[i] = SVGA3D_INVALID_ID;
         shadow->csuaViewIds[i] = SVGA3D_INVALID_ID;
@@ -174,12 +174,12 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_define(struct vms
     if (cid >= SVGA3D_MAX_CONTEXT_IDS) {
         return false;
     }
- 
+
     context = g_try_new0(VMSVGA3DDXContext, 1);
     if (context == NULL) {
         return false;
     }
- 
+
     state = vmsvga3d_state_ensure(s);
     if (state == NULL) {
         g_free(context);
@@ -189,13 +189,13 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_define(struct vms
     context->cid = cid;
     vmsvga3d_state_dx_context_init_shadow(&context->shadow);
     context->renderer_dirty = VMSVGA3D_DX_CTX_F_STATE_ALL;
- 
+
     for (uint32_t type = 0; type < SVGA_COTABLE_MAX; type++) {
         context->cotables[type].mobid = SVGA3D_INVALID_ID;
     }
 
     vmsvga3d_dx_context_free(state->dx_contexts[cid]);
- 
+
     state->dx_contexts[cid] = context;
     return true;
 }
@@ -209,9 +209,9 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_destroy(struct vm
         state->dx_contexts[cid] == NULL) {
         return false;
     }
- 
+
     vmsvga3d_dx_context_free(state->dx_contexts[cid]);
- 
+
     state->dx_contexts[cid] = NULL;
     return true;
 }
@@ -225,11 +225,11 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_bind(
     if (context == NULL) {
         return false;
     }
- 
+
     if (valid_contents != NULL) {
         memcpy(&context->shadow, valid_contents, sizeof(context->shadow));
     }
- 
+
     return true;
 }
 
@@ -242,7 +242,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_readback(
     if (context == NULL || contents == NULL) {
         return false;
     }
- 
+
     memcpy(contents, &context->shadow, sizeof(*contents));
     return true;
 }
@@ -264,7 +264,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_render_target_count(
     if (context == NULL || count == NULL) {
         return false;
     }
- 
+
     *count = context->render_target_count;
     return true;
 }
@@ -281,18 +281,18 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_constant_buffer(
         plan->slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
         return false;
     }
- 
+
     binding = &context->shadow.shaderState[plan->stage_index]
                    .constantBuffers[plan->slot];
     binding->sid = plan->sid;
     binding->offsetInBytes = plan->offset_in_bytes;
     binding->sizeInBytes = plan->size_in_bytes;
- 
+
     if (plan->sid != SVGA3D_INVALID_ID &&
         context->constant_buffer_max_bound[plan->stage_index] < plan->slot + 1u) {
         context->constant_buffer_max_bound[plan->stage_index] = plan->slot + 1u;
     }
- 
+
     return true;
 }
 
@@ -313,7 +313,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader_resources(
             SVGA3D_DX_MAX_SRVIEWS - plan->start_view) {
         return false;
     }
- 
+
     for (i = 0; i < plan->shadow_update_count; i++) {
         uint32_t slot = plan->start_view + i;
         uint32_t *shadow_id =
@@ -329,19 +329,19 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader_resources(
             last_not_null = (int32_t)i;
         }
     }
- 
+
     c_bound = plan->start_view +
               (last_not_null >= 0 ? (uint32_t)last_not_null + 1u : 0u);
- 
+
     if (context->shader_resource_max_bound[plan->stage_index] < c_bound) {
         context->shader_resource_max_bound[plan->stage_index] = c_bound;
     }
- 
+
     if (modified) {
         context->renderer_dirty |=
             VMSVGA3D_DX_CTX_F_STATE_SRV_VS << plan->stage_index;
     }
- 
+
     return true;
 }
 
@@ -355,7 +355,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader(
         plan->stage_index >= SVGA3D_NUM_SHADERTYPE) {
         return false;
     }
- 
+
     context->shadow.shaderState[plan->stage_index].shaderId = plan->shader_id;
     return true;
 }
@@ -375,7 +375,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_samplers(
             SVGA3D_DX_MAX_SAMPLERS - plan->start_sampler) {
         return false;
     }
- 
+
     for (i = 0; i < plan->shadow_update_count; i++) {
         uint32_t *shadow_id =
             &context->shadow.shaderState[plan->stage_index]
@@ -386,12 +386,12 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_samplers(
             modified = true;
         }
     }
- 
+
     if (modified) {
         context->renderer_dirty |=
             VMSVGA3D_DX_CTX_F_STATE_SAMPLER_VS << plan->stage_index;
     }
- 
+
     return true;
 }
 
@@ -404,12 +404,12 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_input_layout(
     if (context == NULL || plan == NULL || !plan->shadow_update) {
         return false;
     }
- 
+
     if (context->shadow.inputAssembly.layoutId != plan->layout_id) {
         context->shadow.inputAssembly.layoutId = plan->layout_id;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_INPUTLAYOUT;
     }
- 
+
     return true;
 }
 
@@ -428,7 +428,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_vertex_buffers(
             SVGA3D_DX_MAX_VERTEXBUFFERS - plan->start_buffer) {
         return false;
     }
- 
+
     for (i = 0; i < plan->shadow_update_count; i++) {
         uint32_t slot = plan->start_buffer + i;
         SVGA3dBufferBinding *binding =
@@ -447,15 +447,15 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_vertex_buffers(
             max_bound = slot + 1u;
         }
     }
- 
+
     if (modified) {
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_VERTEXBUFFER;
     }
- 
+
     if (context->vertex_buffer_max_bound < max_bound) {
         context->vertex_buffer_max_bound = max_bound;
     }
- 
+
     return true;
 }
 
@@ -468,7 +468,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_index_buffer(
     if (context == NULL || plan == NULL || !plan->shadow_update) {
         return false;
     }
- 
+
     if (context->shadow.inputAssembly.indexBufferSid != plan->sid ||
         context->shadow.inputAssembly.indexBufferOffset != plan->offset ||
         context->shadow.inputAssembly.indexBufferFormat != (uint32_t)plan->format) {
@@ -477,7 +477,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_index_buffer(
         context->shadow.inputAssembly.indexBufferFormat = plan->format;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER;
     }
- 
+
     return true;
 }
 
@@ -493,10 +493,10 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_viewports(
         plan->count > SVGA3D_DX_MAX_VIEWPORTS) {
         return false;
     }
- 
+
     modified = context->shadow.numViewports != (uint8_t)plan->count;
     context->shadow.numViewports = (uint8_t)plan->count;
- 
+
     for (i = 0; i < plan->count; i++) {
         const SVGA3dViewport *src = &plan->viewports[i];
         SVGA3dViewport *dst = &context->shadow.viewports[i];
@@ -508,11 +508,11 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_viewports(
             modified = true;
         }
     }
- 
+
     if (modified) {
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_VIEWPORT;
     }
- 
+
     return true;
 }
 
@@ -525,12 +525,12 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_topology(
     if (context == NULL || plan == NULL || !plan->shadow_update) {
         return false;
     }
- 
+
     if (context->shadow.inputAssembly.topology != (uint32_t)plan->topology) {
         context->shadow.inputAssembly.topology = plan->topology;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_TOPOLOGY;
     }
- 
+
     return true;
 }
 
@@ -543,24 +543,24 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_blend_state(
     if (context == NULL || plan == NULL || !plan->shadow_update) {
         return false;
     }
- 
+
     if (context->shadow.renderState.blendStateId != plan->blend_id) {
         context->shadow.renderState.blendStateId = plan->blend_id;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE;
     }
- 
+
     if (memcmp(context->shadow.renderState.blendFactor, plan->blend_factor,
                sizeof(context->shadow.renderState.blendFactor)) != 0) {
         memcpy(context->shadow.renderState.blendFactor, plan->blend_factor,
                sizeof(context->shadow.renderState.blendFactor));
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE;
     }
- 
+
     if (context->shadow.renderState.sampleMask != plan->sample_mask) {
         context->shadow.renderState.sampleMask = plan->sample_mask;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE;
     }
- 
+
     return true;
 }
 
@@ -573,13 +573,13 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_depth_stencil_state
     if (context == NULL || plan == NULL || !plan->shadow_update) {
         return false;
     }
- 
+
     if (context->shadow.renderState.depthStencilStateId !=
         plan->depth_stencil_id) {
         context->shadow.renderState.depthStencilStateId = plan->depth_stencil_id;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_DEPTHSTENCILSTATE;
     }
- 
+
     if (context->shadow.renderState.stencilRef != plan->stencil_ref) {
         context->shadow.renderState.stencilRef = plan->stencil_ref;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_DEPTHSTENCILSTATE;
@@ -596,12 +596,12 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_rasterizer_state(
     if (context == NULL || plan == NULL || !plan->shadow_update) {
         return false;
     }
- 
+
     if (context->shadow.renderState.rasterizerStateId != plan->rasterizer_id) {
         context->shadow.renderState.rasterizerStateId = plan->rasterizer_id;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RASTERIZERSTATE;
     }
- 
+
     return true;
 }
 
@@ -617,10 +617,10 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_scissors(
         plan->count > SVGA3D_DX_MAX_SCISSORRECTS) {
         return false;
     }
- 
+
     modified = context->shadow.numScissorRects != (uint8_t)plan->count;
     context->shadow.numScissorRects = (uint8_t)plan->count;
- 
+
     for (i = 0; i < plan->count; i++) {
         const SVGASignedRect *src = &plan->rects[i];
         SVGASignedRect *dst = &context->shadow.scissorRects[i];
@@ -631,11 +631,11 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_scissors(
             modified = true;
         }
     }
- 
+
     if (modified) {
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SCISSORRECT;
     }
- 
+
     return true;
 }
 
@@ -652,14 +652,14 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_render_targets(
         plan->shadow_update_count > SVGA3D_MAX_RENDER_TARGETS) {
         return false;
     }
- 
+
     if (context->shadow.renderState.depthStencilViewId !=
         plan->depth_stencil_view_id) {
         context->shadow.renderState.depthStencilViewId =
             plan->depth_stencil_view_id;
         modified = true;
     }
- 
+
     for (i = 0; i < SVGA3D_MAX_RENDER_TARGETS; i++) {
         uint32_t id = i < plan->shadow_update_count
                           ? plan->ids[i]
@@ -673,11 +673,11 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_render_targets(
             render_target_count = i + 1u;
         }
     }
- 
+
     if (modified) {
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
     }
- 
+
     context->render_target_count = render_target_count;
     return true;
 }
@@ -691,10 +691,10 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_so_targets(
     if (context == NULL || plan == NULL || !plan->shadow_update) {
         return false;
     }
- 
+
     memcpy(context->shadow.streamOut.targets, plan->shadow_targets,
            sizeof(context->shadow.streamOut.targets));
- 
+
     return true;
 }
 
@@ -707,7 +707,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_stream_output(
     if (context == NULL || plan == NULL || !plan->shadow_update) {
         return false;
     }
- 
+
     context->shadow.streamOut.soid = plan->stream_output_id;
     return true;
 }
@@ -721,7 +721,7 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_clear_rtv_references(
     if (context == NULL) {
         return false;
     }
- 
+
     return vmsvga3d_d3d10_rtv_destroy_shadow_refs(
                destroyed_id, context->shadow.renderState.renderTargetViewIds) !=
            VMSVGA3D_D3D10_LEVEL_INVALID;
@@ -740,10 +740,10 @@ static bool vmsvga3d_state_set_transform(struct vmsvga_state_s *s,
         type >= SVGA3D_TRANSFORM_MAX) {
         return false;
     }
- 
+
     memcpy(context->transform[type].matrix, matrix,
            sizeof(context->transform[type].matrix));
- 
+
     context->transform[type].valid = true;
     return true;
 }
@@ -757,10 +757,10 @@ static bool vmsvga3d_state_set_z_range(struct vmsvga_state_s *s,
     if (context == NULL || z_range == NULL) {
         return false;
     }
- 
+
     context->z_range = *z_range;
     context->z_range_valid = true;
- 
+
     return true;
 }
 
@@ -774,7 +774,7 @@ static bool vmsvga3d_state_set_render_state(
     if (context == NULL || (count != 0 && states == NULL)) {
         return false;
     }
- 
+
     for (i = 0; i < count; i++) {
         if (states[i].state >= SVGA3D_RS_MAX) {
             return false;
@@ -782,7 +782,7 @@ static bool vmsvga3d_state_set_render_state(
         context->render_state[states[i].state].value = states[i].uintValue;
         context->render_state[states[i].state].valid = true;
     }
- 
+
     return true;
 }
 
@@ -798,31 +798,31 @@ static bool vmsvga3d_state_set_render_target(
         type >= SVGA3D_RT_MAX) {
         return false;
     }
- 
+
     if (target->sid == SVGA3D_INVALID_ID) {
         context->render_targets[type] = *target;
         return true;
     }
- 
+
     if (s->svga3d == NULL || target->sid >= SVGA3D_MAX_SURFACE_IDS) {
         return false;
     }
- 
+
     surface = s->svga3d->surfaces[target->sid];
- 
+
     if (!vmsvga3d_surface_image(surface, target, &image)) {
         return false;
     }
- 
+
     /* VBox's D3D9 backend only accepts the base image for depth/stencil
      * render targets. */
     if ((type == SVGA3D_RT_DEPTH || type == SVGA3D_RT_STENCIL) &&
         (target->face != 0 || target->mipmap != 0)) {
         return false;
     }
- 
+
     context->render_targets[type] = *target;
- 
+
     return true;
 }
 
@@ -836,7 +836,7 @@ static bool vmsvga3d_state_set_texture_state(
     if (context == NULL || (count != 0 && states == NULL)) {
         return false;
     }
- 
+
     for (i = 0; i < count; i++) {
         if (states[i].name == SVGA3D_TS_BIND_TEXTURE) {
             if (states[i].stage >= VMSVGA3D_MAX_SAMPLERS) {
@@ -856,7 +856,7 @@ static bool vmsvga3d_state_set_texture_state(
             states[i].value;
         context->texture_state[states[i].stage][states[i].name].valid = true;
     }
- 
+
     return true;
 }
 
@@ -869,10 +869,10 @@ static bool vmsvga3d_state_set_material(struct vmsvga_state_s *s,
     if (context == NULL || material == NULL || (uint32_t)face >= SVGA3D_FACE_MAX) {
         return false;
     }
- 
+
     context->material[face].material = *material;
     context->material[face].valid = true;
- 
+
     return true;
 }
 
@@ -888,10 +888,10 @@ static bool vmsvga3d_state_set_light_data(struct vmsvga_state_s *s,
          data->type != SVGA3D_LIGHTTYPE_DIRECTIONAL)) {
         return false;
     }
- 
+
     context->light[index].data = *data;
     context->light[index].data_valid = true;
- 
+
     return true;
 }
 
@@ -905,10 +905,10 @@ static bool vmsvga3d_state_set_light_enabled(struct vmsvga_state_s *s,
     if (context == NULL || index >= SVGA3D_NUM_LIGHTS) {
         return false;
     }
- 
+
     context->light[index].enabled = enabled;
     context->light[index].enabled_valid = true;
- 
+
     return true;
 }
 
@@ -921,10 +921,10 @@ static bool vmsvga3d_state_set_viewport(struct vmsvga_state_s *s,
     if (context == NULL || rect == NULL) {
         return false;
     }
- 
+
     context->viewport = *rect;
     context->viewport_valid = true;
- 
+
     return true;
 }
 
@@ -937,11 +937,11 @@ static bool vmsvga3d_state_set_clip_plane(struct vmsvga_state_s *s,
     if (context == NULL || plane == NULL || index >= VMSVGA3D_MAX_CLIP_PLANES) {
         return false;
     }
- 
+
     memcpy(context->clip_plane[index].plane, plane,
            sizeof(context->clip_plane[index].plane));
     context->clip_plane[index].valid = true;
- 
+
     return true;
 }
 
@@ -959,9 +959,9 @@ static bool vmsvga3d_state_clear(struct vmsvga_state_s *s, uint32_t cid,
     if (rect_count != 0 && rects == NULL) {
         return false;
     }
- 
+
     context = vmsvga3d_context(s, cid);
- 
+
     if (context == NULL) {
         return false;
     }
@@ -972,17 +972,17 @@ static bool vmsvga3d_state_clear(struct vmsvga_state_s *s, uint32_t cid,
                                           rects, rect_count, false);
         }
     }
- 
+
     if (valid && (flags & SVGA3D_CLEAR_DEPTH)) {
         valid = vmsvga3d_clear_target(s, context, SVGA3D_RT_DEPTH, color, depth,
                                       stencil, rects, rect_count, false);
     }
- 
+
     if (valid && (flags & SVGA3D_CLEAR_STENCIL)) {
         valid = vmsvga3d_clear_target(s, context, SVGA3D_RT_STENCIL, color, depth,
                                       stencil, rects, rect_count, false);
     }
- 
+
     if (!valid) {
         return false;
     }
@@ -993,17 +993,17 @@ static bool vmsvga3d_state_clear(struct vmsvga_state_s *s, uint32_t cid,
                                           rects, rect_count, true);
         }
     }
- 
+
     if (valid && (flags & SVGA3D_CLEAR_DEPTH)) {
         valid = vmsvga3d_clear_target(s, context, SVGA3D_RT_DEPTH, color, depth,
                                       stencil, rects, rect_count, true);
     }
- 
+
     if (valid && (flags & SVGA3D_CLEAR_STENCIL)) {
         valid = vmsvga3d_clear_target(s, context, SVGA3D_RT_STENCIL, color, depth,
                                       stencil, rects, rect_count, true);
     }
- 
+
     return valid;
 }
 
@@ -1028,7 +1028,7 @@ static bool vmsvga3d_state_draw_primitives(
         !vmsvga3d_draw_ranges_valid(state, ranges, range_count)) {
         return false;
     }
- 
+
     for (i = 0; i < divisor_count; i++) {
         if (divisors[i].indexedData && divisors[i].instanceData) {
             return false;
@@ -1048,10 +1048,10 @@ static bool vmsvga3d_state_set_scissor(struct vmsvga_state_s *s,
     if (context == NULL || rect == NULL) {
         return false;
     }
- 
+
     context->scissor = *rect;
     context->scissor_valid = true;
- 
+
     return true;
 }
 
@@ -1065,7 +1065,7 @@ static bool vmsvga3d_state_generate_mipmaps(struct vmsvga_state_s *s,
         filter < SVGA3D_TEX_FILTER_MIN || filter >= SVGA3D_TEX_FILTER_MAX) {
         return false;
     }
- 
+
     surface = s->svga3d->surfaces[sid];
     if (surface == NULL) {
         return false;
@@ -1074,7 +1074,7 @@ static bool vmsvga3d_state_generate_mipmaps(struct vmsvga_state_s *s,
     /* Keep the guest-visible autogen choice in the surface shadow.  The FIFO
      * execution layer applies it to the D3D9 texture and generates the mips. */
     surface->autogen_filter = filter;
- 
+
     return true;
 }
 
@@ -1088,12 +1088,12 @@ static bool vmsvga3d_state_query_begin(struct vmsvga_state_s *s,
     if (context == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
         return false;
     }
- 
+
     query = &context->occlusion;
     query->defined = true;
     query->state = VMSVGA3D_QUERY_BUILDING;
     query->result = 0;
- 
+
     return true;
 }
 
@@ -1107,12 +1107,12 @@ static bool vmsvga3d_state_query_end(struct vmsvga_state_s *s,
     if (context == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
         return false;
     }
- 
+
     query = &context->occlusion;
     if (!query->defined) {
         return false;
     }
- 
+
     query->state = VMSVGA3D_QUERY_ISSUED;
     return true;
 }
@@ -1127,15 +1127,15 @@ bool vmsvga3d_state_query_complete(struct vmsvga_state_s *s,
     if (context == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
         return false;
     }
- 
+
     query = &context->occlusion;
     if (!query->defined || query->state != VMSVGA3D_QUERY_ISSUED) {
         return false;
     }
- 
+
     query->state = VMSVGA3D_QUERY_SIGNALED;
     query->result += result;
- 
+
     return true;
 }
 
@@ -1149,25 +1149,25 @@ static VMSVGA3DQueryWaitStatus vmsvga3d_state_query_wait(
     if (result != NULL) {
         *result = 0;
     }
- 
+
     if (context == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
         return VMSVGA3D_QUERY_WAIT_FAILED;
     }
- 
+
     query = &context->occlusion;
- 
+
     if (!query->defined) {
         return VMSVGA3D_QUERY_WAIT_FAILED;
     }
- 
+
     if (query->state == VMSVGA3D_QUERY_ISSUED) {
         return VMSVGA3D_QUERY_WAIT_NEEDS_RENDERER;
     }
- 
+
     if (result != NULL) {
         *result = query->result;
     }
- 
+
     return VMSVGA3D_QUERY_WAIT_READY;
 }
 
@@ -1193,43 +1193,43 @@ static bool vmsvga3d_state_shader_define(
     state = s->svga3d;
     old_shader = context->shader[type_index][shid];
     new_shader_bytes = state->shader_bytes;
- 
+
     if (old_shader != NULL) {
         if (new_shader_bytes < old_shader->bytecode_size) {
             return false;
         }
         new_shader_bytes -= old_shader->bytecode_size;
     }
- 
+
     if (new_shader_bytes > SVGA3D_MAX_SHADER_MEMORY_BYTES ||
         bytecode_size > SVGA3D_MAX_SHADER_MEMORY_BYTES - new_shader_bytes) {
         return false;
     }
 
     shader = g_try_new0(VMSVGA3DShader, 1);
- 
+
     if (shader != NULL) {
         shader->bytecode = g_try_malloc(bytecode_size);
     }
- 
+
     if (shader == NULL || shader->bytecode == NULL) {
         vmsvga3d_shader_free(shader);
         return false;
     }
- 
+
     shader->shid = shid;
     shader->type = type;
     shader->bytecode_size = bytecode_size;
- 
+
     memcpy(shader->bytecode, bytecode, bytecode_size);
 
     if (old_shader != NULL) {
         vmsvga3d_shader_free(old_shader);
     }
- 
+
     context->shader[type_index][shid] = shader;
     state->shader_bytes = new_shader_bytes + bytecode_size;
- 
+
     return true;
 }
 
@@ -1247,21 +1247,21 @@ static bool vmsvga3d_state_shader_destroy(struct vmsvga_state_s *s,
         shid >= SVGA3D_MAX_SHADERIDS) {
         return false;
     }
- 
+
     shader = context->shader[type_index][shid];
     if (shader == NULL) {
         return true;
     }
- 
+
     if (state->shader_bytes >= shader->bytecode_size) {
         state->shader_bytes -= shader->bytecode_size;
     } else {
         state->shader_bytes = 0;
     }
- 
+
     vmsvga3d_shader_free(shader);
     context->shader[type_index][shid] = NULL;
- 
+
     return true;
 }
 
@@ -1276,16 +1276,16 @@ static bool vmsvga3d_state_set_shader(struct vmsvga_state_s *s,
     if (context == NULL || !vmsvga3d_shader_type_index(type, &type_index)) {
         return false;
     }
- 
+
     context->bound_shader[type_index] = shid;
     if (shid == SVGA3D_INVALID_ID) {
         return true;
     }
- 
+
     if (shid >= SVGA3D_MAX_SHADERIDS || context->shader[type_index][shid] == NULL) {
         return false;
     }
- 
+
     return true;
 }
 
@@ -1306,17 +1306,17 @@ static bool vmsvga3d_state_set_shader_const(
         count > limit - reg) {
         return false;
     }
- 
+
     constants = vmsvga3d_shader_const_array(context, type_index, ctype);
     if (constants == NULL) {
         return false;
     }
- 
+
     for (i = 0; i < count; i++) {
         memcpy(constants[reg + i].values, values[i],
                sizeof(constants[reg + i].values));
         constants[reg + i].valid = true;
     }
- 
+
     return true;
 }

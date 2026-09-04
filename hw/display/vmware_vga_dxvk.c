@@ -403,6 +403,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_BLEND_STATE 91u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_STATE 94u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_VIEWPORTS 95u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_FLUSH 111u
 #define VMSVGA3D_DXVK_D3D11_USAGE_DEFAULT 0u
 #define VMSVGA3D_DXVK_D3D11_USAGE_IMMUTABLE 1u
 #define VMSVGA3D_DXVK_D3D11_USAGE_DYNAMIC 2u
@@ -818,6 +819,7 @@ typedef void (*VMSVGA3DDxvkD3D11DrawInstanced)(
     void *context, uint32_t vertex_count_per_instance, uint32_t instance_count,
     uint32_t start_vertex_location, uint32_t start_instance_location);
 typedef void (*VMSVGA3DDxvkD3D11DrawAuto)(void *context);
+typedef void (*VMSVGA3DDxvkD3D11Flush)(void *context);
 typedef struct vmsvga3d_dxvk_d3d11_mapped_subresource_s {
   void *data;
   uint32_t row_pitch;
@@ -7242,6 +7244,22 @@ restore:
   (void)depth;
   (void)stencil;
   return false;
+#endif
+}
+
+void vmsvga3d_dxvk_d3d11_flush(VMSVGA3DDxvk *dxvk) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+  VMSVGA3DDxvkD3D11Flush flush = NULL;
+
+  if (!vmsvga3d_dxvk_d3d11_ready(dxvk) || dxvk->d3d11_context == NULL ||
+      !vmsvga3d_dxvk_get_method(
+          dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_FLUSH,
+          &flush, sizeof(flush))) {
+    return;
+  }
+  flush(dxvk->d3d11_context);
+#else
+  (void)dxvk;
 #endif
 }
 

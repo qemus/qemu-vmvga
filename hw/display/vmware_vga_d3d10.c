@@ -5543,7 +5543,8 @@ static bool vmsvga3d_d3d10_stream_output_prepare_live(
       return false;
     }
     bytes = entry->numOutputStreamEntries * sizeof(mob_decls[0]);
-    if ((uint64_t)entry->offsetInBytes + bytes > mob->gbo.size ||
+    if (entry->offsetInBytes >= mob->gbo.size ||
+        (uint64_t)bytes > mob->gbo.size - entry->offsetInBytes ||
         !vmsvga3d_mob_read(
             s, mob, entry->offsetInBytes, mob_decls, bytes)) {
       return false;
@@ -7485,6 +7486,9 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
       command->srcSubResource, &source->mips[command->srcSubResource].size,
       &destination->mips[command->dstSubResource].size, &command->box, &plan);
   if (!vmsvga3d_d3d10_level_is_vgpu10(level) ||
+      plan.region.clipped_box.w == 0 ||
+      plan.region.clipped_box.h == 0 ||
+      plan.region.clipped_box.d == 0 ||
       !vmsvga3d_d3d10_copy_surface_materialize_live(
           s, source, plan.source_create_kind) ||
       !vmsvga3d_d3d10_copy_surface_materialize_live(

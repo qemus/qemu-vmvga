@@ -921,10 +921,14 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s) {
   for (i = 0; i < SVGA3D_MAX_CONTEXT_IDS; i++) {
     vmsvga3d_context_free(state, state->contexts[i]);
     vmsvga3d_dxvk_d3d9_query_context_destroy(s->dxvk, i);
+    if (state->dx_contexts[i] != NULL) {
+      vmsvga3d_dxvk_d3d11_flush(s->dxvk);
+    };
     vmsvga3d_dxvk_d3d11_query_context_destroy(s->dxvk, i);
     vmsvga3d_dxvk_d3d11_state_context_destroy(s->dxvk, i);
     vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(s->dxvk, i);
     vmsvga3d_dxvk_d3d11_view_context_destroy(s->dxvk, i);
+    vmsvga3d_dxvk_d3d11_shader_context_destroy(s->dxvk, i);
     vmsvga3d_dx_context_free(state->dx_contexts[i]);
   };
   for (i = 0; i < SVGA3D_MAX_SURFACE_IDS; i++) {
@@ -5175,6 +5179,10 @@ static bool vmsvga3d_dx_context_define_backed(struct vmsvga_state_s *s,
       .mobid = SVGA3D_INVALID_ID,
   };
 
+  if (s != NULL && s->svga3d != NULL &&
+      cid < SVGA3D_MAX_CONTEXT_IDS && s->svga3d->dx_contexts[cid] != NULL) {
+    vmsvga3d_dxvk_d3d11_flush(s->dxvk);
+  };
   if (!vmsvga3d_dx_context_entry_write(s, cid, &entry) ||
       !vmsvga3d_state_dx_context_define(s, cid)) {
     return false;
@@ -5199,6 +5207,10 @@ static bool vmsvga3d_dx_context_destroy_backed(struct vmsvga_state_s *s,
       s->svga3d->active_dx_context_id == cid) {
     s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
   }
+  if (s != NULL && s->svga3d != NULL &&
+      cid < SVGA3D_MAX_CONTEXT_IDS && s->svga3d->dx_contexts[cid] != NULL) {
+    vmsvga3d_dxvk_d3d11_flush(s->dxvk);
+  };
   if (!vmsvga3d_state_dx_context_destroy(s, cid)) {
     return false;
   }

@@ -82,6 +82,7 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk);
 /* vGPU10/DX is an optional upgrade and is never attempted before D3D9. */
 bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk);
+void vmsvga3d_dxvk_d3d11_flush(VMSVGA3DDxvk *dxvk);
 /* Intersect a legacy VMware format-op mask with the live D3D9 adapter. */
 uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
     const VMSVGA3DDxvk *dxvk, uint32_t format, uint32_t caps);

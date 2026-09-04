@@ -120,6 +120,12 @@ typedef struct vmsvga3d_context_s {
     VMSVGA3DClipPlaneState clip_plane[VMSVGA3D_MAX_CLIP_PLANES];
     VMSVGA3DShader *shader[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_MAX_SHADERIDS];
     uint32_t bound_shader[SVGA3D_NUM_SHADERTYPE_PREDX];
+    SVGA3dVertexElement vertex_decls[SVGA3D_MAX_VERTEX_ARRAYS];
+    SVGA3dVertexStream vertex_streams[SVGA3D_MAX_VERTEX_ARRAYS];
+    SVGA3dVertexDivisor vertex_divisors[SVGA3D_MAX_VERTEX_ARRAYS];
+    uint32_t num_vertex_decls;
+    uint32_t num_vertex_streams;
+    uint32_t num_vertex_divisors;
     VMSVGA3DShaderConstant shader_float[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTREG_MAX];
     VMSVGA3DShaderConstant shader_int[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTINTREG_MAX];
     VMSVGA3DShaderConstant shader_bool[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTBOOLREG_MAX];
@@ -1924,6 +1930,116 @@ static VMSVGA3DDXContext *vmsvga3d_dx_context(struct vmsvga_state_s *s,
     return s->svga3d->dx_contexts[cid];
 }
 
+
+static bool vmsvga3d_handle_set_vertex_decls(struct vmsvga_state_s *s,
+                                              uint32_t cmd, int32_t *len,
+                                              uint32_t fifo_start)
+{
+    SVGA3dCmdSetVertexDecls *body;
+    VMSVGA3DContext *context;
+    void *payload;
+    uint32_t size;
+    uint32_t count;
+
+    (void)cmd;
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size >= sizeof(*body)) {
+        body = payload;
+        count = body->numElements;
+
+        if (count <= SVGA3D_MAX_VERTEX_ARRAYS &&
+            size == sizeof(*body) + count * sizeof(SVGA3dVertexElement)) {
+            context = vmsvga3d_context(s, body->cid);
+            if (context != NULL) {
+                memset(context->vertex_decls, 0, sizeof(context->vertex_decls));
+                memcpy(context->vertex_decls, body + 1,
+                       count * sizeof(SVGA3dVertexElement));
+                context->num_vertex_decls = count;
+            }
+        }
+    }
+
+    g_free(payload);
+    return true;
+}
+
+static bool vmsvga3d_handle_set_vertex_streams(struct vmsvga_state_s *s,
+                                                uint32_t cmd, int32_t *len,
+                                                uint32_t fifo_start)
+{
+    SVGA3dCmdSetVertexStreams *body;
+    VMSVGA3DContext *context;
+    SVGA3dVertexStream *streams;
+    void *payload;
+    uint32_t size;
+    uint32_t count;
+
+    (void)cmd;
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size >= sizeof(*body)) {
+        body = payload;
+        count = body->numStreams;
+
+        if (count <= SVGA3D_MAX_VERTEX_ARRAYS &&
+            size == sizeof(*body) + count * sizeof(SVGA3dVertexStream)) {
+            context = vmsvga3d_context(s, body->cid);
+            if (context != NULL) {
+                streams = (SVGA3dVertexStream *)(body + 1);
+                memset(context->vertex_streams, 0,
+                       sizeof(context->vertex_streams));
+                memcpy(context->vertex_streams, streams,
+                       count * sizeof(SVGA3dVertexStream));
+                context->num_vertex_streams = count;
+            }
+        }
+    }
+
+    g_free(payload);
+    return true;
+}
+
+static bool vmsvga3d_handle_set_vertex_divisors(struct vmsvga_state_s *s,
+                                                 uint32_t cmd, int32_t *len,
+                                                 uint32_t fifo_start)
+{
+    SVGA3dCmdSetVertexDivisors *body;
+    VMSVGA3DContext *context;
+    void *payload;
+    uint32_t size;
+    uint32_t count;
+
+    (void)cmd;
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size >= sizeof(*body)) {
+        body = payload;
+        count = body->numDivisors;
+
+        if (count <= SVGA3D_MAX_VERTEX_ARRAYS &&
+            size == sizeof(*body) + count * sizeof(SVGA3dVertexDivisor)) {
+            context = vmsvga3d_context(s, body->cid);
+            if (context != NULL) {
+                memset(context->vertex_divisors, 0,
+                       sizeof(context->vertex_divisors));
+                memcpy(context->vertex_divisors, body + 1,
+                       count * sizeof(SVGA3dVertexDivisor));
+                context->num_vertex_divisors = count;
+            }
+        }
+    }
+
+    g_free(payload);
+    return true;
+}
+
 static bool vmsvga3d_handle_set_transform(struct vmsvga_state_s *s,
                                            uint32_t cmd, int32_t *len,
                                            uint32_t fifo_start)
@@ -2580,6 +2696,133 @@ static bool vmsvga3d_draw_vertex_surfaces_valid(
         }
     }
 
+    return true;
+}
+
+
+static uint32_t vmsvga3d_build_vertex_decls(VMSVGA3DContext *context,
+                                            SVGA3dVertexDecl *decls)
+{
+    uint32_t i;
+
+    if (context == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < MIN(context->num_vertex_decls,
+                       SVGA3D_MAX_VERTEX_ARRAYS); i++) {
+        SVGA3dVertexElement *element = &context->vertex_decls[i];
+
+        memset(&decls[i], 0, sizeof(decls[i]));
+        decls[i].identity.type = element->type;
+        decls[i].identity.method = element->method;
+        decls[i].identity.usage = element->usage;
+        decls[i].identity.usageIndex = element->usageIndex;
+
+        if (element->stream < MIN(context->num_vertex_streams,
+                                      SVGA3D_MAX_VERTEX_ARRAYS)) {
+            SVGA3dVertexStream *stream =
+                &context->vertex_streams[element->stream];
+
+            decls[i].array.surfaceId = stream->sid;
+            decls[i].array.offset = stream->offset + element->streamOffset;
+            decls[i].array.stride = stream->stride;
+        } else {
+            decls[i].array.surfaceId = SVGA3D_INVALID_ID;
+        }
+    }
+
+    return context->num_vertex_decls;
+}
+
+static bool vmsvga3d_handle_draw(struct vmsvga_state_s *s,
+                                  uint32_t cmd, int32_t *len,
+                                  uint32_t fifo_start)
+{
+    SVGA3dCmdDraw *body;
+    SVGA3dVertexDecl decls[SVGA3D_MAX_VERTEX_ARRAYS];
+    SVGA3dPrimitiveRange range;
+    VMSVGA3DContext *context;
+    void *payload;
+    uint32_t size;
+    uint32_t numDecls;
+
+    (void)cmd;
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size == sizeof(*body)) {
+        body = payload;
+        context = vmsvga3d_context(s, body->cid);
+
+        if (context != NULL) {
+            numDecls = vmsvga3d_build_vertex_decls(context, decls);
+
+            memset(&range, 0, sizeof(range));
+            range.primType = body->primitiveType;
+            range.primitiveCount = body->primitiveCount;
+            range.indexArray.surfaceId = SVGA3D_INVALID_ID;
+            range.indexBias = body->startVertexLocation;
+
+            if (vmsvga3d_state_draw_primitives(
+                    s, body->cid, numDecls, decls, 1, &range,
+                    context->num_vertex_divisors, context->vertex_divisors)) {
+                (void)vmsvga3d_d3d9_runtime_draw_primitives(
+                    s, body->cid, numDecls, decls, 1, &range,
+                    context->num_vertex_divisors, context->vertex_divisors);
+            }
+        }
+    }
+
+    g_free(payload);
+    return true;
+}
+
+static bool vmsvga3d_handle_draw_indexed(struct vmsvga_state_s *s,
+                                          uint32_t cmd, int32_t *len,
+                                          uint32_t fifo_start)
+{
+    SVGA3dCmdDrawIndexed *body;
+    SVGA3dVertexDecl decls[SVGA3D_MAX_VERTEX_ARRAYS];
+    SVGA3dPrimitiveRange range;
+    VMSVGA3DContext *context;
+    void *payload;
+    uint32_t size;
+    uint32_t numDecls;
+
+    (void)cmd;
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size == sizeof(*body)) {
+        body = payload;
+        context = vmsvga3d_context(s, body->cid);
+
+        if (context != NULL) {
+            numDecls = vmsvga3d_build_vertex_decls(context, decls);
+
+            memset(&range, 0, sizeof(range));
+            range.primType = body->primitiveType;
+            range.primitiveCount = body->primitiveCount;
+            range.indexArray.surfaceId = body->indexBufferSid;
+            range.indexArray.offset = body->indexBufferOffset;
+            range.indexArray.stride = body->indexBufferStride;
+            range.indexWidth = body->indexBufferStride;
+            range.indexBias = body->baseVertexLocation;
+
+            if (vmsvga3d_state_draw_primitives(
+                    s, body->cid, numDecls, decls, 1, &range,
+                    context->num_vertex_divisors, context->vertex_divisors)) {
+                (void)vmsvga3d_d3d9_runtime_draw_primitives(
+                    s, body->cid, numDecls, decls, 1, &range,
+                    context->num_vertex_divisors, context->vertex_divisors);
+            }
+        }
+    }
+
+    g_free(payload);
     return true;
 }
 
@@ -5424,7 +5667,10 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
         uint32_t local_offset = 0;
 
         if ((header.flags & SVGA_CB_FLAG_DX_CONTEXT) == 0) {
-            status = SVGA_CB_STATUS_COMMAND_ERROR;
+            status = vmsvga_command_buffer_process_legacy(
+                s, commands != NULL ? commands + header.offset : NULL,
+                header.length - header.offset, &local_offset);
+            processed = header.offset + local_offset;
         } else {
             status = vmsvga3d_dx_command_buffer_process(
                 s, header.dxContext,
@@ -5616,6 +5862,13 @@ static bool vmsvga3d_gb_context_snapshot(struct vmsvga_state_s *s,
             }
         }
     }
+    out->numVertexDecls = MIN(context->num_vertex_decls, (uint32_t)SVGA3D_MAX_VERTEX_ARRAYS);
+    out->numVertexStreams = MIN(context->num_vertex_streams, (uint32_t)SVGA3D_MAX_VERTEX_ARRAYS);
+    out->numVertexDivisors = MIN(context->num_vertex_divisors, (uint32_t)SVGA3D_MAX_VERTEX_ARRAYS);
+    memcpy(out->vertexDecls, context->vertex_decls, sizeof(out->vertexDecls));
+    memcpy(out->vertexStreams, context->vertex_streams, sizeof(out->vertexStreams));
+    memcpy(out->vertexDivisors, context->vertex_divisors, sizeof(out->vertexDivisors));
+
     out->occQueryActive = context->occlusion.defined &&
                           context->occlusion.state == VMSVGA3D_QUERY_BUILDING;
     out->occQueryValue = context->occlusion.result;
@@ -5709,6 +5962,13 @@ static bool vmsvga3d_gb_context_restore(struct vmsvga_state_s *s,
     context->occlusion.state = in->occQueryActive ? VMSVGA3D_QUERY_BUILDING
                                                    : VMSVGA3D_QUERY_NULL;
     context->occlusion.result = in->occQueryValue;
+    context->num_vertex_decls = MIN(in->numVertexDecls, (uint32_t)SVGA3D_MAX_VERTEX_ARRAYS);
+    context->num_vertex_streams = MIN(in->numVertexStreams, (uint32_t)SVGA3D_MAX_VERTEX_ARRAYS);
+    context->num_vertex_divisors = MIN(in->numVertexDivisors, (uint32_t)SVGA3D_MAX_VERTEX_ARRAYS);
+    memcpy(context->vertex_decls, in->vertexDecls, sizeof(context->vertex_decls));
+    memcpy(context->vertex_streams, in->vertexStreams, sizeof(context->vertex_streams));
+    memcpy(context->vertex_divisors, in->vertexDivisors, sizeof(context->vertex_divisors));
+
     return true;
 }
 
@@ -7156,11 +7416,14 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_MOB64, vmsvga3d_handle_define_gb_mob),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_REDEFINE_GB_MOB64),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_NOP_ERROR),
-    VMSVGA3D_STALL(SVGA_3D_CMD_SET_VERTEX_STREAMS),
-    VMSVGA3D_STALL(SVGA_3D_CMD_SET_VERTEX_DECLS),
-    VMSVGA3D_STALL(SVGA_3D_CMD_SET_VERTEX_DIVISORS),
-    VMSVGA3D_STALL(SVGA_3D_CMD_DRAW),
-    VMSVGA3D_STALL(SVGA_3D_CMD_DRAW_INDEXED),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_SET_VERTEX_STREAMS,
+                     vmsvga3d_handle_set_vertex_streams),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_SET_VERTEX_DECLS,
+                     vmsvga3d_handle_set_vertex_decls),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_SET_VERTEX_DIVISORS,
+                     vmsvga3d_handle_set_vertex_divisors),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_DRAW, vmsvga3d_handle_draw),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_DRAW_INDEXED, vmsvga3d_handle_draw_indexed),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DX_DEFINE_CONTEXT, vmsvga3d_handle_dx_context_lifecycle),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DX_DESTROY_CONTEXT, vmsvga3d_handle_dx_context_lifecycle),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DX_BIND_CONTEXT, vmsvga3d_handle_dx_context_lifecycle),

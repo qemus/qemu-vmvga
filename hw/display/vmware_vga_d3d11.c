@@ -399,6 +399,59 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_plan(
+    const SVGA3dCmdDXSetConstantBufferOffset *src, SVGA3dShaderType type,
+    VMSVGA3DD3D11ConstantBufferOffsetPlan *plan)
+{
+    VMSVGA3DD3D11Level level;
+    uint32_t stage_index;
+
+    if (!src || !plan || src->slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    level = vmsvga3d_d3d11_shader_stage(type, &stage_index);
+    if (level == VMSVGA3D_D3D11_LEVEL_INVALID) {
+        return level;
+    }
+
+    plan->shader_type = type;
+    plan->stage_index = stage_index;
+    plan->slot = src->slot;
+    plan->offset_in_bytes = src->offsetInBytes;
+
+    return level;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffers_bind_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dShaderType type,
+    uint32_t start_slot, uint32_t buffer_count,
+    const uint32_t *first_constants, const uint32_t *constant_counts)
+{
+    VMSVGA3DD3D11Level level;
+    uint32_t stage_index;
+
+    if (dxvk == NULL || start_slot > SVGA3D_DX_MAX_CONSTBUFFERS ||
+        buffer_count > SVGA3D_DX_MAX_CONSTBUFFERS - start_slot ||
+        (buffer_count != 0 &&
+         (first_constants == NULL || constant_counts == NULL))) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    level = vmsvga3d_d3d11_shader_stage(type, &stage_index);
+    if (level == VMSVGA3D_D3D11_LEVEL_INVALID) {
+        return level;
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_set_constant_buffers1(
+            dxvk, cid, stage_index, start_slot, buffer_count,
+            first_constants, constant_counts)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return level;
+}
+
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_define_live(
     VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
     const SVGACOTableDXUAViewEntry *entry)

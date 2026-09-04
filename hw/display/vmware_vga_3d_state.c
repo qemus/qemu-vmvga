@@ -296,6 +296,28 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_constant_buffer(
     return true;
 }
 
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_constant_buffer_offset(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D11ConstantBufferOffsetPlan *plan)
+{
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    SVGA3dConstantBufferBinding *binding;
+
+    if (context == NULL || plan == NULL ||
+        plan->stage_index >= SVGA3D_NUM_SHADERTYPE ||
+        plan->slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+        return false;
+    }
+
+    binding = &context->shadow.shaderState[plan->stage_index]
+                   .constantBuffers[plan->slot];
+
+    /* VirtualBox updates only offsetInBytes for SET_*_CONSTANT_BUFFER_OFFSET. */
+    binding->offsetInBytes = plan->offset_in_bytes;
+
+    return true;
+}
+
 static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader_resources(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10ShaderResourceSetPlan *plan)

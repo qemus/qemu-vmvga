@@ -6843,6 +6843,37 @@ static const VMSVGA3DCommandInfo *vmsvga3d_command_info(uint32_t cmd)
     return NULL;
 }
 
+static bool vmsvga3d_is_dx_command(uint32_t cmd)
+{
+    if (cmd >= SVGA_3D_CMD_DX_MIN && cmd <= SVGA_3D_CMD_DX_MAX) {
+        return true;
+    }
+
+    switch (cmd) {
+    case SVGA_3D_CMD_DX_GROW_COTABLE:
+    case SVGA_3D_CMD_DX_RESOLVE_COPY:
+    case SVGA_3D_CMD_DX_PRED_RESOLVE_COPY:
+    case SVGA_3D_CMD_DX_PRED_CONVERT_REGION:
+    case SVGA_3D_CMD_DX_PRED_CONVERT:
+    case SVGA_3D_CMD_DX_DEFINE_UA_VIEW ... SVGA_3D_CMD_DX_DISPATCH_INDIRECT:
+    case SVGA_3D_CMD_DX_TRANSFER_TO_BUFFER:
+    case SVGA_3D_CMD_DX_SET_STRUCTURE_COUNT:
+    case SVGA_3D_CMD_DX_COPY_COTABLE_INTO_MOB:
+    case SVGA_3D_CMD_DX_SET_CS_UA_VIEWS:
+    case SVGA_3D_CMD_DX_SET_MIN_LOD:
+    case SVGA_3D_CMD_DX_DEFINE_DEPTHSTENCIL_VIEW_V2:
+    case SVGA_3D_CMD_DX_DEFINE_STREAMOUTPUT_WITH_MOB:
+    case SVGA_3D_CMD_DX_SET_SHADER_IFACE:
+    case SVGA_3D_CMD_DX_BIND_STREAMOUTPUT:
+    case SVGA_3D_CMD_DX_BIND_SHADER_IFACE:
+    case SVGA_3D_CMD_DX_PRED_STAGING_COPY ...
+         SVGA_3D_CMD_DX_STAGING_BUFFER_COPY:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool vmsvga3d_trace_fifo_command(uint32_t cmd)
 {
     switch (cmd) {
@@ -6877,13 +6908,13 @@ static bool vmsvga3d_trace_fifo_command(uint32_t cmd)
     case SVGA_3D_CMD_GENERATE_MIPMAPS:
         return true;
     default:
-        return cmd >= SVGA_3D_CMD_DX_MIN && cmd <= SVGA_3D_CMD_DX_MAX;
+        return vmsvga3d_is_dx_command(cmd);
     }
 }
 
 static const char *vmsvga3d_trace_command_path(uint32_t cmd)
 {
-    if (cmd >= SVGA_3D_CMD_DX_MIN && cmd <= SVGA_3D_CMD_DX_MAX) {
+    if (vmsvga3d_is_dx_command(cmd)) {
         return "DX";
     }
 

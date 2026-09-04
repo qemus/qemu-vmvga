@@ -22,7 +22,7 @@ Together, these improvements provide better VMware driver compatibility, more re
 
 ### 3D acceleration
 
-The device supports DirectX 9, 10 and 11 acceleration. VMware SVGA 3D commands are processed by the QEMU device and rendered through [DXVK](https://github.com/doitsujin/dxvk), which translates the Direct3D graphics operations to Vulkan on the host.
+The device supports DirectX acceleration. VMware SVGA 3D commands are processed by the QEMU device and rendered through [DXVK](https://github.com/doitsujin/dxvk), which translates the Direct3D graphics operations to Vulkan on the host.
 
 It requires a Vulkan-capable graphics card, and the DXVK package to be present on the host, otherwise it automatically falls back to 2D acceleration.
 

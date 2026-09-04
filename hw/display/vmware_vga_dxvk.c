@@ -326,6 +326,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE2D 5u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE3D 6u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SHADER_RESOURCE_VIEW 7u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_UNORDERED_ACCESS_VIEW 8u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RENDERTARGET_VIEW 9u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_VIEW 10u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_INPUT_LAYOUT 11u
@@ -333,6 +334,9 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER 13u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO 14u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PIXEL_SHADER 15u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_HULL_SHADER 16u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DOMAIN_SHADER 17u
+#define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_COMPUTE_SHADER 18u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BLEND_STATE 20u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DEPTH_STENCIL_STATE 21u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RASTERIZER_STATE 22u
@@ -380,16 +384,34 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_DEPTH_STENCIL_STATE 36u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SO_SET_TARGETS 37u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_AUTO 38u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INDEXED_INSTANCED_INDIRECT 39u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DRAW_INSTANCED_INDIRECT 40u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DISPATCH 41u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DISPATCH_INDIRECT 42u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_STATE 43u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_VIEWPORTS 44u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_SCISSOR_RECTS 45u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION 46u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_RESOURCE 47u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UPDATE_SUBRESOURCE 48u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_STRUCTURE_COUNT 49u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_RENDERTARGET_VIEW 50u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_UAV_UINT 51u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_UAV_FLOAT 52u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_DEPTH_STENCIL_VIEW 53u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GENERATE_MIPS 54u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SET_RESOURCE_MIN_LOD 55u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RESOLVE_SUBRESOURCE 57u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SHADER_RESOURCES 59u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SHADER 60u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SAMPLERS 61u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SHADER_RESOURCES 63u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SHADER 64u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SAMPLERS 65u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_SHADER_RESOURCES 67u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_UNORDERED_ACCESS_VIEWS 68u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_SHADER 69u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_SAMPLERS 70u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_CONSTANT_BUFFERS 72u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER_RESOURCES 73u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER 74u
@@ -710,6 +732,8 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CreateTexture3D)(
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateShaderResourceView)(
     void *device, void *resource, const VMSVGA3DDxvkD3D11SRVDesc *desc,
     void **view);
+typedef int32_t (*VMSVGA3DDxvkD3D11CreateUnorderedAccessView)(
+    void *device, void *resource, const void *desc, void **view);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateRenderTargetView)(
     void *device, void *resource, const VMSVGA3DDxvkD3D11RTVDesc *desc,
     void **view);
@@ -748,10 +772,22 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CheckMultisampleQualityLevels)(
     uint32_t *quality_levels);
 typedef void (*VMSVGA3DDxvkD3D11ClearRenderTargetView)(
     void *context, void *view, const float color[4]);
+typedef void (*VMSVGA3DDxvkD3D11ClearUnorderedAccessViewUint)(
+    void *context, void *view, const uint32_t values[4]);
+typedef void (*VMSVGA3DDxvkD3D11ClearUnorderedAccessViewFloat)(
+    void *context, void *view, const float values[4]);
+typedef void (*VMSVGA3DDxvkD3D11CopyStructureCount)(
+    void *context, void *destination_buffer, uint32_t destination_byte_offset,
+    void *source_view);
+typedef void (*VMSVGA3DDxvkD3D11SetResourceMinLOD)(
+    void *context, void *resource, float min_lod);
 typedef void (*VMSVGA3DDxvkD3D11ClearDepthStencilView)(
     void *context, void *view, uint32_t clear_flags, float depth,
     uint8_t stencil);
 typedef void (*VMSVGA3DDxvkD3D11GenerateMips)(void *context, void *view);
+typedef void (*VMSVGA3DDxvkD3D11CSSetUnorderedAccessViews)(
+    void *context, uint32_t start_slot, uint32_t view_count, void **views,
+    const uint32_t *initial_counts);
 typedef void (*VMSVGA3DDxvkD3D11OMSetRenderTargetsAndUAVs)(
     void *context, uint32_t render_target_count,
     void *const *render_target_views, void *depth_stencil_view,
@@ -819,6 +855,15 @@ typedef void (*VMSVGA3DDxvkD3D11DrawInstanced)(
     void *context, uint32_t vertex_count_per_instance, uint32_t instance_count,
     uint32_t start_vertex_location, uint32_t start_instance_location);
 typedef void (*VMSVGA3DDxvkD3D11DrawAuto)(void *context);
+typedef void (*VMSVGA3DDxvkD3D11DrawIndexedInstancedIndirect)(
+    void *context, void *buffer, uint32_t aligned_byte_offset);
+typedef void (*VMSVGA3DDxvkD3D11DrawInstancedIndirect)(
+    void *context, void *buffer, uint32_t aligned_byte_offset);
+typedef void (*VMSVGA3DDxvkD3D11Dispatch)(
+    void *context, uint32_t thread_group_count_x,
+    uint32_t thread_group_count_y, uint32_t thread_group_count_z);
+typedef void (*VMSVGA3DDxvkD3D11DispatchIndirect)(
+    void *context, void *buffer, uint32_t aligned_byte_offset);
 typedef void (*VMSVGA3DDxvkD3D11Flush)(void *context);
 typedef struct vmsvga3d_dxvk_d3d11_mapped_subresource_s {
     void *data;
@@ -3455,6 +3500,15 @@ bool vmsvga3d_dxvk_d3d11_set_shader_resources(
     case 2:
         method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER_RESOURCES;
         break;
+    case 3:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SHADER_RESOURCES;
+        break;
+    case 4:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SHADER_RESOURCES;
+        break;
+    case 5:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_SHADER_RESOURCES;
+        break;
     default:
         return false;
     }
@@ -4693,6 +4747,15 @@ bool vmsvga3d_dxvk_d3d11_set_samplers(
     case 2:
         method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SAMPLERS;
         break;
+    case 3:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SAMPLERS;
+        break;
+    case 4:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SAMPLERS;
+        break;
+    case 5:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_SAMPLERS;
+        break;
     default:
         return false;
     }
@@ -5727,6 +5790,15 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     case SVGA3D_SHADERTYPE_GS:
         method = VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER;
         break;
+    case SVGA3D_SHADERTYPE_HS:
+        method = VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_HULL_SHADER;
+        break;
+    case SVGA3D_SHADERTYPE_DS:
+        method = VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_DOMAIN_SHADER;
+        break;
+    case SVGA3D_SHADERTYPE_CS:
+        method = VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_COMPUTE_SHADER;
+        break;
     default:
         return false;
     }
@@ -5824,6 +5896,15 @@ bool vmsvga3d_dxvk_d3d11_shader_set(
         break;
     case SVGA3D_SHADERTYPE_GS:
         method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER;
+        break;
+    case SVGA3D_SHADERTYPE_HS:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SHADER;
+        break;
+    case SVGA3D_SHADERTYPE_DS:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SHADER;
+        break;
+    case SVGA3D_SHADERTYPE_CS:
+        method = VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_SHADER;
         break;
     default:
         return false;

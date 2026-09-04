@@ -7726,7 +7726,7 @@ bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_uint(
     if (view == NULL ||
         !vmsvga3d_dxvk_get_method(
             dxvk->d3d11_context,
-            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_UNORDERED_ACCESS_VIEW_UINT,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_UAV_UINT,
             &clear_view, sizeof(clear_view))) {
         return false;
     }
@@ -7762,7 +7762,7 @@ bool vmsvga3d_dxvk_d3d11_clear_unordered_access_view_float(
     if (view == NULL ||
         !vmsvga3d_dxvk_get_method(
             dxvk->d3d11_context,
-            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_UNORDERED_ACCESS_VIEW_FLOAT,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_UAV_FLOAT,
             &clear_view, sizeof(clear_view))) {
         return false;
     }

@@ -25,6 +25,7 @@
 */
 
 #include "include/vmware_vga_d3d11.h"
+#include "include/vmware_vga_dxvk.h"
 
 #include <string.h>
 
@@ -262,6 +263,204 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_set_plan(
         memcpy(plan->ids, ids, count * sizeof(plan->ids[0]));
     }
     plan->shadow_update_atomic = true;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_uint_plan(
+    const SVGA3dCmdDXClearUAViewUint *src, uint32_t cotable_count,
+    VMSVGA3DD3D11UAVClearUintPlan *plan)
+{
+    if (!src || !plan || src->uaViewId >= cotable_count) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    plan->view_id = src->uaViewId;
+    memcpy(plan->values, src->value.value, sizeof(plan->values));
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_float_plan(
+    const SVGA3dCmdDXClearUAViewFloat *src, uint32_t cotable_count,
+    VMSVGA3DD3D11UAVClearFloatPlan *plan)
+{
+    if (!src || !plan || src->uaViewId >= cotable_count) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    plan->view_id = src->uaViewId;
+    memcpy(plan->values, src->value.value, sizeof(plan->values));
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_copy_structure_count_plan(
+    const SVGA3dCmdDXCopyStructureCount *src, uint32_t cotable_count,
+    VMSVGA3DD3D11CopyStructureCountPlan *plan)
+{
+    if (!src || !plan || src->srcUAViewId >= cotable_count) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    plan->source_view_id = src->srcUAViewId;
+    plan->destination_sid = src->destSid;
+    plan->destination_byte_offset = src->destByteOffset;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_set_structure_count_plan(
+    const SVGA3dCmdDXSetStructureCount *src, uint32_t cotable_count,
+    VMSVGA3DD3D11SetStructureCountPlan *plan)
+{
+    if (!src || !plan || src->uaViewId >= cotable_count) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    plan->view_id = src->uaViewId;
+    plan->structure_count = src->structureCount;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
+    const SVGA3dCmdDXDispatch *src, VMSVGA3DD3D11DispatchPlan *plan)
+{
+    if (!src || !plan) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    plan->thread_group_count_x = src->threadGroupCountX;
+    plan->thread_group_count_y = src->threadGroupCountY;
+    plan->thread_group_count_z = src->threadGroupCountZ;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_define_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
+    const SVGACOTableDXUAViewEntry *entry)
+{
+    /* VirtualBox creates the native UAV lazily in pipeline setup or clear. */
+    (void)dxvk;
+    (void)cid;
+    (void)view_id;
+    (void)entry;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_destroy_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id)
+{
+    if (!dxvk || view_id == SVGA3D_INVALID_ID ||
+        !vmsvga3d_dxvk_d3d11_unordered_access_view_destroy(
+            dxvk, cid, view_id)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid,
+    const VMSVGA3DD3D11UAVSetPlan *plan)
+{
+    /* VirtualBox defers graphics UAV binding to pipeline setup. */
+    (void)dxvk;
+    (void)cid;
+    (void)plan;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_uint_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
+    VMSVGA3DDxvkSurface *surface, const SVGACOTableDXUAViewEntry *entry,
+    uint32_t array_elements, const uint32_t values[4])
+{
+    VMSVGA3DD3D11UAVDesc desc;
+
+    if (!dxvk || !surface || !entry || !values ||
+        vmsvga3d_d3d11_uav_desc(entry, array_elements, &desc) ==
+            VMSVGA3D_D3D11_LEVEL_INVALID ||
+        !vmsvga3d_dxvk_d3d11_unordered_access_view_ensure(
+            dxvk, cid, view_id, surface, &desc) ||
+        !vmsvga3d_dxvk_d3d11_clear_unordered_access_view_uint(
+            dxvk, cid, view_id, values)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_float_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
+    VMSVGA3DDxvkSurface *surface, const SVGACOTableDXUAViewEntry *entry,
+    uint32_t array_elements, const float values[4])
+{
+    VMSVGA3DD3D11UAVDesc desc;
+
+    if (!dxvk || !surface || !entry || !values ||
+        vmsvga3d_d3d11_uav_desc(entry, array_elements, &desc) ==
+            VMSVGA3D_D3D11_LEVEL_INVALID ||
+        !vmsvga3d_dxvk_d3d11_unordered_access_view_ensure(
+            dxvk, cid, view_id, surface, &desc) ||
+        !vmsvga3d_dxvk_d3d11_clear_unordered_access_view_float(
+            dxvk, cid, view_id, values)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_copy_structure_count_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId source_view_id,
+    VMSVGA3DDxvkSurface *destination, uint32_t destination_byte_offset)
+{
+    if (!dxvk || !vmsvga3d_dxvk_d3d11_copy_structure_count(
+                     dxvk, destination, destination_byte_offset, cid,
+                     source_view_id)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_live(
+    VMSVGA3DDxvk *dxvk, uint32_t thread_group_count_x,
+    uint32_t thread_group_count_y, uint32_t thread_group_count_z)
+{
+    if (!dxvk || !vmsvga3d_dxvk_d3d11_dispatch(
+                     dxvk, thread_group_count_x, thread_group_count_y,
+                     thread_group_count_z)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_indexed_instanced_indirect_live(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset)
+{
+    if (!dxvk || !vmsvga3d_dxvk_d3d11_draw_indexed_instanced_indirect(
+                     dxvk, args_buffer, aligned_byte_offset)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_instanced_indirect_live(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset)
+{
+    if (!dxvk || !vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
+                     dxvk, args_buffer, aligned_byte_offset)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
 
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }

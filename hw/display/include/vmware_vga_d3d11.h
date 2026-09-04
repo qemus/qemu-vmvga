@@ -149,6 +149,36 @@ typedef struct vmsvga3d_d3d11_cs_uav_set_plan_s {
     bool shadow_update_atomic;
 } VMSVGA3DD3D11CSUAVSetPlan;
 
+typedef struct vmsvga3d_d3d11_uav_clear_uint_plan_s {
+    SVGA3dUAViewId view_id;
+    uint32_t values[4];
+} VMSVGA3DD3D11UAVClearUintPlan;
+
+typedef struct vmsvga3d_d3d11_uav_clear_float_plan_s {
+    SVGA3dUAViewId view_id;
+    float values[4];
+} VMSVGA3DD3D11UAVClearFloatPlan;
+
+typedef struct vmsvga3d_d3d11_copy_structure_count_plan_s {
+    SVGA3dUAViewId source_view_id;
+    SVGA3dSurfaceId destination_sid;
+    uint32_t destination_byte_offset;
+} VMSVGA3DD3D11CopyStructureCountPlan;
+
+typedef struct vmsvga3d_d3d11_set_structure_count_plan_s {
+    SVGA3dUAViewId view_id;
+    uint32_t structure_count;
+} VMSVGA3DD3D11SetStructureCountPlan;
+
+typedef struct vmsvga3d_d3d11_dispatch_plan_s {
+    uint32_t thread_group_count_x;
+    uint32_t thread_group_count_y;
+    uint32_t thread_group_count_z;
+} VMSVGA3DD3D11DispatchPlan;
+
+typedef struct vmsvga3d_dxvk_s VMSVGA3DDxvk;
+typedef struct vmsvga3d_dxvk_surface_s VMSVGA3DDxvkSurface;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -179,6 +209,48 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_set_plan(
     const SVGA3dCmdDXSetCSUAViews *src, uint32_t count,
     const SVGA3dUAViewId *ids, uint32_t cotable_count,
     VMSVGA3DD3D11CSUAVSetPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_uint_plan(
+    const SVGA3dCmdDXClearUAViewUint *src, uint32_t cotable_count,
+    VMSVGA3DD3D11UAVClearUintPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_float_plan(
+    const SVGA3dCmdDXClearUAViewFloat *src, uint32_t cotable_count,
+    VMSVGA3DD3D11UAVClearFloatPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_copy_structure_count_plan(
+    const SVGA3dCmdDXCopyStructureCount *src, uint32_t cotable_count,
+    VMSVGA3DD3D11CopyStructureCountPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_set_structure_count_plan(
+    const SVGA3dCmdDXSetStructureCount *src, uint32_t cotable_count,
+    VMSVGA3DD3D11SetStructureCountPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
+    const SVGA3dCmdDXDispatch *src, VMSVGA3DD3D11DispatchPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_define_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
+    const SVGACOTableDXUAViewEntry *entry);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_destroy_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid,
+    const VMSVGA3DD3D11UAVSetPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_uint_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
+    VMSVGA3DDxvkSurface *surface, const SVGACOTableDXUAViewEntry *entry,
+    uint32_t array_elements, const uint32_t values[4]);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_float_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
+    VMSVGA3DDxvkSurface *surface, const SVGACOTableDXUAViewEntry *entry,
+    uint32_t array_elements, const float values[4]);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_copy_structure_count_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId source_view_id,
+    VMSVGA3DDxvkSurface *destination, uint32_t destination_byte_offset);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_live(
+    VMSVGA3DDxvk *dxvk, uint32_t thread_group_count_x,
+    uint32_t thread_group_count_y, uint32_t thread_group_count_z);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_indexed_instanced_indirect_live(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_instanced_indirect_live(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_query_define_entry(
     const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(

@@ -5346,7 +5346,9 @@ static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
 #endif
 }
 
-static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s)
+static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
+                                           uint32_t command_low,
+                                           uint32_t command_high)
 {
     SVGACBHeader raw;
     SVGACBHeader header;
@@ -5362,9 +5364,9 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s)
         return;
     }
 
-    header_gpa = ((uint64_t)s->cmd_high << 32) |
-                 ((uint64_t)s->cmd_low & ~(uint64_t)SVGA_CB_CONTEXT_MASK);
-    context = s->cmd_low & SVGA_CB_CONTEXT_MASK;
+    header_gpa = ((uint64_t)command_high << 32) |
+                 ((uint64_t)command_low & ~(uint64_t)SVGA_CB_CONTEXT_MASK);
+    context = command_low & SVGA_CB_CONTEXT_MASK;
 
     if ((header_gpa & 63u) != 0 ||
         !vmsvga3d_guest_memory_read(s, header_gpa, &raw, sizeof(raw))) {

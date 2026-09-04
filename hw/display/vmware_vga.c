@@ -407,6 +407,8 @@ struct vmsvga_state_s {
     uint32_t traces;
     uint32_t cmd_low;
     uint32_t cmd_high;
+    uint32_t cmd_prepend_low;
+    uint32_t cmd_prepend_high;
     uint32_t guest;
     uint32_t svgaid;
     uint32_t thread;
@@ -7787,11 +7789,11 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
             caps &= ~SVGA_CAP_3D;
         }
         if (s->svga3d_dx_capable) {
-            caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_GBOBJECTS | SVGA_CAP_DX |
-                    SVGA_CAP_CAP2_REGISTER;
+            caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
+                    SVGA_CAP_GBOBJECTS | SVGA_CAP_DX | SVGA_CAP_CAP2_REGISTER;
         } else {
-            caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_GBOBJECTS | SVGA_CAP_DX |
-                      SVGA_CAP_CAP2_REGISTER);
+            caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
+                      SVGA_CAP_GBOBJECTS | SVGA_CAP_DX | SVGA_CAP_CAP2_REGISTER);
         }
         ret = caps;
         VPRINT("SVGA_REG_CAPABILITIES register %u with the return of %u\n",
@@ -7962,6 +7964,16 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
     case SVGA_REG_COMMAND_HIGH:
         ret = s->cmd_high;
         VPRINT("SVGA_REG_COMMAND_HIGH register %u with the return of %u\n",
+               s->index, ret);
+        break;
+    case SVGA_REG_CMD_PREPEND_LOW:
+        ret = s->cmd_prepend_low;
+        VPRINT("SVGA_REG_CMD_PREPEND_LOW register %u with the return of %u\n",
+               s->index, ret);
+        break;
+    case SVGA_REG_CMD_PREPEND_HIGH:
+        ret = s->cmd_prepend_high;
+        VPRINT("SVGA_REG_CMD_PREPEND_HIGH register %u with the return of %u\n",
                s->index, ret);
         break;
     case SVGA_REG_DEV_CAP:
@@ -8281,13 +8293,27 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       VPRINT("SVGA_REG_COMMAND_LOW register %u with the value of %u\n", s->index,
              value);
       if (s->svga3d_dx_capable) {
-          vmsvga3d_command_buffer_submit(s);
+          vmsvga3d_command_buffer_submit(s, s->cmd_low, s->cmd_high);
       }
       break;
   case SVGA_REG_COMMAND_HIGH:
       s->cmd_high = value;
       VPRINT("SVGA_REG_COMMAND_HIGH register %u with the value of %u\n", s->index,
              value);
+      break;
+  case SVGA_REG_CMD_PREPEND_LOW:
+      s->cmd_prepend_low = value;
+      VPRINT("SVGA_REG_CMD_PREPEND_LOW register %u with the value of %u\n",
+             s->index, value);
+      if (s->svga3d_dx_capable) {
+          vmsvga3d_command_buffer_submit(s, s->cmd_prepend_low,
+                                         s->cmd_prepend_high);
+      }
+      break;
+  case SVGA_REG_CMD_PREPEND_HIGH:
+      s->cmd_prepend_high = value;
+      VPRINT("SVGA_REG_CMD_PREPEND_HIGH register %u with the value of %u\n",
+             s->index, value);
       break;
   case SVGA_REG_GMR_ID:
       s->gmrid = value;
@@ -8567,6 +8593,8 @@ static void vmsvga_reset(DeviceState *dev)
     s->gmrpage = 0;
     s->cmd_low = 0;
     s->cmd_high = 0;
+    s->cmd_prepend_low = 0;
+    s->cmd_prepend_high = 0;
     s->pitchlock = 0;
     s->traces = 0;
     s->guest = 0;

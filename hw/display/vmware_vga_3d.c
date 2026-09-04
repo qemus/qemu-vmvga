@@ -918,6 +918,11 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s) {
   if (state == NULL) {
     return;
   };
+  /* VirtualBox destroys each legacy context's D3D9 device during reset,
+   * which drops all native state references before guest resources are freed.
+   * QEMU uses one shared D3D9 device, so restore its captured pristine state
+   * to provide the equivalent teardown boundary. */
+  (void)vmsvga3d_dxvk_reset_state(s->dxvk);
   for (i = 0; i < SVGA3D_MAX_CONTEXT_IDS; i++) {
     vmsvga3d_context_free(state, state->contexts[i]);
     vmsvga3d_dxvk_d3d9_query_context_destroy(s->dxvk, i);
@@ -2124,31 +2129,6 @@ static bool vmsvga3d_handle_wait_for_query(struct vmsvga_state_s *s,
   return true;
 };
 
-static bool vmsvga3d_handle_present_readback(struct vmsvga_state_s *s,
-                                               uint32_t cmd, int32_t *len,
-                                               uint32_t fifo_start) {
-  VMSVGA3DD3D9PresentReadbackPlan plan;
-  VMSVGA3DD3D9AccelResult accel = VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
-  void *payload;
-  uint32_t size;
-
-  (void)cmd;
-  if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
-    return true;
-  }
-  g_free(payload);
-  if (size != 0 || !vmsvga3d_d3d9_present_readback_plan(&plan)) {
-    return true;
-  }
-  accel = vmsvga3d_d3d9_runtime_present_readback(s, &plan);
-  /* The CPU PRESENT/readback path already keeps the framebuffer coherent.
-   * UNAVAILABLE therefore means there is nothing GPU-resident to read back.
-   * FAILED is intentionally not replayed after a potentially partial GPU
-   * synchronization. */
-  (void)accel;
-  return true;
-}
-
 static bool vmsvga3d_handle_shader_define(struct vmsvga_state_s *s,
                                            uint32_t cmd, int32_t *len,
                                            uint32_t fifo_start) {
@@ -3352,20 +3332,21 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
     valid = vmsvga3d_surface_copy_box(src_surface, src_image, dst_surface,
                                       dst_image, &boxes[i], NULL, 0, false,
                                       &needed);
-    scratch_size = MAX(scratch_size, needed);
-  };
-  if (valid && !d3d11_copy &&
-      accel != VMSVGA3D_D3D9_ACCEL_COMPLETE && scratch_size != 0) {
-    scratch = g_try_malloc(scratch_size);
-    if (scratch == NULL) {
-      valid = false;
+    if (valid && needed > scratch_size) {
+      uint8_t *new_scratch = g_try_realloc(scratch, needed);
+
+      if (new_scratch == NULL) {
+        valid = false;
+      } else {
+        scratch = new_scratch;
+        scratch_size = needed;
+      };
     };
-  };
-  for (i = 0; valid && !d3d11_copy &&
-              accel != VMSVGA3D_D3D9_ACCEL_COMPLETE && i < box_count; i++) {
-    valid = vmsvga3d_surface_copy_box(src_surface, src_image, dst_surface,
-                                      dst_image, &boxes[i], scratch,
-                                      scratch_size, true, NULL);
+    if (valid) {
+      valid = vmsvga3d_surface_copy_box(src_surface, src_image, dst_surface,
+                                        dst_image, &boxes[i], scratch,
+                                        scratch_size, true, NULL);
+    };
   };
   if (valid && !d3d11_copy &&
       accel != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
@@ -4417,9 +4398,7 @@ static bool vmsvga3d_surface_dma_box(struct vmsvga_state_s *s,
   };
 
   guest_pitch = guest->pitch != 0 ? guest->pitch : image->pitch;
-  if (guest_pitch == 0 ||
-      ((block_width > 1 || block_height > 1 || block_depth > 1) &&
-       guest->pitch != 0 && guest_pitch != image->pitch)) {
+  if (guest_pitch == 0) {
     return false;
   };
   if ((uint64_t)guest_block_x * bytes_per_block + row_bytes > guest_pitch) {
@@ -6042,8 +6021,7 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
   VMSVGA3D_HANDLER(SVGA_3D_CMD_BEGIN_QUERY, vmsvga3d_handle_begin_query),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_END_QUERY, vmsvga3d_handle_end_query),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_WAIT_FOR_QUERY, vmsvga3d_handle_wait_for_query),
-  VMSVGA3D_HANDLER(SVGA_3D_CMD_PRESENT_READBACK,
-                   vmsvga3d_handle_present_readback),
+  VMSVGA3D_HANDLER(SVGA_3D_CMD_PRESENT_READBACK, vmsvga3d_handle_present),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN,
                    vmsvga3d_handle_blit_surface_to_screen),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_SURFACE_DEFINE_V2, vmsvga3d_handle_surface_define_v2),
@@ -6095,7 +6073,7 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
   VMSVGA3D_DISCARD(SVGA_3D_CMD_BEGIN_GB_QUERY),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_END_GB_QUERY),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_WAIT_FOR_GB_QUERY),
-  VMSVGA3D_STALL(SVGA_3D_CMD_NOP),
+  VMSVGA3D_DISCARD(SVGA_3D_CMD_NOP),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_ENABLE_GART),
   VMSVGA3D_STALL(SVGA_3D_CMD_DISABLE_GART),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_MAP_MOB_INTO_GART),
@@ -6117,7 +6095,7 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
   VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, vmsvga3d_handle_define_gb_surface),
   VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_MOB64, vmsvga3d_handle_define_gb_mob),
   VMSVGA3D_DISCARD(SVGA_3D_CMD_REDEFINE_GB_MOB64),
-  VMSVGA3D_STALL(SVGA_3D_CMD_NOP_ERROR),
+  VMSVGA3D_DISCARD(SVGA_3D_CMD_NOP_ERROR),
   VMSVGA3D_STALL(SVGA_3D_CMD_SET_VERTEX_STREAMS),
   VMSVGA3D_STALL(SVGA_3D_CMD_SET_VERTEX_DECLS),
   VMSVGA3D_STALL(SVGA_3D_CMD_SET_VERTEX_DIVISORS),

@@ -898,13 +898,13 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
                             VMSVGA3DD3D9RenderStatePlan *plan) {
   uint32_t d3d_state;
 
-  if (state == NULL || plan == NULL || state->state < SVGA3D_RS_MIN ||
-      state->state >= SVGA3D_RS_MAX) {
+  if (state == NULL || plan == NULL || state->state >= SVGA3D_RS_MAX) {
     return VMSVGA3D_D3D9_TRANSLATE_INVALID;
   }
   memset(plan, 0, sizeof(*plan));
 
-  if (vmsvga3d_d3d9_render_state_ignored(state->state)) {
+  if (state->state == SVGA3D_RS_INVALID ||
+      vmsvga3d_d3d9_render_state_ignored(state->state)) {
     return VMSVGA3D_D3D9_TRANSLATE_IGNORE;
   }
 
@@ -2353,7 +2353,6 @@ static bool vmsvga3d_dxvk_apply_context_targets(
     struct vmsvga_state_s *s, VMSVGA3DContext *context) {
   const SVGA3dSurfaceImageId *depth;
   const SVGA3dSurfaceImageId *stencil;
-  const SVGA3dSurfaceImageId *depth_stencil;
   uint32_t type;
 
   if (s == NULL || context == NULL) {
@@ -2370,15 +2369,22 @@ static bool vmsvga3d_dxvk_apply_context_targets(
 
   depth = &context->render_targets[SVGA3D_RT_DEPTH];
   stencil = &context->render_targets[SVGA3D_RT_STENCIL];
-  if (depth->sid != SVGA3D_INVALID_ID && stencil->sid != SVGA3D_INVALID_ID &&
-      (depth->sid != stencil->sid || depth->face != stencil->face ||
-       depth->mipmap != stencil->mipmap)) {
+
+  /* VBox replays render targets in enum order.  DEPTH and STENCIL both map
+   * to the single native D3D9 depth/stencil slot, so a valid STENCIL target
+   * is applied after DEPTH and wins even when the two SIDs differ.  Unbinding
+   * STENCIL is ignored by VBox, leaving the DEPTH binding intact. */
+  if (!vmsvga3d_dxvk_bind_context_target(
+          s, depth, VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET, 0, true, true)) {
     return false;
   }
-  depth_stencil = depth->sid != SVGA3D_INVALID_ID ? depth : stencil;
-  return vmsvga3d_dxvk_bind_context_target(
-      s, depth_stencil, VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET, 0, true,
-      true);
+  if (stencil->sid != SVGA3D_INVALID_ID &&
+      !vmsvga3d_dxvk_bind_context_target(
+          s, stencil, VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET, 0, true,
+          false)) {
+    return false;
+  }
+  return true;
 }
 
 static bool vmsvga3d_dxvk_apply_context_viewport(
@@ -3217,15 +3223,6 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
     return VMSVGA3D_D3D9_ACCEL_FAILED;
   }
 
-  /* Validate every destination before synchronizing GPU state so a malformed
-   * later rectangle cannot leave a partially presented framebuffer. */
-  for (i = 0; i < present_rect_count; i++) {
-    if (!vmsvga3d_present_rect(s, surface, image, desc, &present_rects[i],
-                               false)) {
-      return VMSVGA3D_D3D9_ACCEL_FAILED;
-    }
-  }
-
   if (!info.resident) {
     /* A CPU-only surface is already coherent and the existing PRESENT path is
      * cheaper than manufacturing a GPU resource solely to read it back. */
@@ -3239,6 +3236,8 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
 
   for (i = 0; i < present_rect_count; i++) {
     if (!vmsvga3d_present_rect(s, surface, image, desc, &present_rects[i],
+                               false) ||
+        !vmsvga3d_present_rect(s, surface, image, desc, &present_rects[i],
                                true)) {
       return VMSVGA3D_D3D9_ACCEL_FAILED;
     }

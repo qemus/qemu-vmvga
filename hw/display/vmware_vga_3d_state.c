@@ -680,11 +680,9 @@ static bool vmsvga3d_state_set_render_state(
     return false;
   };
   for (i = 0; i < count; i++) {
-    if (states[i].state < SVGA3D_RS_MIN || states[i].state >= SVGA3D_RS_MAX) {
+    if (states[i].state >= SVGA3D_RS_MAX) {
       return false;
     };
-  };
-  for (i = 0; i < count; i++) {
     context->render_state[states[i].state].value = states[i].uintValue;
     context->render_state[states[i].state].valid = true;
   };
@@ -713,6 +711,12 @@ static bool vmsvga3d_state_set_render_target(
   if (!vmsvga3d_surface_image(surface, target, &image)) {
     return false;
   };
+  /* VBox's D3D9 backend only accepts the base image for depth/stencil
+   * render targets. */
+  if ((type == SVGA3D_RT_DEPTH || type == SVGA3D_RT_STENCIL) &&
+      (target->face != 0 || target->mipmap != 0)) {
+    return false;
+  };
   context->render_targets[type] = *target;
   return true;
 };
@@ -727,18 +731,20 @@ static bool vmsvga3d_state_set_texture_state(
     return false;
   };
   for (i = 0; i < count; i++) {
-    if (states[i].stage >= VMSVGA3D_MAX_SAMPLERS ||
-        states[i].name < SVGA3D_TS_MIN || states[i].name >= SVGA3D_TS_MAX) {
-      return false;
+    if (states[i].name == SVGA3D_TS_BIND_TEXTURE) {
+      if (states[i].stage >= VMSVGA3D_MAX_SAMPLERS) {
+        continue;
+      };
+      if (states[i].value != SVGA3D_INVALID_ID &&
+          (s->svga3d == NULL || states[i].value >= SVGA3D_MAX_SURFACE_IDS ||
+           s->svga3d->surfaces[states[i].value] == NULL)) {
+        return false;
+      };
+    } else if (states[i].stage >= VMSVGA3D_MAX_SAMPLERS ||
+               states[i].name < SVGA3D_TS_MIN ||
+               states[i].name >= SVGA3D_TS_MAX) {
+      continue;
     };
-    if (states[i].name == SVGA3D_TS_BIND_TEXTURE &&
-        states[i].value != SVGA3D_INVALID_ID &&
-        (s->svga3d == NULL || states[i].value >= SVGA3D_MAX_SURFACE_IDS ||
-         s->svga3d->surfaces[states[i].value] == NULL)) {
-      return false;
-    };
-  };
-  for (i = 0; i < count; i++) {
     context->texture_state[states[i].stage][states[i].name].value =
         states[i].value;
     context->texture_state[states[i].stage][states[i].name].valid = true;
@@ -1098,14 +1104,13 @@ static bool vmsvga3d_state_set_shader(struct vmsvga_state_s *s,
   if (context == NULL || !vmsvga3d_shader_type_index(type, &type_index)) {
     return false;
   };
+  context->bound_shader[type_index] = shid;
   if (shid == SVGA3D_INVALID_ID) {
-    context->bound_shader[type_index] = SVGA3D_INVALID_ID;
     return true;
   };
   if (shid >= SVGA3D_MAX_SHADERIDS || context->shader[type_index][shid] == NULL) {
     return false;
   };
-  context->bound_shader[type_index] = shid;
   return true;
 };
 

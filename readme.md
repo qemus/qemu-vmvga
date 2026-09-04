@@ -1,6 +1,6 @@
 # VMVGA 🖥️
 
-VMVGA is a virtual graphics adapter for QEMU implementing the VMware SVGA/SVGA3D interfaces.
+VMVGA is a virtual graphics adapter for QEMU implementing the VMware SVGA/SVGA3D interfaces to provide GPU acceleration.
 
 ## Purpose 🎯
 

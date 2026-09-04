@@ -372,6 +372,9 @@ bool vmsvga3d_dxvk_d3d11_clear_render_target_view(
 bool vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
     uint32_t clear_flags, float depth, uint8_t stencil);
+bool vmsvga3d_dxvk_d3d11_unbind_cs_unordered_access_views(
+    VMSVGA3DDxvk *dxvk, uint32_t start_slot, uint32_t view_count,
+    const uint64_t *modified);
 bool vmsvga3d_dxvk_d3d11_set_cs_unordered_access_views(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t start_slot,
     uint32_t view_count, const uint32_t *view_ids,

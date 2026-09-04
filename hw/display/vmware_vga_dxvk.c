@@ -4690,6 +4690,52 @@ static bool vmsvga3d_dxvk_d3d11_state_object(
 }
 #endif
 
+bool vmsvga3d_dxvk_d3d11_unbind_cs_unordered_access_views(
+    VMSVGA3DDxvk *dxvk, uint32_t start_slot, uint32_t view_count,
+    const uint64_t *modified)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CSSetUnorderedAccessViews set_views = NULL;
+    void *null_view = NULL;
+    uint32_t i;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        start_slot >= SVGA3D_DX11_1_MAX_UAVIEWS ||
+        view_count > SVGA3D_DX11_1_MAX_UAVIEWS - start_slot ||
+        (view_count != 0 && modified == NULL)) {
+        return false;
+    }
+
+    if (view_count == 0) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CS_SET_UNORDERED_ACCESS_VIEWS,
+            &set_views, sizeof(set_views))) {
+        return false;
+    }
+
+    for (i = 0; i < view_count; i++) {
+        uint32_t slot = start_slot + i;
+
+        if ((modified[slot / 64u] &
+             (UINT64_C(1) << (slot % 64u))) != 0) {
+            set_views(dxvk->d3d11_context, slot, 1, &null_view, NULL);
+        }
+    }
+
+    return true;
+#else
+    (void)dxvk;
+    (void)start_slot;
+    (void)view_count;
+    (void)modified;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_set_cs_unordered_access_views(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t start_slot,
     uint32_t view_count, const uint32_t *view_ids,

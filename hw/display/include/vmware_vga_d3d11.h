@@ -135,6 +135,15 @@ typedef struct vmsvga3d_d3d11_uav_desc_s {
     uint32_t flags;
 } VMSVGA3DD3D11UAVDesc;
 
+typedef struct vmsvga3d_d3d11_uav_define_plan_s {
+    SVGA3dUAViewId view_id;
+    SVGACOTableDXUAViewEntry entry;
+} VMSVGA3DD3D11UAVDefinePlan;
+
+typedef struct vmsvga3d_d3d11_uav_destroy_plan_s {
+    SVGA3dUAViewId view_id;
+} VMSVGA3DD3D11UAVDestroyPlan;
+
 typedef struct vmsvga3d_d3d11_uav_set_plan_s {
     uint32_t uav_splice_index;
     uint32_t count;
@@ -170,6 +179,16 @@ typedef struct vmsvga3d_d3d11_set_structure_count_plan_s {
     uint32_t structure_count;
 } VMSVGA3DD3D11SetStructureCountPlan;
 
+typedef struct vmsvga3d_d3d11_draw_indexed_instanced_indirect_plan_s {
+    SVGA3dSurfaceId args_buffer_sid;
+    uint32_t aligned_byte_offset;
+} VMSVGA3DD3D11DrawIndexedInstancedIndirectPlan;
+
+typedef struct vmsvga3d_d3d11_draw_instanced_indirect_plan_s {
+    SVGA3dSurfaceId args_buffer_sid;
+    uint32_t aligned_byte_offset;
+} VMSVGA3DD3D11DrawInstancedIndirectPlan;
+
 typedef struct vmsvga3d_d3d11_dispatch_plan_s {
     uint32_t thread_group_count_x;
     uint32_t thread_group_count_y;
@@ -201,6 +220,12 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_destroy_entry(
     SVGACOTableDXUAViewEntry *entry);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_structure_count(
     SVGACOTableDXUAViewEntry *entry, uint32_t structure_count);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_define_plan(
+    const SVGA3dCmdDXDefineUAView *src, uint32_t cotable_count,
+    VMSVGA3DD3D11UAVDefinePlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_destroy_plan(
+    const SVGA3dCmdDXDestroyUAView *src, uint32_t cotable_count,
+    VMSVGA3DD3D11UAVDestroyPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_plan(
     const SVGA3dCmdDXSetUAViews *src, uint32_t count,
     const SVGA3dUAViewId *ids, uint32_t cotable_count,
@@ -221,6 +246,12 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_copy_structure_count_plan(
 VMSVGA3DD3D11Level vmsvga3d_d3d11_set_structure_count_plan(
     const SVGA3dCmdDXSetStructureCount *src, uint32_t cotable_count,
     VMSVGA3DD3D11SetStructureCountPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_indexed_instanced_indirect_plan(
+    const SVGA3dCmdDXDrawIndexedInstancedIndirect *src,
+    VMSVGA3DD3D11DrawIndexedInstancedIndirectPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_instanced_indirect_plan(
+    const SVGA3dCmdDXDrawInstancedIndirect *src,
+    VMSVGA3DD3D11DrawInstancedIndirectPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
     const SVGA3dCmdDXDispatch *src, VMSVGA3DD3D11DispatchPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_define_live(
@@ -231,6 +262,9 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_destroy_live(
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_live(
     VMSVGA3DDxvk *dxvk, uint32_t cid,
     const VMSVGA3DD3D11UAVSetPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_set_live(
+    VMSVGA3DDxvk *dxvk, const VMSVGA3DD3D11CSUAVSetPlan *plan,
+    const uint64_t *modified);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_uint_live(
     VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
     VMSVGA3DDxvkSurface *surface, const SVGACOTableDXUAViewEntry *entry,

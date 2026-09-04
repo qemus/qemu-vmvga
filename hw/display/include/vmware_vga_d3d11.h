@@ -195,6 +195,13 @@ typedef struct vmsvga3d_d3d11_dispatch_plan_s {
     uint32_t thread_group_count_z;
 } VMSVGA3DD3D11DispatchPlan;
 
+typedef struct vmsvga3d_d3d11_constant_buffer_offset_plan_s {
+    SVGA3dShaderType shader_type;
+    uint32_t stage_index;
+    uint32_t slot;
+    uint32_t offset_in_bytes;
+} VMSVGA3DD3D11ConstantBufferOffsetPlan;
+
 typedef struct vmsvga3d_dxvk_s VMSVGA3DDxvk;
 typedef struct vmsvga3d_dxvk_surface_s VMSVGA3DDxvkSurface;
 
@@ -254,6 +261,13 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_instanced_indirect_plan(
     VMSVGA3DD3D11DrawInstancedIndirectPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
     const SVGA3dCmdDXDispatch *src, VMSVGA3DD3D11DispatchPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_plan(
+    const SVGA3dCmdDXSetConstantBufferOffset *src, SVGA3dShaderType type,
+    VMSVGA3DD3D11ConstantBufferOffsetPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffers_bind_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dShaderType type,
+    uint32_t start_slot, uint32_t buffer_count,
+    const uint32_t *first_constants, const uint32_t *constant_counts);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_define_live(
     VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
     const SVGACOTableDXUAViewEntry *entry);

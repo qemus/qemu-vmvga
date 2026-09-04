@@ -291,17 +291,17 @@ struct vmsvga_cursor_source_s {
  * Add -trace "vmware_value_read" when register reads/BUSY polling are needed.
  * Categories set to 0 compile down to a constant-false branch.
  */
-#define VMVGA_TRACE_STATE   1
+#define VMVGA_TRACE_STATE   0
 #define VMVGA_TRACE_DRAW    0
 #define VMVGA_TRACE_DIRTY   0
 #define VMVGA_TRACE_ROP     0
-#define VMVGA_TRACE_OBJECT  1
-#define VMVGA_TRACE_STREAM  1
-#define VMVGA_TRACE_FIFO    1
+#define VMVGA_TRACE_OBJECT  0
+#define VMVGA_TRACE_STREAM  0
+#define VMVGA_TRACE_FIFO    0
 #define VMVGA_TRACE_3D      1
 #define VMVGA_TRACE_DEVCAP  1
 #define VMVGA_TRACE_FLIGHT  0
-#define VMVGA_TRACE_QEMU    1
+#define VMVGA_TRACE_QEMU    0
 
 #define VMVGA_TRACE_CMD_MAX 256
 #define VMVGA_TRACE_DEVCAP_MAX 256
@@ -4727,6 +4727,9 @@ typedef struct {
 } SVGAFifoCmdSurfaceAlphaBlend;
 
 static inline void vmsvga_check_size(struct vmsvga_state_s *s);
+static SVGACBStatus vmsvga_command_buffer_process_legacy(
+    struct vmsvga_state_s *s, const void *commands, uint32_t size,
+    uint32_t *error_offset);
 
 #include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
@@ -6655,6 +6658,139 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
         }
     }
 }
+
+/*
+ * COMMAND_BUFFERS_2 does not imply DX command encoding.  When
+ * SVGA_CB_FLAG_DX_CONTEXT is clear, VMware submits the same command stream
+ * that can be written to the normal SVGA FIFO.  Execute that stream through
+ * the existing FIFO parser so command validation and side effects stay
+ * identical between the two transports.
+ *
+ * The real FIFO itself must not be consumed: construct a private FIFO image,
+ * copy the guest-visible FIFO register block into it, run the normal parser,
+ * then restore the original FIFO plumbing.  Renderer/device side effects
+ * (surfaces, contexts, fences, IRQ state, etc.) are intentionally retained.
+ */
+static SVGACBStatus vmsvga_command_buffer_process_legacy(
+    struct vmsvga_state_s *s, const void *commands, uint32_t size,
+    uint32_t *error_offset)
+{
+    uint32_t *saved_fifo;
+    uint32_t saved_fifo_size;
+    uint32_t saved_fifo_min;
+    uint32_t saved_fifo_max;
+    uint32_t saved_fifo_next;
+    uint32_t saved_fifo_stop;
+    uint32_t saved_sync;
+    struct vmsvga_fifo_upload_s saved_fifo_upload;
+    uint32_t fifo_min;
+    uint32_t ring_bytes;
+    uint32_t fifo_max;
+    uint32_t fifo_next;
+    uint32_t consumed = 0;
+    uint32_t previous_stop;
+    uint8_t *temp_bytes;
+    uint32_t *temp_fifo;
+    SVGACBStatus status = SVGA_CB_STATUS_COMMAND_ERROR;
+
+    if (error_offset == NULL || s == NULL ||
+        (size != 0 && commands == NULL) || (size & 3u) != 0) {
+        return SVGA_CB_STATUS_COMMAND_ERROR;
+    }
+    *error_offset = 0;
+
+    if (size == 0) {
+        return SVGA_CB_STATUS_COMPLETED;
+    }
+
+    saved_fifo = s->fifo;
+    saved_fifo_size = s->fifo_size;
+    saved_fifo_min = s->fifo_min;
+    saved_fifo_max = s->fifo_max;
+    saved_fifo_next = s->fifo_next;
+    saved_fifo_stop = s->fifo_stop;
+    saved_sync = s->sync;
+    saved_fifo_upload = s->fifo_upload;
+
+    /* Keep the same FIFO register visibility as the configured guest FIFO. */
+    fifo_min = sizeof(uint32_t) * 4;
+    if (saved_fifo != NULL && saved_fifo_size >= sizeof(uint32_t) * 4) {
+        uint32_t guest_min = le32_to_cpu(saved_fifo[SVGA_FIFO_MIN]);
+        if ((guest_min & 3u) == 0 && guest_min >= sizeof(uint32_t) * 4 &&
+            guest_min <= saved_fifo_size && guest_min <= 64 * 1024) {
+            fifo_min = guest_min;
+        }
+    }
+
+    /* vmsvga_fifo_length() requires at least 10 KiB of ring space. */
+    ring_bytes = MAX(10u * 1024u, size + sizeof(uint32_t));
+    ring_bytes = QEMU_ALIGN_UP(ring_bytes, sizeof(uint32_t));
+    fifo_max = fifo_min + ring_bytes;
+    fifo_next = fifo_min + size;
+
+    temp_bytes = g_try_malloc0(fifo_max);
+    if (temp_bytes == NULL) {
+        return SVGA_CB_STATUS_QUEUE_FULL;
+    }
+    temp_fifo = (uint32_t *)temp_bytes;
+
+    if (saved_fifo != NULL && saved_fifo_size >= fifo_min) {
+        memcpy(temp_bytes, saved_fifo, fifo_min);
+    }
+
+    temp_fifo[SVGA_FIFO_MIN] = cpu_to_le32(fifo_min);
+    temp_fifo[SVGA_FIFO_MAX] = cpu_to_le32(fifo_max);
+    temp_fifo[SVGA_FIFO_NEXT_CMD] = cpu_to_le32(fifo_next);
+    temp_fifo[SVGA_FIFO_STOP] = cpu_to_le32(fifo_min);
+    memcpy(temp_bytes + fifo_min, commands, size);
+
+    s->fifo = temp_fifo;
+    s->fifo_size = fifo_max;
+    s->fifo_min = fifo_min;
+    s->fifo_max = fifo_max;
+    s->fifo_next = fifo_next;
+    s->fifo_stop = fifo_min;
+    memset(&s->fifo_upload, 0, sizeof(s->fifo_upload));
+
+    for (;;) {
+        previous_stop = s->fifo_stop;
+        vmsvga_fifo_run(s, false);
+        consumed = s->fifo_stop >= fifo_min ? s->fifo_stop - fifo_min : 0;
+
+        if (s->fifo_stop == fifo_next) {
+            status = SVGA_CB_STATUS_COMPLETED;
+            consumed = size;
+            break;
+        }
+
+        /* A rewind/stall or malformed command made no forward progress. */
+        if (s->fifo_stop == previous_stop || consumed > size) {
+            status = SVGA_CB_STATUS_COMMAND_ERROR;
+            consumed = MIN(consumed, size);
+            break;
+        }
+    }
+
+    s->fifo = saved_fifo;
+    s->fifo_size = saved_fifo_size;
+    s->fifo_min = saved_fifo_min;
+    s->fifo_max = saved_fifo_max;
+    s->fifo_next = saved_fifo_next;
+    s->fifo_stop = saved_fifo_stop;
+    s->sync = saved_sync;
+    s->fifo_upload = saved_fifo_upload;
+
+    /* FENCE is architecturally visible in the real FIFO register block even
+     * when the command itself arrived through COMMAND_BUFFERS_2. */
+    if (saved_fifo != NULL && vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
+        saved_fifo[SVGA_FIFO_FENCE] = cpu_to_le32(s->fence);
+    }
+
+    g_free(temp_bytes);
+    *error_offset = consumed;
+    return status;
+}
+
 
 static uint32_t vmsvga_index_read(void *opaque, uint32_t address)
 {

@@ -58,6 +58,9 @@ static bool vmsvga3d_state_dx_render_target_count(
 static bool vmsvga3d_state_dx_apply_constant_buffer(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10ConstantBufferPlan *plan);
+static bool vmsvga3d_state_dx_apply_constant_buffer_offset(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D11ConstantBufferOffsetPlan *plan);
 static bool vmsvga3d_state_dx_apply_shader_resources(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10ShaderResourceSetPlan *plan);

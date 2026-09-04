@@ -60,10 +60,16 @@ struct vmsvga3d_dxvk_s {
     VMSVGA3DDxvkInputLayout *d3d11_input_layouts;
     VMSVGA3DDxvkConstantBuffer *d3d11_constant_buffers;
     VMSVGA3DDxvkView *d3d11_views;
-    void *d3d11_bound_constant_buffers[SVGA3D_NUM_SHADERTYPE_DX10]
+    void *d3d11_bound_constant_buffers[SVGA3D_NUM_SHADERTYPE]
                                         [SVGA3D_DX_MAX_CONSTBUFFERS];
-    bool d3d11_bound_constant_buffer_valid[SVGA3D_NUM_SHADERTYPE_DX10]
+    bool d3d11_bound_constant_buffer_valid[SVGA3D_NUM_SHADERTYPE]
                                              [SVGA3D_DX_MAX_CONSTBUFFERS];
+    uint32_t d3d11_bound_constant_buffer_first_constant[SVGA3D_NUM_SHADERTYPE]
+                                                       [SVGA3D_DX_MAX_CONSTBUFFERS];
+    uint32_t d3d11_bound_constant_buffer_num_constants[SVGA3D_NUM_SHADERTYPE]
+                                                     [SVGA3D_DX_MAX_CONSTBUFFERS];
+    uint32_t d3d11_constant_buffer_start_slot[SVGA3D_NUM_SHADERTYPE];
+    uint32_t d3d11_constant_buffer_num_buffers[SVGA3D_NUM_SHADERTYPE];
     void *d3d11_bound_vertex_buffers[SVGA3D_DX_MAX_VERTEXBUFFERS];
     uint32_t d3d11_bound_vertex_strides[SVGA3D_DX_MAX_VERTEXBUFFERS];
     uint32_t d3d11_bound_vertex_offsets[SVGA3D_DX_MAX_VERTEXBUFFERS];
@@ -3468,7 +3474,7 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_define(
     int32_t result;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
-        stage_index >= SVGA3D_NUM_SHADERTYPE_DX10 ||
+        stage_index >= SVGA3D_NUM_SHADERTYPE ||
         slot >= SVGA3D_DX_MAX_CONSTBUFFERS || size == 0 ||
         !vmsvga3d_dxvk_get_method(
             dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BUFFER,
@@ -3510,7 +3516,8 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_define(
         dxvk->d3d11_constant_buffers = new_buffer;
     }
 
-    return true;
+    return vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
+        dxvk, stage_index, slot, 0, size / 16u);
 #else
     (void)dxvk;
     (void)cid;
@@ -3529,7 +3536,7 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
     VMSVGA3DDxvkConstantBuffer **link = NULL;
     VMSVGA3DDxvkConstantBuffer *buffer;
 
-    if (dxvk == NULL || stage_index >= SVGA3D_NUM_SHADERTYPE_DX10 ||
+    if (dxvk == NULL || stage_index >= SVGA3D_NUM_SHADERTYPE ||
         slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
         return false;
     }
@@ -3548,7 +3555,9 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
 #endif
     *link = buffer->next;
     g_free(buffer);
-    return true;
+
+    return vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
+        dxvk, stage_index, slot, 0, 0);
 }
 
 bool vmsvga3d_dxvk_d3d11_set_shader_resources(
@@ -3562,7 +3571,7 @@ bool vmsvga3d_dxvk_d3d11_set_shader_resources(
     uint32_t i;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
-        stage_index >= SVGA3D_NUM_SHADERTYPE_DX10 ||
+        stage_index >= SVGA3D_NUM_SHADERTYPE ||
         start_slot > SVGA3D_DX_MAX_SRVIEWS ||
         view_count > SVGA3D_DX_MAX_SRVIEWS - start_slot ||
         (view_count != 0 && view_ids == NULL)) {
@@ -3694,6 +3703,99 @@ bool vmsvga3d_dxvk_d3d11_set_constant_buffers(
     (void)buffer_count;
     return false;
 #endif
+}
+
+bool vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
+    VMSVGA3DDxvk *dxvk, uint32_t stage_index, uint32_t slot,
+    uint32_t first_constant, uint32_t num_constants)
+{
+    if (dxvk == NULL || stage_index >= SVGA3D_NUM_SHADERTYPE ||
+        slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+        return false;
+    }
+
+    dxvk->d3d11_bound_constant_buffer_first_constant[stage_index][slot] =
+        first_constant;
+    dxvk->d3d11_bound_constant_buffer_num_constants[stage_index][slot] =
+        num_constants;
+
+    if (dxvk->d3d11_constant_buffer_num_buffers[stage_index] == 0) {
+        dxvk->d3d11_constant_buffer_start_slot[stage_index] = slot;
+        dxvk->d3d11_constant_buffer_num_buffers[stage_index] = 1;
+    } else {
+        uint32_t start_slot =
+            dxvk->d3d11_constant_buffer_start_slot[stage_index];
+        uint32_t end_slot =
+            start_slot + dxvk->d3d11_constant_buffer_num_buffers[stage_index];
+
+        if (slot < start_slot) {
+            start_slot = slot;
+        }
+        if (slot + 1u > end_slot) {
+            end_slot = slot + 1u;
+        }
+
+        dxvk->d3d11_constant_buffer_start_slot[stage_index] = start_slot;
+        dxvk->d3d11_constant_buffer_num_buffers[stage_index] =
+            end_slot - start_slot;
+    }
+
+    return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_constant_buffers1_flush(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index)
+{
+    uint32_t start_slot;
+    uint32_t buffer_count;
+
+    if (dxvk == NULL || stage_index >= SVGA3D_NUM_SHADERTYPE) {
+        return false;
+    }
+
+    start_slot = dxvk->d3d11_constant_buffer_start_slot[stage_index];
+    buffer_count = dxvk->d3d11_constant_buffer_num_buffers[stage_index];
+    if (buffer_count == 0) {
+        return true;
+    }
+
+    if (start_slot >= SVGA3D_DX_MAX_CONSTBUFFERS ||
+        buffer_count > SVGA3D_DX_MAX_CONSTBUFFERS - start_slot) {
+        return false;
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_set_constant_buffers1(
+            dxvk, cid, stage_index, start_slot, buffer_count,
+            &dxvk->d3d11_bound_constant_buffer_first_constant[stage_index]
+                                                              [start_slot],
+            &dxvk->d3d11_bound_constant_buffer_num_constants[stage_index]
+                                                             [start_slot])) {
+        return false;
+    }
+
+    dxvk->d3d11_constant_buffer_start_slot[stage_index] = 0;
+    dxvk->d3d11_constant_buffer_num_buffers[stage_index] = 0;
+    return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_constant_buffers1_flush_all(
+    VMSVGA3DDxvk *dxvk, uint32_t cid)
+{
+    uint32_t stage_index;
+
+    if (dxvk == NULL) {
+        return false;
+    }
+
+    for (stage_index = 0; stage_index < SVGA3D_NUM_SHADERTYPE;
+         stage_index++) {
+        if (!vmsvga3d_dxvk_d3d11_constant_buffers1_flush(
+                dxvk, cid, stage_index)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool vmsvga3d_dxvk_d3d11_set_constant_buffers1(
@@ -4440,7 +4542,7 @@ void vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(
             continue;
         }
 
-        if (buffer->stage_index < SVGA3D_NUM_SHADERTYPE_DX10 &&
+        if (buffer->stage_index < SVGA3D_NUM_SHADERTYPE &&
             buffer->slot < SVGA3D_DX_MAX_CONSTBUFFERS &&
             dxvk->d3d11_bound_constant_buffer_valid[buffer->stage_index]
                                                        [buffer->slot] &&

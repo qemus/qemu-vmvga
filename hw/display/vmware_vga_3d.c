@@ -320,6 +320,7 @@ static void vmsvga3d_context_free(struct vmsvga3d_state_s *state,
 
     if (context == NULL) {
         return;
+    }
 
     for (type = 0; type < SVGA3D_NUM_SHADERTYPE_PREDX; type++) {
         for (shid = 0; shid < SVGA3D_MAX_SHADERIDS; shid++) {

@@ -424,14 +424,17 @@ static bool vmsvga3d_d3d9_direct_render_state(uint32_t state,
             return true;
         }
     }
+ 
     if (state >= SVGA3D_RS_WRAP0 && state <= SVGA3D_RS_WRAP7) {
         *d3d_state = D3D9_RS_WRAP0 + state - SVGA3D_RS_WRAP0;
         return true;
     }
+ 
     if (state >= SVGA3D_RS_WRAP8 && state <= SVGA3D_RS_WRAP15) {
         *d3d_state = D3D9_RS_WRAP8 + state - SVGA3D_RS_WRAP8;
         return true;
     }
+ 
     return false;
 }
 
@@ -440,12 +443,15 @@ static uint32_t vmsvga3d_d3d9_blend(uint32_t value, uint32_t fallback)
     if (value >= SVGA3D_BLENDOP_ZERO && value <= SVGA3D_BLENDOP_SRCALPHASAT) {
         return value;
     }
+ 
     if (value == SVGA3D_BLENDOP_BLENDFACTOR) {
         return D3D9_BLEND_BLENDFACTOR;
     }
+ 
     if (value == SVGA3D_BLENDOP_INVBLENDFACTOR) {
         return D3D9_BLEND_INVBLENDFACTOR;
     }
+ 
     return fallback;
 }
 
@@ -502,6 +508,7 @@ static uint32_t vmsvga3d_d3d9_texture_combiner(uint32_t value)
     if (value >= SVGA3D_TC_MAX || map[value] == 0) {
         return D3D9_TOP_DISABLE;
     }
+ 
     return map[value];
 }
 
@@ -548,6 +555,7 @@ uint32_t vmsvga3d_d3d9_surface_format(SVGA3dSurfaceFormat format)
     if ((uint32_t)format >= SVGA3D_FORMAT_MAX) {
         return D3D9_FMT_UNKNOWN;
     }
+ 
     return vmsvga3d_d3d9_format_map[format];
 }
 
@@ -596,6 +604,7 @@ SVGA3dSurface1Flags vmsvga3d_d3d9_normalize_surface_flags(
     default:
         break;
     }
+ 
     return flags;
 }
 
@@ -606,18 +615,23 @@ uint32_t vmsvga3d_d3d9_surface_usage(SVGA3dSurface1Flags flags)
     if (flags & SVGA3D_SURFACE_HINT_DYNAMIC) {
         usage |= D3D9_USAGE_DYNAMIC;
     }
+ 
     if (flags & SVGA3D_SURFACE_HINT_RENDERTARGET) {
         usage |= D3D9_USAGE_RENDERTARGET;
     }
+ 
     if (flags & SVGA3D_SURFACE_HINT_DEPTHSTENCIL) {
         usage |= D3D9_USAGE_DEPTHSTENCIL;
     }
+ 
     if (flags & SVGA3D_SURFACE_HINT_WRITEONLY) {
         usage |= D3D9_USAGE_WRITEONLY;
     }
+ 
     if (flags & SVGA3D_SURFACE_AUTOGENMIPMAPS) {
         usage |= D3D9_USAGE_AUTOGENMIPMAP;
     }
+ 
     return usage;
 }
 
@@ -627,18 +641,22 @@ uint32_t vmsvga3d_d3d9_actual_format(
     if (caps == NULL) {
         return requested_format;
     }
+ 
     if (requested_format == VMSVGA3D_D3D9_MAKE_FOURCC('U', 'Y', 'V', 'Y') &&
         !caps->supports_uyvy) {
         return D3D9_FMT_A8R8G8B8;
     }
+ 
     if (requested_format == VMSVGA3D_D3D9_MAKE_FOURCC('Y', 'U', 'Y', '2') &&
         !caps->supports_yuy2) {
         return D3D9_FMT_A8R8G8B8;
     }
+ 
     if (requested_format == D3D9_FMT_A8B8G8R8 &&
         !caps->supports_a8b8g8r8) {
         return D3D9_FMT_A8R8G8B8;
     }
+ 
     return requested_format;
 }
 
@@ -648,6 +666,7 @@ static void vmsvga3d_d3d9_create_desc(
     uint32_t usage, uint32_t format, uint32_t pool)
 {
     memset(desc, 0, sizeof(*desc));
+ 
     desc->valid = true;
     desc->resource_type = resource_type;
     desc->width = surface->size.width;
@@ -665,6 +684,7 @@ static void vmsvga3d_d3d9_surface_desc(
 {
     vmsvga3d_d3d9_create_desc(desc, D3D9_RTYPE_SURFACE, surface, 1, usage,
                               format, D3D9_POOL_DEFAULT);
+ 
     desc->depth = 1;
     desc->multisample_type =
         vmsvga3d_d3d9_multisample_type(surface->multisample_count);
@@ -748,6 +768,7 @@ static void vmsvga3d_d3d9_texture_plan(
             plan->needs_format_conversion = true;
         }
     }
+ 
     if (surface->autogen_filter != SVGA3D_TEX_FILTER_NONE) {
         plan->set_autogen_filter = true;
         plan->autogen_filter = (uint32_t)surface->autogen_filter;
@@ -763,6 +784,7 @@ bool vmsvga3d_d3d9_resource_plan(
     }
 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->use = use;
     plan->normalized_surface_flags = vmsvga3d_d3d9_normalize_surface_flags(
         surface->surface_flags, surface->format);
@@ -859,6 +881,7 @@ bool vmsvga3d_d3d9_transform_type(SVGA3dTransformType type,
     if (d3d_transform == NULL) {
         return false;
     }
+ 
     switch (type) {
     case SVGA3D_TRANSFORM_VIEW:
         *d3d_transform = D3D9_TS_VIEW;
@@ -899,14 +922,17 @@ void vmsvga3d_d3d9_apply_z_range(VMSVGA3DD3D9Viewport *viewport,
     if (viewport == NULL || z_range == NULL) {
         return;
     }
+ 
     min_z = z_range->min;
     max_z = z_range->max;
+ 
     if (min_z < 0.0f) {
         min_z = 0.0f;
     }
     if (max_z > 1.0f) {
         max_z = 1.0f;
     }
+ 
     viewport->min_z = min_z;
     viewport->max_z = max_z;
 }
@@ -920,6 +946,7 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
     if (state == NULL || plan == NULL || state->state >= SVGA3D_RS_MAX) {
         return VMSVGA3D_D3D9_TRANSLATE_INVALID;
     }
+ 
     memset(plan, 0, sizeof(*plan));
 
     if (state->state == SVGA3D_RS_INVALID ||
@@ -935,6 +962,7 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
     }
 
     plan->count = 1;
+ 
     switch (state->state) {
     case SVGA3D_RS_SRCBLEND:
         plan->ops[0].state = D3D9_RS_SRCBLEND;
@@ -1038,6 +1066,7 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
     default:
         return VMSVGA3D_D3D9_TRANSLATE_INVALID;
     }
+ 
     return VMSVGA3D_D3D9_TRANSLATE_EMIT;
 }
 
@@ -1049,6 +1078,7 @@ vmsvga3d_d3d9_render_target(SVGA3dRenderTargetType type,
     if (target == NULL || plan == NULL || (uint32_t)type >= SVGA3D_RT_MAX) {
         return VMSVGA3D_D3D9_TRANSLATE_INVALID;
     }
+ 
     memset(plan, 0, sizeof(*plan));
     plan->unbind = target->sid == SVGA3D_INVALID_ID;
 
@@ -1056,6 +1086,7 @@ vmsvga3d_d3d9_render_target(SVGA3dRenderTargetType type,
         plan->action = VMSVGA3D_D3D9_RT_ACTION_DEPTH_STENCIL;
         return VMSVGA3D_D3D9_TRANSLATE_EMIT;
     }
+ 
     if (type == SVGA3D_RT_STENCIL) {
         if (plan->unbind) {
             return VMSVGA3D_D3D9_TRANSLATE_IGNORE;
@@ -1063,12 +1094,14 @@ vmsvga3d_d3d9_render_target(SVGA3dRenderTargetType type,
         plan->action = VMSVGA3D_D3D9_RT_ACTION_DEPTH_STENCIL;
         return VMSVGA3D_D3D9_TRANSLATE_EMIT;
     }
+ 
     if (type >= SVGA3D_RT_COLOR0 && type <= SVGA3D_RT_COLOR7) {
         plan->action = VMSVGA3D_D3D9_RT_ACTION_COLOR;
         plan->color_index = type - SVGA3D_RT_COLOR0;
         plan->restore_viewport_zrange_scissor = !plan->unbind;
         return VMSVGA3D_D3D9_TRANSLATE_EMIT;
     }
+ 
     return VMSVGA3D_D3D9_TRANSLATE_INVALID;
 }
 
@@ -1077,6 +1110,7 @@ uint32_t vmsvga3d_d3d9_sampler_index(uint32_t stage)
     if (stage < VMSVGA3D_D3D9_MAX_PIXEL_SAMPLERS) {
         return stage;
     }
+ 
     return VMSVGA3D_D3D9_DMAP_SAMPLER +
            stage - VMSVGA3D_D3D9_MAX_PIXEL_SAMPLERS;
 }
@@ -1091,6 +1125,7 @@ vmsvga3d_d3d9_texture_state(const SVGA3dTextureState *state,
         state->name >= SVGA3D_TS_MAX) {
         return VMSVGA3D_D3D9_TRANSLATE_INVALID;
     }
+ 
     memset(plan, 0, sizeof(*plan));
 
     if (state->name == SVGA3D_TS_BIND_TEXTURE) {
@@ -1180,18 +1215,23 @@ vmsvga3d_d3d9_texture_state(const SVGA3dTextureState *state,
     if (state->stage >= VMSVGA3D_D3D9_MAX_TEXTURE_STAGES) {
         return VMSVGA3D_D3D9_TRANSLATE_IGNORE;
     }
+ 
     plan->action = VMSVGA3D_D3D9_TEXTURE_ACTION_STAGE_STATE;
     plan->stage = state->stage;
     plan->value = value;
+ 
     return VMSVGA3D_D3D9_TRANSLATE_EMIT;
 
 sampler_state:
+
     if (state->stage >= VMSVGA3D_D3D9_MAX_SAMPLERS) {
         return VMSVGA3D_D3D9_TRANSLATE_IGNORE;
     }
+ 
     plan->action = VMSVGA3D_D3D9_TEXTURE_ACTION_SAMPLER_STATE;
     plan->stage = vmsvga3d_d3d9_sampler_index(state->stage);
     plan->value = state->value;
+ 
     switch (state->name) {
     case SVGA3D_TS_ADDRESSU:
         plan->state = D3D9_SAMP_ADDRESSU;
@@ -1231,6 +1271,7 @@ sampler_state:
         memset(plan, 0, sizeof(*plan));
         return VMSVGA3D_D3D9_TRANSLATE_IGNORE;
     }
+ 
     return VMSVGA3D_D3D9_TRANSLATE_EMIT;
 }
 
@@ -1251,11 +1292,13 @@ bool vmsvga3d_d3d9_material(SVGA3dFace face,
         d3d_material == NULL) {
         return false;
     }
+ 
     vmsvga3d_d3d9_color(material->diffuse, &d3d_material->diffuse);
     vmsvga3d_d3d9_color(material->ambient, &d3d_material->ambient);
     vmsvga3d_d3d9_color(material->specular, &d3d_material->specular);
     vmsvga3d_d3d9_color(material->emissive, &d3d_material->emissive);
     d3d_material->power = material->shininess;
+ 
     return true;
 }
 
@@ -1265,6 +1308,7 @@ bool vmsvga3d_d3d9_light(const SVGA3dLightData *light,
     if (light == NULL || d3d_light == NULL) {
         return false;
     }
+ 
     switch (light->type) {
     case SVGA3D_LIGHTTYPE_POINT:
         d3d_light->type = D3D9_LIGHT_POINT;
@@ -1278,9 +1322,11 @@ bool vmsvga3d_d3d9_light(const SVGA3dLightData *light,
     default:
         return false;
     }
+ 
     vmsvga3d_d3d9_color(light->diffuse, &d3d_light->diffuse);
     vmsvga3d_d3d9_color(light->specular, &d3d_light->specular);
     vmsvga3d_d3d9_color(light->ambient, &d3d_light->ambient);
+ 
     d3d_light->position.x = light->position[0];
     d3d_light->position.y = light->position[1];
     d3d_light->position.z = light->position[2];
@@ -1294,6 +1340,7 @@ bool vmsvga3d_d3d9_light(const SVGA3dLightData *light,
     d3d_light->attenuation2 = light->attenuation2;
     d3d_light->theta = light->theta;
     d3d_light->phi = light->phi;
+ 
     return true;
 }
 
@@ -1303,6 +1350,7 @@ void vmsvga3d_d3d9_apply_viewport(VMSVGA3DD3D9Viewport *viewport,
     if (viewport == NULL || rect == NULL) {
         return;
     }
+ 
     viewport->x = rect->x;
     viewport->y = rect->y;
     viewport->width = rect->w;
@@ -1318,8 +1366,10 @@ void vmsvga3d_d3d9_rect(const SVGA3dRect *rect,
     if (rect == NULL || d3d_rect == NULL) {
         return;
     }
+ 
     right = rect->x + rect->w;
     bottom = rect->y + rect->h;
+ 
     d3d_rect->left = (int32_t)rect->x;
     d3d_rect->top = (int32_t)rect->y;
     d3d_rect->right = (int32_t)right;
@@ -1333,12 +1383,15 @@ uint32_t vmsvga3d_d3d9_clear_flags(SVGA3dClearFlag flags)
     if (flags & SVGA3D_CLEAR_COLOR) {
         d3d_flags |= D3D9_CLEAR_TARGET;
     }
+ 
     if (flags & SVGA3D_CLEAR_DEPTH) {
         d3d_flags |= D3D9_CLEAR_ZBUFFER;
     }
+ 
     if (flags & SVGA3D_CLEAR_STENCIL) {
         d3d_flags |= D3D9_CLEAR_STENCIL;
     }
+ 
     return d3d_flags;
 }
 
@@ -1353,6 +1406,7 @@ bool vmsvga3d_d3d9_clear_plan(
     }
 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
     plan->cpu_fallback_allowed = true;
     plan->require_color0 = true;
@@ -1372,6 +1426,7 @@ bool vmsvga3d_d3d9_clear_plan(
     plan->clear = true;
     plan->track_active_render_targets = true;
     plan->active_render_target_mask = active_render_target_mask;
+ 
     return true;
 }
 
@@ -1382,6 +1437,7 @@ bool vmsvga3d_d3d9_vertex_element(const SVGA3dVertexArrayIdentity *identity,
     if (identity == NULL || element == NULL) {
         return false;
     }
+ 
     /* D3DVERTEXELEMENT9 stores these fields as WORD/BYTE.  Preserve the ABI's
      * direct narrowing behavior when converting the wider SVGA fields. */
     element->stream = (uint16_t)stream;
@@ -1390,6 +1446,7 @@ bool vmsvga3d_d3d9_vertex_element(const SVGA3dVertexArrayIdentity *identity,
     element->method = (uint8_t)identity->method;
     element->usage = (uint8_t)identity->usage;
     element->usage_index = (uint8_t)identity->usageIndex;
+ 
     return true;
 }
 
@@ -1419,6 +1476,7 @@ bool vmsvga3d_d3d9_vertex_layout(
         if (stream_id >= stream_capacity) {
             return false;
         }
+     
         for (end = current; end < decl_count; end++) {
             uint32_t offset;
             uint32_t new_min;
@@ -1436,6 +1494,7 @@ bool vmsvga3d_d3d9_vertex_layout(
             min_offset = new_min;
             max_offset = new_max;
         }
+     
         if (end == current) {
             return false;
         }
@@ -1454,6 +1513,7 @@ bool vmsvga3d_d3d9_vertex_layout(
                 return false;
             }
         }
+     
         current = end;
         stream_id++;
     }
@@ -1466,6 +1526,7 @@ bool vmsvga3d_d3d9_vertex_layout(
     elements[decl_count].usage = 0;
     elements[decl_count].usage_index = 0;
     *stream_count = stream_id;
+ 
     return true;
 }
 
@@ -1485,7 +1546,9 @@ bool vmsvga3d_d3d9_indexed_draw(const SVGA3dVertexDecl *first_decl,
         range->indexWidth == 0) {
         return false;
     }
+ 
     stride = first_decl->array.stride;
+ 
     if (first_decl->rangeHint.last != 0) {
         draw->num_vertices = first_decl->rangeHint.last - first_decl->rangeHint.first;
     } else {
@@ -1496,10 +1559,12 @@ bool vmsvga3d_d3d9_indexed_draw(const SVGA3dVertexDecl *first_decl,
                              first_decl->array.offset / stride -
                              first_decl->rangeHint.first - range->indexBias;
     }
+ 
     draw->base_vertex_index = (int32_t)range->indexBias;
     draw->min_vertex_index = 0;
     draw->start_index = range->indexArray.offset / range->indexWidth;
     draw->primitive_count = range->primitiveCount;
+ 
     return true;
 }
 
@@ -1516,6 +1581,7 @@ bool vmsvga3d_d3d9_draw_range_plan(
     }
 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->primitive_type = primitive_type;
     plan->primitive_count = range->primitiveCount;
     plan->index_surface_id = range->indexArray.surfaceId;
@@ -1538,6 +1604,7 @@ bool vmsvga3d_d3d9_draw_range_plan(
     plan->action = VMSVGA3D_D3D9_DRAW_ACTION_INDEXED;
     plan->sync_index_buffer = true;
     plan->index_format = vmsvga3d_d3d9_index_format(range->indexWidth);
+ 
     return true;
 }
 
@@ -1555,6 +1622,7 @@ bool vmsvga3d_d3d9_draw_batch_plan(uint32_t stream_count,
     }
 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->sync_vertex_buffers = true;
     plan->create_or_reuse_vertex_declaration = true;
     plan->begin_scene = true;
@@ -1567,6 +1635,7 @@ bool vmsvga3d_d3d9_draw_batch_plan(uint32_t stream_count,
     plan->clear_vertex_dirty_on_success = true;
     plan->clear_index_dirty_on_success = true;
     plan->track_context_usage_on_success = true;
+ 
     return true;
 }
 
@@ -1584,6 +1653,7 @@ bool vmsvga3d_d3d9_mipmap_plan(SVGA3dTextureFilter filter,
     }
 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->filter = vmsvga3d_d3d9_texture_filter(filter);
     plan->store_filter = true;
     plan->require_associated_context = true;
@@ -1598,6 +1668,7 @@ bool vmsvga3d_d3d9_mipmap_plan(SVGA3dTextureFilter filter,
     plan->filter_failure_is_fatal = false;
     plan->generate_after_filter_failure = true;
     plan->generate_sublevels = true;
+ 
     return true;
 }
 
@@ -1633,7 +1704,9 @@ bool vmsvga3d_d3d9_surface_copy_plan(
     if (source == NULL || destination == NULL || plan == NULL) {
         return false;
     }
+ 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->cpu_fallback_allowed = true;
     plan->reject_volume_texture = true;
     plan->require_identical_layout = true;
@@ -1645,6 +1718,7 @@ bool vmsvga3d_d3d9_surface_copy_plan(
         plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
         return true;
     }
+ 
     if (source->block_width != destination->block_width ||
         source->block_height != destination->block_height ||
         source->block_depth != destination->block_depth ||
@@ -1654,6 +1728,7 @@ bool vmsvga3d_d3d9_surface_copy_plan(
 
     source_gpu = source->resident;
     destination_gpu = destination->resident;
+ 
     if (source_gpu && !destination_gpu &&
         (destination->surface_flags & SVGA3D_SURFACE_HINT_TEXTURE)) {
         plan->create_destination_texture = true;
@@ -1680,18 +1755,22 @@ bool vmsvga3d_d3d9_surface_copy_plan(
     }
 
     plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
+ 
     if (source_gpu || destination_gpu) {
         plan->lock_single_gpu_surface = true;
         plan->lock_source_readonly = source_gpu;
         plan->flush_source = source_gpu;
         plan->flush_destination = destination_gpu;
     }
+ 
     plan->mark_cpu_destination_dirty = !destination_gpu;
+ 
     if (destination_gpu && vmsvga3d_d3d9_transfer_texture(destination) &&
         destination->has_bounce) {
         plan->update_destination_texture = true;
         plan->track_destination = true;
     }
+ 
     return true;
 }
 
@@ -1703,7 +1782,9 @@ bool vmsvga3d_d3d9_stretch_blt_plan(
     if (source == NULL || destination == NULL || plan == NULL) {
         return false;
     }
+ 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->execution = source->resident || destination->resident
                           ? VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED
                           : VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
@@ -1736,6 +1817,7 @@ bool vmsvga3d_d3d9_stretch_blt_plan(
         vmsvga3d_d3d9_transfer_volume(destination)) {
         plan->execution = VMSVGA3D_D3D9_EXECUTION_CPU_ONLY;
     }
+ 
     return true;
 }
 
@@ -1751,7 +1833,9 @@ bool vmsvga3d_d3d9_dma_plan(
          transfer != SVGA3D_READ_HOST_VRAM)) {
         return false;
     }
+ 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->cpu_fallback_allowed = true;
     plan->gmr_transfer = true;
     plan->reject_volume_texture = true;
@@ -1809,6 +1893,7 @@ bool vmsvga3d_d3d9_dma_plan(
     plan->update_texture_after_write =
         transfer == SVGA3D_WRITE_HOST_VRAM && texture && surface->has_bounce;
     plan->track_after_update = plan->update_texture_after_write;
+ 
     return true;
 }
 
@@ -1823,6 +1908,7 @@ bool vmsvga3d_d3d9_screen_blit_plan(
     }
 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->cpu_fallback_allowed = destination_screen == 0 && !scaling;
     plan->destination_screen = destination_screen;
     plan->source_face = 0;
@@ -1840,6 +1926,7 @@ bool vmsvga3d_d3d9_screen_blit_plan(
 
     source_2d = (surface->surface_flags &
                  (SVGA3D_SURFACE_CUBEMAP | SVGA3D_SURFACE_VOLUME)) == 0;
+ 
     if (!source_2d ||
         surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE ||
         surface->resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE ||
@@ -1855,6 +1942,7 @@ bool vmsvga3d_d3d9_screen_blit_plan(
     plan->direct_scanout_blit = true;
     plan->track_source = surface->resident;
     plan->update_scanout = true;
+ 
     return true;
 }
 
@@ -1870,10 +1958,12 @@ bool vmsvga3d_d3d9_screen_blit_copy_rect(
     if (rect == NULL || source == NULL || destination == NULL) {
         return false;
     }
+ 
     source_right = (uint64_t)rect->srcx + rect->w;
     source_bottom = (uint64_t)rect->srcy + rect->h;
     destination_right = (uint64_t)rect->x + rect->w;
     destination_bottom = (uint64_t)rect->y + rect->h;
+ 
     if (source_right > INT32_MAX || source_bottom > INT32_MAX ||
         destination_right > INT32_MAX || destination_bottom > INT32_MAX) {
         return false;
@@ -1887,6 +1977,7 @@ bool vmsvga3d_d3d9_screen_blit_copy_rect(
     destination->top = (int32_t)rect->y;
     destination->right = (int32_t)destination_right;
     destination->bottom = (int32_t)destination_bottom;
+ 
     return true;
 }
 
@@ -1901,6 +1992,7 @@ bool vmsvga3d_d3d9_present_plan(
     }
 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->cpu_fallback_allowed = true;
     plan->destination_screen = 0;
     plan->source_face = 0;
@@ -1908,6 +2000,7 @@ bool vmsvga3d_d3d9_present_plan(
     plan->input_rect_count = rect_count;
     plan->effective_rect_count = rect_count != 0 ? rect_count : 1;
     plan->synthesize_full_screen_rect = rect_count == 0;
+ 
     if (plan->synthesize_full_screen_rect) {
         plan->full_screen_rect.x = 0;
         plan->full_screen_rect.y = 0;
@@ -1921,10 +2014,12 @@ bool vmsvga3d_d3d9_present_plan(
      * VERR_NOT_IMPLEMENTED.  Preserve its DMA readback as the fallback, but
      * prefer a direct GPU screen blit when the final runtime can provide one. */
     plan->legacy_d3d9_screen_blit_unimplemented = true;
+ 
     if (!vmsvga3d_d3d9_screen_blit_plan(surface, 0, false, 0,
                                         &plan->screen_blit)) {
         return false;
     }
+ 
     plan->prefer_direct_screen_blit =
         plan->screen_blit.execution == VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
     plan->use_surface_dma_readback = true;
@@ -1937,9 +2032,11 @@ bool vmsvga3d_d3d9_present_plan(
                                  &plan->dma)) {
         return false;
     }
+ 
     plan->execution = plan->prefer_direct_screen_blit
                           ? VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED
                           : plan->dma.execution;
+ 
     return true;
 }
 
@@ -1949,7 +2046,9 @@ bool vmsvga3d_d3d9_present_dma_box(const SVGA3dCopyRect *rect,
     if (rect == NULL || box == NULL) {
         return false;
     }
+ 
     memset(box, 0, sizeof(*box));
+ 
     /* SurfaceDMA names its copy-box source after the guest image even for a
      * READ_HOST_VRAM transfer.  PRESENT therefore places the host source in
      * x/y and the screen destination in srcx/srcy, exactly as VBox does. */
@@ -1962,6 +2061,7 @@ bool vmsvga3d_d3d9_present_dma_box(const SVGA3dCopyRect *rect,
     box->srcx = rect->x;
     box->srcy = rect->y;
     box->srcz = 0;
+ 
     return true;
 }
 
@@ -1973,6 +2073,7 @@ bool vmsvga3d_d3d9_present_readback_plan(
     }
 
     memset(plan, 0, sizeof(*plan));
+ 
     plan->execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
     plan->cpu_fallback_allowed = true;
     plan->destination_screen = 0;
@@ -1982,6 +2083,7 @@ bool vmsvga3d_d3d9_present_readback_plan(
     plan->update_screen = false;
     plan->cpu_fallback_is_noop = true;
     plan->unavailable_requires_cpu_coherent = true;
+ 
     return true;
 }
 
@@ -1991,12 +2093,14 @@ bool vmsvga3d_d3d9_query_plan(SVGA3dQueryType type,
     if (plan == NULL || type != SVGA3D_QUERYTYPE_OCCLUSION) {
         return false;
     }
+ 
     plan->query_type = 9;    /* D3DQUERYTYPE_OCCLUSION */
     plan->issue_begin = 2;   /* D3DISSUE_BEGIN */
     plan->issue_end = 1;     /* D3DISSUE_END */
     plan->getdata_flags = 1; /* D3DGETDATA_FLUSH */
     plan->result_size = sizeof(uint32_t);
     plan->wait_until_ready = true; /* Loop while GetData returns S_FALSE. */
+ 
     return true;
 }
 
@@ -2007,6 +2111,7 @@ bool vmsvga3d_d3d9_primitive_type(SVGA3dPrimitiveType type,
     if (d3d_primitive == NULL) {
         return false;
     }
+ 
     switch (type) {
     case SVGA3D_PRIMITIVE_TRIANGLELIST:
         *d3d_primitive = D3D9_PT_TRIANGLELIST;
@@ -2029,11 +2134,13 @@ bool vmsvga3d_d3d9_primitive_type(SVGA3dPrimitiveType type,
     default:
         return false;
     }
+ 
     if (primitive_count == 1 &&
         (*d3d_primitive == D3D9_PT_TRIANGLESTRIP ||
          *d3d_primitive == D3D9_PT_TRIANGLEFAN)) {
         *d3d_primitive = D3D9_PT_TRIANGLELIST;
     }
+ 
     return true;
 }
 
@@ -2065,6 +2172,7 @@ vmsvga3d_d3d9_shader_const_target(SVGA3dShaderType type,
             return VMSVGA3D_D3D9_CONST_TARGET_INVALID;
         }
     }
+ 
     if (type == SVGA3D_SHADERTYPE_PS) {
         switch (ctype) {
         case SVGA3D_CONST_TYPE_FLOAT:
@@ -2077,6 +2185,7 @@ vmsvga3d_d3d9_shader_const_target(SVGA3dShaderType type,
             return VMSVGA3D_D3D9_CONST_TARGET_INVALID;
         }
     }
+ 
     return VMSVGA3D_D3D9_CONST_TARGET_INVALID;
 }
 
@@ -2098,6 +2207,7 @@ bool vmsvga3d_d3d9_runtime_surface_info(
     if (surface == NULL || info == NULL) {
         return false;
     }
+ 
     desc = svga3dsurface_get_desc(surface->format);
     if (desc->format != surface->format || desc->bytes_per_block == 0 ||
         desc->block_size.width == 0 || desc->block_size.height == 0 ||
@@ -2109,11 +2219,13 @@ bool vmsvga3d_d3d9_runtime_surface_info(
     info->surface_flags =
         vmsvga3d_d3d9_normalize_surface_flags(surface->surface_flags,
                                                surface->format);
+ 
     info->block_width = desc->block_size.width;
     info->block_height = desc->block_size.height;
     info->block_depth = desc->block_size.depth;
     info->bytes_per_block = desc->bytes_per_block;
     (void)s;
+ 
     return vmsvga3d_dxvk_surface_info(surface->dxvk_surface, info);
 }
 
@@ -2147,10 +2259,12 @@ static bool vmsvga3d_dxvk_resource_plan(
     info.multisample_count = surface->multisample_count;
     info.autogen_filter = surface->autogen_filter;
     info.surface_bytes = (uint32_t)surface->storage_bytes;
+ 
     if (!vmsvga3d_d3d9_resource_plan(&info, use, &caps, plan) ||
         plan->needs_format_conversion || plan->has_emulated) {
         return false;
     }
+ 
     return true;
 }
 
@@ -2166,7 +2280,9 @@ static bool vmsvga3d_dxvk_upload_image(VMSVGA3DDxvk *dxvk,
         image->plane_size % image->pitch != 0) {
         return false;
     }
+ 
     rows = image->plane_size / image->pitch;
+ 
     return vmsvga3d_dxvk_surface_upload_level(
         dxvk, dxvk_surface, level, image->data, image->pitch, rows);
 }
@@ -2182,7 +2298,9 @@ static bool vmsvga3d_dxvk_readback_image(
         image->plane_size % image->pitch != 0) {
         return false;
     }
+ 
     rows = image->plane_size / image->pitch;
+ 
     return vmsvga3d_dxvk_surface_readback_level(
         dxvk, dxvk_surface, level, image->data, image->pitch, rows);
 }
@@ -2199,6 +2317,7 @@ static void vmsvga3d_dxvk_sync_surface_from_cpu(struct vmsvga_state_s *s,
         !info.resident) {
         return;
     }
+ 
     if (info.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE) {
         for (level = 0; level < surface->mip_count; level++) {
             if (!vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, level,
@@ -2209,12 +2328,14 @@ static void vmsvga3d_dxvk_sync_surface_from_cpu(struct vmsvga_state_s *s,
         }
         return;
     }
+ 
     if (info.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&
         surface->mip_count == 1 &&
         vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, 0,
                                    &surface->mips[0])) {
         return;
     }
+ 
     vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
 }
 
@@ -2227,6 +2348,7 @@ static void vmsvga3d_dxvk_sync_clear_targets_from_cpu(
     if (context == NULL || s->svga3d == NULL) {
         return;
     }
+ 
     if (clear_flags & SVGA3D_CLEAR_COLOR) {
         for (type = SVGA3D_RT_COLOR0; type <= SVGA3D_RT_COLOR7; type++) {
             uint32_t sid = context->render_targets[type].sid;
@@ -2236,6 +2358,7 @@ static void vmsvga3d_dxvk_sync_clear_targets_from_cpu(
             }
         }
     }
+ 
     if (clear_flags & SVGA3D_CLEAR_DEPTH) {
         uint32_t sid = context->render_targets[SVGA3D_RT_DEPTH].sid;
 
@@ -2243,6 +2366,7 @@ static void vmsvga3d_dxvk_sync_clear_targets_from_cpu(
             vmsvga3d_dxvk_sync_surface_from_cpu(s, s->svga3d->surfaces[sid]);
         }
     }
+ 
     if (clear_flags & SVGA3D_CLEAR_STENCIL) {
         uint32_t sid = context->render_targets[SVGA3D_RT_STENCIL].sid;
 
@@ -2268,6 +2392,7 @@ static bool vmsvga3d_dxvk_materialize_surface(
         !vmsvga3d_dxvk_resource_plan(surface, use, &plan)) {
         return false;
     }
+ 
     switch (use) {
     case VMSVGA3D_D3D9_RESOURCE_USE_TEXTURE:
         compatible =
@@ -2288,12 +2413,14 @@ static bool vmsvga3d_dxvk_materialize_surface(
     default:
         break;
     }
+ 
     if (!vmsvga3d_dxvk_surface_materialize(s->dxvk, surface->dxvk_surface,
                                            &plan) ||
         !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
         !info.resident) {
         return false;
     }
+ 
     if (upload_cpu && (!before.resident || !compatible)) {
         vmsvga3d_dxvk_sync_surface_from_cpu(s, surface);
         if (!vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
@@ -2301,6 +2428,7 @@ static bool vmsvga3d_dxvk_materialize_surface(
             return false;
         }
     }
+ 
     return true;
 }
 
@@ -2337,6 +2465,7 @@ static bool vmsvga3d_dxvk_materialize_buffer(
     info.autogen_filter = surface->autogen_filter;
     info.surface_bytes = (uint32_t)surface->storage_bytes;
     info.index_width = index_width;
+ 
     if (!vmsvga3d_d3d9_resource_plan(&info, use, &caps, &plan) ||
         !vmsvga3d_dxvk_surface_materialize(s->dxvk, surface->dxvk_surface,
                                            &plan) ||
@@ -2345,6 +2474,7 @@ static bool vmsvga3d_dxvk_materialize_buffer(
             (uint32_t)surface->storage_bytes)) {
         return false;
     }
+ 
     return true;
 }
 
@@ -2357,7 +2487,9 @@ static bool vmsvga3d_dxvk_surface_level_index(
         *image < surface->mips || *image >= surface->mips + surface->mip_count) {
         return false;
     }
+ 
     *level = (uint32_t)(*image - surface->mips);
+ 
     return true;
 }
 
@@ -2372,10 +2504,12 @@ static bool vmsvga3d_dxvk_box_rect(uint32_t x, uint32_t y, uint32_t width,
         right > INT32_MAX || bottom > INT32_MAX) {
         return false;
     }
+ 
     rect->left = (int32_t)x;
     rect->top = (int32_t)y;
     rect->right = (int32_t)right;
     rect->bottom = (int32_t)bottom;
+ 
     return true;
 }
 
@@ -2391,6 +2525,7 @@ static bool vmsvga3d_dxvk_bind_context_target(
     if (s == NULL || target == NULL || s->svga3d == NULL) {
         return false;
     }
+ 
     if (target->sid == SVGA3D_INVALID_ID) {
         if (!allow_unbind) {
             return false;
@@ -2400,14 +2535,17 @@ static bool vmsvga3d_dxvk_bind_context_target(
                    : vmsvga3d_dxvk_set_render_target(s->dxvk, color_index, NULL,
                                                       0);
     }
+ 
     if (target->sid >= SVGA3D_MAX_SURFACE_IDS) {
         return false;
     }
+ 
     surface = s->svga3d->surfaces[target->sid];
     if (!vmsvga3d_dxvk_surface_level_index(surface, target, &image, &level) ||
         !vmsvga3d_dxvk_materialize_surface(s, surface, use, true)) {
         return false;
     }
+ 
     return depth_stencil
                ? vmsvga3d_dxvk_set_depth_stencil(s->dxvk,
                                                   surface->dxvk_surface, level)
@@ -2425,6 +2563,7 @@ static bool vmsvga3d_dxvk_apply_context_targets(
     if (s == NULL || context == NULL) {
         return false;
     }
+ 
     for (type = SVGA3D_RT_COLOR0; type <= SVGA3D_RT_COLOR7; type++) {
         if (!vmsvga3d_dxvk_bind_context_target(
                 s, &context->render_targets[type],
@@ -2445,12 +2584,14 @@ static bool vmsvga3d_dxvk_apply_context_targets(
             s, depth, VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET, 0, true, true)) {
         return false;
     }
+ 
     if (stencil->sid != SVGA3D_INVALID_ID &&
         !vmsvga3d_dxvk_bind_context_target(
             s, stencil, VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET, 0, true,
             false)) {
         return false;
     }
+ 
     return true;
 }
 
@@ -2479,9 +2620,11 @@ static bool vmsvga3d_dxvk_apply_context_viewport(
     } else {
         return true;
     }
+ 
     if (context->z_range_valid) {
         vmsvga3d_d3d9_apply_z_range(&viewport, &context->z_range);
     }
+ 
     return viewport.width != 0 && viewport.height != 0 &&
            vmsvga3d_dxvk_set_viewport(s->dxvk, &viewport);
 }
@@ -2494,6 +2637,7 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
     if (!vmsvga3d_dxvk_apply_context_viewport(s, context)) {
         return false;
     }
+ 
     if (context->scissor_valid) {
         VMSVGA3DD3D9Rect rect;
 
@@ -2509,6 +2653,7 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
         if (!context->transform[i].valid) {
             continue;
         }
+     
         if (!vmsvga3d_d3d9_transform_type((SVGA3dTransformType)i,
                                           &d3d_transform) ||
             !vmsvga3d_dxvk_set_transform(s->dxvk, d3d_transform,
@@ -2526,15 +2671,19 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
         if (!context->render_state[i].valid) {
             continue;
         }
+     
         state.state = i;
         state.uintValue = context->render_state[i].value;
         translated = vmsvga3d_d3d9_render_state(&state, &plan);
+     
         if (translated == VMSVGA3D_D3D9_TRANSLATE_INVALID) {
             return false;
         }
+     
         if (translated == VMSVGA3D_D3D9_TRANSLATE_IGNORE) {
             continue;
         }
+     
         for (op = 0; op < plan.count; op++) {
             if (!vmsvga3d_dxvk_set_render_state(s->dxvk, plan.ops[op].state,
                                                 plan.ops[op].value)) {
@@ -2569,12 +2718,14 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
                 return false;
             }
         }
+     
         if (context->light[i].enabled_valid &&
             !vmsvga3d_dxvk_light_enable(s->dxvk, i,
                                         context->light[i].enabled != 0)) {
             return false;
         }
     }
+ 
     for (i = 0; i < VMSVGA3D_MAX_CLIP_PLANES; i++) {
         if (context->clip_plane[i].valid &&
             !vmsvga3d_dxvk_set_clip_plane(s->dxvk, i,
@@ -2582,6 +2733,7 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
             return false;
         }
     }
+ 
     return true;
 }
 
@@ -2600,16 +2752,21 @@ static bool vmsvga3d_dxvk_apply_context_textures(
             if (!context->texture_state[stage][name].valid) {
                 continue;
             }
+         
             state.stage = stage;
             state.name = name;
             state.value = context->texture_state[stage][name].value;
+         
             translated = vmsvga3d_d3d9_texture_state(&state, &plan);
+         
             if (translated == VMSVGA3D_D3D9_TRANSLATE_INVALID) {
                 return false;
             }
+         
             if (translated == VMSVGA3D_D3D9_TRANSLATE_IGNORE) {
                 continue;
             }
+         
             switch (plan.action) {
             case VMSVGA3D_D3D9_TEXTURE_ACTION_BIND:
                 if (plan.value == SVGA3D_INVALID_ID) {
@@ -2645,6 +2802,7 @@ static bool vmsvga3d_dxvk_apply_context_textures(
             }
         }
     }
+ 
     return true;
 }
 
@@ -2665,7 +2823,9 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
         if (stage == VMSVGA3D_D3D9_SHADER_STAGE_INVALID) {
             return false;
         }
+          
         bound_shaders[type_index] = NULL;
+          
         if (shid != SVGA3D_INVALID_ID) {
             VMSVGA3DShader *shader;
 
@@ -2674,12 +2834,15 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
                 shader->bytecode == NULL || shader->bytecode_size == 0) {
                 return false;
             }
+         
             bound_shaders[type_index] =
                 vmsvga3d_dxvk_shader_create(s->dxvk, stage, shader->bytecode);
+         
             if (bound_shaders[type_index] == NULL) {
                 return false;
             }
         }
+          
         if (!vmsvga3d_dxvk_shader_bind(s->dxvk, stage,
                                         bound_shaders[type_index])) {
             return false;
@@ -2701,6 +2864,7 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
                 target == VMSVGA3D_D3D9_CONST_TARGET_INVALID) {
                 return false;
             }
+              
             for (reg = 0; reg < limit; reg++) {
                 if (constants[reg].valid &&
                     !vmsvga3d_dxvk_shader_constant(
@@ -2710,6 +2874,7 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
             }
         }
     }
+ 
     return true;
 }
 
@@ -2738,6 +2903,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         (context = vmsvga3d_context(s, cid)) == NULL) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (!vmsvga3d_d3d9_vertex_layout(
             vertex_decls, vertex_decl_count, divisors, divisor_count, elements,
             G_N_ELEMENTS(elements), streams, G_N_ELEMENTS(streams),
@@ -2757,6 +2923,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         !vmsvga3d_dxvk_vertex_declaration_bind(s->dxvk, declaration)) {
         goto out;
     }
+ 
     for (i = 0; i < stream_count; i++) {
         VMSVGA3DSurface *surface;
 
@@ -2780,6 +2947,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
             UINT32_MAX) {
         goto out;
     }
+ 
     vertex_buffer_bytes = (uint32_t)s->svga3d
                               ->surfaces[vertex_decls[0].array.surfaceId]
                               ->storage_bytes;
@@ -2795,6 +2963,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                                             vertex_buffer_bytes, &plan)) {
             goto out;
         }
+     
         if (plan.action == VMSVGA3D_D3D9_DRAW_ACTION_NONINDEXED) {
             if ((plan.unbind_indices &&
                  !vmsvga3d_dxvk_set_indices(s->dxvk, NULL)) ||
@@ -2830,23 +2999,28 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         }
         scene_started = false;
     }
+ 
     success = true;
 
 out:
     if (scene_started) {
         (void)vmsvga3d_dxvk_end_scene(s->dxvk);
     }
+ 
     if (!vmsvga3d_dxvk_reset_state(s->dxvk)) {
         success = false;
     }
+ 
     if (declaration != NULL) {
         vmsvga3d_dxvk_vertex_declaration_destroy(declaration);
     }
+ 
     for (i = 0; i < G_N_ELEMENTS(shaders); i++) {
         if (shaders[i] != NULL) {
             vmsvga3d_dxvk_shader_destroy(shaders[i]);
         }
     }
+ 
     return success ? VMSVGA3D_D3D9_ACCEL_COMPLETE
                    : VMSVGA3D_D3D9_ACCEL_FAILED;
 }
@@ -2874,13 +3048,16 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
         !vmsvga3d_dxvk_ready(s->dxvk)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     state = s->svga3d;
     if (state == NULL || command->src.sid >= SVGA3D_MAX_SURFACE_IDS ||
         command->dest.sid >= SVGA3D_MAX_SURFACE_IDS) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     source = state->surfaces[command->src.sid];
     destination = state->surfaces[command->dest.sid];
+ 
     if (!vmsvga3d_dxvk_surface_level_index(source, &command->src,
                                            &source_image, &source_level) ||
         !vmsvga3d_dxvk_surface_level_index(destination, &command->dest,
@@ -2891,13 +3068,16 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
                                              &destination_info)) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     if (source == destination) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (plan->create_destination_texture && !destination_info.resident &&
         !vmsvga3d_dxvk_materialize_texture(s, destination)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (!vmsvga3d_d3d9_transfer_surface_info(s, source, &source_info) ||
         !vmsvga3d_d3d9_transfer_surface_info(s, destination,
                                              &destination_info) ||
@@ -2915,6 +3095,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
     }
+ 
     for (i = 0; i < box_count; i++) {
         SVGA3dCopyBox clipped;
         VMSVGA3DD3D9Rect source_rect;
@@ -2925,16 +3106,19 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
         if (clipped.w == 0 || clipped.h == 0 || clipped.d == 0) {
             continue;
         }
+     
         if (clipped.srcz != 0 || clipped.z != 0 || clipped.d != 1 ||
             source_image->size.depth != 1 || destination_image->size.depth != 1) {
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
+     
         if (!vmsvga3d_dxvk_box_rect(clipped.srcx, clipped.srcy, clipped.w,
                                      clipped.h, &source_rect) ||
             !vmsvga3d_dxvk_box_rect(clipped.x, clipped.y, clipped.w, clipped.h,
                                      &destination_rect)) {
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
+     
         if (!vmsvga3d_dxvk_surface_stretch_rect(
                 s->dxvk, source->dxvk_surface, source_level, &source_rect,
                 destination->dxvk_surface, destination_level, &destination_rect,
@@ -2955,6 +3139,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
             break;
         }
     }
+ 
     return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }
 
@@ -2983,11 +3168,13 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
         !vmsvga3d_dxvk_ready(s->dxvk)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     state = s->svga3d;
     if (state == NULL || command->src.sid >= SVGA3D_MAX_SURFACE_IDS ||
         command->dest.sid >= SVGA3D_MAX_SURFACE_IDS) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     if (plan->require_existing_context) {
         for (cid = 0; cid < SVGA3D_MAX_CONTEXT_IDS; cid++) {
             if (state->contexts[cid] != NULL) {
@@ -3002,6 +3189,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
 
     source = state->surfaces[command->src.sid];
     destination = state->surfaces[command->dest.sid];
+ 
     if (!vmsvga3d_dxvk_surface_level_index(source, &command->src,
                                            &source_image, &source_level) ||
         !vmsvga3d_dxvk_surface_level_index(destination, &command->dest,
@@ -3012,14 +3200,17 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
                                              &destination_info)) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     if (plan->create_source_texture && !source_info.resident &&
         !vmsvga3d_dxvk_materialize_texture(s, source)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (plan->create_destination_texture && !destination_info.resident &&
         !vmsvga3d_dxvk_materialize_texture(s, destination)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (!vmsvga3d_d3d9_transfer_surface_info(s, source, &source_info) ||
         !vmsvga3d_d3d9_transfer_surface_info(s, destination,
                                              &destination_info) ||
@@ -3031,16 +3222,19 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
                               &source_box);
     vmsvga3d_clip_surface_box(&command->boxDest, &destination_image->size,
                               &destination_box);
+ 
     if (source_box.w == 0 || source_box.h == 0 || source_box.d == 0 ||
         destination_box.w == 0 || destination_box.h == 0 ||
         destination_box.d == 0) {
         return VMSVGA3D_D3D9_ACCEL_COMPLETE;
     }
+ 
     if (source_box.z != 0 || destination_box.z != 0 || source_box.d != 1 ||
         destination_box.d != 1 || source_image->size.depth != 1 ||
         destination_image->size.depth != 1) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (source == destination && source_level == destination_level &&
         source_box.x == destination_box.x && source_box.y == destination_box.y &&
         source_box.w == destination_box.w && source_box.h == destination_box.h) {
@@ -3054,16 +3248,19 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
                                  &destination_rect)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (!vmsvga3d_dxvk_surface_stretch_rect(
             s->dxvk, source->dxvk_surface, source_level, &source_rect,
             destination->dxvk_surface, destination_level, &destination_rect,
             plan->filter)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (!vmsvga3d_dxvk_readback_image(s->dxvk, destination->dxvk_surface,
                                        destination_level, destination_image)) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }
 
@@ -3076,12 +3273,15 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_generate_mipmaps(
         !vmsvga3d_dxvk_ready(s->dxvk)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (!vmsvga3d_dxvk_materialize_texture(s, surface)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     return vmsvga3d_dxvk_surface_generate_mipmaps(
                s->dxvk, surface->dxvk_surface, (uint32_t)filter)
                ? VMSVGA3D_D3D9_ACCEL_COMPLETE
@@ -3119,8 +3319,10 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
         !vmsvga3d_dxvk_ready(s->dxvk)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     state = s->svga3d;
     context = vmsvga3d_context(s, command->cid);
+ 
     if (state == NULL || context == NULL) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
@@ -3133,23 +3335,30 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
         if (target->sid == SVGA3D_INVALID_ID) {
             continue;
         }
+     
         if (target->sid >= SVGA3D_MAX_SURFACE_IDS) {
             return VMSVGA3D_D3D9_ACCEL_FAILED;
         }
+     
         surface = state->surfaces[target->sid];
+     
         if (!vmsvga3d_dxvk_surface_level_index(surface, target, &image,
                                                &color_levels[i])) {
             return VMSVGA3D_D3D9_ACCEL_FAILED;
         }
+     
         upload_cpu = (command->clearFlag & SVGA3D_CLEAR_COLOR) == 0 ||
                      rect_count != 0;
+     
         if (!vmsvga3d_dxvk_materialize_surface(
                 s, surface, VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET,
                 upload_cpu)) {
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
+     
         color_targets[i] = surface->dxvk_surface;
     }
+ 
     if (color_targets[0] == NULL) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
@@ -3157,9 +3366,11 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     if (command->clearFlag & SVGA3D_CLEAR_DEPTH) {
         depth_id = &context->render_targets[SVGA3D_RT_DEPTH];
     }
+ 
     if (command->clearFlag & SVGA3D_CLEAR_STENCIL) {
         stencil_id = &context->render_targets[SVGA3D_RT_STENCIL];
     }
+ 
     if (depth_id != NULL && stencil_id != NULL &&
         depth_id->sid != SVGA3D_INVALID_ID &&
         stencil_id->sid != SVGA3D_INVALID_ID &&
@@ -3167,14 +3378,17 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
          depth_id->mipmap != stencil_id->mipmap)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (depth_id != NULL && depth_id->sid == SVGA3D_INVALID_ID) {
         effective_clear_flags &= ~SVGA3D_CLEAR_DEPTH;
         depth_id = NULL;
     }
+ 
     if (stencil_id != NULL && stencil_id->sid == SVGA3D_INVALID_ID) {
         effective_clear_flags &= ~SVGA3D_CLEAR_STENCIL;
         stencil_id = NULL;
     }
+ 
     if (depth_id != NULL || stencil_id != NULL) {
         SVGA3dSurfaceImageId *target = depth_id != NULL ? depth_id : stencil_id;
         bool clear_depth = depth_id != NULL;
@@ -3183,30 +3397,38 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
         if (target->sid >= SVGA3D_MAX_SURFACE_IDS) {
             return VMSVGA3D_D3D9_ACCEL_FAILED;
         }
+     
         surface = state->surfaces[target->sid];
+     
         if (!vmsvga3d_dxvk_surface_level_index(surface, target, &image,
                                                &depth_stencil_level) ||
             !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info)) {
             return VMSVGA3D_D3D9_ACCEL_FAILED;
         }
+     
         desc = svga3dsurface_get_desc(surface->format);
+     
         if (desc->format != surface->format) {
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
+     
         full_replace = rect_count == 0 &&
                        (!(desc->block_desc & SVGA3DBLOCKDESC_DEPTH) ||
                         clear_depth) &&
                        (!(desc->block_desc & SVGA3DBLOCKDESC_STENCIL) ||
                         clear_stencil);
+     
         if ((!info.resident ||
              (info.usage & D3D9_USAGE_DEPTHSTENCIL) == 0) &&
             !full_replace) {
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
+     
         if (!vmsvga3d_dxvk_materialize_surface(
                 s, surface, VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET, false)) {
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
+     
         depth_stencil = surface->dxvk_surface;
     }
 
@@ -3215,6 +3437,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
         if (d3d_rects == NULL) {
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
+     
         for (i = 0; i < rect_count; i++) {
             uint64_t right = (uint64_t)rects[i].x + rects[i].w;
             uint64_t bottom = (uint64_t)rects[i].y + rects[i].h;
@@ -3234,6 +3457,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
         g_free(d3d_rects);
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     d3d_flags = vmsvga3d_d3d9_clear_flags(effective_clear_flags);
     if (d3d_flags == 0 ||
         !vmsvga3d_dxvk_clear(
@@ -3245,6 +3469,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
         g_free(d3d_rects);
         return VMSVGA3D_D3D9_ACCEL_COMPLETE;
     }
+ 
     g_free(d3d_rects);
     return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }
@@ -3268,20 +3493,24 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
         !vmsvga3d_dxvk_ready(s->dxvk) || !s->active_valid) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     state = s->svga3d;
     if (state == NULL || command->sid >= SVGA3D_MAX_SURFACE_IDS) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     surface = state->surfaces[command->sid];
     image = surface != NULL && surface->mip_count != 0 ? &surface->mips[0] : NULL;
     if (surface == NULL || image == NULL ||
         !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (!vmsvga3d_present_format(surface, &desc)) {
         return info.resident ? VMSVGA3D_D3D9_ACCEL_FAILED
                              : VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (plan->destination_screen != 0 || plan->source_face != 0 ||
         plan->source_mipmap != 0 || !plan->use_surface_dma_readback ||
         !plan->update_screen_after_each_rect) {
@@ -3305,6 +3534,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
          * cheaper than manufacturing a GPU resource solely to read it back. */
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     if (!vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, 0, image)) {
         /* Once a surface is GPU-resident its CPU shadow may be stale.  Never fall
          * through and display stale pixels after a failed GPU synchronization. */
@@ -3319,6 +3549,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
             return VMSVGA3D_D3D9_ACCEL_FAILED;
         }
     }
+ 
     return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }
 
@@ -3356,16 +3587,19 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_dma(
         !vmsvga3d_dxvk_ready(s->dxvk)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
+ 
     state = s->svga3d;
     if (state == NULL || command->host.sid >= SVGA3D_MAX_SURFACE_IDS) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     surface = state->surfaces[command->host.sid];
     if (!vmsvga3d_surface_image(surface, &command->host, &image) ||
         !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
         image < surface->mips || image >= surface->mips + surface->mip_count) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
+ 
     level = (uint32_t)(image - surface->mips);
 
     if (command->transfer == SVGA3D_WRITE_HOST_VRAM) {

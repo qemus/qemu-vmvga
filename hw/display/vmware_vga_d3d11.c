@@ -62,9 +62,11 @@ static VMSVGA3DD3D11Level d3d11_level(VMSVGA3DD3D10Level level)
     if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     if (level == VMSVGA3D_D3D10_LEVEL_11_1) {
         return VMSVGA3D_D3D11_LEVEL_11_1;
     }
+ 
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
@@ -80,6 +82,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_shader_define_entry(
     dst->sizeInBytes = src->sizeInBytes;
     dst->offsetInBytes = 0;
     dst->mobid = SVGA3D_INVALID_ID;
+ 
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
@@ -99,10 +102,12 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_stream_output_mob_entry(
     dst->numOutputStreamEntries = src->numOutputStreamEntries;
     memcpy(dst->streamOutputStrideInBytes, src->streamOutputStrideInBytes,
            sizeof(dst->streamOutputStrideInBytes));
+ 
     dst->rasterizedStream = src->rasterizedStream;
     dst->numOutputStreamStrides = src->numOutputStreamStrides;
     dst->mobid = SVGA3D_INVALID_ID;
     dst->usesMob = 1;
+ 
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
@@ -125,6 +130,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_stream_output_bind(
     entry->mobid = mobid;
     entry->offsetInBytes = offset_in_bytes;
     entry->usesMob = 1;
+ 
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
@@ -135,6 +141,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_rasterizer_define_entry(
     if (!src || !entry) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     entry->fillMode = src->fillMode;
     entry->cullMode = src->cullMode;
     entry->frontCounterClockwise = src->frontCounterClockwise;
@@ -151,7 +158,9 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_rasterizer_define_entry(
     entry->lineStippleFactor = src->lineStippleFactor;
     entry->lineStipplePattern = src->lineStipplePattern;
     entry->forcedSampleCount = (uint8_t)src->forcedSampleCount;
+ 
     memset(entry->mustBeZero, 0, sizeof(entry->mustBeZero));
+ 
     return VMSVGA3D_D3D11_LEVEL_11_1;
 }
 
@@ -172,6 +181,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_query_define_entry(
     dst->flags = src->flags;
     dst->mobid = SVGA3D_INVALID_ID;
     dst->offset = 0;
+ 
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
@@ -179,6 +189,7 @@ VMSVGA3DD3D11Format vmsvga3d_d3d11_surface_format(SVGA3dSurfaceFormat format)
 {
     VMSVGA3DD3D10Format base = vmsvga3d_d3d10_surface_format(format);
     VMSVGA3DD3D11Format result = { base.dxgi_format, d3d11_level(base.min_level) };
+ 
     return result;
 }
 
@@ -194,6 +205,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(
     if (!policy) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     base_level = vmsvga3d_d3d10_resource_policy(flags, texture_resource, &base);
     if (base_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
@@ -203,30 +215,39 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(
     if (flags & (SVGA3D_SURFACE_BIND_VERTEX_BUFFER | SVGA3D_SURFACE_HINT_VERTEXBUFFER)) {
         bind |= D3D11_BIND_VERTEX_BUFFER;
     }
+ 
     if (flags & (SVGA3D_SURFACE_BIND_INDEX_BUFFER | SVGA3D_SURFACE_HINT_INDEXBUFFER)) {
         bind |= D3D11_BIND_INDEX_BUFFER;
     }
+ 
     if (flags & SVGA3D_SURFACE_BIND_CONSTANT_BUFFER) {
         bind |= D3D11_BIND_CONSTANT_BUFFER;
     }
+ 
     if (flags & SVGA3D_SURFACE_BIND_SHADER_RESOURCE) {
         bind |= D3D11_BIND_SHADER_RESOURCE;
     }
+ 
     if (flags & SVGA3D_SURFACE_BIND_RENDER_TARGET) {
         bind |= D3D11_BIND_RENDER_TARGET;
     }
+ 
     if (flags & SVGA3D_SURFACE_BIND_DEPTH_STENCIL) {
         bind |= D3D11_BIND_DEPTH_STENCIL;
     }
+ 
     if (flags & SVGA3D_SURFACE_BIND_STREAM_OUTPUT) {
         bind |= D3D11_BIND_STREAM_OUTPUT;
     }
+ 
     if (flags & SVGA3D_SURFACE_BIND_UAVIEW) {
         bind |= D3D11_BIND_UNORDERED_ACCESS;
     }
+ 
     if (flags & SVGA3D_SURFACE_RESERVED1) {
         bind |= D3D11_BIND_DECODER;
     }
+ 
     if (flags & SVGA3D_SURFACE_SCREENTARGET) {
         bind |= D3D11_BIND_SHADER_RESOURCE;
     }
@@ -235,18 +256,23 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(
     if (flags & SVGA3D_SURFACE_CUBEMAP) {
         misc |= D3D11_RESOURCE_MISC_TEXTURECUBE;
     }
+ 
     if (flags & SVGA3D_SURFACE_DRAWINDIRECT_ARGS) {
         misc |= D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
     }
+ 
     if (flags & SVGA3D_SURFACE_BIND_RAW_VIEWS) {
         misc |= D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
     }
+ 
     if (flags & SVGA3D_SURFACE_BUFFER_STRUCTURED) {
         misc |= D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     }
+ 
     if (flags & SVGA3D_SURFACE_RESOURCE_CLAMP) {
         misc |= D3D11_RESOURCE_MISC_RESOURCE_CLAMP;
     }
+ 
     if (texture_resource && (flags & SVGA3D_SURFACE_AUTOGENMIPMAPS) &&
         (bind & (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)) ==
             (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)) {
@@ -260,6 +286,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(
     policy->structure_byte_stride =
         !texture_resource && (misc & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)
         ? buffer_byte_stride : 0;
+ 
     return flags & (SVGA3D_SURFACE_BIND_LOGICOPS | SVGA3D_SURFACE_RESERVED1)
          ? VMSVGA3D_D3D11_LEVEL_11_1
          : VMSVGA3D_D3D11_LEVEL_11_0;
@@ -281,14 +308,17 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_blend_state(
     if (!src || !dst) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     level = vmsvga3d_d3d10_blend_state(src, &base);
     if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
 
     memset(dst, 0, sizeof(*dst));
+ 
     dst->alpha_to_coverage_enable = base.alpha_to_coverage_enable;
     dst->independent_blend_enable = base.independent_blend_enable;
+ 
     for (i = 0; i < SVGA3D_DX_MAX_RENDER_TARGETS; i++) {
         dst->render_target[i].blend_enable = base.render_target[i].blend_enable;
         dst->render_target[i].logic_op_enable = !!src->perRT[i].logicOpEnable;
@@ -301,6 +331,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_blend_state(
         dst->render_target[i].logic_op = src->perRT[i].logicOp;
         dst->render_target[i].write_mask = base.render_target[i].write_mask;
     }
+ 
     return VMSVGA3D_D3D11_LEVEL_11_1;
 }
 
@@ -321,10 +352,12 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_rasterizer_state(
     if (!src || !dst) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     level = vmsvga3d_d3d10_rasterizer_state(src, &base);
     if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     dst->fill_mode = base.fill_mode;
     dst->cull_mode = base.cull_mode;
     dst->front_counter_clockwise = base.front_counter_clockwise;
@@ -336,6 +369,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_rasterizer_state(
     dst->multisample_enable = base.multisample_enable;
     dst->antialiased_line_enable = base.antialiased_line_enable;
     dst->forced_sample_count = src->forcedSampleCount;
+ 
     return VMSVGA3D_D3D11_LEVEL_11_1;
 }
 
@@ -373,7 +407,9 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_srv_desc(
     if (!src || !dst) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     memset(dst, 0, sizeof(*dst));
+ 
     if (src->resourceDimension == SVGA3D_RESOURCE_BUFFEREX) {
         VMSVGA3DD3D11Format format = vmsvga3d_d3d11_surface_format(src->format);
         if (format.min_level == VMSVGA3D_D3D11_LEVEL_INVALID &&
@@ -393,6 +429,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_srv_desc(
     if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     dst->format = base.format;
     dst->view_dimension = base.view_dimension;
     dst->most_detailed_mip = base.most_detailed_mip;
@@ -401,6 +438,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_srv_desc(
     dst->array_size = base.array_size;
     dst->first_element = base.first_element;
     dst->num_elements = base.num_elements;
+ 
     return d3d11_level(level);
 }
 
@@ -413,8 +451,10 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_rtv_desc(
     if (!src || !dst || src->resourceDimension == SVGA3D_RESOURCE_BUFFEREX) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     level = vmsvga3d_d3d10_rtv_desc(src, array_elements,
                                     multisample_count, dst);
+ 
     return d3d11_level(level);
 }
 
@@ -428,17 +468,20 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_dsv_desc(
     if (!src || !dst) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     level = vmsvga3d_d3d10_dsv_desc(src, array_elements,
                                     multisample_count, &base);
     if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     dst->format = base.format;
     dst->view_dimension = base.view_dimension;
     dst->flags = src->flags;
     dst->mip_slice = base.mip_slice;
     dst->first_array_slice = base.first_array_slice;
     dst->array_size = base.array_size;
+ 
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
@@ -451,12 +494,15 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_desc(
     if (!src || !dst) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     memset(dst, 0, sizeof(*dst));
+ 
     format = vmsvga3d_d3d11_surface_format(src->format);
     if (format.min_level == VMSVGA3D_D3D11_LEVEL_INVALID &&
         src->format != SVGA3D_BUFFER) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
+ 
     dst->format = format.dxgi_format;
 
     switch (src->resourceDimension) {

@@ -135,6 +135,20 @@ typedef struct vmsvga3d_d3d11_uav_desc_s {
     uint32_t flags;
 } VMSVGA3DD3D11UAVDesc;
 
+typedef struct vmsvga3d_d3d11_uav_set_plan_s {
+    uint32_t uav_splice_index;
+    uint32_t count;
+    SVGA3dUAViewId ids[SVGA3D_DX11_1_MAX_UAVIEWS];
+    bool shadow_update_atomic;
+} VMSVGA3DD3D11UAVSetPlan;
+
+typedef struct vmsvga3d_d3d11_cs_uav_set_plan_s {
+    uint32_t start_index;
+    uint32_t count;
+    SVGA3dUAViewId ids[SVGA3D_DX11_1_MAX_UAVIEWS];
+    bool shadow_update_atomic;
+} VMSVGA3DD3D11CSUAVSetPlan;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -157,6 +171,14 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_destroy_entry(
     SVGACOTableDXUAViewEntry *entry);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_structure_count(
     SVGACOTableDXUAViewEntry *entry, uint32_t structure_count);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_plan(
+    const SVGA3dCmdDXSetUAViews *src, uint32_t count,
+    const SVGA3dUAViewId *ids, uint32_t cotable_count,
+    VMSVGA3DD3D11UAVSetPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_set_plan(
+    const SVGA3dCmdDXSetCSUAViews *src, uint32_t count,
+    const SVGA3dUAViewId *ids, uint32_t cotable_count,
+    VMSVGA3DD3D11CSUAVSetPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_query_define_entry(
     const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_resource_policy(

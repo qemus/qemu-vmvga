@@ -35,6 +35,7 @@
 #include "svga3d_cmd.h"
 #include "svga3d_types.h"
 #include "vmware_vga_d3d10.h"
+#include "vmware_vga_d3d11.h"
 
 struct vmsvga_state_s;
 
@@ -96,6 +97,12 @@ static bool vmsvga3d_state_dx_apply_scissors(
 static bool vmsvga3d_state_dx_apply_render_targets(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10RenderTargetsSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_uavs(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D11UAVSetPlan *plan);
+static bool vmsvga3d_state_dx_apply_cs_uavs(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D11CSUAVSetPlan *plan);
 static bool vmsvga3d_state_dx_apply_so_targets(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10SOTargetsPlan *plan);

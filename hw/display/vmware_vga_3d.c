@@ -230,6 +230,9 @@ typedef struct vmsvga3d_dx_context_s {
     uint32_t constant_buffer_num_buffers[SVGA3D_NUM_SHADERTYPE];
     uint32_t shader_resource_max_bound[SVGA3D_NUM_SHADERTYPE];
     uint64_t shader_resource_modified[SVGA3D_NUM_SHADERTYPE][2];
+    uint32_t uav_max_bound;
+    uint32_t cs_uav_max_bound;
+    uint64_t cs_uav_modified[(SVGA3D_DX11_1_MAX_UAVIEWS + 63u) / 64u];
     SVGADXContextMobFormat shadow;
     VMSVGA3DDXCOTable cotables[SVGA_COTABLE_MAX];
 } VMSVGA3DDXContext;

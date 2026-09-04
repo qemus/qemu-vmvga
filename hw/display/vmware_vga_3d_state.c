@@ -682,6 +682,95 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_render_targets(
     return true;
 }
 
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_uavs(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D11UAVSetPlan *plan)
+{
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    int32_t last_not_null = -1;
+    bool modified = false;
+    uint32_t bound_count;
+    uint32_t i;
+
+    if (context == NULL || plan == NULL || !plan->shadow_update_atomic ||
+        plan->uav_splice_index > SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS ||
+        plan->count > SVGA3D_DX11_1_MAX_UAVIEWS) {
+        return false;
+    }
+
+    for (i = 0; i < plan->count; i++) {
+        if (context->shadow.uaViewIds[i] != plan->ids[i]) {
+            context->shadow.uaViewIds[i] = plan->ids[i];
+            modified = true;
+        }
+
+        if (plan->ids[i] != SVGA3D_INVALID_ID) {
+            last_not_null = (int32_t)i;
+        }
+    }
+
+    if (context->shadow.uavSpliceIndex != plan->uav_splice_index) {
+        context->shadow.uavSpliceIndex = plan->uav_splice_index;
+        modified = true;
+    }
+
+    bound_count = (uint32_t)last_not_null + 1u;
+
+    if (context->uav_max_bound < bound_count) {
+        context->uav_max_bound = bound_count;
+    }
+
+    if (modified) {
+        context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+    }
+
+    return true;
+}
+
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_cs_uavs(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D11CSUAVSetPlan *plan)
+{
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    int32_t last_not_null = -1;
+    bool modified = false;
+    uint32_t bound_count;
+    uint32_t i;
+
+    if (context == NULL || plan == NULL || !plan->shadow_update_atomic ||
+        plan->start_index >= SVGA3D_DX11_1_MAX_UAVIEWS ||
+        plan->count > SVGA3D_DX11_1_MAX_UAVIEWS - plan->start_index) {
+        return false;
+    }
+
+    for (i = 0; i < plan->count; i++) {
+        uint32_t slot = plan->start_index + i;
+
+        if (context->shadow.csuaViewIds[slot] != plan->ids[i]) {
+            context->shadow.csuaViewIds[slot] = plan->ids[i];
+            context->cs_uav_modified[slot / 64u] |=
+                UINT64_C(1) << (slot % 64u);
+            modified = true;
+        }
+
+        if (plan->ids[i] != SVGA3D_INVALID_ID) {
+            last_not_null = (int32_t)i;
+        }
+    }
+
+    bound_count = plan->start_index + (uint32_t)last_not_null + 1u;
+
+    if (context->cs_uav_max_bound < bound_count) {
+        context->cs_uav_max_bound = bound_count;
+    }
+
+    if (modified) {
+        context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_CSTARGET;
+    }
+
+    return true;
+}
+
 static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_so_targets(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10SOTargetsPlan *plan)

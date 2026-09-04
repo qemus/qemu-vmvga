@@ -204,6 +204,68 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_structure_count(
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
+VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_plan(
+    const SVGA3dCmdDXSetUAViews *src, uint32_t count,
+    const SVGA3dUAViewId *ids, uint32_t cotable_count,
+    VMSVGA3DD3D11UAVSetPlan *plan)
+{
+    uint32_t i;
+
+    if (!src || !plan ||
+        src->uavSpliceIndex > SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS ||
+        count > SVGA3D_DX11_1_MAX_UAVIEWS ||
+        (count != 0 && !ids)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (ids[i] >= cotable_count && ids[i] != SVGA3D_INVALID_ID) {
+            return VMSVGA3D_D3D11_LEVEL_INVALID;
+        }
+    }
+
+    memset(plan, 0, sizeof(*plan));
+    plan->uav_splice_index = src->uavSpliceIndex;
+    plan->count = count;
+    if (count != 0) {
+        memcpy(plan->ids, ids, count * sizeof(plan->ids[0]));
+    }
+    plan->shadow_update_atomic = true;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_set_plan(
+    const SVGA3dCmdDXSetCSUAViews *src, uint32_t count,
+    const SVGA3dUAViewId *ids, uint32_t cotable_count,
+    VMSVGA3DD3D11CSUAVSetPlan *plan)
+{
+    uint32_t i;
+
+    if (!src || !plan ||
+        src->startIndex >= SVGA3D_DX11_1_MAX_UAVIEWS ||
+        count > SVGA3D_DX11_1_MAX_UAVIEWS - src->startIndex ||
+        (count != 0 && !ids)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (ids[i] >= cotable_count && ids[i] != SVGA3D_INVALID_ID) {
+            return VMSVGA3D_D3D11_LEVEL_INVALID;
+        }
+    }
+
+    memset(plan, 0, sizeof(*plan));
+    plan->start_index = src->startIndex;
+    plan->count = count;
+    if (count != 0) {
+        memcpy(plan->ids, ids, count * sizeof(plan->ids[0]));
+    }
+    plan->shadow_update_atomic = true;
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
 VMSVGA3DD3D11Level vmsvga3d_d3d11_query_define_entry(
     const SVGA3dCmdDXDefineQuery *src, SVGACOTableDXQueryEntry *dst)
 {

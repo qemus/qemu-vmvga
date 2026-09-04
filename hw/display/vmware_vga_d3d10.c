@@ -9169,6 +9169,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
           if (size < sizeof(command)) {
               return false;
+          }
 
           memcpy(&command, payload, sizeof(command));
           return vmsvga3d_d3d10_pred_copy_live(s, cid, &command);

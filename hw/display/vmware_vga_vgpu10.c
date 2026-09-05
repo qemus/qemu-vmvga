@@ -24,7 +24,7 @@
 
 */
 
-#include "include/vmware_vga_d3d10.h"
+#include "include/vmware_vga_vgpu10.h"
 
 #include <stddef.h>
 #include <stdlib.h>

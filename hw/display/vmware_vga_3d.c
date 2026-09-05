@@ -34,8 +34,8 @@
 #include "include/svga3d_surfacedefs.h"
 #include "include/svga3d_types.h"
 #include "include/vmware_vga_3d_state.h"
-#include "include/vmware_vga_d3d9.h"
-#include "include/vmware_vga_d3d10.h"
+#include "include/vmware_vga_vgpu9.h"
+#include "include/vmware_vga_vgpu10.h"
 #include "include/vmware_vga_dxvk.h"
 #include "hw/pci/pci_device.h"
 #include "system/address-spaces.h"
@@ -268,7 +268,7 @@ typedef struct vmsvga3d_surface_s {
     VMSVGA3DDxvkSurface *dxvk_surface;
 } VMSVGA3DSurface;
 
-/* vmware_vga_d3d10.c is included below after the legacy command handlers.
+/* vmware_vga_vgpu10.c is included below after the legacy command handlers.
  * SurfaceCopy needs the same vGPU10 resource materializer when either side
  * has already become D3D11-resident, matching the VirtualBox D3D11 backend.
  */
@@ -5433,12 +5433,12 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_bind_entry(
 #include "vmware_vga_dxvk_wsi.c"
 #include "vmware_vga_dxvk.c"
 #define VMSVGA3D_D3D9_RUNTIME_INTEGRATION 1
-#include "vmware_vga_d3d9.c"
+#include "vmware_vga_vgpu9.c"
 #undef VMSVGA3D_D3D9_RUNTIME_INTEGRATION
 #define VMSVGA3D_D3D10_RUNTIME_INTEGRATION 1
-#include "vmware_vga_d3d10.c"
+#include "vmware_vga_vgpu10.c"
 #undef VMSVGA3D_D3D10_RUNTIME_INTEGRATION
-#include "vmware_vga_d3d11.c"
+#include "vmware_vga_vgpu11.c"
 #include "vmware_vga_3d_state.c"
 
 static SVGACBStatus

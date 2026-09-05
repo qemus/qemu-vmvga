@@ -8436,9 +8436,16 @@ static bool vmsvga3d_d3d10_present_blt_live(
     SVGA3dBox source_box;
     SVGA3dBox destination_box;
 
+    /*
+     * VirtualBox requires a command-buffer DX context for PRESENTBLT.  The
+     * VMware Win7 KMD, however, can submit PRESENTBLT through an unflagged
+     * command buffer when no DMA-context metadata is attached.  Preserve and
+     * validate a context whenever one is supplied, while accepting the
+     * observed VMware context-less presentation form.
+     */
     if (s == NULL || command == NULL || s->svga3d == NULL ||
+        (cid != SVGA3D_INVALID_ID && vmsvga3d_dx_context(s, cid) == NULL) ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
-        vmsvga3d_dx_context(s, cid) == NULL ||
         command->boxDest.z != 0 || command->boxDest.d != 1 ||
         command->boxSrc.z != 0 || command->boxSrc.d != 1 ||
         command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
@@ -9101,10 +9108,46 @@ static bool vmsvga3d_d3d10_stream_output_invalidate_bound_gs_live(
     return vmsvga3d_dxvk_d3d11_shader_invalidate(s->dxvk, cid, shader_id);
 }
 
+/*
+ * Most VGPU10 commands operate on the DX context associated with their
+ * command buffer.  A small protocol-defined set is context-less, or carries
+ * its own context id in the packet.  Keep that policy here so transport
+ * routing never has to invent context 0 for an unflagged command buffer.
+ *
+ * PRESENTBLT is the one intentional VMware compatibility exception: the
+ * VMware Win7 KMD has been observed submitting it without
+ * SVGA_CB_FLAG_DX_CONTEXT.  vmsvga3d_d3d10_present_blt_live() still validates
+ * a supplied context id.
+ */
+static bool vmsvga3d_d3d10_command_allows_invalid_context(uint32_t cmd)
+{
+    switch (cmd) {
+    case SVGA_3D_CMD_DX_UPDATE_SUBRESOURCE:
+    case SVGA_3D_CMD_DX_READBACK_SUBRESOURCE:
+    case SVGA_3D_CMD_DX_INVALIDATE_SUBRESOURCE:
+    case SVGA_3D_CMD_DX_TRANSFER_FROM_BUFFER:
+    case SVGA_3D_CMD_DX_PRED_TRANSFER_FROM_BUFFER:
+    case SVGA_3D_CMD_DX_MOB_FENCE_64:
+    case SVGA_3D_CMD_DX_BIND_SHADER:
+    case SVGA_3D_CMD_DX_BIND_ALL_QUERY:
+    case SVGA_3D_CMD_DX_READBACK_ALL_QUERY:
+    case SVGA_3D_CMD_DX_PRESENTBLT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                                        uint32_t cid, uint32_t cmd,
                                        const void *payload, uint32_t size)
 {
+    if (s == NULL ||
+        (!vmsvga3d_d3d10_command_allows_invalid_context(cmd) &&
+         vmsvga3d_dx_context(s, cid) == NULL)) {
+        return false;
+    }
+
     switch (cmd) {
     case SVGA_3D_CMD_DX_INVALIDATE_CONTEXT:
 

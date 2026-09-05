@@ -4727,9 +4727,9 @@ typedef struct {
 } SVGAFifoCmdSurfaceAlphaBlend;
 
 static inline void vmsvga_check_size(struct vmsvga_state_s *s);
-static SVGACBStatus vmsvga_command_buffer_process_legacy(
-    struct vmsvga_state_s *s, const void *commands, uint32_t size,
-    uint32_t *error_offset);
+static SVGACBStatus vmsvga_command_buffer_process(
+    struct vmsvga_state_s *s, uint32_t dx_context, const void *commands,
+    uint32_t size, uint32_t *error_offset);
 
 #include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
@@ -5045,7 +5045,8 @@ static void vmsvga_trace_gmr2_sample(struct vmsvga_state_s *s)
     }
 }
 
-static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
+static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
+                            uint32_t dx_context)
 {
     VPRINT("vmsvga_fifo_run was just executed\n");
     int32_t len;
@@ -6590,7 +6591,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
             VPRINT("SVGA_CMD_MAX command %u in SVGA command FIFO\n", cmd);
             break;
         default:
-            if (vmsvga3d_fifo_command(s, cmd, &len, fifo_start)) {
+            if (vmsvga3d_fifo_command(s, dx_context, cmd, &len, fifo_start)) {
                 break;
             }
             if (len < 1) {
@@ -6664,20 +6665,19 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
 }
 
 /*
- * COMMAND_BUFFERS_2 does not imply DX command encoding.  When
- * SVGA_CB_FLAG_DX_CONTEXT is clear, VMware submits the same command stream
- * that can be written to the normal SVGA FIFO.  Execute that stream through
- * the existing FIFO parser so command validation and side effects stay
- * identical between the two transports.
+ * COMMAND_BUFFERS_2 carries the same SVGA command stream as the normal FIFO.
+ * SVGA_CB_FLAG_DX_CONTEXT only associates a DX context with commands in that
+ * stream; it does not select a separate DX-only encoding.  Execute both
+ * flagged and unflagged command buffers through the common FIFO parser.
  *
  * The real FIFO itself must not be consumed: construct a private FIFO image,
  * copy the guest-visible FIFO register block into it, run the normal parser,
  * then restore the original FIFO plumbing.  Renderer/device side effects
  * (surfaces, contexts, fences, IRQ state, etc.) are intentionally retained.
  */
-static SVGACBStatus vmsvga_command_buffer_process_legacy(
-    struct vmsvga_state_s *s, const void *commands, uint32_t size,
-    uint32_t *error_offset)
+static SVGACBStatus vmsvga_command_buffer_process(
+    struct vmsvga_state_s *s, uint32_t dx_context, const void *commands,
+    uint32_t size, uint32_t *error_offset)
 {
     uint32_t *saved_fifo;
     uint32_t saved_fifo_size;
@@ -6756,9 +6756,15 @@ static SVGACBStatus vmsvga_command_buffer_process_legacy(
     s->fifo_stop = fifo_min;
     memset(&s->fifo_upload, 0, sizeof(s->fifo_upload));
 
+    if (dx_context != SVGA3D_INVALID_ID &&
+        !vmsvga3d_d3d10_context_switch_live(s, dx_context)) {
+        status = SVGA_CB_STATUS_COMMAND_ERROR;
+        goto restore;
+    }
+
     for (;;) {
         previous_stop = s->fifo_stop;
-        vmsvga_fifo_run(s, false);
+        vmsvga_fifo_run(s, false, dx_context);
         consumed = s->fifo_stop >= fifo_min ? s->fifo_stop - fifo_min : 0;
 
         if (s->fifo_stop == fifo_next) {
@@ -6775,6 +6781,7 @@ static SVGACBStatus vmsvga_command_buffer_process_legacy(
         }
     }
 
+restore:
     s->fifo = saved_fifo;
     s->fifo_size = saved_fifo_size;
     s->fifo_min = saved_fifo_min;
@@ -8017,7 +8024,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         }
         if (s->sync) {
             vmsvga_try_commit_mode(s);
-            vmsvga_fifo_run(s, false);
+            vmsvga_fifo_run(s, false, SVGA3D_INVALID_ID);
         }
         ret = s->sync;
         /* vmware_value_read already traces this register when enabled. */
@@ -8359,7 +8366,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       if (s->enable && s->config) {
           vmsvga_try_commit_mode(s);
           s->sync = 1;
-          vmsvga_fifo_run(s, false);
+          vmsvga_fifo_run(s, false, SVGA3D_INVALID_ID);
       }
       /* vmware_value_write already traces this register when enabled. */
       VPRINT("SVGA_REG_SYNC register %u with the value of %u\n", s->index, value);
@@ -8637,7 +8644,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
      * a complete/usable scanout tuple. */
     if (s->enable && s->config) {
         if (vmsvga_fifo_pending(s)) {
-            vmsvga_fifo_run(s, false);
+            vmsvga_fifo_run(s, false, SVGA3D_INVALID_ID);
         } else {
             cursor_update_from_fifo(s);
         }

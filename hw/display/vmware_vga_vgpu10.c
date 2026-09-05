@@ -7896,7 +7896,15 @@ static bool vmsvga3d_d3d10_rtv_changed_live(
         subresource = entry->desc.tex3D.mipSlice;
         break;
     case SVGA3D_RESOURCE_TEXTURECUBE:
-        subresource = entry->desc.tex.mipSlice;
+        if (levels == 0) {
+            return false;
+        }
+        if (entry->desc.tex.firstArraySlice >
+            (UINT32_MAX - entry->desc.tex.mipSlice) / levels) {
+            return false;
+        }
+        subresource = entry->desc.tex.firstArraySlice * levels +
+                      entry->desc.tex.mipSlice;
         break;
     default:
         return true;
@@ -8368,11 +8376,15 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     }
 
     {
-        SVGA3dBox dirty = plan.region.clipped_box;
+        SVGA3dBox dirty = {
+            .x = plan.region.destination_x,
+            .y = plan.region.destination_y,
+            .z = plan.region.destination_z,
+            .w = plan.region.clipped_box.w,
+            .h = plan.region.clipped_box.h,
+            .d = plan.region.clipped_box.d,
+        };
 
-        dirty.x = plan.region.destination_x;
-        dirty.y = plan.region.destination_y;
-        dirty.z = plan.region.destination_z;
         (void)vmsvga3d_surface_changed_live(
             s, command->dstSid, plan.destination_subresource, &dirty);
     }

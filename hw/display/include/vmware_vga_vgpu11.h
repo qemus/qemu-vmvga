@@ -24,13 +24,13 @@
 
 */
 
-#ifndef HW_DISPLAY_VMWARE_VGA_D3D11_H
-#define HW_DISPLAY_VMWARE_VGA_D3D11_H
+#ifndef HW_DISPLAY_VMWARE_VGA_VGPU11_H
+#define HW_DISPLAY_VMWARE_VGA_VGPU11_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "vmware_vga_d3d10.h"
+#include "vmware_vga_vgpu10.h"
 
 /*
  * Pure vGPU11 -> Direct3D 11.x translation.

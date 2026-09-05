@@ -24,8 +24,8 @@
 
 */
 
-#ifndef HW_DISPLAY_VMWARE_VGA_D3D9_H
-#define HW_DISPLAY_VMWARE_VGA_D3D9_H
+#ifndef HW_DISPLAY_VMWARE_VGA_VGPU9_H
+#define HW_DISPLAY_VMWARE_VGA_VGPU9_H
 
 #include <stdbool.h>
 #include <stdint.h>

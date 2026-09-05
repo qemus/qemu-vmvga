@@ -34,8 +34,8 @@
 #include "svga_reg.h"
 #include "svga3d_cmd.h"
 #include "svga3d_types.h"
-#include "vmware_vga_d3d10.h"
-#include "vmware_vga_d3d11.h"
+#include "vmware_vga_vgpu10.h"
+#include "vmware_vga_vgpu11.h"
 
 struct vmsvga_state_s;
 

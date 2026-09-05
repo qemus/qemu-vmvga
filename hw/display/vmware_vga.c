@@ -6247,6 +6247,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
                               (size - sizeof(uint32_t) * 2) /
                               (sizeof(uint32_t) * 2);
 
+                          (void)stream_id;
                           consumed_words++;
                           VPRINT("SVGA_ESCAPE_VMWARE_VIDEO_SET_REGS: stream "
                                  "0x%x\n",
@@ -6255,6 +6256,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
                               uint32_t reg = vmsvga_fifo_read(s);
                               uint32_t value = vmsvga_fifo_read(s);
 
+                              (void)reg;
+                              (void)value;
                               consumed_words += 2;
                               VPRINT("SVGA_ESCAPE_VMWARE_VIDEO_SET_REGS: reg "
                                      "0x%x val 0x%x\n",
@@ -6266,6 +6269,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage)
                       if (size >= sizeof(SVGAEscapeVideoFlush)) {
                           uint32_t stream_id = vmsvga_fifo_read(s);
 
+                          (void)stream_id;
                           consumed_words++;
                           VPRINT("SVGA_ESCAPE_VMWARE_VIDEO_FLUSH: stream "
                                  "0x%x\n",

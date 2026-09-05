@@ -3156,7 +3156,7 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
               .bind_flags = resource_desc->bind_flags,
               .cpu_access_flags = resource_desc->cpu_access_flags,
               .misc_flags = resource_desc->misc_flags,
-              .structure_byte_stride = 0,
+              .structure_byte_stride = resource_desc->structure_byte_stride,
           };
 
           if (native.byte_width == 0 ||
@@ -3529,6 +3529,35 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_define(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_constant_buffer_snapshot(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
+    uint32_t slot, const void *data, uint32_t copy_size, uint32_t size)
+{
+    uint8_t *upload;
+    bool success;
+
+    if (dxvk == NULL || stage_index >= SVGA3D_NUM_SHADERTYPE ||
+        slot >= SVGA3D_DX_MAX_CONSTBUFFERS || size == 0 ||
+        copy_size > size || (copy_size != 0 && data == NULL)) {
+        return false;
+    }
+
+    upload = g_try_malloc0(size);
+    if (upload == NULL) {
+        return false;
+    }
+
+    if (copy_size != 0) {
+        memcpy(upload, data, copy_size);
+    }
+
+    success = vmsvga3d_dxvk_d3d11_constant_buffer_define(
+        dxvk, cid, stage_index, slot, upload, size);
+    g_free(upload);
+
+    return success;
+}
+
 bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t slot)
@@ -3544,7 +3573,8 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
     buffer = vmsvga3d_dxvk_d3d11_constant_buffer_find(
         dxvk, cid, stage_index, slot, &link);
     if (buffer == NULL) {
-        return true;
+        return vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
+            dxvk, stage_index, slot, 0, 0);
     }
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -3764,7 +3794,17 @@ bool vmsvga3d_dxvk_d3d11_constant_buffers1_flush(
         return false;
     }
 
-    if (!vmsvga3d_dxvk_d3d11_set_constant_buffers1(
+    /* SVGA shadows 16 slots; D3D11 exposes only 14.  Keep slots 14-15 in
+     * metadata, but never pass them to SetConstantBuffers1.
+     */
+    if (start_slot >= 14u) {
+        buffer_count = 0;
+    } else if (buffer_count > 14u - start_slot) {
+        buffer_count = 14u - start_slot;
+    }
+
+    if (buffer_count != 0 &&
+        !vmsvga3d_dxvk_d3d11_set_constant_buffers1(
             dxvk, cid, stage_index, start_slot, buffer_count,
             &dxvk->d3d11_bound_constant_buffer_first_constant[stage_index]
                                                               [start_slot],

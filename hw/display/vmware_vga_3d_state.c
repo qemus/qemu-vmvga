@@ -296,12 +296,49 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_constant_buffer(
     return true;
 }
 
+static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_constant_buffer_d3d11(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D11ConstantBufferPlan *plan)
+{
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    SVGA3dConstantBufferBinding *binding;
+    VMSVGA3DD3D11Level level;
+    uint32_t stage_index;
+
+    if (context == NULL || plan == NULL || !plan->shadow_update ||
+        plan->stage_index >= SVGA3D_NUM_SHADERTYPE ||
+        plan->slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+        return false;
+    }
+
+    level = vmsvga3d_d3d11_shader_stage(plan->shader_type, &stage_index);
+    if (level == VMSVGA3D_D3D11_LEVEL_INVALID ||
+        stage_index != plan->stage_index) {
+        return false;
+    }
+
+    binding = &context->shadow.shaderState[stage_index]
+                   .constantBuffers[plan->slot];
+    binding->sid = plan->sid;
+    binding->offsetInBytes = plan->offset_in_bytes;
+    binding->sizeInBytes = plan->size_in_bytes;
+
+    if (plan->sid != SVGA3D_INVALID_ID &&
+        context->constant_buffer_max_bound[stage_index] < plan->slot + 1u) {
+        context->constant_buffer_max_bound[stage_index] = plan->slot + 1u;
+    }
+
+    return true;
+}
+
 static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_constant_buffer_offset(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D11ConstantBufferOffsetPlan *plan)
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     SVGA3dConstantBufferBinding *binding;
+    VMSVGA3DD3D11Level level;
+    uint32_t stage_index;
 
     if (context == NULL || plan == NULL ||
         plan->stage_index >= SVGA3D_NUM_SHADERTYPE ||
@@ -309,7 +346,13 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_constant_buffer_off
         return false;
     }
 
-    binding = &context->shadow.shaderState[plan->stage_index]
+    level = vmsvga3d_d3d11_shader_stage(plan->shader_type, &stage_index);
+    if (level == VMSVGA3D_D3D11_LEVEL_INVALID ||
+        stage_index != plan->stage_index) {
+        return false;
+    }
+
+    binding = &context->shadow.shaderState[stage_index]
                    .constantBuffers[plan->slot];
 
     /* VirtualBox updates only offsetInBytes for SET_*_CONSTANT_BUFFER_OFFSET. */

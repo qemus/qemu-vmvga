@@ -399,6 +399,66 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_plan(
+    uint32_t slot, SVGA3dShaderType type, SVGA3dSurfaceId sid,
+    uint32_t offset_in_bytes, uint32_t size_in_bytes, bool surface_available,
+    uint32_t surface_bytes, bool has_surface_data,
+    VMSVGA3DD3D11ConstantBufferPlan *plan)
+{
+    VMSVGA3DD3D11Level level;
+    uint32_t stage_index;
+    uint32_t aligned_size;
+
+    if (plan == NULL || slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    level = vmsvga3d_d3d11_shader_stage(type, &stage_index);
+    if (level == VMSVGA3D_D3D11_LEVEL_INVALID) {
+        return level;
+    }
+
+    memset(plan, 0, sizeof(*plan));
+    plan->shader_type = type;
+    plan->stage_index = stage_index;
+    plan->slot = slot;
+    plan->sid = sid;
+    plan->offset_in_bytes = offset_in_bytes;
+    plan->size_in_bytes = size_in_bytes;
+    plan->shadow_update = true;
+
+    if (sid == SVGA3D_INVALID_ID) {
+        plan->unbind = true;
+        return level;
+    }
+
+    /* Match VirtualBox's SetSingleConstantBuffer snapshot range: align the
+     * backend allocation to 16 constants (256 bytes), clamp to 4096
+     * constants, then clip the guest copy to that allocation.  Keep the same
+     * uint32_t alignment semantics as the existing D3D10 path.
+     */
+    aligned_size = (size_in_bytes + 255u) & ~255u;
+    if (aligned_size > 4096u * 16u) {
+        aligned_size = 4096u * 16u;
+    }
+
+    plan->backend_buffer_size = aligned_size;
+    plan->backend_copy_size = size_in_bytes < aligned_size ?
+                                  size_in_bytes : aligned_size;
+
+    if (!surface_available || !has_surface_data ||
+        offset_in_bytes >= surface_bytes ||
+        plan->backend_copy_size > surface_bytes - offset_in_bytes) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    plan->create_buffer = aligned_size != 0;
+    plan->has_initial_data = true;
+    plan->initial_data_offset = offset_in_bytes;
+
+    return level;
+}
+
 VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_plan(
     const SVGA3dCmdDXSetConstantBufferOffset *src, SVGA3dShaderType type,
     VMSVGA3DD3D11ConstantBufferOffsetPlan *plan)
@@ -423,6 +483,103 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_plan(
     return level;
 }
 
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_snapshot_plan(
+    const VMSVGA3DD3D11ConstantBufferOffsetPlan *offset_plan,
+    const SVGA3dConstantBufferBinding *binding, bool surface_available,
+    uint32_t surface_bytes, bool has_surface_data,
+    VMSVGA3DD3D11ConstantBufferPlan *plan)
+{
+    VMSVGA3DD3D11Level level;
+    uint32_t stage_index;
+
+    if (offset_plan == NULL || binding == NULL || plan == NULL) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    level = vmsvga3d_d3d11_shader_stage(
+        offset_plan->shader_type, &stage_index);
+    if (level == VMSVGA3D_D3D11_LEVEL_INVALID ||
+        stage_index != offset_plan->stage_index) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return vmsvga3d_d3d11_constant_buffer_plan(
+        offset_plan->slot, offset_plan->shader_type, binding->sid,
+        offset_plan->offset_in_bytes, binding->sizeInBytes,
+        surface_available, surface_bytes, has_surface_data, plan);
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid,
+    const VMSVGA3DD3D11ConstantBufferPlan *plan,
+    const uint8_t *surface_data, uint32_t surface_bytes)
+{
+    VMSVGA3DD3D11Level level;
+    uint32_t stage_index;
+
+    if (dxvk == NULL || plan == NULL || !plan->shadow_update ||
+        plan->slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    level = vmsvga3d_d3d11_shader_stage(plan->shader_type, &stage_index);
+    if (level == VMSVGA3D_D3D11_LEVEL_INVALID ||
+        stage_index != plan->stage_index) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    if (plan->unbind || plan->backend_buffer_size == 0) {
+        if (!vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
+                dxvk, cid, stage_index, plan->slot)) {
+            return VMSVGA3D_D3D11_LEVEL_INVALID;
+        }
+        return level;
+    }
+
+    if (!plan->create_buffer || !plan->has_initial_data ||
+        surface_data == NULL || plan->initial_data_offset >= surface_bytes ||
+        plan->backend_copy_size >
+            surface_bytes - plan->initial_data_offset ||
+        plan->backend_copy_size > plan->backend_buffer_size ||
+        !vmsvga3d_dxvk_d3d11_constant_buffer_snapshot(
+            dxvk, cid, stage_index, plan->slot,
+            surface_data + plan->initial_data_offset,
+            plan->backend_copy_size, plan->backend_buffer_size)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return level;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid,
+    const VMSVGA3DD3D11ConstantBufferOffsetPlan *offset_plan,
+    const SVGA3dConstantBufferBinding *binding,
+    const uint8_t *surface_data, uint32_t surface_bytes,
+    bool surface_available, bool has_surface_data)
+{
+    VMSVGA3DD3D11ConstantBufferPlan plan;
+    VMSVGA3DD3D11Level level;
+
+    if (dxvk == NULL || offset_plan == NULL || binding == NULL) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    level = vmsvga3d_d3d11_constant_buffer_offset_snapshot_plan(
+        offset_plan, binding, surface_available, surface_bytes,
+        has_surface_data, &plan);
+    if (level == VMSVGA3D_D3D11_LEVEL_INVALID) {
+        return level;
+    }
+
+    /* The caller updates offsetInBytes in the context shadow first, matching
+     * VirtualBox, then this helper re-snapshots the same SID/size at the new
+     * offset into VMVGA's dedicated native constant-buffer object.
+     */
+    return vmsvga3d_d3d11_constant_buffer_live(
+        dxvk, cid, &plan, surface_data, surface_bytes);
+}
+
 VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffers_bind_live(
     VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dShaderType type,
     uint32_t start_slot, uint32_t buffer_count,
@@ -443,7 +600,18 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffers_bind_live(
         return level;
     }
 
-    if (!vmsvga3d_dxvk_d3d11_set_constant_buffers1(
+    /* The SVGA context shadows 16 slots, but D3D11 exposes only 14 native
+     * constant-buffer slots.  Match VirtualBox and preserve slots 14-15 only
+     * in the context shadow.
+     */
+    if (start_slot >= 14u) {
+        buffer_count = 0;
+    } else if (buffer_count > 14u - start_slot) {
+        buffer_count = 14u - start_slot;
+    }
+
+    if (buffer_count != 0 &&
+        !vmsvga3d_dxvk_d3d11_set_constant_buffers1(
             dxvk, cid, stage_index, start_slot, buffer_count,
             first_constants, constant_counts)) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;

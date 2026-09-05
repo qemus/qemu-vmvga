@@ -193,6 +193,9 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource(
 bool vmsvga3d_dxvk_d3d11_constant_buffer_define(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t slot, const void *data, uint32_t size);
+bool vmsvga3d_dxvk_d3d11_constant_buffer_snapshot(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
+    uint32_t slot, const void *data, uint32_t copy_size, uint32_t size);
 bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t slot);

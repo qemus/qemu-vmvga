@@ -195,6 +195,22 @@ typedef struct vmsvga3d_d3d11_dispatch_plan_s {
     uint32_t thread_group_count_z;
 } VMSVGA3DD3D11DispatchPlan;
 
+typedef struct vmsvga3d_d3d11_constant_buffer_plan_s {
+    SVGA3dShaderType shader_type;
+    uint32_t stage_index;
+    uint32_t slot;
+    SVGA3dSurfaceId sid;
+    uint32_t offset_in_bytes;
+    uint32_t size_in_bytes;
+    bool shadow_update;
+    bool unbind;
+    bool create_buffer;
+    bool has_initial_data;
+    uint32_t initial_data_offset;
+    uint32_t backend_copy_size;
+    uint32_t backend_buffer_size;
+} VMSVGA3DD3D11ConstantBufferPlan;
+
 typedef struct vmsvga3d_d3d11_constant_buffer_offset_plan_s {
     SVGA3dShaderType shader_type;
     uint32_t stage_index;
@@ -261,9 +277,29 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_instanced_indirect_plan(
     VMSVGA3DD3D11DrawInstancedIndirectPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
     const SVGA3dCmdDXDispatch *src, VMSVGA3DD3D11DispatchPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_plan(
+    uint32_t slot, SVGA3dShaderType type, SVGA3dSurfaceId sid,
+    uint32_t offset_in_bytes, uint32_t size_in_bytes, bool surface_available,
+    uint32_t surface_bytes, bool has_surface_data,
+    VMSVGA3DD3D11ConstantBufferPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_plan(
     const SVGA3dCmdDXSetConstantBufferOffset *src, SVGA3dShaderType type,
     VMSVGA3DD3D11ConstantBufferOffsetPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_snapshot_plan(
+    const VMSVGA3DD3D11ConstantBufferOffsetPlan *offset_plan,
+    const SVGA3dConstantBufferBinding *binding, bool surface_available,
+    uint32_t surface_bytes, bool has_surface_data,
+    VMSVGA3DD3D11ConstantBufferPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid,
+    const VMSVGA3DD3D11ConstantBufferPlan *plan,
+    const uint8_t *surface_data, uint32_t surface_bytes);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_offset_live(
+    VMSVGA3DDxvk *dxvk, uint32_t cid,
+    const VMSVGA3DD3D11ConstantBufferOffsetPlan *offset_plan,
+    const SVGA3dConstantBufferBinding *binding,
+    const uint8_t *surface_data, uint32_t surface_bytes,
+    bool surface_available, bool has_surface_data);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffers_bind_live(
     VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dShaderType type,
     uint32_t start_slot, uint32_t buffer_count,

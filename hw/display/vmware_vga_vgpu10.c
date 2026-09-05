@@ -7896,7 +7896,15 @@ static bool vmsvga3d_d3d10_rtv_changed_live(
         subresource = entry->desc.tex3D.mipSlice;
         break;
     case SVGA3D_RESOURCE_TEXTURECUBE:
-        subresource = entry->desc.tex.mipSlice;
+        if (levels == 0) {
+            return false;
+        }
+        if (entry->desc.tex.firstArraySlice >
+            (UINT32_MAX - entry->desc.tex.mipSlice) / levels) {
+            return false;
+        }
+        subresource = entry->desc.tex.firstArraySlice * levels +
+                      entry->desc.tex.mipSlice;
         break;
     default:
         return true;

@@ -6847,7 +6847,7 @@ static bool vmsvga3d_gb_screen_target_entry_read(
                                 sizeof(*entry), entry, sizeof(*entry));
 }
 
-static bool vmsvga3d_gb_screen_target_present_live(
+bool vmsvga3d_present_screen_target_live(
     struct vmsvga_state_s *s, const SVGA3dRect *rect)
 {
     VMSVGA3DSurface *surface;

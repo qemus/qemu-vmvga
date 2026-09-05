@@ -8679,6 +8679,11 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
         goto done;
     }
 
+    /* Screen-target writers only mark the bound target dirty.  Perform the
+     * readback/presentation here so command execution stays independent of the
+     * frontend refresh path and multiple writes coalesce into one update. */
+    (void)vmsvga3d_screen_target_flush_live(s);
+
     /*
      * A Screen transition mirror is seeded from the last valid frontend image,
      * so it is always safe to bind. GMRFB and 3D Screen updates paint on top

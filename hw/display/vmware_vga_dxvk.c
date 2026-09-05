@@ -27,9 +27,9 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 
-#include "include/vmware_vga_d3d9.h"
-#include "include/vmware_vga_d3d10.h"
-#include "include/vmware_vga_d3d11.h"
+#include "include/vmware_vga_vgpu9.h"
+#include "include/vmware_vga_vgpu10.h"
+#include "include/vmware_vga_vgpu11.h"
 #include "include/vmware_vga_dxvk.h"
 #include "include/vmware_vga_dxvk_wsi.h"
 

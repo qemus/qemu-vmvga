@@ -24,7 +24,7 @@
 
 */
 
-#include "include/vmware_vga_d3d9.h"
+#include "include/vmware_vga_vgpu9.h"
 
 #include <string.h>
 

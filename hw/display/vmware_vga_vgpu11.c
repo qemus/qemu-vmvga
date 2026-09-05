@@ -24,7 +24,7 @@
 
 */
 
-#include "include/vmware_vga_d3d11.h"
+#include "include/vmware_vga_vgpu11.h"
 #include "include/vmware_vga_dxvk.h"
 
 #include <string.h>

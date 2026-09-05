@@ -291,17 +291,17 @@ struct vmsvga_cursor_source_s {
  * Add -trace "vmware_value_read" when register reads/BUSY polling are needed.
  * Categories set to 0 compile down to a constant-false branch.
  */
-#define VMVGA_TRACE_STATE   0
-#define VMVGA_TRACE_DRAW    0
-#define VMVGA_TRACE_DIRTY   0
+#define VMVGA_TRACE_STATE   1
+#define VMVGA_TRACE_DRAW    1
+#define VMVGA_TRACE_DIRTY   1
 #define VMVGA_TRACE_ROP     0
-#define VMVGA_TRACE_OBJECT  0
-#define VMVGA_TRACE_STREAM  0
-#define VMVGA_TRACE_FIFO    0
+#define VMVGA_TRACE_OBJECT  1
+#define VMVGA_TRACE_STREAM  1
+#define VMVGA_TRACE_FIFO    1
 #define VMVGA_TRACE_3D      1
 #define VMVGA_TRACE_DEVCAP  1
-#define VMVGA_TRACE_FLIGHT  0
-#define VMVGA_TRACE_QEMU    0
+#define VMVGA_TRACE_FLIGHT  1
+#define VMVGA_TRACE_QEMU    1
 
 #define VMVGA_TRACE_CMD_MAX 256
 #define VMVGA_TRACE_DEVCAP_MAX 256

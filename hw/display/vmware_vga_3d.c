@@ -261,7 +261,6 @@ typedef struct vmsvga3d_surface_s {
     uint32_t multisample_count;
     SVGA3dMSPattern multisample_pattern;
     SVGA3dTextureFilter autogen_filter;
-    uint32_t buffer_byte_stride;
     uint32_t array_elements;
     uint32_t mip_count;
     size_t storage_bytes;
@@ -285,6 +284,7 @@ struct vmsvga3d_state_s {
     GHashTable *mobs;
     uint32_t active_dx_context_id;
     uint32_t active_screen_target_sid;
+    bool dx_context_ever_defined;
     size_t surface_bytes;
     size_t shader_bytes;
 };
@@ -1032,17 +1032,11 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s)
      * to provide the equivalent teardown boundary. */
     (void)vmsvga3d_dxvk_reset_state(s->dxvk);
 
+    vmsvga3d_dxvk_reset_guest_objects(s->dxvk,
+                                      state->dx_context_ever_defined);
+
     for (i = 0; i < SVGA3D_MAX_CONTEXT_IDS; i++) {
         vmsvga3d_context_free(state, state->contexts[i]);
-        vmsvga3d_dxvk_d3d9_query_context_destroy(s->dxvk, i);
-        if (state->dx_contexts[i] != NULL) {
-            vmsvga3d_dxvk_d3d11_flush(s->dxvk);
-        }
-        vmsvga3d_dxvk_d3d11_query_context_destroy(s->dxvk, i);
-        vmsvga3d_dxvk_d3d11_state_context_destroy(s->dxvk, i);
-        vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(s->dxvk, i);
-        vmsvga3d_dxvk_d3d11_view_context_destroy(s->dxvk, i);
-        vmsvga3d_dxvk_d3d11_shader_context_destroy(s->dxvk, i);
         vmsvga3d_dx_context_free(state->dx_contexts[i]);
     }
 
@@ -1381,7 +1375,7 @@ static void vmsvga3d_surface_install(
     SVGA3dSurfaceAllFlags surface_flags, SVGA3dSurfaceFormat format,
     const SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES],
     uint32_t multisample_count, SVGA3dMSPattern multisample_pattern,
-    SVGA3dTextureFilter autogen_filter, uint32_t buffer_byte_stride,
+    SVGA3dTextureFilter autogen_filter,
     uint32_t array_elements, const SVGA3dSize *mip_sizes,
     uint32_t mip_count)
 {
@@ -1447,7 +1441,6 @@ static void vmsvga3d_surface_install(
         multisample_pattern > SVGA3D_MS_PATTERN_MAX
             ? SVGA3D_MS_PATTERN_MAX : multisample_pattern;
     surface->autogen_filter = autogen_filter;
-    surface->buffer_byte_stride = buffer_byte_stride;
     surface->array_elements = array_elements;
     surface->mip_count = mip_count;
 
@@ -1561,8 +1554,7 @@ static bool vmsvga3d_gb_surface_define_live(
     SVGA3dSurfaceAllFlags surface_flags, SVGA3dSurfaceFormat format,
     uint32_t num_mip_levels, uint32_t multisample_count,
     SVGA3dMSPattern multisample_pattern, SVGA3dTextureFilter autogen_filter,
-    const SVGA3dSize *base_size, uint32_t array_size,
-    uint32_t buffer_byte_stride)
+    const SVGA3dSize *base_size, uint32_t array_size)
 {
     SVGAOTableSurfaceEntry entry;
     SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES] = {{0}};
@@ -1637,7 +1629,7 @@ static bool vmsvga3d_gb_surface_define_live(
 
     vmsvga3d_surface_install(s, sid, surface_flags, format, face,
                              multisample_count, multisample_pattern,
-                             autogen_filter, buffer_byte_stride, array_elements,
+                             autogen_filter, array_elements,
                              mip_sizes, mip_count);
     g_free(mip_sizes);
 
@@ -1785,7 +1777,7 @@ static bool vmsvga3d_handle_surface_define(struct vmsvga_state_s *s,
     mip_sizes = (SVGA3dSize *)(body + 1);
     mip_count = mip_bytes / sizeof(SVGA3dSize);
     vmsvga3d_surface_install(s, body->sid, body->surfaceFlags, body->format,
-                             body->face, 0, SVGA3D_MS_PATTERN_NONE, 0, 0,
+                             body->face, 0, SVGA3D_MS_PATTERN_NONE, 0,
                              (body->surfaceFlags & SVGA3D_SURFACE_CUBEMAP)
                                  ? SVGA3D_MAX_SURFACE_FACES
                                  : 1u,
@@ -1843,7 +1835,7 @@ static bool vmsvga3d_handle_surface_define_v2(struct vmsvga_state_s *s,
                              body->multisampleCount > 1
                                  ? SVGA3D_MS_PATTERN_STANDARD
                                  : SVGA3D_MS_PATTERN_NONE,
-                             body->autogenFilter, 0,
+                             body->autogenFilter,
                              (body->surfaceFlags & SVGA3D_SURFACE_CUBEMAP)
                                  ? SVGA3D_MAX_SURFACE_FACES
                                  : 1u,
@@ -6461,6 +6453,8 @@ static bool vmsvga3d_dx_context_define_backed(struct vmsvga_state_s *s,
         return false;
     }
 
+    s->svga3d->dx_context_ever_defined = true;
+
     if (s->svga3d->active_dx_context_id == cid) {
         s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
     }
@@ -7309,7 +7303,7 @@ static bool vmsvga3d_handle_define_gb_surface(struct vmsvga_state_s *s,
             body->multisampleCount,
             body->multisampleCount > 1 ? SVGA3D_MS_PATTERN_STANDARD
                                        : SVGA3D_MS_PATTERN_NONE,
-            body->autogenFilter, &body->size, 0, 0);
+            body->autogenFilter, &body->size, 0);
     } else if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V2 &&
                size >= sizeof(SVGA3dCmdDefineGBSurface_v2)) {
         const SVGA3dCmdDefineGBSurface_v2 *body = payload;
@@ -7319,7 +7313,7 @@ static bool vmsvga3d_handle_define_gb_surface(struct vmsvga_state_s *s,
             body->multisampleCount,
             body->multisampleCount > 1 ? SVGA3D_MS_PATTERN_STANDARD
                                        : SVGA3D_MS_PATTERN_NONE,
-            body->autogenFilter, &body->size, body->arraySize, 0);
+            body->autogenFilter, &body->size, body->arraySize);
     } else if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V3 &&
                size >= sizeof(SVGA3dCmdDefineGBSurface_v3)) {
         const SVGA3dCmdDefineGBSurface_v3 *body = payload;
@@ -7327,7 +7321,7 @@ static bool vmsvga3d_handle_define_gb_surface(struct vmsvga_state_s *s,
         (void)vmsvga3d_gb_surface_define_live(
             s, body->sid, body->surfaceFlags, body->format, body->numMipLevels,
             body->multisampleCount, body->multisamplePattern,
-            body->autogenFilter, &body->size, body->arraySize, 0);
+            body->autogenFilter, &body->size, body->arraySize);
     }
 
     g_free(payload);

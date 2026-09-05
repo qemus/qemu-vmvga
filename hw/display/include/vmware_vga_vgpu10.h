@@ -885,6 +885,9 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_triangle_fan_generate_u16(
     const void *source_indices, uint32_t source_bytes,
     uint16_t *generated_indices, uint32_t generated_capacity,
     uint32_t *generated_count);
+bool vmsvga3d_present_screen_target_live(
+    struct vmsvga_state_s *s, const SVGA3dRect *rect);
+
 #define VMSVGA3D_D3D10_QUERY_COTABLE_ENTRY_SIZE 16u
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_info(

@@ -284,6 +284,8 @@ struct vmsvga3d_state_s {
     GHashTable *mobs;
     uint32_t active_dx_context_id;
     uint32_t active_screen_target_sid;
+    bool screen_target_dirty;
+    SVGA3dRect screen_target_dirty_rect;
     bool dx_context_ever_defined;
     size_t surface_bytes;
     size_t shader_bytes;
@@ -5429,6 +5431,12 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_mob_entry(
 VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_bind_entry(
     SVGACOTableDXStreamOutputEntry *entry, uint32_t mobid,
     uint32_t offset_in_bytes, uint32_t size_in_bytes);
+static bool vmsvga3d_screen_target_mark_dirty_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dRect *rect);
+static bool vmsvga3d_surface_changed_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dBox *box);
 
 #include "vmware_vga_dxvk_wsi.c"
 #include "vmware_vga_dxvk.c"
@@ -6847,26 +6855,25 @@ static bool vmsvga3d_gb_screen_target_entry_read(
                                 sizeof(*entry), entry, sizeof(*entry));
 }
 
-bool vmsvga3d_present_screen_target_live(
-    struct vmsvga_state_s *s, const SVGA3dRect *rect)
+static bool vmsvga3d_screen_target_present_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dRect *rect)
 {
     VMSVGA3DSurface *surface;
     VMSVGA3DSurfaceImage *image;
     const struct svga3d_surface_desc *desc;
     SVGA3dCopyRect copy;
-    uint32_t sid;
 
     if (s == NULL || rect == NULL || s->svga3d == NULL) {
         return false;
     }
 
-    sid = s->svga3d->active_screen_target_sid;
-
-    if (sid == SVGA3D_INVALID_ID) {
+    if (sid == SVGA3D_INVALID_ID ||
+        sid != s->svga3d->active_screen_target_sid) {
         return true;
     }
 
-    if (sid >= SVGA3D_MAX_SURFACE_IDS) {
+    if (sid >= SVGA3D_MAX_SURFACE_IDS || subresource != 0) {
         return false;
     }
 
@@ -6876,13 +6883,13 @@ bool vmsvga3d_present_screen_target_live(
         (surface->surface_flags & SVGA3D_SURFACE_SCREENTARGET) == 0 ||
         (surface->surface_flags &
          (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) != 0 ||
-        surface->mips[0].size.depth != 1 ||
+        surface->mips[subresource].size.depth != 1 ||
         !vmsvga3d_present_format(surface, &desc) ||
-        !vmsvga3d_d3d10_readback_image_live(s, surface, 0)) {
+        !vmsvga3d_d3d10_readback_image_live(s, surface, subresource)) {
         return false;
     }
 
-    image = &surface->mips[0];
+    image = &surface->mips[subresource];
 
     if (rect->w == 0 || rect->h == 0 || rect->x >= image->size.width ||
         rect->y >= image->size.height) {
@@ -6901,6 +6908,107 @@ bool vmsvga3d_present_screen_target_live(
     }
 
     return vmsvga3d_present_screen_rect(s, surface, image, desc, &copy, true);
+}
+
+static bool vmsvga3d_screen_target_mark_dirty_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dRect *rect)
+{
+    struct vmsvga3d_state_s *state;
+    uint64_t left;
+    uint64_t top;
+    uint64_t right;
+    uint64_t bottom;
+    uint64_t old_right;
+    uint64_t old_bottom;
+
+    if (s == NULL || rect == NULL || s->svga3d == NULL) {
+        return false;
+    }
+
+    state = s->svga3d;
+    if (sid != state->active_screen_target_sid || subresource != 0 ||
+        rect->w == 0 || rect->h == 0) {
+        return true;
+    }
+
+    left = rect->x;
+    top = rect->y;
+    right = MIN((uint64_t)UINT32_MAX + 1, left + rect->w);
+    bottom = MIN((uint64_t)UINT32_MAX + 1, top + rect->h);
+
+    if (!state->screen_target_dirty) {
+        state->screen_target_dirty_rect = *rect;
+        state->screen_target_dirty = true;
+        return true;
+    }
+
+    old_right = MIN((uint64_t)UINT32_MAX + 1,
+                    (uint64_t)state->screen_target_dirty_rect.x +
+                        state->screen_target_dirty_rect.w);
+    old_bottom = MIN((uint64_t)UINT32_MAX + 1,
+                     (uint64_t)state->screen_target_dirty_rect.y +
+                         state->screen_target_dirty_rect.h);
+    left = MIN(left, (uint64_t)state->screen_target_dirty_rect.x);
+    top = MIN(top, (uint64_t)state->screen_target_dirty_rect.y);
+    right = MAX(right, old_right);
+    bottom = MAX(bottom, old_bottom);
+
+    state->screen_target_dirty_rect.x = (uint32_t)left;
+    state->screen_target_dirty_rect.y = (uint32_t)top;
+    state->screen_target_dirty_rect.w = (uint32_t)MIN(
+        right - left, (uint64_t)UINT32_MAX);
+    state->screen_target_dirty_rect.h = (uint32_t)MIN(
+        bottom - top, (uint64_t)UINT32_MAX);
+
+    return true;
+}
+
+static bool vmsvga3d_surface_changed_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dBox *box)
+{
+    SVGA3dRect rect;
+
+    if (s == NULL || box == NULL || s->svga3d == NULL) {
+        return false;
+    }
+
+    if (box->z != 0 || box->d == 0 || box->w == 0 || box->h == 0) {
+        return true;
+    }
+
+    rect.x = box->x;
+    rect.y = box->y;
+    rect.w = box->w;
+    rect.h = box->h;
+
+    return vmsvga3d_screen_target_mark_dirty_live(
+        s, sid, subresource, &rect);
+}
+
+static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
+{
+    struct vmsvga3d_state_s *state;
+    SVGA3dRect rect;
+    uint32_t sid;
+
+    if (s == NULL || s->svga3d == NULL) {
+        return true;
+    }
+
+    state = s->svga3d;
+    if (!state->screen_target_dirty) {
+        return true;
+    }
+
+    sid = state->active_screen_target_sid;
+    rect = state->screen_target_dirty_rect;
+    state->screen_target_dirty = false;
+    memset(&state->screen_target_dirty_rect, 0,
+           sizeof(state->screen_target_dirty_rect));
+
+    return vmsvga3d_screen_target_present_live(s, sid, 0, &rect);
 }
 
 static bool vmsvga3d_gb_screen_target_update_live(
@@ -6936,7 +7044,8 @@ static bool vmsvga3d_gb_screen_target_update_live(
         return true;
     }
 
-    return vmsvga3d_gb_screen_target_present_live(s, rect);
+    return vmsvga3d_screen_target_mark_dirty_live(
+        s, s->svga3d->active_screen_target_sid, 0, rect);
 }
 
 static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
@@ -7048,7 +7157,8 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 rect.h = le32_to_cpu(entry.height);
                 /* Binding a new surface is a flip.  Unlike explicit UPDATE, VBox does
                  * not require the Surface OTable entry to have a valid MOB here. */
-                (void)vmsvga3d_gb_screen_target_present_live(s, &rect);
+                (void)vmsvga3d_screen_target_mark_dirty_live(
+                    s, s->svga3d->active_screen_target_sid, 0, &rect);
             }
         }
         break;

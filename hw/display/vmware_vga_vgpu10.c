@@ -7626,6 +7626,9 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
 
     if (sid == SVGA3D_INVALID_ID) {
         s->svga3d->active_screen_target_sid = sid;
+        s->svga3d->screen_target_dirty = false;
+        memset(&s->svga3d->screen_target_dirty_rect, 0,
+               sizeof(s->svga3d->screen_target_dirty_rect));
         return true;
     }
 
@@ -7654,6 +7657,9 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     }
 
     s->svga3d->active_screen_target_sid = sid;
+    s->svga3d->screen_target_dirty = false;
+    memset(&s->svga3d->screen_target_dirty_rect, 0,
+           sizeof(s->svga3d->screen_target_dirty_rect));
     return true;
 }
 
@@ -8499,18 +8505,8 @@ static bool vmsvga3d_d3d10_present_blt_live(
         return false;
     }
 
-    if (command->dstSid == s->svga3d->active_screen_target_sid) {
-        SVGA3dRect rect = {
-            .x = destination_box.x,
-            .y = destination_box.y,
-            .w = destination_box.w,
-            .h = destination_box.h,
-        };
-
-        return vmsvga3d_present_screen_target_live(s, &rect);
-    }
-
-    return true;
+    return vmsvga3d_surface_changed_live(
+        s, command->dstSid, command->destSubResource, &destination_box);
 }
 
 typedef enum vmsvga3d_d3d10_query_poll_result_e {

@@ -185,7 +185,6 @@ typedef struct vmsvga3d_d3d10_surface_info_s {
     uint32_t array_elements;
     uint32_t multisample_count;
     SVGA3dTextureFilter autogen_filter;
-    uint32_t buffer_byte_stride;
     /* Byte size of mip 0 when this surface is used as a buffer. */
     uint32_t surface_bytes;
     bool has_initial_data;
@@ -207,7 +206,6 @@ typedef struct vmsvga3d_d3d10_create_desc_s {
     uint32_t bind_flags;
     uint32_t cpu_access_flags;
     uint32_t misc_flags;
-    uint32_t structure_byte_stride;
     uint32_t initial_subresource_count;
 } VMSVGA3DD3D10CreateDesc;
 

@@ -79,6 +79,9 @@ typedef struct vmsvga3d_dxvk_d3d11_index_binding_s {
 
 VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
                                     Error **errp);
+/* Drop guest-owned backend objects while keeping the renderer devices alive. */
+void vmsvga3d_dxvk_reset_guest_objects(VMSVGA3DDxvk *dxvk,
+                                        bool reset_d3d11_state);
 void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk);
 /* Legacy SVGA3D is available once the D3D9 runtime is ready. */
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk);

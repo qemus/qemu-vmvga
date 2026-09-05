@@ -8368,11 +8368,15 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     }
 
     {
-        SVGA3dBox dirty = plan.region.clipped_box;
+        SVGA3dBox dirty = {
+            .x = plan.region.destination_x,
+            .y = plan.region.destination_y,
+            .z = plan.region.destination_z,
+            .w = plan.region.clipped_box.w,
+            .h = plan.region.clipped_box.h,
+            .d = plan.region.clipped_box.d,
+        };
 
-        dirty.x = plan.region.destination_x;
-        dirty.y = plan.region.destination_y;
-        dirty.z = plan.region.destination_z;
         (void)vmsvga3d_surface_changed_live(
             s, command->dstSid, plan.destination_subresource, &dirty);
     }

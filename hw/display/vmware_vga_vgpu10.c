@@ -8489,13 +8489,28 @@ static bool vmsvga3d_d3d10_present_blt_live(
 
     /* mode is intentionally ignored: VirtualBox always uses its fixed
      * anisotropic blitter and derives sRGB handling from the source format. */
-    return vmsvga3d_dxvk_d3d11_present_blt(
-        s->dxvk, source->dxvk_surface, command->srcSubResource,
-        source_format.dxgi_format, &source_box, &source_image->size,
-        vmsvga3d_d3d10_is_srgb_format(source_format.dxgi_format),
-        destination->dxvk_surface, command->destSubResource,
-        destination_format.dxgi_format, &destination_box,
-        &destination_image->size);
+    if (!vmsvga3d_dxvk_d3d11_present_blt(
+            s->dxvk, source->dxvk_surface, command->srcSubResource,
+            source_format.dxgi_format, &source_box, &source_image->size,
+            vmsvga3d_d3d10_is_srgb_format(source_format.dxgi_format),
+            destination->dxvk_surface, command->destSubResource,
+            destination_format.dxgi_format, &destination_box,
+            &destination_image->size)) {
+        return false;
+    }
+
+    if (command->dstSid == s->svga3d->active_screen_target_sid) {
+        SVGA3dRect rect = {
+            .x = destination_box.x,
+            .y = destination_box.y,
+            .w = destination_box.w,
+            .h = destination_box.h,
+        };
+
+        return vmsvga3d_present_screen_target_live(s, &rect);
+    }
+
+    return true;
 }
 
 typedef enum vmsvga3d_d3d10_query_poll_result_e {

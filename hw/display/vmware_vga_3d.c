@@ -5441,59 +5441,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_bind_entry(
 #include "vmware_vga_vgpu11.c"
 #include "vmware_vga_3d_state.c"
 
-static SVGACBStatus
-vmsvga3d_dx_command_buffer_process(struct vmsvga_state_s *s, uint32_t cid,
-                                   const void *commands, uint32_t size,
-                                   uint32_t *error_offset)
-{
-    const uint8_t *bytes = commands;
-    uint32_t offset = 0;
-
-    if (error_offset == NULL || (size != 0 && commands == NULL)) {
-        return SVGA_CB_STATUS_COMMAND_ERROR;
-    }
-    *error_offset = 0;
-
-    if (!vmsvga3d_d3d10_context_switch_live(s, cid)) {
-        return SVGA_CB_STATUS_COMMAND_ERROR;
-    }
-
-    while (offset < size) {
-        const uint32_t command_offset = offset;
-        uint32_t cmd;
-        uint32_t payload_size;
-        uint32_t remaining = size - offset;
-
-        if (remaining < sizeof(cmd)) {
-            *error_offset = command_offset;
-            return SVGA_CB_STATUS_COMMAND_ERROR;
-        }
-        memcpy(&cmd, bytes + offset, sizeof(cmd));
-        offset += sizeof(cmd);
-        remaining -= sizeof(cmd);
-
-        if (remaining < sizeof(payload_size)) {
-            *error_offset = command_offset;
-            return SVGA_CB_STATUS_COMMAND_ERROR;
-        }
-        memcpy(&payload_size, bytes + offset, sizeof(payload_size));
-        offset += sizeof(payload_size);
-        remaining -= sizeof(payload_size);
-
-        if (payload_size > remaining ||
-            !vmsvga3d_d3d10_command(s, cid, cmd, bytes + offset,
-                                    payload_size)) {
-            *error_offset = command_offset;
-            return SVGA_CB_STATUS_COMMAND_ERROR;
-        }
-        offset += payload_size;
-    }
-
-    *error_offset = offset;
-
-    return SVGA_CB_STATUS_COMPLETED;
-}
-
 static SVGACBStatus vmsvga3d_device_command_buffer_process(
     const void *commands, uint32_t size, uint32_t *error_offset)
 {
@@ -5676,19 +5623,22 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
         processed = header.offset + local_offset;
     } else if (context < SVGA_CB_CONTEXT_MAX) {
         uint32_t local_offset = 0;
+        uint32_t dx_context =
+            (header.flags & SVGA_CB_FLAG_DX_CONTEXT) != 0
+                ? header.dxContext
+                : SVGA3D_INVALID_ID;
 
-        if ((header.flags & SVGA_CB_FLAG_DX_CONTEXT) == 0) {
-            status = vmsvga_command_buffer_process_legacy(
-                s, commands != NULL ? commands + header.offset : NULL,
-                header.length - header.offset, &local_offset);
-            processed = header.offset + local_offset;
-        } else {
-            status = vmsvga3d_dx_command_buffer_process(
-                s, header.dxContext,
-                commands != NULL ? commands + header.offset : NULL,
-                header.length - header.offset, &local_offset);
-            processed = header.offset + local_offset;
-        }
+        /*
+         * COMMAND_BUFFERS_2 carries the normal SVGA command stream.  The
+         * DX_CONTEXT flag supplies metadata for DX commands in that stream;
+         * it does not select a different command encoding.  Use one parser
+         * for both flagged and unflagged buffers, like VirtualBox does.
+         */
+        status = vmsvga_command_buffer_process(
+            s, dx_context,
+            commands != NULL ? commands + header.offset : NULL,
+            header.length - header.offset, &local_offset);
+        processed = header.offset + local_offset;
     } else {
         status = SVGA_CB_STATUS_QUEUE_FULL;
     }
@@ -7881,9 +7831,9 @@ static const char *vmsvga3d_trace_command_path(uint32_t cmd)
 }
 
 static const char *vmsvga3d_trace_command_action(
-    const VMSVGA3DCommandInfo *info)
+    uint32_t cmd, const VMSVGA3DCommandInfo *info)
 {
-    if (info->handler != NULL) {
+    if (info->handler != NULL || vmsvga3d_is_dx_command(cmd)) {
         return "HANDLE";
     }
 
@@ -7894,7 +7844,36 @@ static const char *vmsvga3d_trace_command_action(
     return "DISCARD";
 }
 
-static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
+static bool vmsvga3d_fifo_dx_command(struct vmsvga_state_s *s,
+                                      uint32_t dx_context, uint32_t cmd,
+                                      int32_t *len, uint32_t fifo_start)
+{
+    void *payload;
+    uint32_t size;
+
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (!vmsvga3d_d3d10_command(s, dx_context, cmd, payload, size)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "3D-DX-UNHANDLED name=%s id=%u cid=%u fifo=0x%08x",
+            vmsvga3d_command_info(cmd) != NULL
+                ? vmsvga3d_command_info(cmd)->name
+                : "UNKNOWN",
+            cmd, dx_context, fifo_start);
+        g_free(payload);
+        vmsvga3d_fifo_rewind(s, len, fifo_start);
+        return true;
+    }
+
+    g_free(payload);
+    return true;
+}
+
+static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
+                                   uint32_t dx_context, uint32_t cmd,
                                    int32_t *len, uint32_t fifo_start)
 {
     const VMSVGA3DCommandInfo *info;
@@ -7924,7 +7903,7 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
             cmd, info != NULL ? info->name : "UNKNOWN",
             payload_size == UINT32_MAX ? "INVALID/" : "",
             payload_size == UINT32_MAX ? 0 : payload_size,
-            info != NULL ? vmsvga3d_trace_command_action(info) : "STALL",
+            info != NULL ? vmsvga3d_trace_command_action(cmd, info) : "STALL",
             fifo_start, *len);
     }
 
@@ -7938,11 +7917,15 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s, uint32_t cmd,
             VMVGA_TRACE_3D,
             "3D-CMD path=%s name=%s id=%u action=%s fifo=0x%08x",
             vmsvga3d_trace_command_path(cmd), info->name, cmd,
-            vmsvga3d_trace_command_action(info), fifo_start);
+            vmsvga3d_trace_command_action(cmd, info), fifo_start);
     }
 
     if (info->handler != NULL) {
         return info->handler(s, cmd, len, fifo_start);
+    }
+
+    if (vmsvga3d_is_dx_command(cmd)) {
+        return vmsvga3d_fifo_dx_command(s, dx_context, cmd, len, fifo_start);
     }
 
     if (info->action == VMSVGA3D_COMMAND_STALL) {

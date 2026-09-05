@@ -286,6 +286,7 @@ struct vmsvga3d_state_s {
     uint32_t active_screen_target_sid;
     bool screen_target_dirty;
     SVGA3dRect screen_target_dirty_rect;
+    uint64_t screen_target_diag_seq;
     bool dx_context_ever_defined;
     size_t surface_bytes;
     size_t shader_bytes;
@@ -6855,6 +6856,135 @@ static bool vmsvga3d_gb_screen_target_entry_read(
                                 sizeof(*entry), entry, sizeof(*entry));
 }
 
+static uint32_t vmsvga3d_screen_target_diag_hash_extend(
+    uint32_t hash, const uint8_t *data, size_t size)
+{
+    size_t i;
+
+    for (i = 0; i < size; i++) {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+
+    return hash;
+}
+
+static void vmsvga3d_screen_target_diag_live(
+    struct vmsvga_state_s *s, uint32_t sid, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, const struct svga3d_surface_desc *desc,
+    const SVGA3dCopyRect *rect)
+{
+    uint8_t *screen_base;
+    size_t screen_size;
+    uint32_t screen_stride;
+    uint32_t source_hash = 2166136261u;
+    uint32_t scanout_hash = 2166136261u;
+    uint32_t source_nonzero = 0;
+    uint32_t scanout_nonzero = 0;
+    uint32_t source_bypp;
+    uint32_t row;
+    uint64_t source_offset;
+    uint64_t scanout_offset;
+    uint64_t source_end;
+    uint64_t scanout_end;
+    uint32_t source_first = 0;
+    uint32_t source_center = 0;
+    uint32_t scanout_first = 0;
+    uint32_t scanout_center = 0;
+    bool comparable;
+    uint64_t seq;
+
+    if (s == NULL || s->svga3d == NULL || surface == NULL || image == NULL ||
+        desc == NULL || rect == NULL || rect->w == 0 || rect->h == 0 ||
+        !vmsvga_trace_flight_enabled() ||
+        !vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride)) {
+        return;
+    }
+
+    seq = ++s->svga3d->screen_target_diag_seq;
+    if (seq > 16 && (seq & 63) != 0) {
+        return;
+    }
+
+    source_bypp = desc->bytes_per_block;
+    if (source_bypp == 0 || desc->block_size.width != 1 ||
+        desc->block_size.height != 1 || rect->srcx >= image->size.width ||
+        rect->srcy >= image->size.height || rect->x >= s->screen_width ||
+        rect->y >= s->screen_height ||
+        rect->w > image->size.width - rect->srcx ||
+        rect->h > image->size.height - rect->srcy ||
+        rect->w > s->screen_width - rect->x ||
+        rect->h > s->screen_height - rect->y) {
+        return;
+    }
+
+    source_offset = (uint64_t)rect->srcy * image->pitch +
+                    (uint64_t)rect->srcx * source_bypp;
+    scanout_offset = (uint64_t)rect->y * screen_stride +
+                     (uint64_t)rect->x * 4;
+    source_end = source_offset + (uint64_t)(rect->h - 1) * image->pitch +
+                 (uint64_t)rect->w * source_bypp;
+    scanout_end = scanout_offset + (uint64_t)(rect->h - 1) * screen_stride +
+                  (uint64_t)rect->w * 4;
+    if (source_end > image->data_size || scanout_end > screen_size) {
+        return;
+    }
+
+    for (row = 0; row < rect->h; row++) {
+        const uint8_t *source = image->data + source_offset +
+                                (uint64_t)row * image->pitch;
+        const uint8_t *scanout = screen_base + scanout_offset +
+                                 (uint64_t)row * screen_stride;
+        size_t source_bytes = (size_t)rect->w * source_bypp;
+        size_t scanout_bytes = (size_t)rect->w * 4;
+        size_t i;
+
+        source_hash = vmsvga3d_screen_target_diag_hash_extend(
+            source_hash, source, source_bytes);
+        scanout_hash = vmsvga3d_screen_target_diag_hash_extend(
+            scanout_hash, scanout, scanout_bytes);
+        for (i = 0; i < source_bytes; i++) {
+            source_nonzero += source[i] != 0;
+        }
+        for (i = 0; i < scanout_bytes; i++) {
+            scanout_nonzero += scanout[i] != 0;
+        }
+    }
+
+    source_first = (uint32_t)vmsvga3d_present_load_pixel(
+        image->data + source_offset, MIN(source_bypp, 4u));
+    scanout_first = (uint32_t)vmsvga3d_present_load_pixel(
+        screen_base + scanout_offset, 4);
+    {
+        uint32_t center_x = rect->w / 2;
+        uint32_t center_y = rect->h / 2;
+        const uint8_t *source = image->data + source_offset +
+                                (uint64_t)center_y * image->pitch +
+                                (uint64_t)center_x * source_bypp;
+        const uint8_t *scanout = screen_base + scanout_offset +
+                                 (uint64_t)center_y * screen_stride +
+                                 (uint64_t)center_x * 4;
+
+        source_center = (uint32_t)vmsvga3d_present_load_pixel(
+            source, MIN(source_bypp, 4u));
+        scanout_center = (uint32_t)vmsvga3d_present_load_pixel(scanout, 4);
+    }
+
+    comparable = source_bypp == 4 &&
+                 (surface->format == SVGA3D_X8R8G8B8 ||
+                  surface->format == SVGA3D_A8R8G8B8);
+    fprintf(stderr,
+            "VMVGA-3D-SCANOUT seq=%" PRIu64 " sid=%u format=%u "
+            "rect=%u,%u-%ux%u renderer-hash=0x%08x renderer-nonzero=%u "
+            "scanout-hash=0x%08x scanout-nonzero=%u comparable=%u match=%u "
+            "renderer-p0=0x%08x renderer-pc=0x%08x "
+            "scanout-p0=0x%08x scanout-pc=0x%08x\n",
+            seq, sid, surface->format, rect->x, rect->y, rect->w, rect->h,
+            source_hash, source_nonzero, scanout_hash, scanout_nonzero,
+            comparable, comparable && source_hash == scanout_hash,
+            source_first, source_center, scanout_first, scanout_center);
+}
+
 static bool vmsvga3d_screen_target_present_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dRect *rect)
@@ -6907,7 +7037,15 @@ static bool vmsvga3d_screen_target_present_live(
         return false;
     }
 
-    return vmsvga3d_present_screen_rect(s, surface, image, desc, &copy, true);
+    if (!vmsvga3d_present_screen_rect(s, surface, image, desc, &copy, true)) {
+        return false;
+    }
+
+    /* image contains the renderer readback; screen storage contains QEMU's
+     * post-copy scanout.  Comparing them localizes black frames to either side
+     * of the renderer-to-frontend handoff without changing presentation. */
+    vmsvga3d_screen_target_diag_live(s, sid, surface, image, desc, &copy);
+    return true;
 }
 
 static bool vmsvga3d_screen_target_mark_dirty_live(
@@ -7505,6 +7643,55 @@ static bool vmsvga3d_handle_bind_gb_surface(struct vmsvga_state_s *s,
     return true;
 }
 
+static bool vmsvga3d_handle_cond_bind_gb_surface(
+    struct vmsvga_state_s *s, uint32_t cmd, int32_t *len,
+    uint32_t fifo_start)
+{
+    const SVGA3dCmdCondBindGBSurface *body;
+    struct vmsvga3d_state_s *state;
+    SVGAOTableSurfaceEntry entry;
+    SVGAMobId old_mobid;
+    void *payload;
+    uint32_t size;
+
+    (void)cmd;
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size < sizeof(*body)) {
+        g_free(payload);
+        return true;
+    }
+
+    body = payload;
+    state = s != NULL ? s->svga3d : NULL;
+    if (state != NULL &&
+        (body->mobid == SVGA3D_INVALID_ID ||
+         vmsvga3d_otable_index_valid(&state->otables[SVGA_OTABLE_MOB],
+                                      body->mobid,
+                                      sizeof(SVGAOTableMobEntry))) &&
+        vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, body->sid,
+                             sizeof(entry), &entry, sizeof(entry))) {
+        old_mobid = le32_to_cpu(entry.mobid);
+        if (old_mobid == body->testMobid && old_mobid != body->mobid) {
+            if (body->flags & SVGA3D_COND_BIND_GB_SURFACE_FLAG_READBACK) {
+                (void)vmsvga3d_gb_surface_transfer_live(s, body->sid, true);
+            }
+            if (body->flags & SVGA3D_COND_BIND_GB_SURFACE_FLAG_UPDATE) {
+                (void)vmsvga3d_gb_surface_transfer_live(s, body->sid, false);
+            }
+
+            entry.mobid = cpu_to_le32(body->mobid);
+            (void)vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, body->sid,
+                                        sizeof(entry), &entry, sizeof(entry));
+        }
+    }
+
+    g_free(payload);
+    return true;
+}
+
 static bool vmsvga3d_handle_dx_context_lifecycle(
     struct vmsvga_state_s *s, uint32_t cmd, int32_t *len,
     uint32_t fifo_start)
@@ -7660,7 +7847,8 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_SURFACE, vmsvga3d_handle_define_gb_surface),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DESTROY_GB_SURFACE, vmsvga3d_handle_destroy_gb_surface),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_BIND_GB_SURFACE, vmsvga3d_handle_bind_gb_surface),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_COND_BIND_GB_SURFACE),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_COND_BIND_GB_SURFACE,
+                     vmsvga3d_handle_cond_bind_gb_surface),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_UPDATE_GB_IMAGE, vmsvga3d_handle_gb_surface_sync),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_UPDATE_GB_SURFACE, vmsvga3d_handle_gb_surface_sync),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_READBACK_GB_IMAGE, vmsvga3d_handle_gb_surface_sync),

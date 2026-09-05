@@ -6362,6 +6362,9 @@ vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
     vmsvga3d_d3d10_pipeline_input_layout_realize_live(s, cid);
 }
 
+static void vmsvga3d_d3d10_bound_rtvs_changed_live(
+    struct vmsvga_state_s *s, uint32_t cid, VMSVGA3DDXContext *context);
+
 static void vmsvga3d_d3d10_post_draw_live(VMSVGA3DDXContext *context)
 {
     if (context == NULL) {
@@ -6457,6 +6460,9 @@ static bool vmsvga3d_d3d10_draw_live(
             s->dxvk, vertex_count, start_vertex_location);
     }
 
+    if (success) {
+        vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
+    }
     vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
@@ -6578,6 +6584,9 @@ static bool vmsvga3d_d3d10_draw_indexed_live(
             s->dxvk, index_count, start_index_location, base_vertex_location);
     }
 
+    if (success) {
+        vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
+    }
     vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
@@ -6604,6 +6613,9 @@ static bool vmsvga3d_d3d10_draw_instanced_live(
         s->dxvk, vertex_count_per_instance, instance_count,
         start_vertex_location, start_instance_location);
 
+    if (success) {
+        vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
+    }
     vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
@@ -6629,6 +6641,9 @@ static bool vmsvga3d_d3d10_draw_indexed_instanced_live(
         s->dxvk, index_count_per_instance, instance_count,
         start_index_location, base_vertex_location, start_instance_location);
 
+    if (success) {
+        vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
+    }
     vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
@@ -6649,6 +6664,9 @@ static bool vmsvga3d_d3d10_draw_auto_live(
      */
     success = vmsvga3d_dxvk_d3d11_draw_auto(s->dxvk);
 
+    if (success) {
+        vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
+    }
     vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
@@ -7799,6 +7817,110 @@ static bool vmsvga3d_d3d10_invalidate_subresource_live(
     return true;
 }
 
+static bool vmsvga3d_d3d10_surface_changed_full_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource)
+{
+    VMSVGA3DSurface *surface;
+    SVGA3dBox box;
+
+    if (s == NULL || s->svga3d == NULL || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[sid];
+    if (surface == NULL || surface->mips == NULL ||
+        subresource >= surface->mip_count) {
+        return false;
+    }
+
+    memset(&box, 0, sizeof(box));
+    box.w = surface->mips[subresource].size.width;
+    box.h = surface->mips[subresource].size.height;
+    box.d = surface->mips[subresource].size.depth;
+    if (box.w == 0 || box.h == 0 || box.d == 0) {
+        return true;
+    }
+
+    return vmsvga3d_surface_changed_live(s, sid, subresource, &box);
+}
+
+static bool vmsvga3d_d3d10_rtv_changed_live(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dRenderTargetViewId view_id)
+{
+    SVGACOTableDXRTViewEntry *entry;
+    VMSVGA3DSurface *surface;
+    uint32_t subresource = 0;
+    uint32_t levels;
+
+    if (view_id == SVGA3D_INVALID_ID) {
+        return true;
+    }
+    if (s == NULL || s->svga3d == NULL) {
+        return false;
+    }
+
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_RTVIEW, view_id);
+    if (entry == NULL || entry->sid == SVGA3D_INVALID_ID ||
+        entry->sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[entry->sid];
+    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
+        return false;
+    }
+
+    levels = surface->face[0].numMipLevels;
+    switch (entry->resourceDimension) {
+    case SVGA3D_RESOURCE_BUFFER:
+        subresource = 0;
+        break;
+    case SVGA3D_RESOURCE_TEXTURE1D:
+    case SVGA3D_RESOURCE_TEXTURE2D:
+        if (levels == 0) {
+            return false;
+        }
+        if (surface->array_elements <= 1) {
+            subresource = entry->desc.tex.mipSlice;
+        } else {
+            if (entry->desc.tex.firstArraySlice >
+                (UINT32_MAX - entry->desc.tex.mipSlice) / levels) {
+                return false;
+            }
+            subresource = entry->desc.tex.firstArraySlice * levels +
+                          entry->desc.tex.mipSlice;
+        }
+        break;
+    case SVGA3D_RESOURCE_TEXTURE3D:
+        subresource = entry->desc.tex3D.mipSlice;
+        break;
+    case SVGA3D_RESOURCE_TEXTURECUBE:
+        subresource = entry->desc.tex.mipSlice;
+        break;
+    default:
+        return true;
+    }
+
+    return vmsvga3d_d3d10_surface_changed_full_live(
+        s, entry->sid, subresource);
+}
+
+static void vmsvga3d_d3d10_bound_rtvs_changed_live(
+    struct vmsvga_state_s *s, uint32_t cid, VMSVGA3DDXContext *context)
+{
+    uint32_t slot;
+
+    if (context == NULL) {
+        return;
+    }
+
+    for (slot = 0; slot < SVGA3D_DX_MAX_RENDER_TARGETS; slot++) {
+        (void)vmsvga3d_d3d10_rtv_changed_live(
+            s, cid, context->shadow.renderState.renderTargetViewIds[slot]);
+    }
+}
+
 static bool vmsvga3d_d3d10_update_subresource_live(
     struct vmsvga_state_s *s, const SVGA3dCmdDXUpdateSubResource *command)
 {
@@ -7878,9 +8000,15 @@ static bool vmsvga3d_d3d10_update_subresource_live(
     native_box.bottom = layout.box.y + layout.box.h;
     native_box.back = layout.box.z + layout.box.d;
 
-    return vmsvga3d_dxvk_d3d11_update_subresource(
-        s->dxvk, surface->dxvk_surface, command->subResource, &native_box,
-        image->data + layout.box_offset, image->pitch, image->plane_size);
+    if (!vmsvga3d_dxvk_d3d11_update_subresource(
+            s->dxvk, surface->dxvk_surface, command->subResource, &native_box,
+            image->data + layout.box_offset, image->pitch, image->plane_size)) {
+        return false;
+    }
+
+    (void)vmsvga3d_surface_changed_live(
+        s, command->sid, command->subResource, &layout.box);
+    return true;
 }
 
 static bool vmsvga3d_d3d10_readback_image_live(
@@ -8081,6 +8209,9 @@ static bool vmsvga3d_d3d10_buffer_copy_live(
         s->dxvk, destination->dxvk_surface, 0, &native_box,
         destination_image->data, destination_image->pitch,
         destination_image->plane_size);
+    if (update_ok) {
+        (void)vmsvga3d_d3d10_surface_changed_full_live(s, command->dest, 0);
+    }
 
     return copy_ok && update_ok;
 }
@@ -8176,6 +8307,10 @@ static bool vmsvga3d_d3d10_transfer_from_buffer_live(
         s->dxvk, destination->dxvk_surface, command->destSubResource,
         &native_box, destination_image->data + layout.box_offset,
         destination_image->pitch, destination_image->plane_size);
+    if (update_ok) {
+        (void)vmsvga3d_surface_changed_live(
+            s, command->destSid, command->destSubResource, &layout.box);
+    }
 
     return copy_ok && update_ok;
 }
@@ -8224,11 +8359,24 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         return false;
     }
 
-    return vmsvga3d_dxvk_d3d11_copy_subresource_region(
-        s->dxvk, destination->dxvk_surface, plan.destination_subresource,
-        plan.region.destination_x, plan.region.destination_y,
-        plan.region.destination_z, source->dxvk_surface,
-        plan.source_subresource, &plan.region.source_box);
+    if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
+            s->dxvk, destination->dxvk_surface, plan.destination_subresource,
+            plan.region.destination_x, plan.region.destination_y,
+            plan.region.destination_z, source->dxvk_surface,
+            plan.source_subresource, &plan.region.source_box)) {
+        return false;
+    }
+
+    {
+        SVGA3dBox dirty = plan.region.clipped_box;
+
+        dirty.x = plan.region.destination_x;
+        dirty.y = plan.region.destination_y;
+        dirty.z = plan.region.destination_z;
+        (void)vmsvga3d_surface_changed_live(
+            s, command->dstSid, plan.destination_subresource, &dirty);
+    }
+    return true;
 }
 
 static bool vmsvga3d_d3d10_pred_copy_live(
@@ -8266,8 +8414,13 @@ static bool vmsvga3d_d3d10_pred_copy_live(
         return false;
     }
 
-    return vmsvga3d_dxvk_d3d11_copy_resource(
-        s->dxvk, destination->dxvk_surface, source->dxvk_surface);
+    if (!vmsvga3d_dxvk_d3d11_copy_resource(
+            s->dxvk, destination->dxvk_surface, source->dxvk_surface)) {
+        return false;
+    }
+
+    (void)vmsvga3d_d3d10_surface_changed_full_live(s, command->dstSid, 0);
+    return true;
 }
 
 static bool vmsvga3d_d3d10_resolve_copy_live(
@@ -8303,10 +8456,16 @@ static bool vmsvga3d_d3d10_resolve_copy_live(
      * behavior, including DXGI_FORMAT_UNKNOWN for an unmapped format. */
     resolve_format = vmsvga3d_d3d10_surface_format(command->copyFormat);
 
-    return vmsvga3d_dxvk_d3d11_resolve_subresource(
-        s->dxvk, destination->dxvk_surface, command->dstSubResource,
-        source->dxvk_surface, command->srcSubResource,
-        resolve_format.dxgi_format);
+    if (!vmsvga3d_dxvk_d3d11_resolve_subresource(
+            s->dxvk, destination->dxvk_surface, command->dstSubResource,
+            source->dxvk_surface, command->srcSubResource,
+            resolve_format.dxgi_format)) {
+        return false;
+    }
+
+    (void)vmsvga3d_d3d10_surface_changed_full_live(
+        s, command->dstSid, command->dstSubResource);
+    return true;
 }
 
 static bool vmsvga3d_d3d10_gen_mips_live(
@@ -8365,8 +8524,13 @@ static bool vmsvga3d_d3d10_clear_rtv_live(
         return false;
     }
 
-    return vmsvga3d_dxvk_d3d11_clear_render_target_view(
-        s->dxvk, cid, clear_plan.view_id, clear_plan.color);
+    if (!vmsvga3d_dxvk_d3d11_clear_render_target_view(
+            s->dxvk, cid, clear_plan.view_id, clear_plan.color)) {
+        return false;
+    }
+
+    (void)vmsvga3d_d3d10_rtv_changed_live(s, cid, clear_plan.view_id);
+    return true;
 }
 
 static bool vmsvga3d_d3d10_clear_dsv_live(

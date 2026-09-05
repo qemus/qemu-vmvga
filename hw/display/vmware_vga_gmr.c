@@ -1756,30 +1756,27 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         (void)scanout_size;
         (void)scanout_stride;
 
-        if (scanout_bound) {
-            if (vmsvga_trace_flight_enabled()) {
-                uint64_t seq = s->trace_now.gmrfb_to_screen + 1;
+        if (scanout_bound && vmsvga_trace_flight_enabled()) {
+            uint64_t seq = s->trace_now.gmrfb_to_screen + 1;
 
-                s->trace_now.damage_rects++;
-                s->trace_activity_seq++;
-                if (seq <= 16 || (seq & 63) == 0) {
-                    fprintf(stderr,
-                            "VMVGA-SCREEN-DAMAGE seq=%" PRIu64 " surface=%p data=%p "
-                            "size=%dx%d stride=%d scanout=%p scanout-match=%u "
-                            "rect=%" PRId64 ",%" PRId64 "-%" PRId64 ",%" PRId64
-                            " handoff=%u bound=%u\n",
-                            seq, (void *)surface, (void *)surface_data(surface),
-                            surface_width(surface), surface_height(surface),
-                            surface_stride(surface), (void *)scanout_base,
-                            surface_data(surface) == scanout_base, left, top, right,
-                            bottom, s->screen_handoff_active, s->svga_surface_bound);
-                }
+            s->trace_now.damage_rects++;
+            s->trace_activity_seq++;
+            if (seq <= 16 || (seq & 63) == 0) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-DAMAGE seq=%" PRIu64 " surface=%p data=%p "
+                        "size=%dx%d stride=%d scanout=%p scanout-match=%u "
+                        "rect=%" PRId64 ",%" PRId64 "-%" PRId64 ",%" PRId64
+                        " handoff=%u bound=%u queued=1\n",
+                        seq, (void *)surface, (void *)surface_data(surface),
+                        surface_width(surface), surface_height(surface),
+                        surface_stride(surface), (void *)scanout_base,
+                        surface_data(surface) == scanout_base, left, top, right,
+                        bottom, s->screen_handoff_active, s->svga_surface_bound);
             }
-            vmvga_console_update(s->vga.con, (uint32_t)left, (uint32_t)top,
-                                 width, height);
-        } else {
-            vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
         }
+
+        /* Keep vmsvga_update_display() as the single frontend refresh point. */
+        vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
     }
 
     return true;

@@ -1586,8 +1586,8 @@ static bool vmsvga_screen_gmrfb_rect_is_zero(
 static bool vmsvga_screen_blit_one_from_gmrfb(
     struct vmsvga_state_s *s, int32_t src_x, int32_t src_y,
     int32_t dst_left, int32_t dst_top, int32_t dst_right,
-    int32_t dst_bottom, bool preserve_handoff_self_present,
-    bool *preserved_self_present)
+    int32_t dst_bottom, bool preserve_handoff_present,
+    bool *preserved_handoff_present)
 {
     uint32_t bpp, depth, bypp;
     int64_t left = dst_left;
@@ -1610,8 +1610,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
     uint32_t trace_changed_rows;
     bool self_present;
 
-    if (preserved_self_present != NULL) {
-        *preserved_self_present = false;
+    if (preserved_handoff_present != NULL) {
+        *preserved_handoff_present = false;
     }
 
     if (!vmsvga_screen_base_layer_storage(
@@ -1664,9 +1664,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
 
     self_present = vmsvga_screen_is_direct_self_present(
         s, source_x, source_y, left, top, bypp);
-    preserve_handoff_self_present &= self_present;
-    if (preserved_self_present != NULL) {
-        *preserved_self_present = preserve_handoff_self_present;
+    if (preserved_handoff_present != NULL) {
+        *preserved_handoff_present = preserve_handoff_present;
     }
 
     trace_blit = vmsvga_trace_flight_enabled() &&
@@ -1736,12 +1735,12 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
             }
 
             if (self_present) {
-                if (mirror_dst != NULL && !preserve_handoff_self_present) {
+                if (mirror_dst != NULL && !preserve_handoff_present) {
                     memcpy(mirror_dst, s->blit_scratch, (size_t)width * 4);
                 }
             } else {
                 vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
-                if (mirror_dst != NULL) {
+                if (mirror_dst != NULL && !preserve_handoff_present) {
                     memcpy(mirror_dst, dst, (size_t)width * 4);
                 }
             }
@@ -1753,12 +1752,12 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
             }
         } else {
             if (self_present) {
-                if (mirror_dst != NULL && !preserve_handoff_self_present) {
+                if (mirror_dst != NULL && !preserve_handoff_present) {
                     memcpy(mirror_dst, s->blit_scratch, (size_t)width * 4);
                 }
             } else {
                 vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
-                if (mirror_dst != NULL) {
+                if (mirror_dst != NULL && !preserve_handoff_present) {
                     memcpy(mirror_dst, dst, (size_t)width * 4);
                 }
             }
@@ -1772,7 +1771,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
                 "rows=%u width=%u before=0x%08x source-hash=0x%08x "
                 "after=0x%08x source-nonzero-rows=%u changed-rows=%u\n",
                 s->trace_now.gmrfb_to_screen + 1,
-                preserve_handoff_self_present
+                preserve_handoff_present
                     ? "handoff-preserve"
                     : (mirror_base != NULL
                            ? "handoff-mirror"
@@ -1847,8 +1846,8 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
     int32_t local_bottom;
     bool ok;
     bool full_present;
-    bool preserve_same_backing_full;
-    bool preserved_self_present;
+    bool preserve_empty_full;
+    bool preserved_handoff_present;
 
     if (!s->screen_defined || src_origin == NULL || dest_rect == NULL) {
         VMSVGA_SCREEN_REJECT(
@@ -1918,18 +1917,19 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
                    local_right >= (int32_t)s->screen_width &&
                    local_bottom >= (int32_t)s->screen_height;
 
-    preserve_same_backing_full = false;
+    preserve_empty_full = false;
 
     /*
-     * During a same-backing handoff the Windows SVGA driver can issue several
-     * exact full-screen self-present notifications before it has populated the
-     * BAR1 backing with the new frame. Judge every such notification by the
-     * actual source contents: keep an all-zero backing hidden behind the seeded
-     * transition mirror, but let the first populated frame through immediately
-     * and complete the handoff. Outside an active handoff, intentional black
-     * frames are never suppressed.
+     * Windows can switch GMRFB buffers while a Screen handoff is active.  The
+     * replacement buffer may still be entirely zero even though it is no
+     * longer the Screen backing itself.  Judge every exact full-screen GMRFB
+     * presentation by its actual source contents: update the backing as the
+     * command requires, but keep an all-zero frame hidden behind the seeded
+     * transition mirror.  The first populated full-screen frame is copied to
+     * both backing and mirror and then completes the handoff.  Outside an
+     * active handoff, intentional black frames are never suppressed.
      */
-    if (s->screen_handoff_active && s->screen_handoff_same_backing &&
+    if (s->screen_handoff_active &&
         local_left == 0 && local_top == 0 &&
         local_right == (int32_t)s->screen_width &&
         local_bottom == (int32_t)s->screen_height &&
@@ -1938,31 +1938,28 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
         bool source_is_zero;
 
         if (vmsvga_screen_format_decode(
-                s->gmrfb_format, &bpp, &depth, &bypp) &&
-            vmsvga_screen_is_direct_self_present(
-                s, src_origin->x, src_origin->y,
-                local_left, local_top, bypp)) {
+                s->gmrfb_format, &bpp, &depth, &bypp)) {
             if (!vmsvga_screen_gmrfb_rect_is_zero(
                     s, src_origin->x, src_origin->y,
                     s->screen_width, s->screen_height, bypp,
                     &source_is_zero)) {
                 return false;
             }
-            preserve_same_backing_full = source_is_zero;
+            preserve_empty_full = source_is_zero;
         }
     }
 
     ok = vmsvga_screen_blit_one_from_gmrfb(
         s, src_origin->x, src_origin->y, local_left, local_top,
-        local_right, local_bottom, preserve_same_backing_full,
-        &preserved_self_present);
+        local_right, local_bottom, preserve_empty_full,
+        &preserved_handoff_present);
 
-    if (ok && preserved_self_present) {
+    if (ok && preserved_handoff_present) {
         s->screen_handoff_skipped_same_backing_full = true;
     }
 
     if (ok && s->screen_handoff_active &&
-        !preserved_self_present && full_present) {
+        !preserved_handoff_present && full_present) {
         s->screen_handoff_active = false;
         s->screen_handoff_same_backing = false;
         s->screen_handoff_skipped_same_backing_full = false;

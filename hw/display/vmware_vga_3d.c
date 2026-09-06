@@ -1580,9 +1580,10 @@ static bool vmsvga3d_gb_surface_define_live(
 
     multisample_quality = MIN(MAX(multisample_quality,
                                   (uint32_t)SVGA3D_MS_QUALITY_MIN),
-                              (uint32_t)SVGA3D_MS_QUALITY_MAX);
+                                  (uint32_t)SVGA3D_MS_QUALITY_MAX);
 
     memset(&entry, 0, sizeof(entry));
+ 
     entry.format = cpu_to_le32(format);
     entry.surface1Flags = cpu_to_le32((uint32_t)surface_flags);
     entry.numMipLevels = cpu_to_le32(num_mip_levels);
@@ -1649,7 +1650,8 @@ static bool vmsvga3d_gb_surface_define_live(
                              mip_sizes, mip_count);
     if (sid < SVGA3D_MAX_SURFACE_IDS && s->svga3d->surfaces[sid] != NULL) {
         s->svga3d->surfaces[sid]->multisample_quality = multisample_quality;
-        s->svga3d->surfaces[sid]->buffer_byte_stride = buffer_byte_stride;
+        s->svga3d->surfaces[sid]->buffer_byte_stride =
+            (uint16_t)buffer_byte_stride;
     }
     g_free(mip_sizes);
 
@@ -5227,9 +5229,8 @@ static bool vmsvga3d_d3d11_readback_surface_image(
     depth_count = image->data_size / image->plane_size;
 
     return vmsvga3d_dxvk_d3d11_readback_subresource(
-        s->dxvk, surface->dxvk_surface, subresource, NULL, image->data,
-        image->pitch, image->pitch, row_count, image->plane_size,
-        depth_count);
+        s->dxvk, surface->dxvk_surface, subresource, image->data, image->pitch,
+        image->pitch, row_count, image->plane_size, depth_count);
 }
 
 static bool vmsvga3d_surface_dma_d3d11_upload_box(

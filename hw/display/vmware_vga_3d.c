@@ -244,6 +244,7 @@ typedef struct vmsvga3d_dx_context_s {
 } VMSVGA3DDXContext;
 
 #define VMSVGA3D_MAX_MIP_LEVELS 16
+#define VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS 32
 
 typedef struct vmsvga3d_surface_image_s {
     SVGA3dSize size;
@@ -286,8 +287,8 @@ struct vmsvga3d_state_s {
     GHashTable *mobs;
     uint32_t active_dx_context_id;
     uint32_t active_screen_target_sid;
-    bool screen_target_dirty;
-    SVGA3dRect screen_target_dirty_rect;
+    uint32_t screen_target_dirty_count;
+    SVGA3dRect screen_target_dirty_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
     bool dx_context_ever_defined;
     size_t surface_bytes;
     size_t shader_bytes;
@@ -7062,17 +7063,125 @@ static bool vmsvga3d_screen_target_present_live(
     return true;
 }
 
+static uint64_t vmsvga3d_screen_target_rect_area(const SVGA3dRect *rect)
+{
+    return (uint64_t)rect->w * rect->h;
+}
+
+static bool vmsvga3d_screen_target_rect_contains(
+    const SVGA3dRect *outer, const SVGA3dRect *inner)
+{
+    uint64_t outer_right = (uint64_t)outer->x + outer->w;
+    uint64_t outer_bottom = (uint64_t)outer->y + outer->h;
+    uint64_t inner_right = (uint64_t)inner->x + inner->w;
+    uint64_t inner_bottom = (uint64_t)inner->y + inner->h;
+
+    return inner->x >= outer->x && inner->y >= outer->y &&
+           inner_right <= outer_right && inner_bottom <= outer_bottom;
+}
+
+static SVGA3dRect vmsvga3d_screen_target_rect_union(
+    const SVGA3dRect *a, const SVGA3dRect *b)
+{
+    uint64_t left = MIN((uint64_t)a->x, (uint64_t)b->x);
+    uint64_t top = MIN((uint64_t)a->y, (uint64_t)b->y);
+    uint64_t right = MAX(
+        MIN((uint64_t)UINT32_MAX + 1, (uint64_t)a->x + a->w),
+        MIN((uint64_t)UINT32_MAX + 1, (uint64_t)b->x + b->w));
+    uint64_t bottom = MAX(
+        MIN((uint64_t)UINT32_MAX + 1, (uint64_t)a->y + a->h),
+        MIN((uint64_t)UINT32_MAX + 1, (uint64_t)b->y + b->h));
+    SVGA3dRect merged = {
+        .x = (uint32_t)left,
+        .y = (uint32_t)top,
+        .w = (uint32_t)MIN(right - left, (uint64_t)UINT32_MAX),
+        .h = (uint32_t)MIN(bottom - top, (uint64_t)UINT32_MAX),
+    };
+
+    return merged;
+}
+
+static uint64_t vmsvga3d_screen_target_area_add(uint64_t a, uint64_t b)
+{
+    return a > UINT64_MAX - b ? UINT64_MAX : a + b;
+}
+
+static bool vmsvga3d_screen_target_merge_is_efficient(
+    const SVGA3dRect *a, const SVGA3dRect *b, const SVGA3dRect *merged)
+{
+    uint64_t combined_area = vmsvga3d_screen_target_area_add(
+        vmsvga3d_screen_target_rect_area(a),
+        vmsvga3d_screen_target_rect_area(b));
+    uint64_t merged_area = vmsvga3d_screen_target_rect_area(merged);
+    uint64_t allowance = combined_area / 4;
+    uint64_t limit = vmsvga3d_screen_target_area_add(combined_area, allowance);
+
+    /*
+     * A small amount of overdraw is cheaper than an extra GPU readback/map,
+     * but keep genuinely sparse updates separate.  This allows nearby damage
+     * to merge while preventing distant rectangles from becoming a near-full
+     * screen bounding box.
+     */
+    return merged_area <= limit;
+}
+
+static void vmsvga3d_screen_target_merge_cheapest_pair(
+    struct vmsvga3d_state_s *state)
+{
+    uint32_t best_i = 0;
+    uint32_t best_j = 1;
+    uint64_t best_cost = UINT64_MAX;
+    uint64_t best_area = UINT64_MAX;
+    uint32_t i;
+    uint32_t j;
+
+    if (state->screen_target_dirty_count < 2) {
+        return;
+    }
+
+    for (i = 0; i < state->screen_target_dirty_count; i++) {
+        for (j = i + 1; j < state->screen_target_dirty_count; j++) {
+            const SVGA3dRect *a = &state->screen_target_dirty_rects[i];
+            const SVGA3dRect *b = &state->screen_target_dirty_rects[j];
+            SVGA3dRect merged = vmsvga3d_screen_target_rect_union(a, b);
+            uint64_t merged_area =
+                vmsvga3d_screen_target_rect_area(&merged);
+            uint64_t combined_area = vmsvga3d_screen_target_area_add(
+                vmsvga3d_screen_target_rect_area(a),
+                vmsvga3d_screen_target_rect_area(b));
+            uint64_t cost = merged_area > combined_area
+                                ? merged_area - combined_area
+                                : 0;
+
+            if (cost < best_cost ||
+                (cost == best_cost && merged_area < best_area)) {
+                best_i = i;
+                best_j = j;
+                best_cost = cost;
+                best_area = merged_area;
+            }
+        }
+    }
+
+    state->screen_target_dirty_rects[best_i] =
+        vmsvga3d_screen_target_rect_union(
+            &state->screen_target_dirty_rects[best_i],
+            &state->screen_target_dirty_rects[best_j]);
+    state->screen_target_dirty_count--;
+    if (best_j != state->screen_target_dirty_count) {
+        state->screen_target_dirty_rects[best_j] =
+            state->screen_target_dirty_rects[state->screen_target_dirty_count];
+    }
+}
+
 static bool vmsvga3d_screen_target_mark_dirty_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dRect *rect)
 {
     struct vmsvga3d_state_s *state;
-    uint64_t left;
-    uint64_t top;
-    uint64_t right;
-    uint64_t bottom;
-    uint64_t old_right;
-    uint64_t old_bottom;
+    VMSVGA3DSurface *surface;
+    SVGA3dRect dirty;
+    uint32_t i;
 
     if (s == NULL || rect == NULL || s->svga3d == NULL) {
         return false;
@@ -7084,35 +7193,84 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
         return true;
     }
 
-    left = rect->x;
-    top = rect->y;
-    right = MIN((uint64_t)UINT32_MAX + 1, left + rect->w);
-    bottom = MIN((uint64_t)UINT32_MAX + 1, top + rect->h);
+    dirty = *rect;
+    surface = sid < SVGA3D_MAX_SURFACE_IDS ? state->surfaces[sid] : NULL;
+    if (surface != NULL && surface->mips != NULL && surface->mip_count != 0) {
+        uint32_t width = surface->mips[0].size.width;
+        uint32_t height = surface->mips[0].size.height;
 
-    if (!state->screen_target_dirty) {
-        state->screen_target_dirty_rect = *rect;
-        state->screen_target_dirty = true;
-        return true;
+        /* Damage wholly outside the active image has no visible effect. */
+        if (dirty.x >= width || dirty.y >= height) {
+            return true;
+        }
+
+        dirty.w = MIN(dirty.w, width - dirty.x);
+        dirty.h = MIN(dirty.h, height - dirty.y);
+        if (dirty.w == 0 || dirty.h == 0) {
+            return true;
+        }
+
+        if (dirty.x == 0 && dirty.y == 0 &&
+            dirty.w == width && dirty.h == height) {
+            /* A queued full-screen update already covers an identical one. */
+            if (state->screen_target_dirty_count == 1 &&
+                vmsvga3d_screen_target_rect_contains(
+                    &state->screen_target_dirty_rects[0], &dirty)) {
+                return true;
+            }
+
+            state->screen_target_dirty_count = 1;
+            state->screen_target_dirty_rects[0] = dirty;
+            return true;
+        }
     }
 
-    old_right = MIN((uint64_t)UINT32_MAX + 1,
-                    (uint64_t)state->screen_target_dirty_rect.x +
-                        state->screen_target_dirty_rect.w);
-    old_bottom = MIN((uint64_t)UINT32_MAX + 1,
-                     (uint64_t)state->screen_target_dirty_rect.y +
-                         state->screen_target_dirty_rect.h);
-    left = MIN(left, (uint64_t)state->screen_target_dirty_rect.x);
-    top = MIN(top, (uint64_t)state->screen_target_dirty_rect.y);
-    right = MAX(right, old_right);
-    bottom = MAX(bottom, old_bottom);
+retry_merge:
+    for (i = 0; i < state->screen_target_dirty_count; i++) {
+        SVGA3dRect merged;
 
-    state->screen_target_dirty_rect.x = (uint32_t)left;
-    state->screen_target_dirty_rect.y = (uint32_t)top;
-    state->screen_target_dirty_rect.w = (uint32_t)MIN(
-        right - left, (uint64_t)UINT32_MAX);
-    state->screen_target_dirty_rect.h = (uint32_t)MIN(
-        bottom - top, (uint64_t)UINT32_MAX);
+        /* Duplicate or fully covered damage needs no new readback. */
+        if (vmsvga3d_screen_target_rect_contains(
+                &state->screen_target_dirty_rects[i], &dirty)) {
+            return true;
+        }
 
+        /* A larger new rectangle supersedes any queued rectangle it covers. */
+        if (vmsvga3d_screen_target_rect_contains(
+                &dirty, &state->screen_target_dirty_rects[i])) {
+            state->screen_target_dirty_count--;
+            if (i != state->screen_target_dirty_count) {
+                state->screen_target_dirty_rects[i] =
+                    state->screen_target_dirty_rects[
+                        state->screen_target_dirty_count];
+            }
+            goto retry_merge;
+        }
+
+        merged = vmsvga3d_screen_target_rect_union(
+            &dirty, &state->screen_target_dirty_rects[i]);
+        if (!vmsvga3d_screen_target_merge_is_efficient(
+                &dirty, &state->screen_target_dirty_rects[i], &merged)) {
+            continue;
+        }
+
+        dirty = merged;
+        state->screen_target_dirty_count--;
+        if (i != state->screen_target_dirty_count) {
+            state->screen_target_dirty_rects[i] =
+                state->screen_target_dirty_rects[
+                    state->screen_target_dirty_count];
+        }
+        goto retry_merge;
+    }
+
+    if (state->screen_target_dirty_count ==
+        VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS) {
+        vmsvga3d_screen_target_merge_cheapest_pair(state);
+        goto retry_merge;
+    }
+
+    state->screen_target_dirty_rects[state->screen_target_dirty_count++] = dirty;
     return true;
 }
 
@@ -7142,25 +7300,35 @@ static bool vmsvga3d_surface_changed_live(
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
 {
     struct vmsvga3d_state_s *state;
-    SVGA3dRect rect;
+    SVGA3dRect rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    uint32_t rect_count;
     uint32_t sid;
+    uint32_t i;
 
     if (s == NULL || s->svga3d == NULL) {
         return true;
     }
 
     state = s->svga3d;
-    if (!state->screen_target_dirty) {
+    rect_count = state->screen_target_dirty_count;
+    if (rect_count == 0) {
         return true;
     }
 
     sid = state->active_screen_target_sid;
-    rect = state->screen_target_dirty_rect;
-    state->screen_target_dirty = false;
-    memset(&state->screen_target_dirty_rect, 0,
-           sizeof(state->screen_target_dirty_rect));
+    memcpy(rects, state->screen_target_dirty_rects,
+           rect_count * sizeof(rects[0]));
+    state->screen_target_dirty_count = 0;
+    memset(state->screen_target_dirty_rects, 0,
+           sizeof(state->screen_target_dirty_rects));
 
-    return vmsvga3d_screen_target_present_live(s, sid, 0, &rect);
+    for (i = 0; i < rect_count; i++) {
+        if (!vmsvga3d_screen_target_present_live(s, sid, 0, &rects[i])) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static bool vmsvga3d_gb_screen_target_update_live(

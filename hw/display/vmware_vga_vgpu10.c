@@ -7932,9 +7932,9 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
 
     if (sid == SVGA3D_INVALID_ID) {
         s->svga3d->active_screen_target_sid = sid;
-        s->svga3d->screen_target_dirty = false;
-        memset(&s->svga3d->screen_target_dirty_rect, 0,
-               sizeof(s->svga3d->screen_target_dirty_rect));
+        s->svga3d->screen_target_dirty_count = 0;
+        memset(s->svga3d->screen_target_dirty_rects, 0,
+               sizeof(s->svga3d->screen_target_dirty_rects));
         return true;
     }
 
@@ -7963,9 +7963,9 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     }
 
     s->svga3d->active_screen_target_sid = sid;
-    s->svga3d->screen_target_dirty = false;
-    memset(&s->svga3d->screen_target_dirty_rect, 0,
-           sizeof(s->svga3d->screen_target_dirty_rect));
+    s->svga3d->screen_target_dirty_count = 0;
+    memset(s->svga3d->screen_target_dirty_rects, 0,
+           sizeof(s->svga3d->screen_target_dirty_rects));
     return true;
 }
 

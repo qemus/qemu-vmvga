@@ -1538,6 +1538,43 @@ static bool vmsvga_screen_is_direct_self_readback(
            dest_origin->y == src_rect->top;
 }
 
+static bool vmsvga_screen_gmrfb_rect_is_zero(
+    struct vmsvga_state_s *s, int32_t src_x, int32_t src_y,
+    uint32_t width, uint32_t height, uint32_t bypp, bool *is_zero)
+{
+    uint32_t row;
+
+    if (is_zero == NULL || width == 0 || height == 0) {
+        return false;
+    }
+
+    *is_zero = false;
+
+    for (row = 0; row < height; row++) {
+        uint32_t gmr_offset;
+        size_t row_bytes;
+        size_t i;
+
+        if (!vmsvga_screen_gmrfb_row_offset(
+                s, src_x, src_y + (int32_t)row, width, bypp,
+                &gmr_offset, &row_bytes) ||
+            row_bytes > sizeof(s->blit_scratch) ||
+            !vmsvga_gmr_read(s, s->gmrfb_gmr_id, gmr_offset,
+                             s->blit_scratch, row_bytes)) {
+            return false;
+        }
+
+        for (i = 0; i < row_bytes; i++) {
+            if (s->blit_scratch[i] != 0) {
+                return true;
+            }
+        }
+    }
+
+    *is_zero = true;
+    return true;
+}
+
 static bool vmsvga_screen_blit_one_from_gmrfb(
     struct vmsvga_state_s *s, int32_t src_x, int32_t src_y,
     int32_t dst_left, int32_t dst_top, int32_t dst_right,
@@ -1877,6 +1914,45 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
         s->screen_handoff_active && s->screen_handoff_same_backing &&
         !s->screen_handoff_skipped_same_backing_full && full_present &&
         s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER;
+
+    /*
+     * The Windows SVGA driver can issue several exact full-screen self-present
+     * notifications before it has populated the same BAR1 backing with the new
+     * mode's pixels. The first such notification is already protected above;
+     * keep protecting subsequent all-zero notifications as well. Otherwise the
+     * seeded transition mirror is replaced by the untouched backing and the
+     * frontend visibly goes black until the first real frame arrives.
+     *
+     * Restrict this to an active same-backing handoff and an exact 32-bpp
+     * self-present. Once any source byte is non-zero, normal presentation and
+     * handoff completion resume. Outside a handoff, an intentional black frame
+     * is never suppressed.
+     */
+    if (!preserve_same_backing_full && s->screen_handoff_active &&
+        s->screen_handoff_same_backing &&
+        s->screen_handoff_skipped_same_backing_full &&
+        local_left == 0 && local_top == 0 &&
+        local_right == (int32_t)s->screen_width &&
+        local_bottom == (int32_t)s->screen_height &&
+        s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER) {
+        uint32_t bpp, depth, bypp;
+        bool source_is_zero;
+
+        if (vmsvga_screen_format_decode(
+                s->gmrfb_format, &bpp, &depth, &bypp) &&
+            vmsvga_screen_is_direct_self_present(
+                s, src_origin->x, src_origin->y,
+                local_left, local_top, bypp)) {
+            if (!vmsvga_screen_gmrfb_rect_is_zero(
+                    s, src_origin->x, src_origin->y,
+                    s->screen_width, s->screen_height, bypp,
+                    &source_is_zero)) {
+                return false;
+            }
+            preserve_same_backing_full = source_is_zero;
+        }
+    }
+
     ok = vmsvga_screen_blit_one_from_gmrfb(
         s, src_origin->x, src_origin->y, local_left, local_top,
         local_right, local_bottom, preserve_same_backing_full,

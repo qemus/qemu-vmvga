@@ -261,6 +261,7 @@ typedef enum vmsvga3d_d3d10_shader_component_type_e {
 typedef struct vmsvga3d_d3d10_shader_semantic_s {
     const char *semantic_name;
     uint32_t semantic_index;
+    uint32_t read_write_mask;
 } VMSVGA3DD3D10ShaderSemantic;
 
 /*

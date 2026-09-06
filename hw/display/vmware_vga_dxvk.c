@@ -430,6 +430,8 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INPUT_LAYOUT 78u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INDEX_BUFFER 80u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_GET_SHADER 82u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_GET_SHADER 98u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_GET_SHADER 102u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_RENDER_TARGETS 89u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_BLEND_STATE 91u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_STATE 94u
@@ -5575,6 +5577,8 @@ typedef struct vmsvga3d_dxvk_d3d11_blit_saved_state_s {
     void *input_layout;
     void *vs_constant_buffer;
     void *vs;
+    void *hs;
+    void *ds;
     void *gs;
     void *ps_srv;
     void *ps;
@@ -5594,7 +5598,8 @@ static void vmsvga3d_dxvk_d3d11_blit_release_saved(
 {
     void **single[] = {
         &saved->input_layout, &saved->vs_constant_buffer, &saved->vs,
-        &saved->gs, &saved->ps_srv, &saved->ps, &saved->ps_sampler,
+        &saved->hs, &saved->ds, &saved->gs, &saved->ps_srv, &saved->ps,
+        &saved->ps_sampler,
         &saved->rasterizer, &saved->blend, &saved->depth_stencil,
     };
     uint32_t i;
@@ -5869,7 +5874,8 @@ static bool vmsvga3d_dxvk_d3d11_blit_save(
     VMSVGA3DDxvkD3D11IAGetPrimitiveTopology get_topology = NULL;
     VMSVGA3DDxvkD3D11IAGetInputLayout get_layout = NULL;
     VMSVGA3DDxvkD3D11GetConstantBuffers get_vs_cb = NULL;
-    VMSVGA3DDxvkD3D11GetShader get_vs = NULL, get_gs = NULL, get_ps = NULL;
+    VMSVGA3DDxvkD3D11GetShader get_vs = NULL, get_hs = NULL, get_ds = NULL;
+    VMSVGA3DDxvkD3D11GetShader get_gs = NULL, get_ps = NULL;
     VMSVGA3DDxvkD3D11GetShaderResources get_ps_srv = NULL;
     VMSVGA3DDxvkD3D11GetSamplers get_ps_sampler = NULL;
     VMSVGA3DDxvkD3D11RSGetState get_rs = NULL;
@@ -5884,6 +5890,8 @@ static bool vmsvga3d_dxvk_d3d11_blit_save(
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INPUT_LAYOUT, get_layout) ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_CONSTANT_BUFFERS, get_vs_cb) ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_SHADER, get_vs) ||
+        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_GET_SHADER, get_hs) ||
+        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_GET_SHADER, get_ds) ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_GET_SHADER, get_gs) ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER_RESOURCES, get_ps_srv) ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER, get_ps) ||
@@ -5901,6 +5909,8 @@ static bool vmsvga3d_dxvk_d3d11_blit_save(
     get_layout(dxvk->d3d11_context, &saved->input_layout);
     get_vs_cb(dxvk->d3d11_context, 0, 1, &saved->vs_constant_buffer);
     get_vs(dxvk->d3d11_context, &saved->vs, NULL, NULL);
+    get_hs(dxvk->d3d11_context, &saved->hs, NULL, NULL);
+    get_ds(dxvk->d3d11_context, &saved->ds, NULL, NULL);
     get_gs(dxvk->d3d11_context, &saved->gs, NULL, NULL);
     get_ps_srv(dxvk->d3d11_context, 0, 1, &saved->ps_srv);
     get_ps(dxvk->d3d11_context, &saved->ps, NULL, NULL);
@@ -5923,7 +5933,8 @@ static bool vmsvga3d_dxvk_d3d11_blit_restore(
     VMSVGA3DDxvkD3D11IASetPrimitiveTopology set_topology = NULL;
     VMSVGA3DDxvkD3D11IASetInputLayout set_layout = NULL;
     VMSVGA3DDxvkD3D11SetConstantBuffers set_vs_cb = NULL;
-    VMSVGA3DDxvkD3D11SetShader set_vs = NULL, set_gs = NULL, set_ps = NULL;
+    VMSVGA3DDxvkD3D11SetShader set_vs = NULL, set_hs = NULL, set_ds = NULL;
+    VMSVGA3DDxvkD3D11SetShader set_gs = NULL, set_ps = NULL;
     VMSVGA3DDxvkD3D11SetShaderResources set_ps_srv = NULL;
     VMSVGA3DDxvkD3D11SetSamplers set_ps_sampler = NULL;
     VMSVGA3DDxvkD3D11RSSetState set_rs = NULL;
@@ -5940,6 +5951,8 @@ static bool vmsvga3d_dxvk_d3d11_blit_restore(
         GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INPUT_LAYOUT, set_layout) &&
         GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_CONSTANT_BUFFERS, set_vs_cb) &&
         GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER, set_vs) &&
+        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SHADER, set_hs) &&
+        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SHADER, set_ds) &&
         GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER, set_gs) &&
         GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER_RESOURCES, set_ps_srv) &&
         GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER, set_ps) &&
@@ -5954,6 +5967,8 @@ static bool vmsvga3d_dxvk_d3d11_blit_restore(
         set_layout(dxvk->d3d11_context, saved->input_layout);
         set_vs_cb(dxvk->d3d11_context, 0, 1, &saved->vs_constant_buffer);
         set_vs(dxvk->d3d11_context, saved->vs, NULL, 0);
+        set_hs(dxvk->d3d11_context, saved->hs, NULL, 0);
+        set_ds(dxvk->d3d11_context, saved->ds, NULL, 0);
         set_gs(dxvk->d3d11_context, saved->gs, NULL, 0);
         set_ps_srv(dxvk->d3d11_context, 0, 1, &saved->ps_srv);
         set_ps(dxvk->d3d11_context, saved->ps, NULL, 0);
@@ -5986,7 +6001,8 @@ bool vmsvga3d_dxvk_d3d11_present_blt(
     VMSVGA3DDxvkD3D11SetConstantBuffers set_vs_cb = NULL;
     VMSVGA3DDxvkD3D11IASetInputLayout set_layout = NULL;
     VMSVGA3DDxvkD3D11IASetPrimitiveTopology set_topology = NULL;
-    VMSVGA3DDxvkD3D11SetShader set_vs = NULL, set_gs = NULL, set_ps = NULL;
+    VMSVGA3DDxvkD3D11SetShader set_vs = NULL, set_hs = NULL, set_ds = NULL;
+    VMSVGA3DDxvkD3D11SetShader set_gs = NULL, set_ps = NULL;
     VMSVGA3DDxvkD3D11SetShaderResources set_ps_srv = NULL;
     VMSVGA3DDxvkD3D11SetSamplers set_ps_sampler = NULL;
     VMSVGA3DDxvkD3D11RSSetState set_rs = NULL;
@@ -6067,6 +6083,8 @@ bool vmsvga3d_dxvk_d3d11_present_blt(
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_PRIMITIVE_TOPOLOGY, set_topology)
             ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER, set_vs) ||
+        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SHADER, set_hs) ||
+        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SHADER, set_ds) ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER, set_gs) ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER_RESOURCES, set_ps_srv) ||
         !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER, set_ps) ||
@@ -6087,6 +6105,8 @@ bool vmsvga3d_dxvk_d3d11_present_blt(
     set_topology(dxvk->d3d11_context,
                  VMSVGA3D_DXVK_D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     set_vs(dxvk->d3d11_context, dxvk->d3d11_blit_vertex_shader, NULL, 0);
+    set_hs(dxvk->d3d11_context, null_shader, NULL, 0);
+    set_ds(dxvk->d3d11_context, null_shader, NULL, 0);
     set_gs(dxvk->d3d11_context, null_shader, NULL, 0);
     set_ps_srv(dxvk->d3d11_context, 0, 1, &srv);
     set_ps(dxvk->d3d11_context,

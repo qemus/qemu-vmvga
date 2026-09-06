@@ -6808,6 +6808,98 @@ static bool vmsvga3d_gb_surface_invalidate_live(
     return true;
 }
 
+static bool vmsvga3d_gb_zero_surface_live(struct vmsvga_state_s *s,
+                                           uint32_t sid)
+{
+    VMSVGA3DSurface *surface;
+    uint32_t subresource;
+    bool success = true;
+
+    if (s == NULL || s->svga3d == NULL || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[sid];
+    if (surface == NULL || surface->mips == NULL ||
+        surface->dxvk_surface == NULL) {
+        return false;
+    }
+
+    for (subresource = 0; subresource < surface->mip_count; subresource++) {
+        VMSVGA3DSurfaceImage *image = &surface->mips[subresource];
+        SVGA3dBox box = {0};
+
+        if (image->data == NULL || image->pitch == 0 ||
+            image->plane_size == 0 || image->data_size == 0) {
+            success = false;
+            continue;
+        }
+
+        /* WRITE_ZERO_SURFACE and HINT_ZERO_SURFACE both establish zero as the
+         * current surface contents.  Keep the CPU shadow authoritative without
+         * touching the bound MOB; a later explicit readback will synchronize
+         * guest backing in the normal GB-surface path. */
+        memset(image->data, 0, image->data_size);
+
+        if (surface->multisample_count <= 1 &&
+            vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+            VMSVGA3DD3D10Box native_box;
+
+            native_box.left = 0;
+            native_box.top = 0;
+            native_box.front = 0;
+            native_box.right = image->size.width;
+            native_box.bottom = image->size.height;
+            native_box.back = image->size.depth;
+
+            if (!vmsvga3d_dxvk_d3d11_update_subresource(
+                    s->dxvk, surface->dxvk_surface, subresource, &native_box,
+                    image->data, image->pitch, image->plane_size)) {
+                success = false;
+            }
+        } else if (surface->multisample_count > 1 &&
+                   vmsvga3d_dxvk_d3d11_surface_resident(
+                       surface->dxvk_surface)) {
+            /* D3D11 UpdateSubresource cannot update multisampled resources. */
+            success = false;
+        }
+
+        box.w = image->size.width;
+        box.h = image->size.height;
+        box.d = image->size.depth;
+        (void)vmsvga3d_surface_changed_live(s, sid, subresource, &box);
+    }
+
+    return success;
+}
+
+static bool vmsvga3d_handle_zero_surface(struct vmsvga_state_s *s,
+                                         uint32_t cmd, int32_t *len,
+                                         uint32_t fifo_start)
+{
+    void *payload;
+    uint32_t size;
+
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size >= sizeof(uint32_t)) {
+        uint32_t sid = ldl_le_p(payload);
+        bool success = vmsvga3d_gb_zero_surface_live(s, sid);
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "ZERO-SURFACE cmd=%u kind=%s sid=%u result=%s",
+            cmd,
+            cmd == SVGA_3D_CMD_WRITE_ZERO_SURFACE ? "WRITE" : "HINT",
+            sid, success ? "OK" : "PARTIAL");
+    }
+
+    g_free(payload);
+    return true;
+}
+
 static bool vmsvga3d_handle_gb_surface_sync(struct vmsvga_state_s *s,
                                             uint32_t cmd, int32_t *len,
                                             uint32_t fifo_start)
@@ -7939,8 +8031,10 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
     VMSVGA3D_STALL(SVGA_3D_CMD_DX_DRAW_INSTANCED_INDIRECT),
     VMSVGA3D_STALL(SVGA_3D_CMD_DX_DISPATCH),
     VMSVGA3D_STALL(SVGA_3D_CMD_DX_DISPATCH_INDIRECT),
-    VMSVGA3D_STALL(SVGA_3D_CMD_WRITE_ZERO_SURFACE),
-    VMSVGA3D_STALL(SVGA_3D_CMD_HINT_ZERO_SURFACE),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_WRITE_ZERO_SURFACE,
+                     vmsvga3d_handle_zero_surface),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_HINT_ZERO_SURFACE,
+                     vmsvga3d_handle_zero_surface),
     VMSVGA3D_STALL(SVGA_3D_CMD_DX_TRANSFER_TO_BUFFER),
     VMSVGA3D_STALL(SVGA_3D_CMD_DX_SET_STRUCTURE_COUNT),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_LOGICOPS_BITBLT),

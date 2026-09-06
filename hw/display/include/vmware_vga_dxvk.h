@@ -78,7 +78,7 @@ typedef struct vmsvga3d_dxvk_d3d11_index_binding_s {
 } VMSVGA3DDxvkD3D11IndexBinding;
 
 VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
-                                    Error **errp);
+                                    bool debug, Error **errp);
 /* Drop guest-owned backend objects while keeping the renderer devices alive. */
 void vmsvga3d_dxvk_reset_guest_objects(VMSVGA3DDxvk *dxvk,
                                         bool reset_d3d11_state);
@@ -94,6 +94,9 @@ uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
 /* Keep a canonical VMware DXFMT mask only if the live D3D11 adapter can use it. */
 uint32_t vmsvga3d_dxvk_d3d11_qualify_format_caps(
     const VMSVGA3DDxvk *dxvk, uint32_t format, bool buffer, uint32_t caps);
+/* Translate live D3D11 CheckFormatSupport bits to VMware DXFMT caps. */
+uint32_t vmsvga3d_dxvk_d3d11_format_caps(
+    const VMSVGA3DDxvk *dxvk, uint32_t format);
 /* True when the live D3D11 adapter supports standard MSAA for both
  * representative color and depth targets at this sample count. */
 bool vmsvga3d_dxvk_d3d11_supports_multisample(

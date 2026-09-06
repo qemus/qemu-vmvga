@@ -1411,8 +1411,10 @@ struct {
    uint32 mobPitch;
    SVGA3dSurface2Flags surface2Flags;
    uint8 multisamplePattern;
-   uint8  pad0[3];
-   uint32 pad1[3];
+   uint8 qualityLevel;
+   uint16 bufferByteStride;
+   float minLOD;
+   uint32 pad0[2];
 }
 #include "vmware_pack_end.h"
 SVGAOTableSurfaceEntry;
@@ -1759,6 +1761,27 @@ struct SVGA3dCmdDefineGBSurface_v3 {
 }
 #include "vmware_pack_end.h"
 SVGA3dCmdDefineGBSurface_v3;   /* SVGA_3D_CMD_DEFINE_GB_SURFACE_V3 */
+
+/*
+ * Defines a guest-backed SM5 surface, adding the structured-buffer stride.
+ */
+typedef
+#include "vmware_pack_begin.h"
+struct SVGA3dCmdDefineGBSurface_v4 {
+   uint32 sid;
+   SVGA3dSurfaceAllFlags surfaceFlags;
+   SVGA3dSurfaceFormat format;
+   uint32 numMipLevels;
+   uint32 multisampleCount;
+   SVGA3dMSPattern multisamplePattern;
+   SVGA3dMSQualityLevel qualityLevel;
+   SVGA3dTextureFilter autogenFilter;
+   SVGA3dSize size;
+   uint32 arraySize;
+   uint32 bufferByteStride;
+}
+#include "vmware_pack_end.h"
+SVGA3dCmdDefineGBSurface_v4;   /* SVGA_3D_CMD_DEFINE_GB_SURFACE_V4 */
 
 /*
  * Destroy a guest-backed surface.

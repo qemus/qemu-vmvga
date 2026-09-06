@@ -7472,6 +7472,15 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
     if (surface != NULL && !surface->screen_target_content_valid) {
         return true;
     }
+    if (surface != NULL && s->screen_frontend_deferred) {
+        s->screen_frontend_deferred = false;
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
+                    "size=%ux%u\n",
+                    sid, s->screen_width, s->screen_height);
+        }
+    }
     if (surface != NULL && surface->mips != NULL && surface->mip_count != 0) {
         uint32_t width = surface->mips[0].size.width;
         uint32_t height = surface->mips[0].size.height;
@@ -7702,7 +7711,9 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             }
             (void)vmsvga_screen_define(s, body->stid, flags, body->width,
                                        body->height, body->xRoot, body->yRoot,
-                                       false, SVGA_GMR_NULL, 0, 0, 0);
+                                       false, SVGA_GMR_NULL, 0, 0, 0,
+                                       s->vgpu_generation == VMSVGA_VGPU_10 ||
+                                       s->vgpu_generation == VMSVGA_VGPU_11);
         }
         break;
 

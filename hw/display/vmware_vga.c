@@ -476,6 +476,11 @@ struct vmsvga_state_s {
     uint32_t screen_backing_offset;
     uint32_t screen_backing_pitch;
     uint32_t screen_clone_count;
+    uint8_t *screen_preseed_base;
+    size_t screen_preseed_size;
+    uint32_t screen_preseed_width;
+    uint32_t screen_preseed_height;
+    uint32_t screen_preseed_stride;
     bool gmrfb_defined;
     uint32_t gmrfb_gmr_id;
     uint32_t gmrfb_offset;
@@ -8918,6 +8923,7 @@ static int vmsvga_pre_load(void *opaque)
     s->legacy_vga_size = 0;
 
     vmsvga_screen_base_clear(s);
+    vmsvga_screen_preseed_clear(s);
 
     s->screen_base_migration_size = 0;
 
@@ -9356,6 +9362,7 @@ fail:
     vmsvga_cursor_source_clear(s);
     vmsvga_objects_clear(s);
     vmsvga_screen_base_clear(s);
+    vmsvga_screen_preseed_clear(s);
     s->screen_base_migration_size = 0;
     vmsvga_migration_buffers_clear(s);
 

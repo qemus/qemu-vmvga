@@ -1781,6 +1781,12 @@ static bool vmsvga3d_gb_surface_define_live(
         return false;
     }
 
+    if ((surface_flags & SVGA3D_SURFACE_SCREENTARGET) != 0 &&
+        !s->screen_defined && s->screen_preseed_base == NULL) {
+        (void)vmsvga_screen_preseed_capture(s, qemu_console_surface(s->vga.con),
+                                            "gb-screentarget-surface");
+    }
+
     multisample_quality = MIN(MAX(multisample_quality,
                                   (uint32_t)SVGA3D_MS_QUALITY_MIN),
                                   (uint32_t)SVGA3D_MS_QUALITY_MAX);
@@ -6803,7 +6809,7 @@ static bool vmsvga3d_handle_set_otable_base(struct vmsvga_state_s *s,
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "OTABLE op=SET type=%u base=0x%016" PRIx64 " size=%u valid=%u "
-            "format=%u result=%s",
+            "ptDepth=%u result=%s",
             body->type, (uint64_t)body->baseAddress, body->sizeInBytes,
             body->validSizeInBytes, body->ptDepth, result ? "OK" : "REJECT");
     } else if (cmd == SVGA_3D_CMD_SET_OTABLE_BASE64 &&
@@ -6821,7 +6827,7 @@ static bool vmsvga3d_handle_set_otable_base(struct vmsvga_state_s *s,
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "OTABLE op=SET64 type=%u base=0x%016" PRIx64 " size=%u valid=%u "
-            "format=%u result=%s",
+            "ptDepth=%u result=%s",
             type, (uint64_t)base, table_size, valid_size, format,
             result ? "OK" : "REJECT");
     }

@@ -821,6 +821,105 @@ static void vmsvga_screen_base_clear(struct vmsvga_state_s *s)
     s->screen_stride = 0;
 }
 
+static void vmsvga_screen_preseed_clear(struct vmsvga_state_s *s)
+{
+    g_clear_pointer(&s->screen_preseed_base, g_free);
+
+    s->screen_preseed_size = 0;
+    s->screen_preseed_width = 0;
+    s->screen_preseed_height = 0;
+    s->screen_preseed_stride = 0;
+}
+
+static bool vmsvga_screen_preseed_capture(struct vmsvga_state_s *s,
+                                          DisplaySurface *surface,
+                                          const char *reason)
+{
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint64_t size64;
+    uint8_t *new_base;
+    pixman_format_code_t src_format;
+    pixman_image_t *src = NULL;
+    pixman_image_t *dst = NULL;
+    uint32_t hash = 0;
+    bool hash_valid = false;
+
+    if (s == NULL || surface == NULL || surface->image == NULL ||
+        surface_width(surface) == 0 || surface_height(surface) == 0 ||
+        surface_stride(surface) == 0 || surface_data(surface) == NULL) {
+        return false;
+    }
+
+    width = surface_width(surface);
+    height = surface_height(surface);
+    if (width > UINT32_MAX / 4u) {
+        return false;
+    }
+    stride = width * 4u;
+    size64 = (uint64_t)stride * height;
+    if (size64 == 0 || size64 > SIZE_MAX) {
+        return false;
+    }
+
+    new_base = g_try_malloc0((size_t)size64);
+    if (new_base == NULL) {
+        return false;
+    }
+
+    src_format = pixman_image_get_format(surface->image);
+    src = pixman_image_create_bits(src_format, width, height,
+                                   (uint32_t *)surface_data(surface),
+                                   surface_stride(surface));
+    dst = pixman_image_create_bits(PIXMAN_x8r8g8b8, width, height,
+                                   (uint32_t *)new_base, stride);
+    if (src == NULL || dst == NULL) {
+        if (dst != NULL) {
+            pixman_image_unref(dst);
+        }
+        if (src != NULL) {
+            pixman_image_unref(src);
+        }
+        g_free(new_base);
+        return false;
+    }
+#ifdef CONFIG_PIXMAN
+    if (src_format == PIXMAN_c8) {
+        pixman_image_set_indexed(src, &s->indexed_palette);
+    }
+#endif
+    pixman_image_composite32(PIXMAN_OP_SRC, src, NULL, dst,
+                             0, 0, 0, 0, 0, 0, width, height);
+
+    pixman_image_unref(dst);
+    pixman_image_unref(src);
+
+    vmsvga_screen_preseed_clear(s);
+    s->screen_preseed_base = new_base;
+    s->screen_preseed_size = (size_t)size64;
+    s->screen_preseed_width = width;
+    s->screen_preseed_height = height;
+    s->screen_preseed_stride = stride;
+
+    hash_valid = vmsvga_gmr_diag_hash_rows(s->screen_preseed_base,
+                                           s->screen_preseed_stride,
+                                           (size_t)s->screen_preseed_width * 4,
+                                           s->screen_preseed_height,
+                                           &hash);
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-SCREEN-PRESEED phase=capture reason=%s "
+                "source=%ux%u/32/%u hash=0x%08x hash-valid=%u snapshot=%p\n",
+                reason != NULL ? reason : "unknown",
+                s->screen_preseed_width, s->screen_preseed_height,
+                s->screen_preseed_stride, hash, hash_valid,
+                (void *)s->screen_preseed_base);
+    }
+
+    return true;
+}
+
 static bool vmsvga_screen_base_resize(struct vmsvga_state_s *s,
                                       uint32_t width, uint32_t height,
                                       uint32_t stride)
@@ -878,6 +977,14 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
     uint64_t size64 = (uint64_t)stride * height;
     uint8_t *new_base;
     bool seeded = false;
+    bool had_preseed = s->screen_preseed_base != NULL;
+    bool used_preseed = false;
+    uint32_t src_width = 0;
+    uint32_t src_height = 0;
+    uint32_t src_stride = 0;
+    uint32_t src_bpp = 0;
+    uint32_t src_hash = 0;
+    bool src_hash_valid = false;
 
     if (row_bytes > UINT32_MAX || stride < row_bytes ||
         size64 == 0 || size64 > SIZE_MAX) {
@@ -889,7 +996,54 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
         return false;
     }
 
-    if (surface != NULL && surface->image != NULL &&
+    if (s->screen_preseed_base != NULL && s->screen_preseed_width != 0 &&
+        s->screen_preseed_height != 0 && s->screen_preseed_stride >=
+            (uint64_t)s->screen_preseed_width * 4 &&
+        (uint64_t)s->screen_preseed_stride * s->screen_preseed_height <=
+            s->screen_preseed_size) {
+        pixman_image_t *src = NULL;
+        pixman_image_t *dst = NULL;
+        pixman_transform_t transform;
+        pixman_fixed_t scale_x;
+        pixman_fixed_t scale_y;
+
+        src_width = s->screen_preseed_width;
+        src_height = s->screen_preseed_height;
+        src_stride = s->screen_preseed_stride;
+        src_bpp = 32;
+        src_hash_valid = vmsvga_gmr_diag_hash_rows(
+            s->screen_preseed_base, s->screen_preseed_stride,
+            (size_t)s->screen_preseed_width * 4, s->screen_preseed_height,
+            &src_hash);
+
+        src = pixman_image_create_bits(PIXMAN_x8r8g8b8, src_width, src_height,
+                                       (uint32_t *)s->screen_preseed_base,
+                                       src_stride);
+        dst = pixman_image_create_bits(PIXMAN_x8r8g8b8, width, height,
+                                       (uint32_t *)new_base, stride);
+        if (src != NULL && dst != NULL) {
+            scale_x = (pixman_fixed_t)(((int64_t)src_width << 16) / width);
+            scale_y = (pixman_fixed_t)(((int64_t)src_height << 16) / height);
+            if (scale_x != 0 && scale_y != 0) {
+                pixman_transform_init_scale(&transform, scale_x, scale_y);
+                pixman_image_set_transform(src, &transform);
+                pixman_image_set_filter(src, PIXMAN_FILTER_BILINEAR, NULL, 0);
+                pixman_image_set_repeat(src, PIXMAN_REPEAT_PAD);
+                pixman_image_composite32(PIXMAN_OP_SRC, src, NULL, dst,
+                                         0, 0, 0, 0, 0, 0, width, height);
+                seeded = true;
+                used_preseed = true;
+            }
+        }
+        if (dst != NULL) {
+            pixman_image_unref(dst);
+        }
+        if (src != NULL) {
+            pixman_image_unref(src);
+        }
+    }
+
+    if (!seeded && surface != NULL && surface->image != NULL &&
         surface_width(surface) > 0 && surface_height(surface) > 0 &&
         surface_stride(surface) > 0 && surface_data(surface) != NULL) {
         pixman_format_code_t src_format = pixman_image_get_format(surface->image);
@@ -898,11 +1052,22 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
         pixman_transform_t transform;
         pixman_fixed_t scale_x;
         pixman_fixed_t scale_y;
+        uint32_t src_bypp = (surface_bits_per_pixel(surface) + 7u) / 8u;
 
-        src = pixman_image_create_bits(src_format, surface_width(surface),
-                                       surface_height(surface),
+        src_width = surface_width(surface);
+        src_height = surface_height(surface);
+        src_stride = surface_stride(surface);
+        src_bpp = surface_bits_per_pixel(surface);
+        if (src_bypp != 0 && (uint64_t)src_width * src_bypp <= src_stride) {
+            src_hash_valid = vmsvga_gmr_diag_hash_rows(
+                surface_data(surface), src_stride,
+                (size_t)src_width * src_bypp, src_height, &src_hash);
+        }
+
+        src = pixman_image_create_bits(src_format, src_width,
+                                       src_height,
                                        (uint32_t *)surface_data(surface),
-                                       surface_stride(surface));
+                                       src_stride);
         dst = pixman_image_create_bits(PIXMAN_x8r8g8b8, width, height,
                                        (uint32_t *)new_base, stride);
         if (src != NULL && dst != NULL) {
@@ -911,9 +1076,9 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
                 pixman_image_set_indexed(src, &s->indexed_palette);
             }
 #endif
-            scale_x = (pixman_fixed_t)(((int64_t)surface_width(surface) << 16) /
+            scale_x = (pixman_fixed_t)(((int64_t)src_width << 16) /
                                        width);
-            scale_y = (pixman_fixed_t)(((int64_t)surface_height(surface) << 16) /
+            scale_y = (pixman_fixed_t)(((int64_t)src_height << 16) /
                                        height);
             if (scale_x != 0 && scale_y != 0) {
                 pixman_transform_init_scale(&transform, scale_x, scale_y);
@@ -941,13 +1106,16 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
 
     if (vmsvga_trace_flight_enabled()) {
         fprintf(stderr,
-                "VMVGA-SCREEN-HANDOFF phase=seed source=%dx%d/%d/%d "
+                "VMVGA-SCREEN-HANDOFF phase=seed source=%ux%u/%u/%u "
+                "source-hash=0x%08x source-hash-valid=%u preseed=%u "
                 "dest=%ux%u/32/%u seeded=%u mirror=%p\n",
-                surface != NULL ? surface_width(surface) : 0,
-                surface != NULL ? surface_height(surface) : 0,
-                surface != NULL ? surface_bits_per_pixel(surface) : 0,
-                surface != NULL ? surface_stride(surface) : 0,
+                src_width, src_height, src_bpp, src_stride,
+                src_hash, src_hash_valid, used_preseed,
                 width, height, stride, seeded, (void *)s->screen_base);
+    }
+
+    if (had_preseed) {
+        vmsvga_screen_preseed_clear(s);
     }
 
     return true;
@@ -1049,6 +1217,7 @@ static inline void vmsvga_screen_mark_dirty(struct vmsvga_state_s *s,
 static void vmsvga_screen_reset(struct vmsvga_state_s *s)
 {
     vmsvga_screen_base_clear(s);
+    vmsvga_screen_preseed_clear(s);
 
     s->screen_defined = false;
     s->screen_flags = 0;
@@ -1180,7 +1349,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
                            "SCREEN_DEFINE id=%u flags=0x%08x width=%u height=%u "
                            "root=%d,%d stride=%u backing=%u:%08x clone=%u",
                            id, flags, width, height, root_x, root_y,
-                           s->active_stride, s->screen_backing_gmr_id,
+                           screen_stride, s->screen_backing_gmr_id,
                            s->screen_backing_offset, clone_count);
         return true;
     }

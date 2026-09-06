@@ -1284,17 +1284,37 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
 static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
                                   uint32_t screen_id)
 {
+    DisplaySurface *surface;
+    bool screen_base_visible;
+
     if (screen_id != VMSVGA_SCREEN_V1_ID) {
         VMSVGA_SCREEN_REJECT("destroy reason=screen-id id=%u", screen_id);
         return false;
     }
 
+    surface = qemu_console_surface(s->vga.con);
+    screen_base_visible =
+        s->screen_base != NULL && surface != NULL &&
+        surface_data(surface) == s->screen_base;
+
+    /*
+     * The console DisplaySurface directly references screen_base while a
+     * handoff mirror is visible.  DESTROY_SCREEN does not replace that
+     * DisplaySurface, so freeing the mirror here leaves the frontend pointing
+     * at freed memory and makes an immediately following DEFINE_SCREEN seed
+     * from a dangling pointer.  Keep the buffer alive until the next define
+     * snapshots/replaces it, but retain the old cleanup for non-visible bases.
+     */
     if (!s->screen_defined) {
-        vmsvga_screen_base_clear(s);
+        if (!screen_base_visible) {
+            vmsvga_screen_base_clear(s);
+        }
         return true;
     }
 
-    vmsvga_screen_base_clear(s);
+    if (!screen_base_visible) {
+        vmsvga_screen_base_clear(s);
+    }
 
     s->screen_defined = false;
     s->screen_flags = 0;

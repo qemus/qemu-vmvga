@@ -6857,12 +6857,14 @@ static bool vmsvga3d_gb_zero_surface_live(struct vmsvga_state_s *s,
                     s->dxvk, surface->dxvk_surface, subresource, &native_box,
                     image->data, image->pitch, image->plane_size)) {
                 success = false;
+                vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
             }
         } else if (surface->multisample_count > 1 &&
                    vmsvga3d_dxvk_d3d11_surface_resident(
                        surface->dxvk_surface)) {
             /* D3D11 UpdateSubresource cannot update multisampled resources. */
             success = false;
+            vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
         }
 
         box.w = image->size.width;

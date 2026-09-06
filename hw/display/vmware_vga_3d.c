@@ -1578,7 +1578,12 @@ static bool vmsvga3d_gb_surface_define_live(
         return false;
     }
 
+    multisample_quality = MIN(MAX(multisample_quality,
+                                  (uint32_t)SVGA3D_MS_QUALITY_MIN),
+                                  (uint32_t)SVGA3D_MS_QUALITY_MAX);
+ 
     memset(&entry, 0, sizeof(entry));
+ 
     entry.format = cpu_to_le32(format);
     entry.surface1Flags = cpu_to_le32((uint32_t)surface_flags);
     entry.numMipLevels = cpu_to_le32(num_mip_levels);

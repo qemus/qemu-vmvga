@@ -8960,6 +8960,30 @@ static bool vmsvga3d_d3d10_present_blt_live(
     VMSVGA3DD3D10Format destination_format;
     SVGA3dBox source_box;
     SVGA3dBox destination_box;
+    bool source_level_supported;
+    bool destination_level_supported;
+
+    if (s == NULL || command == NULL) {
+        return false;
+    }
+
+#define VMSVGA3D_PRESENTBLT_REJECT(reason)                              \
+    do {                                                                \
+        VMVGA_TRACE_LOCAL(                                              \
+            VMVGA_TRACE_3D,                                             \
+            "PRESENTBLT reject=%s gen=%u cid=%u src=%u/%u "            \
+            "dst=%u/%u srcbox=%u,%u,%u+%ux%ux%u "                     \
+            "dstbox=%u,%u,%u+%ux%ux%u mode=0x%08x",                  \
+            reason, (unsigned)s->vgpu_generation, cid,                  \
+            command->srcSid, command->srcSubResource,                   \
+            command->dstSid, command->destSubResource,                  \
+            command->boxSrc.x, command->boxSrc.y, command->boxSrc.z,   \
+            command->boxSrc.w, command->boxSrc.h, command->boxSrc.d,   \
+            command->boxDest.x, command->boxDest.y,                     \
+            command->boxDest.z, command->boxDest.w,                     \
+            command->boxDest.h, command->boxDest.d, command->mode);    \
+        return false;                                                   \
+    } while (0)
 
     /*
      * VirtualBox requires a command-buffer DX context for PRESENTBLT.  The
@@ -8968,28 +8992,56 @@ static bool vmsvga3d_d3d10_present_blt_live(
      * validate a context whenever one is supplied, while accepting the
      * observed VMware context-less presentation form.
      */
-    if (s == NULL || command == NULL || s->svga3d == NULL ||
-        (cid != SVGA3D_INVALID_ID && vmsvga3d_dx_context(s, cid) == NULL) ||
-        !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
-        command->boxDest.z != 0 || command->boxDest.d != 1 ||
-        command->boxSrc.z != 0 || command->boxSrc.d != 1 ||
-        command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
+    if (s->svga3d == NULL) {
+        VMSVGA3D_PRESENTBLT_REJECT("no-3d-state");
+    }
+
+    if (cid != SVGA3D_INVALID_ID && vmsvga3d_dx_context(s, cid) == NULL) {
+        VMSVGA3D_PRESENTBLT_REJECT("invalid-context");
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
+        VMSVGA3D_PRESENTBLT_REJECT("d3d11-not-ready");
+    }
+
+    if (command->boxDest.z != 0 || command->boxDest.d != 1 ||
+        command->boxSrc.z != 0 || command->boxSrc.d != 1) {
+        VMSVGA3D_PRESENTBLT_REJECT("non-2d-box");
+    }
+
+    if (command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
         command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
-        return false;
+        VMSVGA3D_PRESENTBLT_REJECT("sid-range");
     }
 
     source = s->svga3d->surfaces[command->srcSid];
     destination = s->svga3d->surfaces[command->dstSid];
 
-    if (source == NULL || destination == NULL || source->dxvk_surface == NULL ||
-        destination->dxvk_surface == NULL || source->mips == NULL ||
-        destination->mips == NULL || command->srcSubResource >= source->mip_count ||
-        command->destSubResource >= destination->mip_count ||
-        !vmsvga3d_d3d10_copy_surface_materialize_live(
-            s, source, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
-        !vmsvga3d_d3d10_copy_surface_materialize_live(
+    if (source == NULL || destination == NULL) {
+        VMSVGA3D_PRESENTBLT_REJECT("missing-surface");
+    }
+
+    if (source->dxvk_surface == NULL || destination->dxvk_surface == NULL) {
+        VMSVGA3D_PRESENTBLT_REJECT("missing-dxvk-surface");
+    }
+
+    if (source->mips == NULL || destination->mips == NULL) {
+        VMSVGA3D_PRESENTBLT_REJECT("missing-subresources");
+    }
+
+    if (command->srcSubResource >= source->mip_count ||
+        command->destSubResource >= destination->mip_count) {
+        VMSVGA3D_PRESENTBLT_REJECT("subresource-range");
+    }
+
+    if (!vmsvga3d_d3d10_copy_surface_materialize_live(
+            s, source, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
+        VMSVGA3D_PRESENTBLT_REJECT("source-materialize");
+    }
+
+    if (!vmsvga3d_d3d10_copy_surface_materialize_live(
             s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
-        return false;
+        VMSVGA3D_PRESENTBLT_REJECT("destination-materialize");
     }
 
     source_image = &source->mips[command->srcSubResource];
@@ -9002,14 +9054,38 @@ static bool vmsvga3d_d3d10_present_blt_live(
                                          &destination_box);
     if (destination_box.w == 0 || destination_box.h == 0 ||
         destination_box.d == 0) {
-        return false;
+        VMSVGA3D_PRESENTBLT_REJECT("empty-destination");
     }
 
     source_format = vmsvga3d_d3d10_surface_format(source->format);
     destination_format = vmsvga3d_d3d10_surface_format(destination->format);
-    if (!vmsvga3d_d3d10_level_is_vgpu10(source_format.min_level) ||
-        !vmsvga3d_d3d10_level_is_vgpu10(destination_format.min_level)) {
-        return false;
+
+    /*
+     * The common format translator can classify formats as requiring D3D11.
+     * vGPU10 must continue to reject those, while vGPU11 may present every
+     * format represented by the translator through feature level 11.1.
+     */
+    source_level_supported =
+        vmsvga3d_d3d10_level_is_vgpu10(source_format.min_level) ||
+        (s->vgpu_generation == VMSVGA_VGPU_11 &&
+         source_format.min_level >= VMSVGA3D_D3D10_LEVEL_11_0 &&
+         source_format.min_level <= VMSVGA3D_D3D10_LEVEL_11_1);
+    destination_level_supported =
+        vmsvga3d_d3d10_level_is_vgpu10(destination_format.min_level) ||
+        (s->vgpu_generation == VMSVGA_VGPU_11 &&
+         destination_format.min_level >= VMSVGA3D_D3D10_LEVEL_11_0 &&
+         destination_format.min_level <= VMSVGA3D_D3D10_LEVEL_11_1);
+
+    if (!source_level_supported || !destination_level_supported) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "PRESENTBLT formats src-svga=%u src-dxgi=%u src-level=%u "
+            "dst-svga=%u dst-dxgi=%u dst-level=%u",
+            (unsigned)source->format, source_format.dxgi_format,
+            (unsigned)source_format.min_level, (unsigned)destination->format,
+            destination_format.dxgi_format,
+            (unsigned)destination_format.min_level);
+        VMSVGA3D_PRESENTBLT_REJECT("format-level");
     }
 
     /* mode is intentionally ignored: VirtualBox always uses its fixed
@@ -9021,11 +9097,24 @@ static bool vmsvga3d_d3d10_present_blt_live(
             destination->dxvk_surface, command->destSubResource,
             destination_format.dxgi_format, &destination_box,
             &destination_image->size)) {
-        return false;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "PRESENTBLT formats src-svga=%u src-dxgi=%u src-level=%u "
+            "dst-svga=%u dst-dxgi=%u dst-level=%u",
+            (unsigned)source->format, source_format.dxgi_format,
+            (unsigned)source_format.min_level, (unsigned)destination->format,
+            destination_format.dxgi_format,
+            (unsigned)destination_format.min_level);
+        VMSVGA3D_PRESENTBLT_REJECT("dxvk-blit");
     }
 
-    return vmsvga3d_surface_changed_live(
-        s, command->dstSid, command->destSubResource, &destination_box);
+    if (!vmsvga3d_surface_changed_live(
+            s, command->dstSid, command->destSubResource, &destination_box)) {
+        VMSVGA3D_PRESENTBLT_REJECT("dirty-mark");
+    }
+
+#undef VMSVGA3D_PRESENTBLT_REJECT
+    return true;
 }
 
 typedef enum vmsvga3d_d3d10_query_poll_result_e {

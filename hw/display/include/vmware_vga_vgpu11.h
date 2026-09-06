@@ -315,6 +315,9 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_set_live(
 VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_set_live(
     VMSVGA3DDxvk *dxvk, const VMSVGA3DD3D11CSUAVSetPlan *plan,
     const uint64_t *modified);
+bool vmsvga3d_d3d11_uav_surface_live(
+    struct vmsvga_state_s *s, const SVGACOTableDXUAViewEntry *entry,
+    VMSVGA3DDxvkSurface **surface_out, uint32_t *array_elements_out);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_ensure_live(
     VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
     VMSVGA3DDxvkSurface *surface, const SVGACOTableDXUAViewEntry *entry,

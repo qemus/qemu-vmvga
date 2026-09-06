@@ -184,9 +184,12 @@ typedef struct vmsvga3d_d3d10_surface_info_s {
     /* Normalized array count; cubemaps already contain 6 elements per cube. */
     uint32_t array_elements;
     uint32_t multisample_count;
+    uint32_t multisample_quality;
     SVGA3dTextureFilter autogen_filter;
     /* Byte size of mip 0 when this surface is used as a buffer. */
     uint32_t surface_bytes;
+    /* DEFINE_GB_SURFACE_V4 structured-buffer stride; zero for older surfaces. */
+    uint32_t buffer_byte_stride;
     bool has_initial_data;
 } VMSVGA3DD3D10SurfaceInfo;
 
@@ -206,6 +209,7 @@ typedef struct vmsvga3d_d3d10_create_desc_s {
     uint32_t bind_flags;
     uint32_t cpu_access_flags;
     uint32_t misc_flags;
+    uint32_t structure_byte_stride;
     uint32_t initial_subresource_count;
 } VMSVGA3DD3D10CreateDesc;
 
@@ -888,6 +892,8 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_triangle_fan_generate_u16(
     uint32_t *generated_count);
 bool vmsvga3d_present_screen_target_live(
     struct vmsvga_state_s *s, const SVGA3dRect *rect);
+void vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid);
+void vmsvga3d_dx_post_draw_live(struct vmsvga_state_s *s, uint32_t cid);
 
 #define VMSVGA3D_D3D10_QUERY_COTABLE_ENTRY_SIZE 16u
 

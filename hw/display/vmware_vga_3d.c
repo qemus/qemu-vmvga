@@ -260,7 +260,9 @@ typedef struct vmsvga3d_surface_s {
     SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES];
     uint32_t multisample_count;
     SVGA3dMSPattern multisample_pattern;
+    uint32_t multisample_quality;
     SVGA3dTextureFilter autogen_filter;
+    uint32_t buffer_byte_stride;
     uint32_t array_elements;
     uint32_t mip_count;
     size_t storage_bytes;
@@ -986,10 +988,15 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s)
 
     vmsvga3d_renderer_surface_renderer_set(s, NULL, true);
     vmsvga3d_dxvk_destroy(s->dxvk);
+    s->dxvk = NULL;
+
+    if (!s->enable_3d) {
+        return;
+    }
 
     s->dxvk = vmsvga3d_dxvk_create(
         s->active_valid ? s->active_width : 0,
-        s->active_valid ? s->active_height : 0, &local_err);
+        s->active_valid ? s->active_height : 0, s->debug, &local_err);
 
     if (vmsvga3d_dxvk_ready(s->dxvk)) {
         vmsvga3d_renderer_surface_renderer_set(s, s->dxvk, false);
@@ -1555,8 +1562,9 @@ static bool vmsvga3d_gb_surface_define_live(
     struct vmsvga_state_s *s, uint32_t sid,
     SVGA3dSurfaceAllFlags surface_flags, SVGA3dSurfaceFormat format,
     uint32_t num_mip_levels, uint32_t multisample_count,
-    SVGA3dMSPattern multisample_pattern, SVGA3dTextureFilter autogen_filter,
-    const SVGA3dSize *base_size, uint32_t array_size)
+    SVGA3dMSPattern multisample_pattern, uint32_t multisample_quality,
+    SVGA3dTextureFilter autogen_filter, const SVGA3dSize *base_size,
+    uint32_t array_size, uint32_t buffer_byte_stride)
 {
     SVGAOTableSurfaceEntry entry;
     SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES] = {{0}};
@@ -1583,6 +1591,8 @@ static bool vmsvga3d_gb_surface_define_live(
     entry.arraySize = cpu_to_le32(array_size);
     entry.surface2Flags = cpu_to_le32((uint32_t)(surface_flags >> 32));
     entry.multisamplePattern = (uint8_t)multisample_pattern;
+    entry.qualityLevel = (uint8_t)multisample_quality;
+    entry.bufferByteStride = cpu_to_le16((uint16_t)buffer_byte_stride);
 
     if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, sid, sizeof(entry),
                                 &entry, sizeof(entry))) {
@@ -1633,6 +1643,11 @@ static bool vmsvga3d_gb_surface_define_live(
                              multisample_count, multisample_pattern,
                              autogen_filter, array_elements,
                              mip_sizes, mip_count);
+    if (sid < SVGA3D_MAX_SURFACE_IDS && s->svga3d->surfaces[sid] != NULL) {
+        s->svga3d->surfaces[sid]->multisample_quality = multisample_quality;
+        s->svga3d->surfaces[sid]->buffer_byte_stride =
+            (uint16_t)buffer_byte_stride;
+    }
     g_free(mip_sizes);
 
     return true;
@@ -6546,6 +6561,11 @@ static bool vmsvga3d_handle_set_otable_base(struct vmsvga_state_s *s,
     void *payload;
     uint32_t size;
 
+    if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V4 &&
+        s->vgpu_generation != VMSVGA_VGPU_11) {
+        return false;
+    }
+
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
         return true;
     }
@@ -7367,7 +7387,7 @@ static bool vmsvga3d_handle_define_gb_surface(struct vmsvga_state_s *s,
             body->multisampleCount,
             body->multisampleCount > 1 ? SVGA3D_MS_PATTERN_STANDARD
                                        : SVGA3D_MS_PATTERN_NONE,
-            body->autogenFilter, &body->size, 0);
+            0, body->autogenFilter, &body->size, 0, 0);
     } else if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V2 &&
                size >= sizeof(SVGA3dCmdDefineGBSurface_v2)) {
         const SVGA3dCmdDefineGBSurface_v2 *body = payload;
@@ -7377,15 +7397,25 @@ static bool vmsvga3d_handle_define_gb_surface(struct vmsvga_state_s *s,
             body->multisampleCount,
             body->multisampleCount > 1 ? SVGA3D_MS_PATTERN_STANDARD
                                        : SVGA3D_MS_PATTERN_NONE,
-            body->autogenFilter, &body->size, body->arraySize);
+            0, body->autogenFilter, &body->size, body->arraySize, 0);
     } else if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V3 &&
                size >= sizeof(SVGA3dCmdDefineGBSurface_v3)) {
         const SVGA3dCmdDefineGBSurface_v3 *body = payload;
 
         (void)vmsvga3d_gb_surface_define_live(
             s, body->sid, body->surfaceFlags, body->format, body->numMipLevels,
+            body->multisampleCount, body->multisamplePattern, 0,
+            body->autogenFilter, &body->size, body->arraySize, 0);
+    } else if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V4 &&
+               size >= sizeof(SVGA3dCmdDefineGBSurface_v4) &&
+               s->vgpu_generation == VMSVGA_VGPU_11) {
+        const SVGA3dCmdDefineGBSurface_v4 *body = payload;
+
+        (void)vmsvga3d_gb_surface_define_live(
+            s, body->sid, body->surfaceFlags, body->format, body->numMipLevels,
             body->multisampleCount, body->multisamplePattern,
-            body->autogenFilter, &body->size, body->arraySize);
+            body->qualityLevel, body->autogenFilter, &body->size,
+            body->arraySize, body->bufferByteStride);
     }
 
     g_free(payload);
@@ -7879,7 +7909,8 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
     VMSVGA3D_DISCARD(SVGA_3D_CMD_LOGICOPS_COLORFILL),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_LOGICOPS_ALPHABLEND),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_LOGICOPS_CLEARTYPEBLEND),
-    VMSVGA3D_STALL(SVGA_3D_CMD_DEFINE_GB_SURFACE_V4),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_SURFACE_V4,
+                     vmsvga3d_handle_define_gb_surface),
     VMSVGA3D_STALL(SVGA_3D_CMD_DX_SET_CS_UA_VIEWS),
     VMSVGA3D_STALL(SVGA_3D_CMD_DX_SET_MIN_LOD),
     VMSVGA3D_STALL(SVGA_3D_CMD_DX_DEFINE_DEPTHSTENCIL_VIEW_V2),
@@ -8019,7 +8050,9 @@ static bool vmsvga3d_fifo_dx_command(struct vmsvga_state_s *s,
         return true;
     }
 
-    if (!vmsvga3d_d3d10_command(s, dx_context, cmd, payload, size)) {
+    if (!vmsvga3d_d3d10_command(s, dx_context, cmd, payload, size) &&
+        (s->vgpu_generation != VMSVGA_VGPU_11 ||
+         !vmsvga3d_d3d11_command(s, dx_context, cmd, payload, size))) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "3D-DX-UNHANDLED name=%s id=%u cid=%u fifo=0x%08x",
@@ -8717,30 +8750,45 @@ static SVGA3dSurfaceFormat vmsvga3d_dx_devcap_format(uint32_t index)
           [SVGA3D_DEVCAP_DXFMT_X1R5G5B5] = SVGA3D_X1R5G5B5,
           [SVGA3D_DEVCAP_DXFMT_A1R5G5B5] = SVGA3D_A1R5G5B5,
           [SVGA3D_DEVCAP_DXFMT_A4R4G4B4] = SVGA3D_A4R4G4B4,
+          [SVGA3D_DEVCAP_DXFMT_Z_D32] = SVGA3D_Z_D32,
           [SVGA3D_DEVCAP_DXFMT_Z_D16] = SVGA3D_Z_D16,
           [SVGA3D_DEVCAP_DXFMT_Z_D24S8] = SVGA3D_Z_D24S8,
+          [SVGA3D_DEVCAP_DXFMT_Z_D15S1] = SVGA3D_Z_D15S1,
+          [SVGA3D_DEVCAP_DXFMT_LUMINANCE8] = SVGA3D_LUMINANCE8,
+          [SVGA3D_DEVCAP_DXFMT_LUMINANCE4_ALPHA4] = SVGA3D_LUMINANCE4_ALPHA4,
+          [SVGA3D_DEVCAP_DXFMT_LUMINANCE16] = SVGA3D_LUMINANCE16,
+          [SVGA3D_DEVCAP_DXFMT_LUMINANCE8_ALPHA8] = SVGA3D_LUMINANCE8_ALPHA8,
           [SVGA3D_DEVCAP_DXFMT_DXT1] = SVGA3D_DXT1,
           [SVGA3D_DEVCAP_DXFMT_DXT2] = SVGA3D_DXT2,
           [SVGA3D_DEVCAP_DXFMT_DXT3] = SVGA3D_DXT3,
           [SVGA3D_DEVCAP_DXFMT_DXT4] = SVGA3D_DXT4,
           [SVGA3D_DEVCAP_DXFMT_DXT5] = SVGA3D_DXT5,
           [SVGA3D_DEVCAP_DXFMT_BUMPU8V8] = SVGA3D_BUMPU8V8,
+          [SVGA3D_DEVCAP_DXFMT_BUMPL6V5U5] = SVGA3D_BUMPL6V5U5,
+          [SVGA3D_DEVCAP_DXFMT_BUMPX8L8V8U8] = SVGA3D_BUMPX8L8V8U8,
+          [SVGA3D_DEVCAP_DXFMT_FORMAT_DEAD1] = SVGA3D_FORMAT_DEAD1,
           [SVGA3D_DEVCAP_DXFMT_ARGB_S10E5] = SVGA3D_ARGB_S10E5,
           [SVGA3D_DEVCAP_DXFMT_ARGB_S23E8] = SVGA3D_ARGB_S23E8,
           [SVGA3D_DEVCAP_DXFMT_A2R10G10B10] = SVGA3D_A2R10G10B10,
           [SVGA3D_DEVCAP_DXFMT_V8U8] = SVGA3D_V8U8,
           [SVGA3D_DEVCAP_DXFMT_Q8W8V8U8] = SVGA3D_Q8W8V8U8,
+          [SVGA3D_DEVCAP_DXFMT_CxV8U8] = SVGA3D_CxV8U8,
+          [SVGA3D_DEVCAP_DXFMT_X8L8V8U8] = SVGA3D_X8L8V8U8,
+          [SVGA3D_DEVCAP_DXFMT_A2W10V10U10] = SVGA3D_A2W10V10U10,
           [SVGA3D_DEVCAP_DXFMT_ALPHA8] = SVGA3D_ALPHA8,
           [SVGA3D_DEVCAP_DXFMT_R_S10E5] = SVGA3D_R_S10E5,
           [SVGA3D_DEVCAP_DXFMT_R_S23E8] = SVGA3D_R_S23E8,
           [SVGA3D_DEVCAP_DXFMT_RG_S10E5] = SVGA3D_RG_S10E5,
           [SVGA3D_DEVCAP_DXFMT_RG_S23E8] = SVGA3D_RG_S23E8,
+          [SVGA3D_DEVCAP_DXFMT_BUFFER] = SVGA3D_BUFFER,
           [SVGA3D_DEVCAP_DXFMT_Z_D24X8] = SVGA3D_Z_D24X8,
           [SVGA3D_DEVCAP_DXFMT_V16U16] = SVGA3D_V16U16,
           [SVGA3D_DEVCAP_DXFMT_G16R16] = SVGA3D_G16R16,
           [SVGA3D_DEVCAP_DXFMT_A16B16G16R16] = SVGA3D_A16B16G16R16,
+          [SVGA3D_DEVCAP_DXFMT_UYVY] = SVGA3D_UYVY,
           [SVGA3D_DEVCAP_DXFMT_YUY2] = SVGA3D_YUY2,
           [SVGA3D_DEVCAP_DXFMT_NV12] = SVGA3D_NV12,
+          [SVGA3D_DEVCAP_DXFMT_FORMAT_DEAD2] = SVGA3D_FORMAT_DEAD2,
           [SVGA3D_DEVCAP_DXFMT_R32G32B32A32_TYPELESS] = SVGA3D_R32G32B32A32_TYPELESS,
           [SVGA3D_DEVCAP_DXFMT_R32G32B32A32_UINT] = SVGA3D_R32G32B32A32_UINT,
           [SVGA3D_DEVCAP_DXFMT_R32G32B32A32_SINT] = SVGA3D_R32G32B32A32_SINT,
@@ -8792,6 +8840,7 @@ static SVGA3dSurfaceFormat vmsvga3d_dx_devcap_format(uint32_t index)
           [SVGA3D_DEVCAP_DXFMT_R8_UINT] = SVGA3D_R8_UINT,
           [SVGA3D_DEVCAP_DXFMT_R8_SNORM] = SVGA3D_R8_SNORM,
           [SVGA3D_DEVCAP_DXFMT_R8_SINT] = SVGA3D_R8_SINT,
+          [SVGA3D_DEVCAP_DXFMT_P8] = SVGA3D_P8,
           [SVGA3D_DEVCAP_DXFMT_R9G9B9E5_SHAREDEXP] = SVGA3D_R9G9B9E5_SHAREDEXP,
           [SVGA3D_DEVCAP_DXFMT_R8G8_B8G8_UNORM] = SVGA3D_R8G8_B8G8_UNORM,
           [SVGA3D_DEVCAP_DXFMT_G8R8_G8B8_UNORM] = SVGA3D_G8R8_G8B8_UNORM,
@@ -8815,6 +8864,7 @@ static SVGA3dSurfaceFormat vmsvga3d_dx_devcap_format(uint32_t index)
           [SVGA3D_DEVCAP_DXFMT_Z_DF16] = SVGA3D_Z_DF16,
           [SVGA3D_DEVCAP_DXFMT_Z_DF24] = SVGA3D_Z_DF24,
           [SVGA3D_DEVCAP_DXFMT_Z_D24S8_INT] = SVGA3D_Z_D24S8_INT,
+          [SVGA3D_DEVCAP_DXFMT_YV12] = SVGA3D_YV12,
           [SVGA3D_DEVCAP_DXFMT_R32G32B32A32_FLOAT] = SVGA3D_R32G32B32A32_FLOAT,
           [SVGA3D_DEVCAP_DXFMT_R16G16B16A16_FLOAT] = SVGA3D_R16G16B16A16_FLOAT,
           [SVGA3D_DEVCAP_DXFMT_R16G16B16A16_UNORM] = SVGA3D_R16G16B16A16_UNORM,
@@ -8849,6 +8899,61 @@ static SVGA3dSurfaceFormat vmsvga3d_dx_devcap_format(uint32_t index)
     return index < ARRAY_SIZE(formats) ? formats[index] : SVGA3D_FORMAT_INVALID;
 }
 
+static bool vmsvga3d_vbox_dx11_devcap_format_unknown(
+    SVGA3dSurfaceFormat format)
+{
+    /* Match VirtualBox's DX11 devcap format conversion exactly. */
+    switch (format) {
+    case SVGA3D_A4R4G4B4:
+    case SVGA3D_Z_D32:
+    case SVGA3D_Z_D15S1:
+    case SVGA3D_LUMINANCE8:
+    case SVGA3D_LUMINANCE4_ALPHA4:
+    case SVGA3D_LUMINANCE16:
+    case SVGA3D_LUMINANCE8_ALPHA8:
+    case SVGA3D_DXT1:
+    case SVGA3D_DXT2:
+    case SVGA3D_DXT3:
+    case SVGA3D_DXT4:
+    case SVGA3D_DXT5:
+    case SVGA3D_BUMPU8V8:
+    case SVGA3D_BUMPL6V5U5:
+    case SVGA3D_BUMPX8L8V8U8:
+    case SVGA3D_FORMAT_DEAD1:
+    case SVGA3D_ARGB_S10E5:
+    case SVGA3D_ARGB_S23E8:
+    case SVGA3D_A2R10G10B10:
+    case SVGA3D_V8U8:
+    case SVGA3D_Q8W8V8U8:
+    case SVGA3D_CxV8U8:
+    case SVGA3D_X8L8V8U8:
+    case SVGA3D_A2W10V10U10:
+    case SVGA3D_ALPHA8:
+    case SVGA3D_R_S10E5:
+    case SVGA3D_R_S23E8:
+    case SVGA3D_RG_S10E5:
+    case SVGA3D_RG_S23E8:
+    case SVGA3D_BUFFER:
+    case SVGA3D_Z_D24X8:
+    case SVGA3D_V16U16:
+    case SVGA3D_G16R16:
+    case SVGA3D_A16B16G16R16:
+    case SVGA3D_UYVY:
+    case SVGA3D_YUY2:
+    case SVGA3D_NV12:
+    case SVGA3D_FORMAT_DEAD2:
+    case SVGA3D_P8:
+    case SVGA3D_ATI1:
+    case SVGA3D_ATI2:
+    case SVGA3D_Z_DF16:
+    case SVGA3D_Z_DF24:
+    case SVGA3D_YV12:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
                                       uint32_t index)
 {
@@ -8867,12 +8972,22 @@ static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
 
     value = vmsvga3d_devcap[index];
 
+    if (index == SVGA3D_DEVCAP_SM5) {
+        return s != NULL && s->vgpu_generation == VMSVGA_VGPU_11 ? 1 : 0;
+    }
+
     if (index == SVGA3D_DEVCAP_MULTISAMPLE_2X ||
-        index == SVGA3D_DEVCAP_MULTISAMPLE_4X) {
-        uint32_t sample_count = index == SVGA3D_DEVCAP_MULTISAMPLE_2X ? 2u : 4u;
+        index == SVGA3D_DEVCAP_MULTISAMPLE_4X ||
+        (index == SVGA3D_DEVCAP_MULTISAMPLE_8X &&
+         s != NULL && s->vgpu_generation == VMSVGA_VGPU_11)) {
+        uint32_t sample_count = index == SVGA3D_DEVCAP_MULTISAMPLE_2X ? 2u :
+                                index == SVGA3D_DEVCAP_MULTISAMPLE_4X ? 4u : 8u;
         if (s == NULL || s->dxvk == NULL ||
             !vmsvga3d_dxvk_d3d11_supports_multisample(s->dxvk, sample_count)) {
             return 0;
+        }
+        if (index == SVGA3D_DEVCAP_MULTISAMPLE_8X) {
+            value = 1;
         }
     }
 
@@ -8885,7 +9000,17 @@ static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
 
     format = vmsvga3d_dx_devcap_format(index);
 
-    if (format != SVGA3D_FORMAT_INVALID && s != NULL && s->dxvk != NULL) {
+    if (format != SVGA3D_FORMAT_INVALID && s != NULL && s->dxvk != NULL &&
+        s->vgpu_generation == VMSVGA_VGPU_11) {
+        if (vmsvga3d_vbox_dx11_devcap_format_unknown(format)) {
+            value = 0;
+        } else {
+            dx_format = vmsvga3d_d3d10_surface_format(format);
+            value = vmsvga3d_dxvk_d3d11_format_caps(
+                s->dxvk, dx_format.dxgi_format);
+        }
+    } else if (format != SVGA3D_FORMAT_INVALID && s != NULL &&
+               s->dxvk != NULL) {
         dx_format = vmsvga3d_d3d10_surface_format(format);
         value = vmsvga3d_dxvk_d3d11_qualify_format_caps(
             s->dxvk, dx_format.dxgi_format, false, value);

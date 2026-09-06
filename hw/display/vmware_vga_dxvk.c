@@ -208,7 +208,6 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_CONFIG_FILE_VALUE "/dev/null"
 #define VMSVGA3D_DXVK_LOG_LEVEL_ENV "DXVK_LOG_LEVEL"
 #define VMSVGA3D_DXVK_LOG_LEVEL_QUIET "none"
-#define VMSVGA3D_DXVK_DEBUG_ENV "DEBUG_DXVK"
 
 #define VMSVGA3D_DXVK_VULKAN_SONAME "libvulkan.so.1"
 #define VMSVGA3D_DXVK_VULKAN_API_1_3 ((1u << 22) | (3u << 12))
@@ -357,8 +356,24 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_DXGI_FORMAT_R8G8B8A8_UNORM 28u
 #define VMSVGA3D_DXVK_DXGI_FORMAT_D24_UNORM_S8_UINT 45u
 #define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BUFFER 0x00000001u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_IA_VERTEX_BUFFER 0x00000002u
 #define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURE2D 0x00000020u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURE3D 0x00000040u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURECUBE 0x00000080u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_SHADER_SAMPLE 0x00000200u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_MIP 0x00001000u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_RENDER_TARGET 0x00004000u
+#define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BLENDABLE 0x00008000u
 #define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_DEPTH_STENCIL 0x00010000u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_SUPPORTED 0x00000001u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_SHADER_SAMPLE 0x00000002u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_COLOR_RENDERTARGET 0x00000004u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_DEPTH_RENDERTARGET 0x00000008u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_BLENDABLE 0x00000010u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_MIPS 0x00000020u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_ARRAY 0x00000040u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_VOLUME 0x00000080u
+#define VMSVGA3D_DXVK_SVGA3D_DXFMT_DX_VERTEX_BUFFER 0x00000100u
 #define VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE 0x00000200u
 #define VMSVGA3D_DXVK_ID3D11BUFFER_GET_DESC 10u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_CONSTANT_BUFFERS 7u
@@ -1682,57 +1697,19 @@ static void vmsvga3d_dxvk_restore_config_environment(char *saved)
     g_free(saved);
 }
 
-static bool vmsvga3d_dxvk_environment_enabled(const char *name)
-{
-    static const char *const enabled_values[] = {
-          "y", "yes", "true", "1", "on", "enable", "enabled",
-    };
-    const char *value = g_getenv(name);
-    const char *end;
-    size_t length;
-    size_t i;
-
-    if (value == NULL) {
-        return false;
-    }
-
-    while (*value != '\0' && g_ascii_isspace(*value)) {
-        value++;
-    }
-
-    end = value + strlen(value);
-
-    while (end > value && g_ascii_isspace(end[-1])) {
-        end--;
-    }
-
-    length = (size_t)(end - value);
-
-    for (i = 0; i < G_N_ELEMENTS(enabled_values); i++) {
-        size_t enabled_length = strlen(enabled_values[i]);
-
-        if (length == enabled_length &&
-            g_ascii_strncasecmp(value, enabled_values[i], length) == 0) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 /*
  * DXVK 2.7.1 captures DXVK_LOG_LEVEL when its Logger singleton is created.
- * Silence the native DXVK startup dump unless the DEBUG env variable is set.
+ * Silence the native DXVK startup dump unless VMVGA debugging is enabled.
  */
-static bool vmsvga3d_dxvk_set_log_environment(char **saved, bool *restore,
-                                               Error **errp)
+static bool vmsvga3d_dxvk_set_log_environment(bool debug, char **saved,
+                                               bool *restore, Error **errp)
 {
     const char *log_level;
 
     *saved = NULL;
     *restore = false;
 
-    if (vmsvga3d_dxvk_environment_enabled(VMSVGA3D_DXVK_DEBUG_ENV)) {
+    if (debug) {
         return true;
     }
 
@@ -1892,7 +1869,7 @@ static bool vmsvga3d_dxvk_create_device(VMSVGA3DDxvk *dxvk,
 #endif
 
 VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
-                                    Error **errp)
+                                    bool debug, Error **errp)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkDirect3DCreate9 direct3d_create9 = NULL;
@@ -1924,7 +1901,7 @@ VMSVGA3DDxvk *vmsvga3d_dxvk_create(uint32_t width, uint32_t height,
 
     /* DXVK initialization reads process-global environment variables. */
     g_mutex_lock(&vmsvga3d_dxvk_init_lock);
-    if (!vmsvga3d_dxvk_set_log_environment(&saved_log_level,
+    if (!vmsvga3d_dxvk_set_log_environment(debug, &saved_log_level,
                                             &restore_log_environment, errp)) {
         goto fail;
     }
@@ -2381,6 +2358,67 @@ bool vmsvga3d_dxvk_d3d11_supports_multisample(
     }
 
     return true;
+}
+
+uint32_t vmsvga3d_dxvk_d3d11_format_caps(
+    const VMSVGA3DDxvk *dxvk, uint32_t format)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkComFunction entry;
+    VMSVGA3DDxvkD3D11CheckFormatSupport check_format_support = NULL;
+    uint32_t support = 0;
+    uint32_t caps = 0;
+
+    if (dxvk == NULL || !dxvk->d3d11_ready ||
+        dxvk->d3d11_device == NULL || format == 0) {
+        return 0;
+    }
+
+    entry = vmsvga3d_dxvk_vtable_entry(
+        dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CHECK_FORMAT_SUPPORT);
+    memcpy(&check_format_support, &entry, sizeof(check_format_support));
+    if (check_format_support == NULL ||
+        check_format_support(dxvk->d3d11_device, format, &support) < 0) {
+        return 0;
+    }
+
+    /* Match VirtualBox's DX11 devcap translation, including its use of
+     * TEXTURECUBE as the VMware ARRAY capability bit. */
+    caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_SUPPORTED;
+    if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_SHADER_SAMPLE) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_SHADER_SAMPLE;
+    }
+    if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_RENDER_TARGET) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_COLOR_RENDERTARGET;
+    }
+    if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_DEPTH_STENCIL) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_DEPTH_RENDERTARGET;
+    }
+    if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BLENDABLE) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_BLENDABLE;
+    }
+    if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_MIP) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_MIPS;
+    }
+    if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURECUBE) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_ARRAY;
+    }
+    if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURE3D) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_VOLUME;
+    }
+    if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_IA_VERTEX_BUFFER) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_DX_VERTEX_BUFFER;
+    }
+    if (vmsvga3d_dxvk_d3d11_multisample_format_supported(dxvk, format, 2u)) {
+        caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE;
+    }
+
+    return caps;
+#else
+    (void)dxvk;
+    (void)format;
+    return 0;
+#endif
 }
 
 uint32_t vmsvga3d_dxvk_d3d11_qualify_format_caps(
@@ -3257,7 +3295,7 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
               .bind_flags = resource_desc->bind_flags,
               .cpu_access_flags = resource_desc->cpu_access_flags,
               .misc_flags = resource_desc->misc_flags,
-              .structure_byte_stride = 0,
+              .structure_byte_stride = resource_desc->structure_byte_stride,
           };
 
           if (native.byte_width == 0 ||

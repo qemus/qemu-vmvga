@@ -816,7 +816,6 @@ static void vmsvga_screen_trace_present_snapshot(struct vmsvga_state_s *s,
 static void vmsvga_screen_base_clear(struct vmsvga_state_s *s)
 {
     g_clear_pointer(&s->screen_base, g_free);
-    g_clear_pointer(&s->screen_retired_base, g_free);
 
     s->screen_base_size = 0;
     s->screen_stride = 0;
@@ -1086,15 +1085,7 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
         }
     }
 
-    /*
-     * qemu_console_surface() can still reference the current screen_base until
-     * vmsvga_check_size() installs the replacement DisplaySurface.  Keep one
-     * previous mirror generation alive across that rebind instead of freeing
-     * it here.  The next handoff (or reset) retires it once more and releases
-     * the older generation.
-     */
-    g_free(s->screen_retired_base);
-    s->screen_retired_base = s->screen_base;
+    g_free(s->screen_base);
 
     s->screen_base = new_base;
     s->screen_base_size = (size_t)size64;

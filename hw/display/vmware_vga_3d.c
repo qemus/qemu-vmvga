@@ -24,6 +24,7 @@
 
 */
 
+#pragma pack(push, 1)
 #include "include/svga3d_caps.h"
 #include "include/svga3d_cmd.h"
 #include "include/svga3d_devcaps.h"
@@ -33,6 +34,7 @@
 #include "include/svga3d_shaderdefs.h"
 #include "include/svga3d_surfacedefs.h"
 #include "include/svga3d_types.h"
+#pragma pack(pop)
 #include "include/vmware_vga_3d_state.h"
 #include "include/vmware_vga_vgpu9.h"
 #include "include/vmware_vga_vgpu10.h"

@@ -477,6 +477,17 @@ struct vmsvga_state_s {
     uint32_t screen_backing_offset;
     uint32_t screen_backing_pitch;
     uint32_t screen_clone_count;
+    bool screen_frontend_deferred;
+    bool screen_destroyed_reuse_valid;
+    uint32_t screen_destroyed_flags;
+    uint32_t screen_destroyed_width;
+    uint32_t screen_destroyed_height;
+    int32_t screen_destroyed_root_x;
+    int32_t screen_destroyed_root_y;
+    uint32_t screen_destroyed_backing_gmr_id;
+    uint32_t screen_destroyed_backing_offset;
+    uint32_t screen_destroyed_backing_pitch;
+    uint32_t screen_destroyed_clone_count;
     uint8_t *screen_preseed_base;
     size_t screen_preseed_size;
     uint32_t screen_preseed_width;
@@ -1171,14 +1182,13 @@ static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s)
     uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
 
     /*
-     * Capture the legacy VGA framebuffer only on the first VGA -> SVGA handoff.
-     * After that it remains independent while BAR1 continues to hold SVGA data.
+     * Refresh the isolated legacy VGA framebuffer on every VGA -> SVGA
+     * transition.  VGACommonState itself always keeps the full VRAM mapping as
+     * its backing store; only legacy aperture accesses are redirected to the
+     * shadow while SVGA is enabled.
      */
-    if (s->legacy_vga_size == 0) {
-        memcpy(s->legacy_vga_ptr, svga_ptr, backup_size);
-        s->legacy_vga_size = (uint32_t)backup_size;
-    }
-
+    memcpy(s->legacy_vga_ptr, svga_ptr, backup_size);
+    s->legacy_vga_size = (uint32_t)backup_size;
     s->vga.vram_ptr = svga_ptr;
     s->svga_surface_bound = false;
 
@@ -1188,20 +1198,26 @@ static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s)
 
 static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s)
 {
+    size_t backup_size = vmsvga_legacy_vga_backup_size(s);
+    uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
+
     /*
-     * Do not copy the VGA shadow over BAR1. The two framebuffer contents are
-     * independent; only select the shadow as VGACommonState's backing store.
+     * Restore the isolated legacy VGA bytes into the real VRAM before generic
+     * VGA resumes rendering.  Never leave VGACommonState pointing at the small
+     * shadow: vram_ptr must continue to describe the full vram_size mapping.
      */
     if (s->legacy_vga_size != 0) {
-        s->vga.vram_ptr = s->legacy_vga_ptr;
-    } else {
-        s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
+        size_t restore_size = MIN((size_t)s->legacy_vga_size, backup_size);
+
+        memcpy(svga_ptr, s->legacy_vga_ptr, restore_size);
+        memory_region_set_dirty(&s->vga.vram, 0, restore_size);
     }
 
+    s->vga.vram_ptr = svga_ptr;
     s->svga_surface_bound = false;
 
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW leave size=%zu",
-                       vmsvga_legacy_vga_backup_size(s));
+                       backup_size);
 }
 
 static inline void vmsvga_clear_vram_dirty(struct vmsvga_state_s *s)
@@ -6371,7 +6387,8 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
               len -= (int32_t)total_words;
               if (!vmsvga_screen_define(s, id, flags, width, height, root_x, root_y,
                                         backing_present, backing_gmr_id,
-                                        backing_offset, backing_pitch, clone_count)) {
+                                        backing_offset, backing_pitch, clone_count,
+                                        false)) {
                   VPRINT("SVGA_CMD_DEFINE_SCREEN rejected id=%u flags=0x%x size=%ux%u\n",
                          id, flags, width, height);
               }
@@ -7654,7 +7671,7 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
     uint8_t *scanout;
     uint32_t stride;
 
-    if (!s->active_valid) {
+    if (!s->active_valid || s->screen_frontend_deferred) {
         return;
     }
 

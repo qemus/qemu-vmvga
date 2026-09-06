@@ -1244,6 +1244,8 @@ static void vmsvga_screen_reset(struct vmsvga_state_s *s)
     s->screen_backing_offset = 0;
     s->screen_backing_pitch = 0;
     s->screen_clone_count = 0;
+    s->screen_frontend_deferred = false;
+    s->screen_destroyed_reuse_valid = false;
     s->gmrfb_defined = false;
     s->gmrfb_gmr_id = SVGA_GMR_NULL;
     s->gmrfb_offset = 0;
@@ -1269,7 +1271,8 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
                                  uint32_t backing_gmr_id,
                                  uint32_t backing_offset,
                                  uint32_t backing_pitch,
-                                 uint32_t clone_count)
+                                 uint32_t clone_count,
+                                 bool defer_frontend)
 {
     uint64_t stride;
     uint64_t size;
@@ -1277,6 +1280,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     bool handoff_active;
     bool handoff_same_backing;
     bool duplicate_handoff_define;
+    bool reuse_destroyed_frontend;
     DisplaySurface *surface;
     uint32_t supported_flags = SVGA_SCREEN_MUST_BE_SET |
                                SVGA_SCREEN_IS_PRIMARY |
@@ -1322,6 +1326,81 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
 
     screen_stride = backing_present ? backing_pitch : (uint32_t)stride;
     surface = qemu_console_surface(s->vga.con);
+
+    /*
+     * An exact DESTROY_SCREEN -> DEFINE_SCREEN of the same backed scanout is
+     * only a logical Screen Object rebuild.  If the frontend is still bound
+     * directly to that backing, keep it there: reseeding a handoff mirror and
+     * forcing another mode-set can expose the guest's temporary clear and
+     * causes a visible desktop flicker for no actual scanout change.
+     */
+    reuse_destroyed_frontend =
+        s->screen_destroyed_reuse_valid && backing_present &&
+        backing_gmr_id == SVGA_GMR_FRAMEBUFFER && surface != NULL &&
+        surface_data(surface) ==
+            vmsvga_svga_vram_ptr(s) + (size_t)backing_offset &&
+        surface_width(surface) == width && surface_height(surface) == height &&
+        surface_bits_per_pixel(surface) == 32 &&
+        surface_stride(surface) == screen_stride &&
+        s->screen_destroyed_flags == flags &&
+        s->screen_destroyed_width == width &&
+        s->screen_destroyed_height == height &&
+        s->screen_destroyed_root_x == root_x &&
+        s->screen_destroyed_root_y == root_y &&
+        s->screen_destroyed_backing_gmr_id == backing_gmr_id &&
+        s->screen_destroyed_backing_offset == backing_offset &&
+        s->screen_destroyed_backing_pitch == backing_pitch &&
+        s->screen_destroyed_clone_count == clone_count;
+
+    if (reuse_destroyed_frontend) {
+        s->screen_destroyed_reuse_valid = false;
+        s->screen_backing_valid = true;
+        s->screen_handoff_active = false;
+        s->screen_handoff_same_backing = false;
+        s->screen_handoff_skipped_same_backing_full = false;
+        s->screen_backing_gmr_id = backing_gmr_id;
+        s->screen_backing_offset = backing_offset;
+        s->screen_backing_pitch = backing_pitch;
+        s->screen_defined = true;
+        s->screen_flags = flags;
+        s->screen_width = width;
+        s->screen_height = height;
+        s->screen_root_x = root_x;
+        s->screen_root_y = root_y;
+        s->screen_clone_count = clone_count;
+        s->screen_stride = screen_stride;
+        s->active_valid = true;
+        s->active_width = width;
+        s->active_height = height;
+        s->active_depth = 32;
+        s->active_stride = screen_stride;
+        s->new_width = width;
+        s->new_height = height;
+        s->new_depth = 32;
+        s->screen_frontend_deferred = false;
+        s->svga_surface_bound = true;
+        s->invalidated = false;
+        s->damage_count = 0;
+
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=define reuse-destroyed=1 "
+                    "size=%ux%u/32/%u backing=%u:0x%08x\n",
+                    width, height, screen_stride, backing_gmr_id,
+                    backing_offset);
+            s->trace_now.screen_defines++;
+            s->trace_activity_seq++;
+        }
+
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                           "SCREEN_DEFINE id=%u flags=0x%08x width=%u height=%u "
+                           "root=%d,%d stride=%u backing=%u:%08x clone=%u",
+                           id, flags, width, height, root_x, root_y,
+                           screen_stride, backing_gmr_id, backing_offset,
+                           clone_count);
+        return true;
+    }
+    s->screen_destroyed_reuse_valid = false;
 
     /*
      * Windows can emit an identical DEFINE_SCREEN immediately after a handoff
@@ -1449,8 +1528,10 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     s->new_width = width;
     s->new_height = height;
     s->new_depth = 32;
+    s->screen_frontend_deferred = defer_frontend && handoff_active &&
+                                  !backing_present;
     s->svga_surface_bound = false;
-    s->invalidated = true;
+    s->invalidated = !s->screen_frontend_deferred;
 
     if (vmsvga_trace_flight_enabled()) {
         fprintf(stderr,
@@ -1469,10 +1550,20 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
                 s->screen_handoff_same_backing);
     }
 
-    /* A handoff mirror is pre-seeded from the last valid frontend image, so it
-     * is safe to bind immediately. Subsequent GMRFB and 3D Screen updates paint
-     * on top of that snapshot until a complete new frame ends the handoff. */
-    vmsvga_check_size(s);
+    /*
+     * vGPU9 binds the transition mirror immediately.  vGPU10 can do better:
+     * keep the old frontend surface visible until a genuinely written Screen
+     * Target becomes dirty, then switch after its readback has populated the
+     * new screen storage.  The preseed remains available only as a fallback.
+     */
+    if (!s->screen_frontend_deferred) {
+        vmsvga_check_size(s);
+    } else if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-SCREEN-HANDOFF phase=frontend-defer size=%ux%u "
+                "mirror=%p\n",
+                width, height, (void *)s->screen_base);
+    }
 
     if (vmsvga_trace_flight_enabled()) {
         fprintf(stderr,
@@ -1520,6 +1611,27 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
         s->screen_base != NULL && surface != NULL &&
         surface_data(surface) == s->screen_base;
 
+    s->screen_destroyed_reuse_valid =
+        s->screen_defined && s->screen_backing_valid &&
+        s->screen_backing_gmr_id == SVGA_GMR_FRAMEBUFFER && surface != NULL &&
+        surface_data(surface) ==
+            vmsvga_svga_vram_ptr(s) + (size_t)s->screen_backing_offset &&
+        surface_width(surface) == s->screen_width &&
+        surface_height(surface) == s->screen_height &&
+        surface_bits_per_pixel(surface) == 32 &&
+        surface_stride(surface) == s->screen_backing_pitch;
+    if (s->screen_destroyed_reuse_valid) {
+        s->screen_destroyed_flags = s->screen_flags;
+        s->screen_destroyed_width = s->screen_width;
+        s->screen_destroyed_height = s->screen_height;
+        s->screen_destroyed_root_x = s->screen_root_x;
+        s->screen_destroyed_root_y = s->screen_root_y;
+        s->screen_destroyed_backing_gmr_id = s->screen_backing_gmr_id;
+        s->screen_destroyed_backing_offset = s->screen_backing_offset;
+        s->screen_destroyed_backing_pitch = s->screen_backing_pitch;
+        s->screen_destroyed_clone_count = s->screen_clone_count;
+    }
+
     /*
      * The console DisplaySurface directly references screen_base while a
      * handoff mirror is visible.  DESTROY_SCREEN does not replace that
@@ -1554,6 +1666,7 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
     s->screen_backing_pitch = 0;
     s->screen_clone_count = 0;
     s->screen_stride = 0;
+    s->screen_frontend_deferred = false;
     s->screen_annotation_type = VMSVGA_ANNOTATION_NONE;
     s->damage_count = 0;
     s->svga_surface_bound = false;

@@ -955,7 +955,7 @@ static bool vmsvga3d_mob_destroy(struct vmsvga_state_s *s,
     if (state->gart_enabled && state->gart_mobid == mobid) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
-            "VMVGA-GART backing-mob-destroy mobid=%u action=DISABLE\n",
+            "GART backing-mob-destroy mobid=%u action=DISABLE",
             mobid);
         vmsvga3d_gart_disable_live(state);
     }
@@ -1052,7 +1052,7 @@ static bool vmsvga3d_gart_enable_live(struct vmsvga_state_s *s,
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "VMVGA-GART enable mobid=%u pages=%u initialized=%u preserve=%u result=OK\n",
+        "GART enable mobid=%u pages=%u initialized=%u preserve=%u result=OK",
         mobid, page_count, initialized, preserve ? 1u : 0u);
     return true;
 }
@@ -1110,7 +1110,7 @@ static bool vmsvga3d_gart_map_mob_live(struct vmsvga_state_s *s,
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "VMVGA-GART map mobid=%u offset=0x%08x first=%u pages=%u result=OK\n",
+        "GART map mobid=%u offset=0x%08x first=%u pages=%u result=OK",
         mobid, gart_offset, first_page, mob->gbo.page_count);
     return true;
 }
@@ -1143,7 +1143,7 @@ static bool vmsvga3d_gart_unmap_live(struct vmsvga_state_s *s,
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "VMVGA-GART unmap offset=0x%08x first=%u pages=%u result=OK\n",
+        "GART unmap offset=0x%08x first=%u pages=%u result=OK",
         gart_offset, first_page, num_pages);
     return true;
 }
@@ -1620,7 +1620,7 @@ static void vmsvga3d_surface_install(
 
     if (sid >= SVGA3D_MAX_SURFACE_IDS) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=SID_RANGE sid=%u "
+                          "SURFACE result=REJECT reason=SID_RANGE sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
         return;
@@ -1629,7 +1629,7 @@ static void vmsvga3d_surface_install(
     if (!vmsvga3d_surface_faces_valid(surface_flags, face, array_elements,
                                        mip_count)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=FACES sid=%u "
+                          "SURFACE result=REJECT reason=FACES sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
         return;
@@ -1638,7 +1638,7 @@ static void vmsvga3d_surface_install(
     if (!vmsvga3d_surface_sizes_valid(surface_flags, format, face, mip_sizes,
                                       array_elements, mip_count)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=SIZES sid=%u "
+                          "SURFACE result=REJECT reason=SIZES sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
         return;
@@ -1647,7 +1647,7 @@ static void vmsvga3d_surface_install(
     surface = g_try_new0(VMSVGA3DSurface, 1);
     if (surface == NULL) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=ALLOC_SURFACE sid=%u "
+                          "SURFACE result=REJECT reason=ALLOC_SURFACE sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
         return;
@@ -1656,7 +1656,7 @@ static void vmsvga3d_surface_install(
     surface->mips = g_try_new0(VMSVGA3DSurfaceImage, mip_count);
     if (surface->mips == NULL) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=ALLOC_MIPS sid=%u "
+                          "SURFACE result=REJECT reason=ALLOC_MIPS sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
         g_free(surface);
@@ -1680,7 +1680,7 @@ static void vmsvga3d_surface_install(
                                            multisample_count, &surface->mips[i])) {
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
-                "D3D9-SURFACE result=REJECT reason=IMAGE_LAYOUT sid=%u format=%u "
+                "SURFACE result=REJECT reason=IMAGE_LAYOUT sid=%u format=%u "
                 "flags=0x%016" PRIx64 " mip=%u size=%ux%ux%u samples=%u",
                 sid, format, surface_flags, i, mip_sizes[i].width,
                 mip_sizes[i].height, mip_sizes[i].depth, multisample_count);
@@ -1691,7 +1691,7 @@ static void vmsvga3d_surface_install(
         if (storage_bytes > SIZE_MAX) {
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
-                "D3D9-SURFACE result=REJECT reason=STORAGE_OVERFLOW sid=%u "
+                "SURFACE result=REJECT reason=STORAGE_OVERFLOW sid=%u "
                 "format=%u flags=0x%016" PRIx64 " mip=%u bytes=%" PRIu64,
                 sid, format, surface_flags, i, storage_bytes);
             vmsvga3d_surface_free(surface);
@@ -1703,7 +1703,7 @@ static void vmsvga3d_surface_install(
     state = vmsvga3d_state_ensure(s);
     if (state == NULL) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=STATE sid=%u "
+                          "SURFACE result=REJECT reason=STATE sid=%u "
                           "format=%u flags=0x%016" PRIx64 " bytes=%zu",
                           sid, format, surface_flags, surface->storage_bytes);
         vmsvga3d_surface_free(surface);
@@ -1718,7 +1718,7 @@ static void vmsvga3d_surface_install(
         state->surface_bytes - old_bytes > limit - surface->storage_bytes) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
-            "D3D9-SURFACE result=REJECT reason=SURFACE_MEMORY sid=%u format=%u "
+            "SURFACE result=REJECT reason=SURFACE_MEMORY sid=%u format=%u "
             "flags=0x%016" PRIx64 " bytes=%zu current=%zu old=%zu limit=%zu",
             sid, format, surface_flags, surface->storage_bytes,
             state->surface_bytes, old_bytes, limit);
@@ -1731,7 +1731,7 @@ static void vmsvga3d_surface_install(
         if (surface->mips[i].data == NULL) {
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
-                "D3D9-SURFACE result=REJECT reason=ALLOC_IMAGE sid=%u format=%u "
+                "SURFACE result=REJECT reason=ALLOC_IMAGE sid=%u format=%u "
                 "flags=0x%016" PRIx64 " mip=%u bytes=%u",
                 sid, format, surface_flags, i, surface->mips[i].data_size);
             vmsvga3d_surface_free(surface);
@@ -1743,7 +1743,7 @@ static void vmsvga3d_surface_install(
     if (surface->dxvk_surface == NULL) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
-            "D3D9-SURFACE result=REJECT reason=DXVK_SURFACE_CREATE sid=%u "
+            "SURFACE result=REJECT reason=DXVK_SURFACE_CREATE sid=%u "
             "format=%u flags=0x%016" PRIx64 " bytes=%zu",
             sid, format, surface_flags, surface->storage_bytes);
         vmsvga3d_surface_free(surface);
@@ -1771,7 +1771,7 @@ static void vmsvga3d_surface_install(
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "D3D9-SURFACE result=OK sid=%u format=%u flags=0x%016" PRIx64 " mips=%u "
+        "SURFACE result=OK sid=%u format=%u flags=0x%016" PRIx64 " mips=%u "
         "arrays=%u size=%ux%ux%u samples=%u bytes=%zu total=%zu redefined=%u",
         sid, format, surface_flags, mip_count, array_elements,
         mip_count != 0 ? mip_sizes[0].width : 0,
@@ -2020,7 +2020,7 @@ static bool vmsvga3d_handle_surface_define(struct vmsvga_state_s *s,
     (void)cmd;
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=PAYLOAD_READ "
+                          "SURFACE result=REJECT reason=PAYLOAD_READ "
                           "fifo=0x%08x",
                           fifo_start);
         return true;
@@ -2028,7 +2028,7 @@ static bool vmsvga3d_handle_surface_define(struct vmsvga_state_s *s,
 
     if (size < sizeof(*body)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=PACKET_SHORT "
+                          "SURFACE result=REJECT reason=PACKET_SHORT "
                           "fifo=0x%08x bytes=%u expected=%zu",
                           fifo_start, size, sizeof(*body));
         g_free(payload);
@@ -2038,7 +2038,7 @@ static bool vmsvga3d_handle_surface_define(struct vmsvga_state_s *s,
     mip_bytes = size - sizeof(*body);
     if (mip_bytes % sizeof(SVGA3dSize) != 0) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=MIP_PAYLOAD "
+                          "SURFACE result=REJECT reason=MIP_PAYLOAD "
                           "fifo=0x%08x bytes=%u mip_bytes=%u",
                           fifo_start, size, mip_bytes);
         g_free(payload);
@@ -2073,7 +2073,7 @@ static bool vmsvga3d_handle_surface_define_v2(struct vmsvga_state_s *s,
     (void)cmd;
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=PAYLOAD_READ_V2 "
+                          "SURFACE result=REJECT reason=PAYLOAD_READ_V2 "
                           "fifo=0x%08x",
                           fifo_start);
         return true;
@@ -2081,7 +2081,7 @@ static bool vmsvga3d_handle_surface_define_v2(struct vmsvga_state_s *s,
 
     if (size < sizeof(*body)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=PACKET_SHORT_V2 "
+                          "SURFACE result=REJECT reason=PACKET_SHORT_V2 "
                           "fifo=0x%08x bytes=%u expected=%zu",
                           fifo_start, size, sizeof(*body));
         g_free(payload);
@@ -2091,7 +2091,7 @@ static bool vmsvga3d_handle_surface_define_v2(struct vmsvga_state_s *s,
     mip_bytes = size - sizeof(*body);
     if (mip_bytes % sizeof(SVGA3dSize) != 0) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "D3D9-SURFACE result=REJECT reason=MIP_PAYLOAD_V2 "
+                          "SURFACE result=REJECT reason=MIP_PAYLOAD_V2 "
                           "fifo=0x%08x bytes=%u mip_bytes=%u",
                           fifo_start, size, mip_bytes);
         g_free(payload);
@@ -8086,6 +8086,50 @@ static bool vmsvga3d_handle_destroy_gb_mob(struct vmsvga_state_s *s,
     return true;
 }
 
+static bool vmsvga3d_handle_gb_mob_fence(struct vmsvga_state_s *s,
+                                             uint32_t cmd, int32_t *len,
+                                             uint32_t fifo_start)
+{
+    SVGA3dCmdGBMobFence *body;
+    VMSVGA3DMob *mob;
+    void *payload;
+    uint32_t size;
+    bool ok = false;
+
+    (void)cmd;
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                          "GB-MOB-FENCE result=REJECT reason=PAYLOAD_READ "
+                          "fifo=0x%08x",
+                          fifo_start);
+        return true;
+    }
+
+    if (size >= sizeof(*body)) {
+        uint32_t value;
+
+        body = payload;
+        value = body->value;
+        mob = vmsvga3d_mob_get(s, body->mobId);
+        ok = mob != NULL &&
+             vmsvga3d_mob_write(s, mob, body->mobOffset,
+                                &value, sizeof(value));
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-MOB-FENCE value=0x%08x mobid=%u offset=0x%08x result=%s",
+            value, body->mobId, body->mobOffset, ok ? "OK" : "REJECT");
+    } else {
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                          "GB-MOB-FENCE result=REJECT reason=PACKET_SHORT "
+                          "fifo=0x%08x bytes=%u expected=%zu",
+                          fifo_start, size, sizeof(*body));
+    }
+
+    g_free(payload);
+    return true;
+}
+
 static bool vmsvga3d_handle_gart(struct vmsvga_state_s *s, uint32_t cmd,
                                   int32_t *len, uint32_t fifo_start)
 {
@@ -8107,7 +8151,7 @@ static bool vmsvga3d_handle_gart(struct vmsvga_state_s *s, uint32_t cmd,
             if (!ok) {
                 VMVGA_TRACE_LOCAL(
                     VMVGA_TRACE_3D,
-                    "VMVGA-GART enable mobid=%u mustBeZero=%u initialized=%u result=REJECT\n",
+                    "GART enable mobid=%u mustBeZero=%u initialized=%u result=REJECT",
                     body->mobid, body->mustBeZero, body->initialized);
             }
         }
@@ -8121,7 +8165,7 @@ static bool vmsvga3d_handle_gart(struct vmsvga_state_s *s, uint32_t cmd,
                 vmsvga3d_gart_disable_live(state);
                 ok = true;
                 VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                                  "VMVGA-GART disable result=OK\n");
+                                  "GART disable result=OK");
             }
         }
         break;
@@ -8135,7 +8179,7 @@ static bool vmsvga3d_handle_gart(struct vmsvga_state_s *s, uint32_t cmd,
             if (!ok) {
                 VMVGA_TRACE_LOCAL(
                     VMVGA_TRACE_3D,
-                    "VMVGA-GART map mobid=%u offset=0x%08x result=REJECT\n",
+                    "GART map mobid=%u offset=0x%08x result=REJECT",
                     body->mobid, body->gartOffset);
             }
         }
@@ -8150,7 +8194,7 @@ static bool vmsvga3d_handle_gart(struct vmsvga_state_s *s, uint32_t cmd,
             if (!ok) {
                 VMVGA_TRACE_LOCAL(
                     VMVGA_TRACE_3D,
-                    "VMVGA-GART unmap offset=0x%08x pages=%u result=REJECT\n",
+                    "GART unmap offset=0x%08x pages=%u result=REJECT",
                     body->gartOffset, body->numPages);
             }
         }
@@ -8169,7 +8213,7 @@ static bool vmsvga3d_handle_gart(struct vmsvga_state_s *s, uint32_t cmd,
          (cmd == SVGA_3D_CMD_UNMAP_GART_RANGE &&
           size < sizeof(SVGA3dCmdUnmapGartRange)))) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "VMVGA-GART cmd=%u size=%u result=REJECT-SIZE\n",
+                          "GART cmd=%u size=%u result=REJECT-SIZE",
                           cmd, size);
     }
 
@@ -8457,7 +8501,8 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
     VMSVGA3D_DISCARD(SVGA_3D_CMD_SET_GB_SHADERCONSTS_INLINE),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_GB_SCREEN_DMA),
     VMSVGA3D_STALL(SVGA_3D_CMD_BIND_GB_SURFACE_WITH_PITCH),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_GB_MOB_FENCE),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_GB_MOB_FENCE,
+                     vmsvga3d_handle_gb_mob_fence),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, vmsvga3d_handle_define_gb_surface),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_MOB64, vmsvga3d_handle_define_gb_mob),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_REDEFINE_GB_MOB64),

@@ -40,6 +40,25 @@
 #include "hw/pci/pci_device.h"
 #include "system/address-spaces.h"
 
+_Static_assert(sizeof(SVGA3dCmdDefineGBSurface) == 36,
+               "SVGA3dCmdDefineGBSurface wire size");
+_Static_assert(sizeof(SVGA3dCmdDefineGBSurface_v2) == 44,
+               "SVGA3dCmdDefineGBSurface_v2 wire size");
+_Static_assert(sizeof(SVGA3dCmdDefineGBSurface_v3) == 48,
+               "SVGA3dCmdDefineGBSurface_v3 wire size");
+_Static_assert(sizeof(SVGA3dCmdDefineGBSurface_v4) == 56,
+               "SVGA3dCmdDefineGBSurface_v4 wire size");
+_Static_assert(sizeof(SVGA3dCmdSetOTableBase64) == 24,
+               "SVGA3dCmdSetOTableBase64 wire size");
+_Static_assert(sizeof(SVGA3dCmdGrowOTable) == 24,
+               "SVGA3dCmdGrowOTable wire size");
+_Static_assert(sizeof(SVGA3dCmdDefineGBMob64) == 20,
+               "SVGA3dCmdDefineGBMob64 wire size");
+_Static_assert(sizeof(SVGA3dCmdRedefineGBMob64) == 20,
+               "SVGA3dCmdRedefineGBMob64 wire size");
+_Static_assert(sizeof(SVGA3dCmdDXPresentBlt) == 68,
+               "SVGA3dCmdDXPresentBlt wire size");
+
 typedef struct {
     SVGA3dSize size;
 } SVGA3dCmdSize;

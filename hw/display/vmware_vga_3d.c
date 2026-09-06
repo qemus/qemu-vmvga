@@ -831,7 +831,7 @@ static bool vmsvga3d_otable_set_or_grow(struct vmsvga_state_s *s,
     }
 
     current = &state->otables[type];
-    if (current->size < valid_size) {
+    if (grow && current->size < valid_size) {
         return false;
     }
 
@@ -1776,6 +1776,8 @@ static bool vmsvga3d_gb_surface_define_live(
     uint32_t mip_index;
 
     if (s == NULL || base_size == NULL) {
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                          "GB-SURFACE result=REJECT reason=ARGS sid=%u", sid);
         return false;
     }
 
@@ -1802,12 +1804,23 @@ static bool vmsvga3d_gb_surface_define_live(
 
     if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, sid, sizeof(entry),
                                 &entry, sizeof(entry))) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-SURFACE result=REJECT reason=OTABLE sid=%u format=%u "
+            "flags=0x%016" PRIx64 " mips=%u arrays=%u size=%ux%ux%u",
+            sid, format, surface_flags, num_mip_levels, array_size,
+            base_size->width, base_size->height, base_size->depth);
         return false;
     }
 
     if (sid >= SVGA3D_MAX_SURFACE_IDS || num_mip_levels == 0 ||
         num_mip_levels > VMSVGA3D_MAX_MIP_LEVELS ||
         array_size > SVGA3D_MAX_SURFACE_ARRAYSIZE) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-SURFACE result=REJECT reason=RANGE sid=%u format=%u "
+            "mips=%u arrays=%u",
+            sid, format, num_mip_levels, array_size);
         return false;
     }
 
@@ -1820,6 +1833,11 @@ static bool vmsvga3d_gb_surface_define_live(
         ((surface_flags & SVGA3D_SURFACE_CUBEMAP) != 0 &&
          array_elements % SVGA3D_MAX_SURFACE_FACES != 0) ||
         num_mip_levels > UINT32_MAX / array_elements) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-SURFACE result=REJECT reason=ARRAY sid=%u flags=0x%016" PRIx64
+            " mips=%u arrays=%u elements=%u",
+            sid, surface_flags, num_mip_levels, array_size, array_elements);
         return false;
     }
     mip_count = num_mip_levels * array_elements;
@@ -1827,6 +1845,10 @@ static bool vmsvga3d_gb_surface_define_live(
     mip_sizes = g_try_new(SVGA3dSize, mip_count);
 
     if (mip_sizes == NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-SURFACE result=REJECT reason=ALLOC_MIPS sid=%u mips=%u",
+            sid, mip_count);
         return false;
     }
 
@@ -6773,18 +6795,35 @@ static bool vmsvga3d_handle_set_otable_base(struct vmsvga_state_s *s,
     if (cmd == SVGA_3D_CMD_SET_OTABLE_BASE &&
         size >= sizeof(SVGA3dCmdSetOTableBase)) {
         const SVGA3dCmdSetOTableBase *body = payload;
+        bool result;
 
-        (void)vmsvga3d_otable_set_or_grow(
+        result = vmsvga3d_otable_set_or_grow(
             s, body->type, body->baseAddress, body->sizeInBytes,
             body->validSizeInBytes, body->ptDepth, false);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "OTABLE op=SET type=%u base=0x%016" PRIx64 " size=%u valid=%u "
+            "format=%u result=%s",
+            body->type, (uint64_t)body->baseAddress, body->sizeInBytes,
+            body->validSizeInBytes, body->ptDepth, result ? "OK" : "REJECT");
     } else if (cmd == SVGA_3D_CMD_SET_OTABLE_BASE64 &&
                size >= VMSVGA3D_WIRE_SET_OTABLE_BASE64_SIZE) {
         const uint8_t *body = payload;
+        SVGAOTableType type = (SVGAOTableType)ldl_le_p(body);
+        PPN64 base = ldq_le_p(body + 4);
+        uint32_t table_size = ldl_le_p(body + 12);
+        uint32_t valid_size = ldl_le_p(body + 16);
+        SVGAMobFormat format = (SVGAMobFormat)ldl_le_p(body + 20);
+        bool result;
 
-        (void)vmsvga3d_otable_set_or_grow(
-            s, (SVGAOTableType)ldl_le_p(body), ldq_le_p(body + 4),
-            ldl_le_p(body + 12), ldl_le_p(body + 16),
-            (SVGAMobFormat)ldl_le_p(body + 20), false);
+        result = vmsvga3d_otable_set_or_grow(
+            s, type, base, table_size, valid_size, format, false);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "OTABLE op=SET64 type=%u base=0x%016" PRIx64 " size=%u valid=%u "
+            "format=%u result=%s",
+            type, (uint64_t)base, table_size, valid_size, format,
+            result ? "OK" : "REJECT");
     }
 
     g_free(payload);

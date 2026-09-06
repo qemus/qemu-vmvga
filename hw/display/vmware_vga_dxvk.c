@@ -193,6 +193,9 @@ struct vmsvga3d_dxvk_surface_s {
 
     VMSVGA3DD3D10CreateDesc d3d11_desc;
     void *d3d11_resource;
+    void *d3d11_readback_staging_2d;
+    uint32_t d3d11_readback_staging_width;
+    uint32_t d3d11_readback_staging_height;
     bool d3d11_resident;
 };
 
@@ -2883,12 +2886,19 @@ static void vmsvga3d_dxvk_surface_evict_d3d11(
 
     vmsvga3d_dxvk_d3d11_view_surface_destroy(surface);
 #if defined(CONFIG_LINUX) && defined(__ELF__)
+    if (surface->d3d11_readback_staging_2d != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_readback_staging_2d,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        surface->d3d11_readback_staging_2d = NULL;
+    }
     if (surface->d3d11_resource != NULL) {
         vmsvga3d_dxvk_release(surface->d3d11_resource,
                               VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         surface->d3d11_resource = NULL;
     }
 #endif
+    surface->d3d11_readback_staging_width = 0;
+    surface->d3d11_readback_staging_height = 0;
     memset(&surface->d3d11_desc, 0, sizeof(surface->d3d11_desc));
     surface->d3d11_resident = false;
 }
@@ -7815,6 +7825,7 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     VMSVGA3DDxvkD3D11MappedSubresource mapped = {0};
     const VMSVGA3DD3D10CreateDesc *desc;
     void *staging = NULL;
+    bool staging_transient = true;
     uint32_t mip_level;
     uint64_t max_subresources;
     uint32_t z;
@@ -7957,10 +7968,51 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
           staging_desc.sample_desc.count = 1;
           staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
           staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
-          result = create_texture2d(dxvk->d3d11_device, &staging_desc, NULL,
-                                    &staging);
-          if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
-              return false;
+
+          /* Boxed readbacks are frequent on the screen path.  Retain the
+           * largest staging texture seen for this surface; full-subresource
+           * readbacks keep their existing transient allocation behavior. */
+          if (source_box != NULL) {
+              if (surface->d3d11_readback_staging_2d == NULL ||
+                  surface->d3d11_readback_staging_width < staging_desc.width ||
+                  surface->d3d11_readback_staging_height < staging_desc.height) {
+                  void *new_staging = NULL;
+
+                  staging_desc.width = MAX(
+                      staging_desc.width,
+                      surface->d3d11_readback_staging_width);
+                  staging_desc.height = MAX(
+                      staging_desc.height,
+                      surface->d3d11_readback_staging_height);
+                  result = create_texture2d(dxvk->d3d11_device, &staging_desc,
+                                            NULL, &new_staging);
+                  if (!vmsvga3d_dxvk_succeeded(result) ||
+                      new_staging == NULL) {
+                      if (new_staging != NULL) {
+                          vmsvga3d_dxvk_release(
+                              new_staging, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+                      }
+                      return false;
+                  }
+
+                  if (surface->d3d11_readback_staging_2d != NULL) {
+                      vmsvga3d_dxvk_release(
+                          surface->d3d11_readback_staging_2d,
+                          VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+                  }
+                  surface->d3d11_readback_staging_2d = new_staging;
+                  surface->d3d11_readback_staging_width = staging_desc.width;
+                  surface->d3d11_readback_staging_height = staging_desc.height;
+              }
+
+              staging = surface->d3d11_readback_staging_2d;
+              staging_transient = false;
+          } else {
+              result = create_texture2d(dxvk->d3d11_device, &staging_desc, NULL,
+                                        &staging);
+              if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
+                  return false;
+              }
           }
           copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
                       surface->d3d11_resource, subresource, copy_box);
@@ -8029,7 +8081,9 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     success = true;
 
 out:
-    vmsvga3d_dxvk_release(staging, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    if (staging_transient) {
+        vmsvga3d_dxvk_release(staging, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
 
     return success;
 #else

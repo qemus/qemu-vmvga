@@ -1578,6 +1578,10 @@ static bool vmsvga3d_gb_surface_define_live(
         return false;
     }
 
+    multisample_quality = MIN(MAX(multisample_quality,
+                                  (uint32_t)SVGA3D_MS_QUALITY_MIN),
+                              (uint32_t)SVGA3D_MS_QUALITY_MAX);
+
     memset(&entry, 0, sizeof(entry));
     entry.format = cpu_to_le32(format);
     entry.surface1Flags = cpu_to_le32((uint32_t)surface_flags);
@@ -1645,8 +1649,7 @@ static bool vmsvga3d_gb_surface_define_live(
                              mip_sizes, mip_count);
     if (sid < SVGA3D_MAX_SURFACE_IDS && s->svga3d->surfaces[sid] != NULL) {
         s->svga3d->surfaces[sid]->multisample_quality = multisample_quality;
-        s->svga3d->surfaces[sid]->buffer_byte_stride =
-            (uint16_t)buffer_byte_stride;
+        s->svga3d->surfaces[sid]->buffer_byte_stride = buffer_byte_stride;
     }
     g_free(mip_sizes);
 
@@ -6560,11 +6563,6 @@ static bool vmsvga3d_handle_set_otable_base(struct vmsvga_state_s *s,
 {
     void *payload;
     uint32_t size;
-
-    if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V4 &&
-        s->vgpu_generation != VMSVGA_VGPU_11) {
-        return false;
-    }
 
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
         return true;

@@ -7712,7 +7712,8 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             (void)vmsvga_screen_define(s, body->stid, flags, body->width,
                                        body->height, body->xRoot, body->yRoot,
                                        false, SVGA_GMR_NULL, 0, 0, 0,
-                                       s->vgpu_generation == VMSVGA_VGPU_10);
+                                       s->vgpu_generation == VMSVGA_VGPU_10 ||
+                                       s->vgpu_generation == VMSVGA_VGPU_11);
         }
         break;
 

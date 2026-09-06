@@ -1395,13 +1395,17 @@ static inline bool vmsvga_cursor_bypass3_fetch(struct vmsvga_state_s *s,
         s->cursor_dirty = true;
     }
 
-    if (!s->active_cursor_position_valid || s->active_cursor_x != x ||
-        s->active_cursor_y != y ||
-        s->active_cursor_on !=
-            (on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE)) {
+    if (s->active_cursor_on !=
+        (on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE)) {
+        s->active_cursor_on = on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
+        s->cursor_dirty = true;
+    }
+
+    if ((s->active_cursor_position_valid || x != 0 || y != 0) &&
+        (!s->active_cursor_position_valid || s->active_cursor_x != x ||
+         s->active_cursor_y != y)) {
         s->active_cursor_x = x;
         s->active_cursor_y = y;
-        s->active_cursor_on = on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
         s->active_cursor_position_valid = true;
         s->cursor_dirty = true;
     }
@@ -4024,11 +4028,23 @@ static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
 static inline void vmsvga_cursor_commit_indexed(struct vmsvga_state_s *s)
 {
     bool id_changed = s->active_cursor != s->cursor;
+    bool position_valid = s->cursor_x_valid && s->cursor_y_valid;
+
     s->active_cursor = s->cursor;
-    s->active_cursor_x = s->cursor_x;
-    s->active_cursor_y = s->cursor_y;
     s->active_cursor_on = s->cursor_on;
-    s->active_cursor_position_valid = s->cursor_x_valid && s->cursor_y_valid;
+
+    /* Some VMware guests initialize the hardware-cursor position registers to
+     * the origin before publishing the pointer's actual current position. Do
+     * not turn that bootstrap value into a visible jump from the existing
+     * software cursor. Once a non-origin position has established cursor
+     * tracking, (0, 0) remains a perfectly valid guest-requested position. */
+    if (position_valid &&
+        (s->active_cursor_position_valid || s->cursor_x != 0 ||
+         s->cursor_y != 0)) {
+        s->active_cursor_x = s->cursor_x;
+        s->active_cursor_y = s->cursor_y;
+        s->active_cursor_position_valid = true;
+    }
 
     if (id_changed) {
         vmsvga_cursor_select(s, s->active_cursor);
@@ -5448,13 +5464,13 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
               {
                   uint32_t x = vmsvga_fifo_read(s);
                   uint32_t y = vmsvga_fifo_read(s);
-                  if (!s->active_cursor_position_valid || !s->cursor_x_valid ||
-                      !s->cursor_y_valid || s->cursor_x != x || s->cursor_y != y ||
-                      s->active_cursor_x != x || s->active_cursor_y != y) {
-                      s->cursor_x = x;
-                      s->cursor_y = y;
-                      s->cursor_x_valid = true;
-                      s->cursor_y_valid = true;
+                  s->cursor_x = x;
+                  s->cursor_y = y;
+                  s->cursor_x_valid = true;
+                  s->cursor_y_valid = true;
+                  if ((s->active_cursor_position_valid || x != 0 || y != 0) &&
+                      (!s->active_cursor_position_valid ||
+                       s->active_cursor_x != x || s->active_cursor_y != y)) {
                       s->active_cursor_x = x;
                       s->active_cursor_y = y;
                       s->active_cursor_position_valid = true;

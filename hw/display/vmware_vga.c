@@ -455,6 +455,7 @@ struct vmsvga_state_s {
      * the temporary transition mirror during a mode handoff. */
     uint8_t *screen_base;
     size_t screen_base_size;
+    uint8_t *screen_retired_base;
     uint32_t screen_stride;
     uint32_t screen_base_migration_size;
     bool screen_defined;

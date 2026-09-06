@@ -6976,6 +6976,18 @@ static uint64_t vmsvga3d_screen_target_rect_area(const SVGA3dRect *rect)
     return (uint64_t)rect->w * rect->h;
 }
 
+static bool vmsvga3d_screen_target_rect_contains(
+    const SVGA3dRect *outer, const SVGA3dRect *inner)
+{
+    uint64_t outer_right = (uint64_t)outer->x + outer->w;
+    uint64_t outer_bottom = (uint64_t)outer->y + outer->h;
+    uint64_t inner_right = (uint64_t)inner->x + inner->w;
+    uint64_t inner_bottom = (uint64_t)inner->y + inner->h;
+
+    return inner->x >= outer->x && inner->y >= outer->y &&
+           inner_right <= outer_right && inner_bottom <= outer_bottom;
+}
+
 static SVGA3dRect vmsvga3d_screen_target_rect_union(
     const SVGA3dRect *a, const SVGA3dRect *b)
 {
@@ -7095,24 +7107,56 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
         uint32_t width = surface->mips[0].size.width;
         uint32_t height = surface->mips[0].size.height;
 
-        if (dirty.x < width && dirty.y < height) {
-            dirty.w = MIN(dirty.w, width - dirty.x);
-            dirty.h = MIN(dirty.h, height - dirty.y);
+        /* Damage wholly outside the active image has no visible effect. */
+        if (dirty.x >= width || dirty.y >= height) {
+            return true;
+        }
 
-            if (dirty.x == 0 && dirty.y == 0 &&
-                dirty.w == width && dirty.h == height) {
-                state->screen_target_dirty_count = 1;
-                state->screen_target_dirty_rects[0] = dirty;
+        dirty.w = MIN(dirty.w, width - dirty.x);
+        dirty.h = MIN(dirty.h, height - dirty.y);
+        if (dirty.w == 0 || dirty.h == 0) {
+            return true;
+        }
+
+        if (dirty.x == 0 && dirty.y == 0 &&
+            dirty.w == width && dirty.h == height) {
+            /* A queued full-screen update already covers an identical one. */
+            if (state->screen_target_dirty_count == 1 &&
+                vmsvga3d_screen_target_rect_contains(
+                    &state->screen_target_dirty_rects[0], &dirty)) {
                 return true;
             }
+
+            state->screen_target_dirty_count = 1;
+            state->screen_target_dirty_rects[0] = dirty;
+            return true;
         }
     }
 
 retry_merge:
     for (i = 0; i < state->screen_target_dirty_count; i++) {
-        SVGA3dRect merged = vmsvga3d_screen_target_rect_union(
-            &dirty, &state->screen_target_dirty_rects[i]);
+        SVGA3dRect merged;
 
+        /* Duplicate or fully covered damage needs no new readback. */
+        if (vmsvga3d_screen_target_rect_contains(
+                &state->screen_target_dirty_rects[i], &dirty)) {
+            return true;
+        }
+
+        /* A larger new rectangle supersedes any queued rectangle it covers. */
+        if (vmsvga3d_screen_target_rect_contains(
+                &dirty, &state->screen_target_dirty_rects[i])) {
+            state->screen_target_dirty_count--;
+            if (i != state->screen_target_dirty_count) {
+                state->screen_target_dirty_rects[i] =
+                    state->screen_target_dirty_rects[
+                        state->screen_target_dirty_count];
+            }
+            goto retry_merge;
+        }
+
+        merged = vmsvga3d_screen_target_rect_union(
+            &dirty, &state->screen_target_dirty_rects[i]);
         if (!vmsvga3d_screen_target_merge_is_efficient(
                 &dirty, &state->screen_target_dirty_rects[i], &merged)) {
             continue;

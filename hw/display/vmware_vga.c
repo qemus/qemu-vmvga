@@ -36,12 +36,12 @@
 #include "include/vmware_vga_compat.h"
 #include "include/vmware_vga_gmr.h"
 #include "include/includeCheck.h"
+#pragma pack(push, 1)
 #include "include/svga_types.h"
 #include "include/svga_escape.h"
 #include "include/svga_overlay.h"
 #include "include/svga_reg.h"
-#include "include/vmware_pack_begin.h"
-#include "include/vmware_pack_end.h"
+#pragma pack(pop)
 #include "migration/vmstate.h"
 #include "vga_int.h"
 

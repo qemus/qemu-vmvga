@@ -5645,6 +5645,7 @@ static bool vmsvga3d_dxvk_d3d11_blit_shader(
         info.input_signature[0].mask = 1;
         info.input_signature[0].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_UINT32;
         info.input_semantic[0].semantic_name = "SV_VertexID";
+        info.input_semantic[0].read_write_mask = 0x01;
 
         info.output_signature_count = 3;
         info.output_signature[0].registerIndex = 0;
@@ -5657,10 +5658,12 @@ static bool vmsvga3d_dxvk_d3d11_blit_shader(
         info.output_signature[1].mask = 0x03;
         info.output_signature[1].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
         info.output_semantic[1].semantic_name = "TEXCOORD";
+        info.output_semantic[1].read_write_mask = 0x0c;
         info.output_signature[2] = info.output_signature[1];
         info.output_signature[2].mask = 0x0c;
         info.output_semantic[2].semantic_name = "TEXCOORD";
         info.output_semantic[2].semantic_index = 1;
+        info.output_semantic[2].read_write_mask = 0x03;
         method = VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_VERTEX_SHADER;
     } else {
         info.input_signature_count = 3;
@@ -5674,10 +5677,12 @@ static bool vmsvga3d_dxvk_d3d11_blit_shader(
         info.input_signature[1].mask = 0x03;
         info.input_signature[1].componentType = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
         info.input_semantic[1].semantic_name = "TEXCOORD";
+        info.input_semantic[1].read_write_mask = 0x03;
         info.input_signature[2] = info.input_signature[1];
         info.input_signature[2].mask = 0x0c;
         info.input_semantic[2].semantic_name = "TEXCOORD";
         info.input_semantic[2].semantic_index = 1;
+        info.input_semantic[2].read_write_mask = 0x04;
         info.output_signature_count = 1;
         info.output_signature[0].registerIndex = 0;
         info.output_signature[0].semanticName = SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED;

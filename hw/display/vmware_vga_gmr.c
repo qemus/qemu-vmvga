@@ -1151,7 +1151,8 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
      */
     handoff_active =
         surface != NULL &&
-        (surface_width(surface) != width ||
+        (!s->screen_defined ||
+         surface_width(surface) != width ||
          surface_height(surface) != height ||
          surface_bits_per_pixel(surface) != 32 ||
          surface_stride(surface) != screen_stride ||
@@ -1160,8 +1161,13 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
               vmsvga_svga_vram_ptr(s) + (size_t)backing_offset));
     handoff_same_backing =
         backing_present && handoff_active && surface != NULL &&
-        surface_data(surface) ==
-            vmsvga_svga_vram_ptr(s) + (size_t)backing_offset;
+        (surface_data(surface) ==
+             vmsvga_svga_vram_ptr(s) + (size_t)backing_offset ||
+         (s->screen_handoff_active && s->screen_handoff_same_backing &&
+          s->screen_backing_valid &&
+          s->screen_backing_gmr_id == backing_gmr_id &&
+          s->screen_backing_offset == backing_offset &&
+          s->screen_backing_pitch == backing_pitch));
 
     if (handoff_active) {
         if (!vmsvga_screen_handoff_seed(s, surface, width, height,
@@ -1181,9 +1187,11 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
 
     s->screen_backing_valid = backing_present;
     /*
-     * Protect a genuine scanout transition. Same-mode Screen redefines can bind
-     * immediately only when the frontend already points at the same backingStore;
-     * a new BAR1 offset still needs the first present to populate the handoff.
+     * Protect a scanout transition, including a Screen definition following an
+     * explicit DESTROY_SCREEN even when the dimensions and backingStore tuple
+     * are unchanged. Consecutive DEFINE_SCREEN commands during that transition
+     * keep the same-backing classification so an empty backing cannot leak
+     * through between definitions.
      */
     s->screen_handoff_active = handoff_active;
     s->screen_handoff_same_backing = handoff_same_backing;
@@ -1910,27 +1918,18 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
                    local_right >= (int32_t)s->screen_width &&
                    local_bottom >= (int32_t)s->screen_height;
 
-    preserve_same_backing_full =
-        s->screen_handoff_active && s->screen_handoff_same_backing &&
-        !s->screen_handoff_skipped_same_backing_full && full_present &&
-        s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER;
+    preserve_same_backing_full = false;
 
     /*
-     * The Windows SVGA driver can issue several exact full-screen self-present
-     * notifications before it has populated the same BAR1 backing with the new
-     * mode's pixels. The first such notification is already protected above;
-     * keep protecting subsequent all-zero notifications as well. Otherwise the
-     * seeded transition mirror is replaced by the untouched backing and the
-     * frontend visibly goes black until the first real frame arrives.
-     *
-     * Restrict this to an active same-backing handoff and an exact 32-bpp
-     * self-present. Once any source byte is non-zero, normal presentation and
-     * handoff completion resume. Outside a handoff, an intentional black frame
-     * is never suppressed.
+     * During a same-backing handoff the Windows SVGA driver can issue several
+     * exact full-screen self-present notifications before it has populated the
+     * BAR1 backing with the new frame. Judge every such notification by the
+     * actual source contents: keep an all-zero backing hidden behind the seeded
+     * transition mirror, but let the first populated frame through immediately
+     * and complete the handoff. Outside an active handoff, intentional black
+     * frames are never suppressed.
      */
-    if (!preserve_same_backing_full && s->screen_handoff_active &&
-        s->screen_handoff_same_backing &&
-        s->screen_handoff_skipped_same_backing_full &&
+    if (s->screen_handoff_active && s->screen_handoff_same_backing &&
         local_left == 0 && local_top == 0 &&
         local_right == (int32_t)s->screen_width &&
         local_bottom == (int32_t)s->screen_height &&

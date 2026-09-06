@@ -1180,7 +1180,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
                            "SCREEN_DEFINE id=%u flags=0x%08x width=%u height=%u "
                            "root=%d,%d stride=%u backing=%u:%08x clone=%u",
                            id, flags, width, height, root_x, root_y,
-                           s->active_stride, s->screen_backing_gmr_id,
+                           screen_stride, s->screen_backing_gmr_id,
                            s->screen_backing_offset, clone_count);
         return true;
     }

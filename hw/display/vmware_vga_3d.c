@@ -6560,11 +6560,6 @@ static bool vmsvga3d_handle_set_otable_base(struct vmsvga_state_s *s,
     void *payload;
     uint32_t size;
 
-    if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V4 &&
-        s->vgpu_generation != VMSVGA_VGPU_11) {
-        return false;
-    }
-
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
         return true;
     }

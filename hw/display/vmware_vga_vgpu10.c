@@ -8336,9 +8336,8 @@ static bool vmsvga3d_d3d10_readback_image_live(
     depth_count = image->data_size / image->plane_size;
 
     return vmsvga3d_dxvk_d3d11_readback_subresource(
-        s->dxvk, surface->dxvk_surface, subresource, NULL, image->data,
-        image->pitch, image->pitch, row_count, image->plane_size,
-        depth_count);
+        s->dxvk, surface->dxvk_surface, subresource, image->data, image->pitch,
+        image->pitch, row_count, image->plane_size, depth_count);
 }
 
 static bool vmsvga3d_d3d10_readback_image_rect_live(
@@ -8391,7 +8390,7 @@ static bool vmsvga3d_d3d10_readback_image_rect_live(
     source_box.bottom = rect->y + rect->h;
     source_box.back = 1;
 
-    return vmsvga3d_dxvk_d3d11_readback_subresource(
+    return vmsvga3d_dxvk_d3d11_readback_subresource_box(
         s->dxvk, surface->dxvk_surface, subresource, &source_box,
         image->data + data_offset, (uint32_t)row_bytes, image->pitch,
         rect->h, image->plane_size, 1);

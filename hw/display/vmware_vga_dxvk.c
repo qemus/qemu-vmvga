@@ -7790,6 +7790,16 @@ bool vmsvga3d_dxvk_d3d11_update_subresource(
 
 bool vmsvga3d_dxvk_d3d11_readback_subresource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    void *data, uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
+    uint32_t depth_pitch, uint32_t depth_count)
+{
+    return vmsvga3d_dxvk_d3d11_readback_subresource_box(
+        dxvk, surface, subresource, NULL, data, row_bytes, row_pitch,
+        row_count, depth_pitch, depth_count);
+}
+
+bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d10_box_s *source_box, void *data,
     uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
     uint32_t depth_pitch, uint32_t depth_count)

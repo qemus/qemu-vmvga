@@ -1193,7 +1193,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
      * keep the same-backing classification so an empty backing cannot leak
      * through between definitions.
      */
-    s->screen_handoff_active = handoff_active;
+    s->screen_handoff_active = handoff_active && backing_present;
     s->screen_handoff_same_backing = handoff_same_backing;
     s->screen_handoff_skipped_same_backing_full = false;
     if (handoff_active) {

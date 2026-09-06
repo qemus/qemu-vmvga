@@ -902,12 +902,11 @@ static bool vmsvga_screen_preseed_capture(struct vmsvga_state_s *s,
     s->screen_preseed_height = height;
     s->screen_preseed_stride = stride;
 
-    hash_valid = vmsvga_gmr_diag_hash_rows(s->screen_preseed_base,
-                                           s->screen_preseed_stride,
-                                           (size_t)s->screen_preseed_width * 4,
-                                           s->screen_preseed_height,
-                                           &hash);
     if (vmsvga_trace_flight_enabled()) {
+        hash_valid = vmsvga_gmr_diag_hash_rows(
+            s->screen_preseed_base, s->screen_preseed_stride,
+            (size_t)s->screen_preseed_width * 4, s->screen_preseed_height,
+            &hash);
         fprintf(stderr,
                 "VMVGA-SCREEN-PRESEED phase=capture reason=%s "
                 "source=%ux%u/32/%u hash=0x%08x hash-valid=%u snapshot=%p\n",
@@ -1011,11 +1010,6 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
         src_height = s->screen_preseed_height;
         src_stride = s->screen_preseed_stride;
         src_bpp = 32;
-        src_hash_valid = vmsvga_gmr_diag_hash_rows(
-            s->screen_preseed_base, s->screen_preseed_stride,
-            (size_t)s->screen_preseed_width * 4, s->screen_preseed_height,
-            &src_hash);
-
         src = pixman_image_create_bits(PIXMAN_x8r8g8b8, src_width, src_height,
                                        (uint32_t *)s->screen_preseed_base,
                                        src_stride);
@@ -1052,18 +1046,11 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
         pixman_transform_t transform;
         pixman_fixed_t scale_x;
         pixman_fixed_t scale_y;
-        uint32_t src_bypp = (surface_bits_per_pixel(surface) + 7u) / 8u;
 
         src_width = surface_width(surface);
         src_height = surface_height(surface);
         src_stride = surface_stride(surface);
         src_bpp = surface_bits_per_pixel(surface);
-        if (src_bypp != 0 && (uint64_t)src_width * src_bypp <= src_stride) {
-            src_hash_valid = vmsvga_gmr_diag_hash_rows(
-                surface_data(surface), src_stride,
-                (size_t)src_width * src_bypp, src_height, &src_hash);
-        }
-
         src = pixman_image_create_bits(src_format, src_width,
                                        src_height,
                                        (uint32_t *)surface_data(surface),
@@ -1105,6 +1092,21 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
     s->screen_stride = stride;
 
     if (vmsvga_trace_flight_enabled()) {
+        if (used_preseed) {
+            src_hash_valid = vmsvga_gmr_diag_hash_rows(
+                s->screen_preseed_base, s->screen_preseed_stride,
+                (size_t)s->screen_preseed_width * 4,
+                s->screen_preseed_height, &src_hash);
+        } else if (surface != NULL && surface_data(surface) != NULL) {
+            uint32_t src_bypp = (surface_bits_per_pixel(surface) + 7u) / 8u;
+
+            if (src_bypp != 0 &&
+                (uint64_t)src_width * src_bypp <= src_stride) {
+                src_hash_valid = vmsvga_gmr_diag_hash_rows(
+                    surface_data(surface), src_stride,
+                    (size_t)src_width * src_bypp, src_height, &src_hash);
+            }
+        }
         fprintf(stderr,
                 "VMVGA-SCREEN-HANDOFF phase=seed source=%ux%u/%u/%u "
                 "source-hash=0x%08x source-hash-valid=%u preseed=%u "

@@ -436,10 +436,13 @@ struct vmsvga_state_s {
     uint32_t cursor_x;
     uint32_t cursor_y;
     uint32_t cursor_on;
+    bool cursor_x_valid;
+    bool cursor_y_valid;
     uint32_t active_cursor;
     uint32_t active_cursor_x;
     uint32_t active_cursor_y;
     uint32_t active_cursor_on;
+    bool active_cursor_position_valid;
     uint32_t fence;
     uint32_t fence_goal;
     uint32_t fc;
@@ -1322,6 +1325,10 @@ static inline void vmsvga_cursor_apply(struct vmsvga_state_s *s)
     if (!s->cursor_dirty) {
         return;
     }
+    if (!s->active_cursor_position_valid) {
+        s->cursor_dirty = false;
+        return;
+    }
     if (s->enable && !s->hidden &&
         s->active_cursor_on != SVGA_CURSOR_ON_HIDE) {
         vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
@@ -1388,12 +1395,14 @@ static inline bool vmsvga_cursor_bypass3_fetch(struct vmsvga_state_s *s,
         s->cursor_dirty = true;
     }
 
-    if (s->active_cursor_x != x || s->active_cursor_y != y ||
+    if (!s->active_cursor_position_valid || s->active_cursor_x != x ||
+        s->active_cursor_y != y ||
         s->active_cursor_on !=
             (on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE)) {
         s->active_cursor_x = x;
         s->active_cursor_y = y;
         s->active_cursor_on = on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
+        s->active_cursor_position_valid = true;
         s->cursor_dirty = true;
     }
 
@@ -4019,6 +4028,7 @@ static inline void vmsvga_cursor_commit_indexed(struct vmsvga_state_s *s)
     s->active_cursor_x = s->cursor_x;
     s->active_cursor_y = s->cursor_y;
     s->active_cursor_on = s->cursor_on;
+    s->active_cursor_position_valid = s->cursor_x_valid && s->cursor_y_valid;
 
     if (id_changed) {
         vmsvga_cursor_select(s, s->active_cursor);
@@ -5438,12 +5448,16 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
               {
                   uint32_t x = vmsvga_fifo_read(s);
                   uint32_t y = vmsvga_fifo_read(s);
-                  if (s->cursor_x != x || s->cursor_y != y ||
+                  if (!s->active_cursor_position_valid || !s->cursor_x_valid ||
+                      !s->cursor_y_valid || s->cursor_x != x || s->cursor_y != y ||
                       s->active_cursor_x != x || s->active_cursor_y != y) {
                       s->cursor_x = x;
                       s->cursor_y = y;
+                      s->cursor_x_valid = true;
+                      s->cursor_y_valid = true;
                       s->active_cursor_x = x;
                       s->active_cursor_y = y;
+                      s->active_cursor_position_valid = true;
                       s->cursor_dirty = true;
                   }
               }
@@ -8377,11 +8391,13 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       break;
   case SVGA_REG_CURSOR_X:
       s->cursor_x = value;
+      s->cursor_x_valid = true;
       VPRINT("SVGA_REG_CURSOR_X register %u with the value of %u\n", s->index,
              value);
       break;
   case SVGA_REG_CURSOR_Y:
       s->cursor_y = value;
+      s->cursor_y_valid = true;
       VPRINT("SVGA_REG_CURSOR_Y register %u with the value of %u\n", s->index,
              value);
       break;
@@ -8785,10 +8801,13 @@ static void vmsvga_reset(DeviceState *dev)
     s->cursor_x = 0;
     s->cursor_y = 0;
     s->cursor_on = SVGA_CURSOR_ON_SHOW;
+    s->cursor_x_valid = false;
+    s->cursor_y_valid = false;
     s->active_cursor = 0;
     s->active_cursor_x = 0;
     s->active_cursor_y = 0;
     s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
+    s->active_cursor_position_valid = false;
     s->cursor_dirty = true;
     s->damage_count = 0;
     s->fence = 0;
@@ -9188,7 +9207,6 @@ static int vmsvga_post_load(void *opaque, int version_id)
     struct vmsvga_state_s *s = opaque;
     size_t shadow_size;
     int ret;
-    (void)version_id;
 
     s->scratch_size = VMSVGA_SCRATCH_SIZE;
     s->fifo_size = VMSVGA_FIFO_SIZE;
@@ -9597,10 +9615,13 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->cursor_x = 0;
     s->cursor_y = 0;
     s->cursor_on = SVGA_CURSOR_ON_SHOW;
+    s->cursor_x_valid = false;
+    s->cursor_y_valid = false;
     s->active_cursor = 0;
     s->active_cursor_x = 0;
     s->active_cursor_y = 0;
     s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
+    s->active_cursor_position_valid = false;
     s->cursor_dirty = true;
     s->damage_count = 0;
     s->fence = 0;

@@ -377,6 +377,13 @@ struct vmsvga_trace_devcap_s {
     uint32_t value;
 };
 
+enum vmsvga_vgpu_generation_e {
+    VMSVGA_VGPU_AUTO = 0,
+    VMSVGA_VGPU_9 = 9,
+    VMSVGA_VGPU_10 = 10,
+    VMSVGA_VGPU_11 = 11,
+};
+
 struct vmsvga_state_s {
     uint32_t svgapalettebase[VMSVGA_PALETTE_STORAGE_SIZE];
 #ifdef CONFIG_PIXMAN
@@ -478,6 +485,10 @@ struct vmsvga_state_s {
     uint32_t screen_annotation_src_id;
     struct vmsvga3d_state_s *svga3d;
     struct vmsvga3d_dxvk_s *dxvk;
+    bool debug;
+    bool enable_3d;
+    char *vgpu;
+    enum vmsvga_vgpu_generation_e vgpu_generation;
     /* Guest-visible renderer capabilities are latched during realization. */
     bool svga3d_capable;
     bool svga3d_dx_capable;
@@ -499,8 +510,6 @@ struct vmsvga_state_s {
     bool hidden;
     bool cursor_dirty;
     bool dirty_log_enabled;
-    bool test_marker;
-    bool marker_logged;
     uint32_t trace_display_path;
     /* Diagnostic-only flight recorder state; intentionally excluded from VMState. */
     struct vmsvga_trace_counters_s trace_now;
@@ -4023,32 +4032,6 @@ static inline void vmsvga_cursor_commit_indexed(struct vmsvga_state_s *s)
     vmsvga_cursor_apply(s);
 }
 
-static inline void vmsvga_cursor_test_flip(struct vmsvga_state_s *s,
-                                             QEMUCursor *qc, uint32_t width,
-                                             uint32_t height)
-{
-    uint32_t y;
-
-    if (!s->test_marker || width == 0 || height == 0) {
-        return;
-    }
-
-    for (y = 0; y < height / 2; y++) {
-        uint32_t *top = qc->data + (size_t)y * width;
-        uint32_t *bottom = qc->data + (size_t)(height - 1 - y) * width;
-        uint32_t x;
-        for (x = 0; x < width; x++) {
-            uint32_t tmp = top[x];
-            top[x] = bottom[x];
-            bottom[x] = tmp;
-        }
-    }
-
-    if (qc->hot_y < height) {
-        qc->hot_y = height - 1 - qc->hot_y;
-    }
-}
-
 static inline void vmsvga_cursor_cache_put(struct vmsvga_state_s *s,
                                            uint32_t id, QEMUCursor *qc)
 {
@@ -4258,7 +4241,6 @@ static inline bool vmsvga_cursor_render_source(struct vmsvga_state_s *s,
     cursor_print_ascii_art(qc, src->alpha ? "vmsvga_alpha" : "vmsvga_cursor");
 #endif
 
-    vmsvga_cursor_test_flip(s, qc, src->width, src->height);
     vmsvga_cursor_cache_put(s, id, qc);
 
     return true;
@@ -7993,8 +7975,15 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
     case SVGA_REG_CAP2:
 #ifdef EXPCAPS
         ret = s->svga3d_dx_capable ? 0xffffffff : SVGA_CAP2_NONE;
+        if (s->vgpu_generation != VMSVGA_VGPU_11) {
+            ret &= ~SVGA_CAP2_DX3;
+        }
 #else
         ret = s->svga3d_dx_capable ? SVGA_CAP2_GROW_OTABLE : SVGA_CAP2_NONE;
+        if (s->svga3d_dx_capable &&
+            s->vgpu_generation == VMSVGA_VGPU_11) {
+            ret |= SVGA_CAP2_DX3;
+        }
 #endif
         VPRINT("SVGA_REG_CAP2 register %u with the return of %u\n", s->index, ret);
         break;
@@ -8700,11 +8689,6 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     if (scan_dirty) {
         struct vmsvga_damage_rect_s explicit_damage[VMSVGA_DAMAGE_RECTS];
         uint32_t explicit_count = s->damage_count;
-        if (s->test_marker && !s->marker_logged) {
-            fprintf(stderr, "vmware-vga: BAR1 trace scanout active "
-                            "(test marker enabled)\n");
-            s->marker_logged = true;
-        }
         if (explicit_count != 0) {
             memcpy(explicit_damage, s->damage,
                    explicit_count * sizeof(explicit_damage[0]));
@@ -8806,7 +8790,6 @@ static void vmsvga_reset(DeviceState *dev)
     s->active_cursor_y = 0;
     s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
     s->cursor_dirty = true;
-    s->marker_logged = false;
     s->damage_count = 0;
     s->fence = 0;
     s->fence_goal = 0;
@@ -9619,7 +9602,6 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->active_cursor_y = 0;
     s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
     s->cursor_dirty = true;
-    s->marker_logged = false;
     s->damage_count = 0;
     s->fence = 0;
     s->fence_goal = 0;
@@ -9704,11 +9686,50 @@ static MemoryRegionOps vmsvga_io_ops = {
           },
 };
 
+static bool vmsvga_vgpu_parse(struct vmsvga_state_s *s, Error **errp)
+{
+    const char *vgpu = s->vgpu != NULL ? s->vgpu : "auto";
+
+    if (!strcmp(vgpu, "auto")) {
+        s->vgpu_generation = VMSVGA_VGPU_10;
+    } else if (!strcmp(vgpu, "9")) {
+        s->vgpu_generation = VMSVGA_VGPU_9;
+    } else if (!strcmp(vgpu, "10")) {
+        s->vgpu_generation = VMSVGA_VGPU_10;
+    } else if (!strcmp(vgpu, "11")) {
+        s->vgpu_generation = VMSVGA_VGPU_11;
+    } else {
+        error_setg(errp,
+                   "invalid vgpu value '%s' (expected auto, 9, 10, or 11)",
+                   vgpu);
+        return false;
+    }
+
+    return true;
+}
+
+static void vmsvga_vgpu_apply(struct vmsvga_state_s *s)
+{
+    switch (s->vgpu_generation) {
+    case VMSVGA_VGPU_9:
+        s->svga3d_dx_capable = false;
+        break;
+    case VMSVGA_VGPU_AUTO:
+    case VMSVGA_VGPU_10:
+    case VMSVGA_VGPU_11:
+        break;
+    }
+}
+
 static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
 {
     VPRINT("pci_vmsvga_realize was just executed\n");
 
     struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+
+    if (!vmsvga_vgpu_parse(&s->chip, errp)) {
+        return;
+    }
 
     dev->config[PCI_INTERRUPT_PIN] = 1;
     dev->config[PCI_INTERRUPT_LINE] = 0xff;
@@ -9730,6 +9751,7 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
     vmsvga_init(DEVICE(dev), &s->chip, pci_address_space(dev),
                 pci_address_space_io(dev));
     vmsvga3d_renderer_realize(&s->chip);
+    vmsvga_vgpu_apply(&s->chip);
 
     pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.vga.vram);
     pci_register_bar(dev, 2, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.fifo_ram);
@@ -9760,8 +9782,11 @@ static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {
                          chip.vga.vram_size_mb, 128),
       VMVGA_GLOBAL_VMSTATE_PROPERTY(struct pci_vmsvga_state_s,
                                     chip.vga.global_vmstate)
-      DEFINE_PROP_BOOL("x-test-marker", struct pci_vmsvga_state_s,
-                       chip.test_marker, false),
+      DEFINE_PROP_BOOL("debug", struct pci_vmsvga_state_s,
+                       chip.debug, false),
+      DEFINE_PROP_BOOL("3d", struct pci_vmsvga_state_s,
+                       chip.enable_3d, true),
+      DEFINE_PROP_STRING("vgpu", struct pci_vmsvga_state_s, chip.vgpu),
       VMVGA_PROPERTY_END
 };
 

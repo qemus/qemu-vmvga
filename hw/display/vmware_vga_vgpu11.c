@@ -1222,3 +1222,549 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_desc(
          ? VMSVGA3D_D3D11_LEVEL_11_1
          : VMSVGA3D_D3D11_LEVEL_11_0;
 }
+
+bool vmsvga3d_d3d11_uav_surface_live(
+    struct vmsvga_state_s *s, const SVGACOTableDXUAViewEntry *entry,
+    VMSVGA3DDxvkSurface **surface_out, uint32_t *array_elements_out)
+{
+    VMSVGA3DSurface *surface;
+    VMSVGA3DD3D10SurfaceInfo surface_info;
+    VMSVGA3DD3D10ResourcePlan resource_plan;
+    VMSVGA3DDxvkSubresourceData *initial_data = NULL;
+    VMSVGA3DD3D10ResourceUse resource_use;
+    uint32_t initial_data_count = 0;
+    bool success = false;
+
+    if (s == NULL || s->svga3d == NULL || entry == NULL ||
+        surface_out == NULL || array_elements_out == NULL ||
+        entry->sid == SVGA3D_INVALID_ID || entry->sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[entry->sid];
+    if (surface == NULL || surface->dxvk_surface == NULL ||
+        !vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
+        return false;
+    }
+
+    resource_use = entry->resourceDimension == SVGA3D_RESOURCE_BUFFER
+                       ? VMSVGA3D_D3D10_RESOURCE_USE_GENERIC_BUFFER
+                       : VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE;
+
+    if (!vmsvga3d_dx_resource_plan_live(
+            s, &surface_info, resource_use, &resource_plan) ||
+        !vmsvga3d_d3d10_initial_subresources_live(
+            surface, &resource_plan.primary, &initial_data,
+            &initial_data_count)) {
+        return false;
+    }
+
+    success = vmsvga3d_dxvk_d3d11_surface_materialize(
+        s->dxvk, surface->dxvk_surface, &resource_plan.primary,
+        initial_data, initial_data_count);
+    g_free(initial_data);
+
+    if (!success) {
+        return false;
+    }
+
+    *surface_out = surface->dxvk_surface;
+    *array_elements_out = surface_info.array_elements;
+    return true;
+}
+
+static bool vmsvga3d_d3d11_copy_structure_destination_live(
+    struct vmsvga_state_s *s, SVGA3dSurfaceId sid,
+    VMSVGA3DDxvkSurface **surface_out)
+{
+    VMSVGA3DSurface *surface;
+
+    if (surface_out == NULL) {
+        return false;
+    }
+    *surface_out = NULL;
+
+    if (sid == SVGA3D_INVALID_ID) {
+        return true;
+    }
+    if (s == NULL || s->svga3d == NULL || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[sid];
+    if (surface == NULL || surface->dxvk_surface == NULL ||
+        !vmsvga3d_d3d10_buffer_materialize_live(s, sid)) {
+        return false;
+    }
+
+    *surface_out = surface->dxvk_surface;
+    return true;
+}
+
+static bool vmsvga3d_d3d11_indirect_args_buffer_live(
+    struct vmsvga_state_s *s, SVGA3dSurfaceId sid,
+    VMSVGA3DDxvkSurface **surface_out)
+{
+    VMSVGA3DSurface *surface;
+
+    if (surface_out == NULL) {
+        return false;
+    }
+    *surface_out = NULL;
+
+    /* Match VirtualBox: SVGA_ID_INVALID is passed through as a NULL native
+     * argument buffer.  Otherwise the surface is materialized lazily and is
+     * required to be a buffer; no additional byte-offset validation happens
+     * at this layer.
+     */
+    if (sid == SVGA3D_INVALID_ID) {
+        return true;
+    }
+    if (s == NULL || s->svga3d == NULL || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[sid];
+    if (surface == NULL || surface->dxvk_surface == NULL ||
+        !vmsvga3d_d3d10_buffer_materialize_live(s, sid)) {
+        return false;
+    }
+
+    *surface_out = surface->dxvk_surface;
+    return true;
+}
+
+static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
+                                      uint32_t cid, uint32_t cmd,
+                                      const void *payload, uint32_t size)
+{
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+    if (context == NULL) {
+        return false;
+    }
+
+    switch (cmd) {
+    case SVGA_3D_CMD_DX_DEFINE_RASTERIZER_STATE_V2: {
+        SVGA3dCmdDXDefineRasterizerState_v2 command;
+        SVGACOTableDXRasterizerStateEntry *entry;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        entry = vmsvga3d_dx_cotable_entry_ptr(
+            s, cid, SVGA_COTABLE_RASTERIZERSTATE, command.rasterizerId);
+        if (entry == NULL ||
+            !vmsvga3d_dxvk_d3d11_rasterizer_state_destroy(
+                s->dxvk, cid, command.rasterizerId)) {
+            return false;
+        }
+
+        /* Match VirtualBox: redefining a rasterizer state destroys the
+         * native object first, updates the COTable entry, and marks an
+         * already-bound state dirty so it is recreated/rebound lazily. */
+        if (context->shadow.renderState.rasterizerStateId ==
+            command.rasterizerId) {
+            context->renderer_dirty |=
+                VMSVGA3D_DX_CTX_F_STATE_RASTERIZERSTATE;
+        }
+
+        return vmsvga3d_d3d11_rasterizer_define_entry(&command, entry) !=
+               VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_DEFINE_UA_VIEW: {
+        SVGA3dCmdDXDefineUAView command;
+        VMSVGA3DD3D11UAVDefinePlan plan;
+        SVGACOTableDXUAViewEntry *entry;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_uav_define_plan(
+                &command, context->cotables[SVGA_COTABLE_UAVIEW].capacity_entries,
+                &plan) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        entry = vmsvga3d_dx_cotable_entry_ptr(
+            s, cid, SVGA_COTABLE_UAVIEW, plan.view_id);
+        if (entry == NULL) {
+            return false;
+        }
+
+        /* VirtualBox overwrites the COTable entry and leaves native creation
+         * lazy; redefining an already-created UAV does not destroy it here. */
+        *entry = plan.entry;
+        return vmsvga3d_d3d11_uav_define_live(
+                   s->dxvk, cid, plan.view_id, entry) !=
+               VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_DESTROY_UA_VIEW: {
+        SVGA3dCmdDXDestroyUAView command;
+        VMSVGA3DD3D11UAVDestroyPlan plan;
+        SVGACOTableDXUAViewEntry *entry;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_uav_destroy_plan(
+                &command, context->cotables[SVGA_COTABLE_UAVIEW].capacity_entries,
+                &plan) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        entry = vmsvga3d_dx_cotable_entry_ptr(
+            s, cid, SVGA_COTABLE_UAVIEW, plan.view_id);
+        if (entry == NULL ||
+            vmsvga3d_d3d11_uav_destroy_entry(entry) ==
+                VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        /* VirtualBox clears the guest entry before asking the backend to
+         * release the lazily-created native view. */
+        return vmsvga3d_d3d11_uav_destroy_live(
+                   s->dxvk, cid, plan.view_id) !=
+               VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_CLEAR_UA_VIEW_UINT: {
+        SVGA3dCmdDXClearUAViewUint command;
+        VMSVGA3DD3D11UAVClearUintPlan plan;
+        SVGACOTableDXUAViewEntry *entry;
+        VMSVGA3DDxvkSurface *surface;
+        uint32_t array_elements;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_uav_clear_uint_plan(
+                &command, context->cotables[SVGA_COTABLE_UAVIEW].capacity_entries,
+                &plan) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        entry = vmsvga3d_dx_cotable_entry_ptr(
+            s, cid, SVGA_COTABLE_UAVIEW, plan.view_id);
+        if (entry == NULL ||
+            !vmsvga3d_d3d11_uav_surface_live(
+                s, entry, &surface, &array_elements)) {
+            return false;
+        }
+
+        return vmsvga3d_d3d11_uav_clear_uint_live(
+                   s->dxvk, cid, plan.view_id, surface, entry,
+                   array_elements, plan.values) !=
+               VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_CLEAR_UA_VIEW_FLOAT: {
+        SVGA3dCmdDXClearUAViewFloat command;
+        VMSVGA3DD3D11UAVClearFloatPlan plan;
+        SVGACOTableDXUAViewEntry *entry;
+        VMSVGA3DDxvkSurface *surface;
+        uint32_t array_elements;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_uav_clear_float_plan(
+                &command, context->cotables[SVGA_COTABLE_UAVIEW].capacity_entries,
+                &plan) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        entry = vmsvga3d_dx_cotable_entry_ptr(
+            s, cid, SVGA_COTABLE_UAVIEW, plan.view_id);
+        if (entry == NULL ||
+            !vmsvga3d_d3d11_uav_surface_live(
+                s, entry, &surface, &array_elements)) {
+            return false;
+        }
+
+        return vmsvga3d_d3d11_uav_clear_float_live(
+                   s->dxvk, cid, plan.view_id, surface, entry,
+                   array_elements, plan.values) !=
+               VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_COPY_STRUCTURE_COUNT: {
+        SVGA3dCmdDXCopyStructureCount command;
+        VMSVGA3DD3D11CopyStructureCountPlan plan;
+        VMSVGA3DDxvkSurface *destination;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_copy_structure_count_plan(
+                &command, context->cotables[SVGA_COTABLE_UAVIEW].capacity_entries,
+                &plan) == VMSVGA3D_D3D11_LEVEL_INVALID ||
+            !vmsvga3d_d3d11_copy_structure_destination_live(
+                s, plan.destination_sid, &destination)) {
+            return false;
+        }
+
+        /* Match VirtualBox: unlike clear/setupPipeline, this command does not
+         * ensure the source UAV.  The native view must already exist. */
+        return vmsvga3d_d3d11_copy_structure_count_live(
+                   s->dxvk, cid, plan.source_view_id, destination,
+                   plan.destination_byte_offset) !=
+               VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_SET_UA_VIEWS: {
+        SVGA3dCmdDXSetUAViews command;
+        SVGA3dUAViewId ids[SVGA3D_DX11_1_MAX_UAVIEWS];
+        VMSVGA3DD3D11UAVSetPlan plan;
+        const uint32_t header_size = sizeof(command);
+        int32_t last_not_null = -1;
+        bool modified = false;
+        uint32_t bound_count;
+        uint32_t count;
+        uint32_t i;
+
+        if (size < header_size) {
+            return false;
+        }
+
+        memcpy(&command, payload, sizeof(command));
+        count = (size - header_size) / sizeof(ids[0]);
+        if (count > SVGA3D_DX11_1_MAX_UAVIEWS) {
+            return false;
+        }
+        if (count != 0) {
+            memcpy(ids, (const uint8_t *)payload + header_size,
+                   count * sizeof(ids[0]));
+        }
+
+        if (vmsvga3d_d3d11_uav_set_plan(
+                &command, count, count != 0 ? ids : NULL,
+                context->cotables[SVGA_COTABLE_UAVIEW].capacity_entries,
+                &plan) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        /* Match VirtualBox's DX state tracker: only the supplied prefix is
+         * overwritten, cMaxBound never shrinks, and render-target state is
+         * dirtied when either the IDs or splice index change.
+         */
+        for (i = 0; i < plan.count; i++) {
+            if (context->shadow.uaViewIds[i] != plan.ids[i]) {
+                context->shadow.uaViewIds[i] = plan.ids[i];
+                modified = true;
+            }
+            if (plan.ids[i] != SVGA3D_INVALID_ID) {
+                last_not_null = (int32_t)i;
+            }
+        }
+
+        if (context->shadow.uavSpliceIndex != plan.uav_splice_index) {
+            context->shadow.uavSpliceIndex = plan.uav_splice_index;
+            modified = true;
+        }
+
+        bound_count = (uint32_t)last_not_null + 1u;
+        if (context->uav_max_bound < bound_count) {
+            context->uav_max_bound = bound_count;
+        }
+        if (modified) {
+            context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+        }
+
+        return vmsvga3d_d3d11_uav_set_live(
+                   s->dxvk, cid, &plan) != VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_SET_CS_UA_VIEWS: {
+        SVGA3dCmdDXSetCSUAViews command;
+        SVGA3dUAViewId ids[SVGA3D_DX11_1_MAX_UAVIEWS];
+        VMSVGA3DD3D11CSUAVSetPlan plan;
+        const uint32_t header_size = sizeof(command);
+        int32_t last_not_null = -1;
+        bool modified = false;
+        uint32_t bound_count;
+        uint32_t count;
+        uint32_t i;
+
+        if (size < header_size) {
+            return false;
+        }
+
+        memcpy(&command, payload, sizeof(command));
+        count = (size - header_size) / sizeof(ids[0]);
+        if (count > SVGA3D_DX11_1_MAX_UAVIEWS) {
+            return false;
+        }
+        if (count != 0) {
+            memcpy(ids, (const uint8_t *)payload + header_size,
+                   count * sizeof(ids[0]));
+        }
+
+        if (vmsvga3d_d3d11_cs_uav_set_plan(
+                &command, count, count != 0 ? ids : NULL,
+                context->cotables[SVGA_COTABLE_UAVIEW].capacity_entries,
+                &plan) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        /* Match VirtualBox's DX state tracker.  Changed compute UAV slots
+         * are recorded for immediate unbinding, while cMaxBound only grows.
+         */
+        for (i = 0; i < plan.count; i++) {
+            uint32_t slot = plan.start_index + i;
+
+            if (context->shadow.csuaViewIds[slot] != plan.ids[i]) {
+                context->shadow.csuaViewIds[slot] = plan.ids[i];
+                context->cs_uav_modified[slot / 64u] |=
+                    UINT64_C(1) << (slot % 64u);
+                modified = true;
+            }
+            if (plan.ids[i] != SVGA3D_INVALID_ID) {
+                last_not_null = (int32_t)i;
+            }
+        }
+
+        bound_count = plan.start_index + (uint32_t)last_not_null + 1u;
+        if (context->cs_uav_max_bound < bound_count) {
+            context->cs_uav_max_bound = bound_count;
+        }
+        if (modified) {
+            context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_CSTARGET;
+        }
+
+        /* VirtualBox immediately unbinds only compute UAV slots that changed
+         * because those resources may next be reused as render/depth targets.
+         */
+        return vmsvga3d_d3d11_cs_uav_set_live(
+                   s->dxvk, &plan, context->cs_uav_modified) !=
+               VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_SET_STRUCTURE_COUNT: {
+        SVGA3dCmdDXSetStructureCount command;
+        VMSVGA3DD3D11SetStructureCountPlan plan;
+        SVGACOTableDXUAViewEntry *entry;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_set_structure_count_plan(
+                &command, context->cotables[SVGA_COTABLE_UAVIEW].capacity_entries,
+                &plan) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        entry = vmsvga3d_dx_cotable_entry_ptr(
+            s, cid, SVGA_COTABLE_UAVIEW, plan.view_id);
+        return entry != NULL &&
+               vmsvga3d_d3d11_uav_set_structure_count(
+                   entry, plan.structure_count) !=
+                   VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    case SVGA_3D_CMD_DX_DRAW_INDEXED_INSTANCED_INDIRECT: {
+        SVGA3dCmdDXDrawIndexedInstancedIndirect command;
+        VMSVGA3DD3D11DrawIndexedInstancedIndirectPlan plan;
+        VMSVGA3DDxvkSurface *args_buffer;
+        bool success;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_draw_indexed_instanced_indirect_plan(
+                &command, &plan) == VMSVGA3D_D3D11_LEVEL_INVALID ||
+            !vmsvga3d_d3d11_indirect_args_buffer_live(
+                s, plan.args_buffer_sid, &args_buffer)) {
+            return false;
+        }
+
+        /* VirtualBox materializes the argument buffer before pipeline setup,
+         * then uses the normal draw setup and post-draw state bookkeeping.
+         */
+        vmsvga3d_dx_pipeline_setup_live(s, cid);
+        success = vmsvga3d_d3d11_draw_indexed_instanced_indirect_live(
+                      s->dxvk, args_buffer, plan.aligned_byte_offset) !=
+                  VMSVGA3D_D3D11_LEVEL_INVALID;
+        vmsvga3d_dx_post_draw_live(s, cid);
+        return success;
+    }
+
+    case SVGA_3D_CMD_DX_DRAW_INSTANCED_INDIRECT: {
+        SVGA3dCmdDXDrawInstancedIndirect command;
+        VMSVGA3DD3D11DrawInstancedIndirectPlan plan;
+        VMSVGA3DDxvkSurface *args_buffer;
+        bool success;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_draw_instanced_indirect_plan(
+                &command, &plan) == VMSVGA3D_D3D11_LEVEL_INVALID ||
+            !vmsvga3d_d3d11_indirect_args_buffer_live(
+                s, plan.args_buffer_sid, &args_buffer)) {
+            return false;
+        }
+
+        /* Keep the same ordering as VirtualBox's backend: ensure argument
+         * buffer, setup shared pipeline state, submit, then dxPostDraw.
+         */
+        vmsvga3d_dx_pipeline_setup_live(s, cid);
+        success = vmsvga3d_d3d11_draw_instanced_indirect_live(
+                      s->dxvk, args_buffer, plan.aligned_byte_offset) !=
+                  VMSVGA3D_D3D11_LEVEL_INVALID;
+        vmsvga3d_dx_post_draw_live(s, cid);
+        return success;
+    }
+
+    case SVGA_3D_CMD_DX_DISPATCH: {
+        SVGA3dCmdDXDispatch command;
+        VMSVGA3DD3D11DispatchPlan plan;
+        bool success;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_dispatch_plan(&command, &plan) ==
+            VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        /* VirtualBox's DXVK path performs a normal dxSetupPipeline before
+         * Dispatch and the same dxPostDraw cleanup afterwards.  Its
+         * force-all-SRVs workaround is intentionally excluded for DXVK.
+         */
+        vmsvga3d_dx_pipeline_setup_live(s, cid);
+        success = vmsvga3d_d3d11_dispatch_live(
+                      s->dxvk, plan.thread_group_count_x,
+                      plan.thread_group_count_y, plan.thread_group_count_z) !=
+                  VMSVGA3D_D3D11_LEVEL_INVALID;
+        vmsvga3d_dx_post_draw_live(s, cid);
+        return success;
+    }
+
+    default:
+        return false;
+    }
+}

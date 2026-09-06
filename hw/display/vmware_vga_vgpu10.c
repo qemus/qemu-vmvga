@@ -8605,6 +8605,91 @@ static void vmsvga3d_d3d10_present_blt_clip_box(
     }
 }
 
+static uint32_t vmsvga3d_d3d10_present_blt_diag_hash_extend(
+    uint32_t hash, const uint8_t *data, size_t size)
+{
+    size_t i;
+
+    for (i = 0; i < size; i++) {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+
+    return hash;
+}
+
+static uint32_t vmsvga3d_d3d10_present_blt_diag_pixel(
+    const uint8_t *data, uint32_t bytes)
+{
+    uint32_t value = 0;
+
+    memcpy(&value, data, MIN(bytes, 4u));
+    return value;
+}
+
+static void vmsvga3d_d3d10_present_blt_diag_source(
+    uint64_t seq, uint32_t sid,
+    uint32_t subresource, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, const SVGA3dBox *box)
+{
+    const struct svga3d_surface_desc *desc;
+    uint32_t bytes_per_pixel;
+    uint32_t hash = 2166136261u;
+    uint32_t nonzero = 0;
+    uint32_t first;
+    uint32_t center;
+    uint32_t row;
+
+    if (surface == NULL || image == NULL || box == NULL || image->data == NULL ||
+        box->w == 0 || box->h == 0 || box->d != 1 ||
+        box->x > image->size.width || box->y > image->size.height ||
+        box->w > image->size.width - box->x ||
+        box->h > image->size.height - box->y) {
+        return;
+    }
+
+    desc = svga3dsurface_get_desc(surface->format);
+    if (desc->format != surface->format || desc->block_size.width != 1 ||
+        desc->block_size.height != 1 || desc->block_size.depth != 1 ||
+        desc->pitch_bytes_per_block == 0) {
+        fprintf(stderr,
+                "VMVGA-PRESENTBLT-SOURCE seq=%llu sid=%u sub=%u format=%u "
+                "rect=%u,%u-%ux%u comparable=0\n",
+                (unsigned long long)seq, sid, subresource, surface->format,
+                box->x, box->y, box->w, box->h);
+        return;
+    }
+
+    bytes_per_pixel = desc->pitch_bytes_per_block;
+    for (row = 0; row < box->h; row++) {
+        const uint8_t *src = image->data +
+            (uint64_t)(box->y + row) * image->pitch +
+            (uint64_t)box->x * bytes_per_pixel;
+        size_t bytes = (size_t)box->w * bytes_per_pixel;
+        size_t i;
+
+        hash = vmsvga3d_d3d10_present_blt_diag_hash_extend(hash, src, bytes);
+        for (i = 0; i < bytes; i++) {
+            nonzero += src[i] != 0;
+        }
+    }
+
+    first = vmsvga3d_d3d10_present_blt_diag_pixel(
+        image->data + (uint64_t)box->y * image->pitch +
+        (uint64_t)box->x * bytes_per_pixel, bytes_per_pixel);
+    center = vmsvga3d_d3d10_present_blt_diag_pixel(
+        image->data + (uint64_t)(box->y + box->h / 2) * image->pitch +
+        (uint64_t)(box->x + box->w / 2) * bytes_per_pixel, bytes_per_pixel);
+
+    fprintf(stderr,
+            "VMVGA-PRESENTBLT-SOURCE seq=%llu sid=%u sub=%u format=%u "
+            "rect=%u,%u-%ux%u pitch=%u hash=0x%08x nonzero=%u "
+            "p0=0x%08x pc=0x%08x\n",
+            (unsigned long long)seq, sid, subresource, surface->format,
+            box->x, box->y, box->w, box->h, image->pitch, hash, nonzero,
+            first, center);
+}
+
 static bool vmsvga3d_d3d10_present_blt_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXPresentBlt *command)
@@ -8617,6 +8702,9 @@ static bool vmsvga3d_d3d10_present_blt_live(
     VMSVGA3DD3D10Format destination_format;
     SVGA3dBox source_box;
     SVGA3dBox destination_box;
+    static uint64_t diag_seq;
+    uint64_t current_diag_seq;
+    bool diag_this_blt;
 
     /*
      * VirtualBox requires a command-buffer DX context for PRESENTBLT.  The
@@ -8660,6 +8748,23 @@ static bool vmsvga3d_d3d10_present_blt_live(
     if (destination_box.w == 0 || destination_box.h == 0 ||
         destination_box.d == 0) {
         return false;
+    }
+
+    current_diag_seq = ++diag_seq;
+    diag_this_blt = current_diag_seq <= 16 || (current_diag_seq % 64) == 0;
+    if (diag_this_blt) {
+        if (vmsvga3d_d3d10_readback_image_live(
+                s, source, command->srcSubResource)) {
+            vmsvga3d_d3d10_present_blt_diag_source(
+                current_diag_seq, command->srcSid,
+                command->srcSubResource, source, source_image, &source_box);
+        } else {
+            fprintf(stderr,
+                    "VMVGA-PRESENTBLT-SOURCE seq=%llu sid=%u sub=%u "
+                    "readback=FAIL\n",
+                    (unsigned long long)current_diag_seq, command->srcSid,
+                    command->srcSubResource);
+        }
     }
 
     source_format = vmsvga3d_d3d10_surface_format(source->format);

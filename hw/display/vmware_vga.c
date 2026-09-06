@@ -569,7 +569,7 @@ struct vmsvga_state_s {
     uint8_t *legacy_vga_ptr;
     uint32_t legacy_vga_size;
 };
-DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMWARE_SVGA, "vmware-svga")
+DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMVGA, "vmvga")
 struct pci_vmsvga_state_s {
     PCIDevice parent_obj;
     struct vmsvga_state_s chip;
@@ -8757,7 +8757,7 @@ static void vmsvga_reset(DeviceState *dev)
 {
     VPRINT("vmsvga_reset was just executed\n");
 
-    struct pci_vmsvga_state_s *pci = VMWARE_SVGA(dev);
+    struct pci_vmsvga_state_s *pci = VMVGA(dev);
     struct vmsvga_state_s *s = &pci->chip;
 
     VMVGA_TRACE_LOCAL(
@@ -9770,7 +9770,7 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
 {
     VPRINT("pci_vmsvga_realize was just executed\n");
 
-    struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+    struct pci_vmsvga_state_s *s = VMVGA(dev);
 
     if (!vmsvga_vgpu_parse(&s->chip, errp)) {
         return;
@@ -9806,7 +9806,7 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
 
 static void pci_vmsvga_uninit(PCIDevice *dev)
 {
-    struct pci_vmsvga_state_s *s = VMWARE_SVGA(dev);
+    struct pci_vmsvga_state_s *s = VMVGA(dev);
 
     vmsvga_trace_flight_histogram(&s->chip, "uninit");
     vmsvga_trace_gmr2_clear(&s->chip);
@@ -9861,7 +9861,7 @@ static void vmsvga_class_init(ObjectClass *klass, VMVGA_CLASS_INIT_DATA data)
 }
 
 static TypeInfo vmsvga_info = {
-      .name = "vmware-svga",
+      .name = "vmvga",
       .parent = TYPE_PCI_DEVICE,
       .instance_size = sizeof(struct pci_vmsvga_state_s),
       .class_init = vmsvga_class_init,

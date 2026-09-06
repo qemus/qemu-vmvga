@@ -47,10 +47,10 @@ The source is designed to be overlaid onto a QEMU source tree before QEMU is bui
 
 ## Usage 🚀
 
-Once included in QEMU, the device is exposed using QEMU's existing VMware SVGA interface:
+Once included in QEMU, a new display device will be available:
 
 ```text
--vga vmware
+-device vmvga
 ```
 
 The guest requires a compatible VMware SVGA display driver to use the device-specific acceleration features.

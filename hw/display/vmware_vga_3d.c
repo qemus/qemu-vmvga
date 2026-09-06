@@ -279,6 +279,7 @@ typedef struct vmsvga3d_surface_s {
     size_t storage_bytes;
     VMSVGA3DSurfaceImage *mips;
     VMSVGA3DDxvkSurface *dxvk_surface;
+    bool screen_target_content_valid;
 } VMSVGA3DSurface;
 
 /* vmware_vga_vgpu10.c is included below after the legacy command handlers.
@@ -7191,7 +7192,13 @@ static bool vmsvga3d_screen_target_present_live(
     }
 
     surface = s->svga3d->surfaces[sid];
-    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0 ||
+    if (surface == NULL) {
+        return false;
+    }
+    if (!surface->screen_target_content_valid) {
+        return true;
+    }
+    if (surface->mips == NULL || surface->mip_count == 0 ||
         surface->format == SVGA3D_BUFFER ||
         (surface->surface_flags & SVGA3D_SURFACE_SCREENTARGET) == 0 ||
         (surface->surface_flags &
@@ -7396,6 +7403,9 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
 
     dirty = *rect;
     surface = sid < SVGA3D_MAX_SURFACE_IDS ? state->surfaces[sid] : NULL;
+    if (surface != NULL && !surface->screen_target_content_valid) {
+        return true;
+    }
     if (surface != NULL && surface->mips != NULL && surface->mip_count != 0) {
         uint32_t width = surface->mips[0].size.width;
         uint32_t height = surface->mips[0].size.height;
@@ -7493,6 +7503,14 @@ static bool vmsvga3d_surface_changed_live(
     rect.y = box->y;
     rect.w = box->w;
     rect.h = box->h;
+
+    if (sid < SVGA3D_MAX_SURFACE_IDS && subresource == 0 &&
+        s->svga3d->surfaces[sid] != NULL) {
+        /* Only genuine surface writers call this helper.  DEFINE/BIND/UPDATE
+         * screen-target commands use the dirty helper directly, so they cannot
+         * expose a newly materialized texture before it has real contents. */
+        s->svga3d->surfaces[sid]->screen_target_content_valid = true;
+    }
 
     return vmsvga3d_screen_target_mark_dirty_live(
         s, sid, subresource, &rect);

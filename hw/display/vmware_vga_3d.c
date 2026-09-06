@@ -139,6 +139,10 @@ typedef struct vmsvga3d_context_s {
 #define VMSVGA3D_GBO_PAGE_SIZE (1u << VMSVGA3D_GBO_PAGE_SHIFT)
 #define VMSVGA3D_GBO_MAX_SIZE (128u * 1024u * 1024u)
 #define VMSVGA3D_GBO_GPA_MASK UINT64_C(0x00000fffffffffff)
+/* The VMware Win7 KMD sizes the GART backing MOB at one 64-bit entry per
+ * 4 KiB aperture page. */
+#define VMSVGA3D_GART_ENTRY_SIZE 8u
+#define VMSVGA3D_GART_MAX_PAGES (1u << (32u - VMSVGA3D_GBO_PAGE_SHIFT))
 
 typedef struct vmsvga3d_gbo_run_s {
     uint64_t gpa;
@@ -160,6 +164,12 @@ typedef struct vmsvga3d_mob_s {
     SVGAMobId mobid;
     VMSVGA3DGBO gbo;
 } VMSVGA3DMob;
+
+typedef struct vmsvga3d_gart_page_s {
+    uint64_t gpa;
+    SVGAMobId mobid;
+    uint32_t mob_page;
+} VMSVGA3DGARTPage;
 
 typedef struct vmsvga3d_dx_cotable_s {
     SVGAMobId mobid;
@@ -285,6 +295,10 @@ struct vmsvga3d_state_s {
     VMSVGA3DSurface *surfaces[SVGA3D_MAX_SURFACE_IDS];
     VMSVGA3DGBO otables[SVGA_OTABLE_MAX];
     GHashTable *mobs;
+    VMSVGA3DGARTPage *gart_pages;
+    SVGAMobId gart_mobid;
+    uint32_t gart_page_count;
+    bool gart_enabled;
     uint32_t active_dx_context_id;
     uint32_t active_screen_target_sid;
     uint32_t screen_target_dirty_count;
@@ -431,6 +445,7 @@ static void vmsvga3d_surface_clear_legacy_bindings(
 
 static struct vmsvga3d_state_s *
 vmsvga3d_state_ensure(struct vmsvga_state_s *s);
+static void vmsvga3d_gart_disable_live(struct vmsvga3d_state_s *state);
 
 static void *vmsvga3d_dx_cotable_entry_ptr(struct vmsvga_state_s *s,
                                             uint32_t cid,
@@ -915,6 +930,14 @@ static bool vmsvga3d_mob_destroy(struct vmsvga_state_s *s,
                                  sizeof(SVGAOTableMobEntry), &entry,
                                  sizeof(entry));
 
+    if (state->gart_enabled && state->gart_mobid == mobid) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "VMVGA-GART backing-mob-destroy mobid=%u action=DISABLE\n",
+            mobid);
+        vmsvga3d_gart_disable_live(state);
+    }
+
     return g_hash_table_remove(state->mobs, vmsvga3d_mob_key(mobid));
 }
 
@@ -933,12 +956,183 @@ static bool vmsvga3d_mob_write(struct vmsvga_state_s *s, VMSVGA3DMob *mob,
            vmsvga3d_gbo_write(s, &mob->gbo, offset, data, size);
 }
 
+static void vmsvga3d_gart_clear_pages(struct vmsvga3d_state_s *state)
+{
+    uint32_t page;
+
+    if (state == NULL || state->gart_pages == NULL) {
+        return;
+    }
+
+    for (page = 0; page < state->gart_page_count; page++) {
+        state->gart_pages[page].gpa = 0;
+        state->gart_pages[page].mobid = SVGA3D_INVALID_ID;
+        state->gart_pages[page].mob_page = 0;
+    }
+}
+
+static void vmsvga3d_gart_disable_live(struct vmsvga3d_state_s *state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    g_free(state->gart_pages);
+    state->gart_pages = NULL;
+    state->gart_mobid = SVGA3D_INVALID_ID;
+    state->gart_page_count = 0;
+    state->gart_enabled = false;
+}
+
+static bool vmsvga3d_gart_enable_live(struct vmsvga_state_s *s,
+                                      SVGAMobId mobid, uint32_t must_be_zero,
+                                      uint32_t initialized)
+{
+    struct vmsvga3d_state_s *state = vmsvga3d_state_ensure(s);
+    VMSVGA3DMob *mob;
+    VMSVGA3DGARTPage *pages;
+    uint32_t page_count;
+    bool preserve;
+
+    if (state == NULL || must_be_zero != 0 || initialized > 1) {
+        return false;
+    }
+
+    mob = vmsvga3d_mob_get(s, mobid);
+    if (mob == NULL || mob->gbo.size < VMSVGA3D_GART_ENTRY_SIZE ||
+        (mob->gbo.size % VMSVGA3D_GART_ENTRY_SIZE) != 0) {
+        return false;
+    }
+
+    page_count = mob->gbo.size / VMSVGA3D_GART_ENTRY_SIZE;
+    if (page_count == 0 || page_count > VMSVGA3D_GART_MAX_PAGES) {
+        return false;
+    }
+
+    preserve = initialized != 0 && state->gart_enabled &&
+               state->gart_mobid == mobid &&
+               state->gart_page_count == page_count &&
+               state->gart_pages != NULL;
+    if (!preserve) {
+        pages = g_try_new(VMSVGA3DGARTPage, page_count);
+        if (pages == NULL) {
+            return false;
+        }
+
+        g_free(state->gart_pages);
+        state->gart_pages = pages;
+        state->gart_page_count = page_count;
+        vmsvga3d_gart_clear_pages(state);
+    }
+
+    state->gart_mobid = mobid;
+    state->gart_enabled = true;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "VMVGA-GART enable mobid=%u pages=%u initialized=%u preserve=%u result=OK\n",
+        mobid, page_count, initialized, preserve ? 1u : 0u);
+    return true;
+}
+
+static bool vmsvga3d_gart_map_mob_live(struct vmsvga_state_s *s,
+                                       SVGAMobId mobid, uint32_t gart_offset)
+{
+    struct vmsvga3d_state_s *state = s != NULL ? s->svga3d : NULL;
+    VMSVGA3DMob *mob;
+    uint32_t first_page;
+    uint32_t mob_page = 0;
+    uint32_t run_index;
+
+    if (state == NULL || !state->gart_enabled || state->gart_pages == NULL ||
+        (gart_offset & (VMSVGA3D_GBO_PAGE_SIZE - 1u)) != 0) {
+        return false;
+    }
+
+    mob = vmsvga3d_mob_get(s, mobid);
+    if (mob == NULL) {
+        return false;
+    }
+
+    first_page = gart_offset >> VMSVGA3D_GBO_PAGE_SHIFT;
+    if (first_page >= state->gart_page_count ||
+        mob->gbo.page_count > state->gart_page_count - first_page) {
+        return false;
+    }
+
+    /*
+     * The VMware host owns the serialized 64-bit GART PTE format.  The guest
+     * command supplies only a MOB id and aperture offset, so keep the
+     * equivalent translation as host-side shadow state rather than inventing
+     * guest-visible PTE bits.  Snapshot GPAs at MAP time so DESTROY_GB_MOB
+     * followed by UNMAP_GART_RANGE, as used by the Win7 KMD, remains valid.
+     */
+    for (run_index = 0; run_index < mob->gbo.run_count; run_index++) {
+        const VMSVGA3DGBORun *run = &mob->gbo.runs[run_index];
+        uint32_t run_page;
+
+        for (run_page = 0; run_page < run->pages; run_page++, mob_page++) {
+            VMSVGA3DGARTPage *page =
+                &state->gart_pages[first_page + mob_page];
+
+            page->gpa = run->gpa +
+                        (uint64_t)run_page * VMSVGA3D_GBO_PAGE_SIZE;
+            page->mobid = mobid;
+            page->mob_page = mob_page;
+        }
+    }
+
+    if (mob_page != mob->gbo.page_count) {
+        return false;
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "VMVGA-GART map mobid=%u offset=0x%08x first=%u pages=%u result=OK\n",
+        mobid, gart_offset, first_page, mob->gbo.page_count);
+    return true;
+}
+
+static bool vmsvga3d_gart_unmap_live(struct vmsvga_state_s *s,
+                                     uint32_t gart_offset, uint32_t num_pages)
+{
+    struct vmsvga3d_state_s *state = s != NULL ? s->svga3d : NULL;
+    uint32_t first_page;
+    uint32_t page;
+
+    if (state == NULL || !state->gart_enabled || state->gart_pages == NULL ||
+        (gart_offset & (VMSVGA3D_GBO_PAGE_SIZE - 1u)) != 0) {
+        return false;
+    }
+
+    first_page = gart_offset >> VMSVGA3D_GBO_PAGE_SHIFT;
+    if (first_page > state->gart_page_count ||
+        num_pages > state->gart_page_count - first_page) {
+        return false;
+    }
+
+    for (page = 0; page < num_pages; page++) {
+        VMSVGA3DGARTPage *entry = &state->gart_pages[first_page + page];
+
+        entry->gpa = 0;
+        entry->mobid = SVGA3D_INVALID_ID;
+        entry->mob_page = 0;
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "VMVGA-GART unmap offset=0x%08x first=%u pages=%u result=OK\n",
+        gart_offset, first_page, num_pages);
+    return true;
+}
+
 static struct vmsvga3d_state_s *
 vmsvga3d_state_ensure(struct vmsvga_state_s *s)
 {
     if (s->svga3d == NULL) {
         s->svga3d = g_try_new0(struct vmsvga3d_state_s, 1);
         if (s->svga3d != NULL) {
+            s->svga3d->gart_mobid = SVGA3D_INVALID_ID;
             s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
         }
@@ -1058,6 +1252,7 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s)
         vmsvga3d_gbo_destroy(&state->otables[i]);
     }
 
+    g_free(state->gart_pages);
     g_hash_table_destroy(state->mobs);
     g_free(state);
 
@@ -1105,6 +1300,10 @@ static bool vmsvga3d_fifo_supported_command(uint32_t cmd)
     case SVGA_3D_CMD_DEFINE_GB_MOB:
     case SVGA_3D_CMD_DEFINE_GB_MOB64:
     case SVGA_3D_CMD_DESTROY_GB_MOB:
+    case SVGA_3D_CMD_ENABLE_GART:
+    case SVGA_3D_CMD_DISABLE_GART:
+    case SVGA_3D_CMD_MAP_MOB_INTO_GART:
+    case SVGA_3D_CMD_UNMAP_GART_RANGE:
     case SVGA_3D_CMD_DX_DEFINE_CONTEXT:
     case SVGA_3D_CMD_DX_DESTROY_CONTEXT:
     case SVGA_3D_CMD_DX_BIND_CONTEXT:
@@ -7803,6 +8002,97 @@ static bool vmsvga3d_handle_destroy_gb_mob(struct vmsvga_state_s *s,
     return true;
 }
 
+static bool vmsvga3d_handle_gart(struct vmsvga_state_s *s, uint32_t cmd,
+                                  int32_t *len, uint32_t fifo_start)
+{
+    void *payload;
+    uint32_t size;
+    bool ok = false;
+
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    switch (cmd) {
+    case SVGA_3D_CMD_ENABLE_GART:
+        if (size >= sizeof(SVGA3dCmdEnableGart)) {
+            const SVGA3dCmdEnableGart *body = payload;
+
+            ok = vmsvga3d_gart_enable_live(
+                s, body->mobid, body->mustBeZero, body->initialized);
+            if (!ok) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "VMVGA-GART enable mobid=%u mustBeZero=%u initialized=%u result=REJECT\n",
+                    body->mobid, body->mustBeZero, body->initialized);
+            }
+        }
+        break;
+
+    case SVGA_3D_CMD_DISABLE_GART:
+        if (size == 0) {
+            struct vmsvga3d_state_s *state = s != NULL ? s->svga3d : NULL;
+
+            if (state != NULL) {
+                vmsvga3d_gart_disable_live(state);
+                ok = true;
+                VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                                  "VMVGA-GART disable result=OK\n");
+            }
+        }
+        break;
+
+    case SVGA_3D_CMD_MAP_MOB_INTO_GART:
+        if (size >= sizeof(SVGA3dCmdMapMobIntoGart)) {
+            const SVGA3dCmdMapMobIntoGart *body = payload;
+
+            ok = vmsvga3d_gart_map_mob_live(s, body->mobid,
+                                             body->gartOffset);
+            if (!ok) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "VMVGA-GART map mobid=%u offset=0x%08x result=REJECT\n",
+                    body->mobid, body->gartOffset);
+            }
+        }
+        break;
+
+    case SVGA_3D_CMD_UNMAP_GART_RANGE:
+        if (size >= sizeof(SVGA3dCmdUnmapGartRange)) {
+            const SVGA3dCmdUnmapGartRange *body = payload;
+
+            ok = vmsvga3d_gart_unmap_live(s, body->gartOffset,
+                                           body->numPages);
+            if (!ok) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "VMVGA-GART unmap offset=0x%08x pages=%u result=REJECT\n",
+                    body->gartOffset, body->numPages);
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    if (!ok &&
+        ((cmd == SVGA_3D_CMD_ENABLE_GART &&
+          size < sizeof(SVGA3dCmdEnableGart)) ||
+         (cmd == SVGA_3D_CMD_DISABLE_GART && size != 0) ||
+         (cmd == SVGA_3D_CMD_MAP_MOB_INTO_GART &&
+          size < sizeof(SVGA3dCmdMapMobIntoGart)) ||
+         (cmd == SVGA_3D_CMD_UNMAP_GART_RANGE &&
+          size < sizeof(SVGA3dCmdUnmapGartRange)))) {
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                          "VMVGA-GART cmd=%u size=%u result=REJECT-SIZE\n",
+                          cmd, size);
+    }
+
+    g_free(payload);
+    return true;
+}
+
 static bool vmsvga3d_handle_bind_gb_surface(struct vmsvga_state_s *s,
                                              uint32_t cmd, int32_t *len,
                                              uint32_t fifo_start)
@@ -8066,10 +8356,10 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
     VMSVGA3D_DISCARD(SVGA_3D_CMD_END_GB_QUERY),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_WAIT_FOR_GB_QUERY),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_NOP),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_ENABLE_GART),
-    VMSVGA3D_STALL(SVGA_3D_CMD_DISABLE_GART),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_MAP_MOB_INTO_GART),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_UNMAP_GART_RANGE),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_ENABLE_GART, vmsvga3d_handle_gart),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_DISABLE_GART, vmsvga3d_handle_gart),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_MAP_MOB_INTO_GART, vmsvga3d_handle_gart),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_UNMAP_GART_RANGE, vmsvga3d_handle_gart),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_SCREENTARGET,
                      vmsvga3d_handle_gb_screen_target),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DESTROY_GB_SCREENTARGET,

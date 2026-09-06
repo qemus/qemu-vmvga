@@ -5227,7 +5227,7 @@ static bool vmsvga3d_d3d11_readback_surface_image(
     depth_count = image->data_size / image->plane_size;
 
     return vmsvga3d_dxvk_d3d11_readback_subresource(
-        s->dxvk, surface->dxvk_surface, subresource, image->data,
+        s->dxvk, surface->dxvk_surface, subresource, NULL, image->data,
         image->pitch, image->pitch, row_count, image->plane_size,
         depth_count);
 }
@@ -6902,8 +6902,7 @@ static bool vmsvga3d_screen_target_present_live(
         (surface->surface_flags &
          (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) != 0 ||
         surface->mips[subresource].size.depth != 1 ||
-        !vmsvga3d_present_format(surface, &desc) ||
-        !vmsvga3d_d3d10_readback_image_live(s, surface, subresource)) {
+        !vmsvga3d_present_format(surface, &desc)) {
         return false;
     }
 
@@ -6925,8 +6924,46 @@ static bool vmsvga3d_screen_target_present_live(
         return false;
     }
 
+    /*
+     * The screen-target path is restricted by vmsvga3d_present_format() to
+     * single-sample, uncompressed 2D pixel formats. Read back only the dirty
+     * rectangle into the existing CPU shadow. If the backend cannot service
+     * a boxed readback, retain the previous full-subresource path as a
+     * correctness fallback.
+     */
+    {
+        SVGA3dRect readback_rect = {
+            .x = copy.srcx,
+            .y = copy.srcy,
+            .w = copy.w,
+            .h = copy.h,
+        };
+
+        if (!vmsvga3d_d3d10_readback_image_rect_live(
+                s, surface, subresource, &readback_rect,
+                desc->bytes_per_block) &&
+            !vmsvga3d_d3d10_readback_image_live(
+                s, surface, subresource)) {
+            return false;
+        }
+    }
+
     if (!vmsvga3d_present_screen_rect(s, surface, image, desc, &copy, true)) {
         return false;
+    }
+
+    /*
+     * An unbacked Screen Object uses the handoff mirror as its lasting host
+     * storage. Once a complete 3D frame has replaced the seeded transition
+     * image, the handoff is complete; no scanout rebind is needed because the
+     * storage pointer itself does not change.
+     */
+    if (s->screen_handoff_active && !s->screen_backing_valid &&
+        copy.x == 0 && copy.y == 0 &&
+        copy.w == s->screen_width && copy.h == s->screen_height) {
+        s->screen_handoff_active = false;
+        s->screen_handoff_same_backing = false;
+        s->screen_handoff_skipped_same_backing_full = false;
     }
 
     return true;
@@ -7106,9 +7143,13 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 break;
             }
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
-            if (s->screen_defined) {
-                (void)vmsvga_screen_destroy(s, body->stid);
-            }
+            /*
+             * Do not destroy the currently visible Screen Object before a
+             * redefine. vmsvga_screen_define() deliberately seeds its handoff
+             * mirror from the existing frontend; destroying here would free
+             * that storage while the frontend can still be displaying it and
+             * would also throw away the previous good frame.
+             */
             flags = SVGA_SCREEN_MUST_BE_SET;
             if (body->flags & SVGA_STFLAG_PRIMARY) {
                 flags |= SVGA_SCREEN_IS_PRIMARY;

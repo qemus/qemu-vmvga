@@ -1142,16 +1142,24 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     screen_stride = backing_present ? backing_pitch : (uint32_t)stride;
     surface = qemu_console_surface(s->vga.con);
 
+    /*
+     * A Screen Object definition replaces the currently visible scanout even
+     * before a backingStore is attached.  Keep the old frontend image visible
+     * across that transition: an unbacked Screen target is populated later by
+     * GMRFB or 3D presentation and must not expose its fresh zeroed mirror in
+     * the meantime.
+     */
     handoff_active =
-        backing_present &&
-        (surface == NULL || surface_width(surface) != width ||
+        surface != NULL &&
+        (surface_width(surface) != width ||
          surface_height(surface) != height ||
          surface_bits_per_pixel(surface) != 32 ||
          surface_stride(surface) != screen_stride ||
-         surface_data(surface) !=
-             vmsvga_svga_vram_ptr(s) + (size_t)backing_offset);
+         (backing_present &&
+          surface_data(surface) !=
+              vmsvga_svga_vram_ptr(s) + (size_t)backing_offset));
     handoff_same_backing =
-        handoff_active && surface != NULL &&
+        backing_present && handoff_active && surface != NULL &&
         surface_data(surface) ==
             vmsvga_svga_vram_ptr(s) + (size_t)backing_offset;
 

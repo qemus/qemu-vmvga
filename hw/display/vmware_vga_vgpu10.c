@@ -8336,9 +8336,65 @@ static bool vmsvga3d_d3d10_readback_image_live(
     depth_count = image->data_size / image->plane_size;
 
     return vmsvga3d_dxvk_d3d11_readback_subresource(
-        s->dxvk, surface->dxvk_surface, subresource, image->data,
+        s->dxvk, surface->dxvk_surface, subresource, NULL, image->data,
         image->pitch, image->pitch, row_count, image->plane_size,
         depth_count);
+}
+
+static bool vmsvga3d_d3d10_readback_image_rect_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    uint32_t subresource, const SVGA3dRect *rect, uint32_t bytes_per_pixel)
+{
+    VMSVGA3DSurfaceImage *image;
+    VMSVGA3DD3D10Box source_box;
+    uint64_t row_bytes;
+    uint64_t data_offset;
+
+    if (s == NULL || surface == NULL || rect == NULL ||
+        surface->mips == NULL || subresource >= surface->mip_count ||
+        bytes_per_pixel == 0 || rect->w == 0 || rect->h == 0) {
+        return false;
+    }
+
+    if (surface->multisample_count > 1) {
+        return false;
+    }
+
+    image = &surface->mips[subresource];
+    if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
+        image->data_size == 0 || image->plane_size % image->pitch != 0 ||
+        image->data_size % image->plane_size != 0 ||
+        image->size.depth != 1 || rect->x >= image->size.width ||
+        rect->y >= image->size.height ||
+        rect->w > image->size.width - rect->x ||
+        rect->h > image->size.height - rect->y) {
+        return false;
+    }
+
+    row_bytes = (uint64_t)rect->w * bytes_per_pixel;
+    data_offset = (uint64_t)rect->y * image->pitch +
+                  (uint64_t)rect->x * bytes_per_pixel;
+    if (row_bytes == 0 || row_bytes > UINT32_MAX ||
+        data_offset > image->data_size ||
+        row_bytes > image->data_size - data_offset ||
+        row_bytes > image->pitch ||
+        (uint64_t)rect->x * bytes_per_pixel > image->pitch - row_bytes ||
+        (uint64_t)(rect->h - 1) * image->pitch >
+            image->data_size - data_offset - row_bytes) {
+        return false;
+    }
+
+    source_box.left = rect->x;
+    source_box.top = rect->y;
+    source_box.front = 0;
+    source_box.right = rect->x + rect->w;
+    source_box.bottom = rect->y + rect->h;
+    source_box.back = 1;
+
+    return vmsvga3d_dxvk_d3d11_readback_subresource(
+        s->dxvk, surface->dxvk_surface, subresource, &source_box,
+        image->data + data_offset, (uint32_t)row_bytes, image->pitch,
+        rect->h, image->plane_size, 1);
 }
 
 static bool vmsvga3d_d3d10_subresource_offset_live(

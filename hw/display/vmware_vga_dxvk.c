@@ -7790,7 +7790,8 @@ bool vmsvga3d_dxvk_d3d11_update_subresource(
 
 bool vmsvga3d_dxvk_d3d11_readback_subresource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
-    void *data, uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
+    const struct vmsvga3d_d3d10_box_s *source_box, void *data,
+    uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
     uint32_t depth_pitch, uint32_t depth_count)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -7843,10 +7844,10 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource(
     switch (desc->resource_dimension) {
     case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER: {
           VMSVGA3DDxvkD3D11BufferDesc staging_desc = {0};
-          VMSVGA3DDxvkD3D11Box source_box;
+          VMSVGA3DDxvkD3D11Box native_box;
 
-          if (subresource != 0 || row_count != 1 || depth_count != 1 ||
-              row_bytes > desc->byte_width ||
+          if (source_box != NULL || subresource != 0 || row_count != 1 ||
+              depth_count != 1 || row_bytes > desc->byte_width ||
               !vmsvga3d_dxvk_get_method(
                   dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BUFFER,
                   &create_buffer, sizeof(create_buffer))) {
@@ -7860,22 +7861,22 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource(
           if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
               return false;
           }
-          source_box.left = 0;
-          source_box.top = 0;
-          source_box.front = 0;
-          source_box.right = row_bytes;
-          source_box.bottom = 1;
-          source_box.back = 1;
+          native_box.left = 0;
+          native_box.top = 0;
+          native_box.front = 0;
+          native_box.right = row_bytes;
+          native_box.bottom = 1;
+          native_box.back = 1;
           copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
-                      surface->d3d11_resource, 0, &source_box);
+                      surface->d3d11_resource, 0, &native_box);
           break;
       }
     case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
           VMSVGA3DDxvkD3D11Texture1DDesc staging_desc = {0};
 
           max_subresources = (uint64_t)desc->mip_levels * desc->array_size;
-          if (desc->mip_levels == 0 || desc->array_size == 0 ||
-              subresource >= max_subresources ||
+          if (source_box != NULL || desc->mip_levels == 0 ||
+              desc->array_size == 0 || subresource >= max_subresources ||
               !vmsvga3d_dxvk_get_method(
                   dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE1D,
                   &create_texture1d, sizeof(create_texture1d))) {
@@ -7899,6 +7900,10 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource(
       }
     case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
           VMSVGA3DDxvkD3D11Texture2DDesc staging_desc = {0};
+          VMSVGA3DDxvkD3D11Box native_box;
+          const VMSVGA3DDxvkD3D11Box *copy_box = NULL;
+          uint32_t source_width;
+          uint32_t source_height;
 
           max_subresources = (uint64_t)desc->mip_levels * desc->array_size;
           if (desc->mip_levels == 0 || desc->array_size == 0 ||
@@ -7910,8 +7915,32 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource(
               return false;
           }
           mip_level = subresource % desc->mip_levels;
-          staging_desc.width = MAX(1u, desc->width >> mip_level);
-          staging_desc.height = MAX(1u, desc->height >> mip_level);
+          source_width = MAX(1u, desc->width >> mip_level);
+          source_height = MAX(1u, desc->height >> mip_level);
+          staging_desc.width = source_width;
+          staging_desc.height = source_height;
+
+          if (source_box != NULL) {
+              if (source_box->front != 0 || source_box->back != 1 ||
+                  source_box->left >= source_box->right ||
+                  source_box->top >= source_box->bottom ||
+                  source_box->right > source_width ||
+                  source_box->bottom > source_height || depth_count != 1 ||
+                  row_count != source_box->bottom - source_box->top) {
+                  return false;
+              }
+
+              staging_desc.width = source_box->right - source_box->left;
+              staging_desc.height = source_box->bottom - source_box->top;
+              native_box.left = source_box->left;
+              native_box.top = source_box->top;
+              native_box.front = 0;
+              native_box.right = source_box->right;
+              native_box.bottom = source_box->bottom;
+              native_box.back = 1;
+              copy_box = &native_box;
+          }
+
           staging_desc.mip_levels = 1;
           staging_desc.array_size = 1;
           staging_desc.format = desc->format;
@@ -7924,13 +7953,14 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource(
               return false;
           }
           copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
-                      surface->d3d11_resource, subresource, NULL);
+                      surface->d3d11_resource, subresource, copy_box);
           break;
       }
     case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
           VMSVGA3DDxvkD3D11Texture3DDesc staging_desc = {0};
 
-          if (desc->mip_levels == 0 || subresource >= desc->mip_levels ||
+          if (source_box != NULL || desc->mip_levels == 0 ||
+              subresource >= desc->mip_levels ||
               !vmsvga3d_dxvk_get_method(
                   dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE3D,
                   &create_texture3d, sizeof(create_texture3d))) {
@@ -7996,6 +8026,7 @@ out:
     (void)dxvk;
     (void)surface;
     (void)subresource;
+    (void)source_box;
     (void)data;
     (void)row_bytes;
     (void)row_pitch;

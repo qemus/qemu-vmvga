@@ -8204,13 +8204,24 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
             ret &= ~SVGA_CAP2_DX3;
         }
 #else
-        ret = s->svga3d_dx_capable ? SVGA_CAP2_GROW_OTABLE : SVGA_CAP2_NONE;
+        ret = s->svga3d_dx_capable
+                  ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2)
+                  : SVGA_CAP2_NONE;
         if (s->svga3d_dx_capable &&
             s->vgpu_generation == VMSVGA_VGPU_11) {
             ret |= SVGA_CAP2_DX3;
         }
 #endif
         VPRINT("SVGA_REG_CAP2 register %u with the return of %u\n", s->index, ret);
+        break;
+    case SVGA_REG_GUEST_DRIVER_ID:
+    case SVGA_REG_GUEST_DRIVER_VERSION1:
+    case SVGA_REG_GUEST_DRIVER_VERSION2:
+    case SVGA_REG_GUEST_DRIVER_VERSION3:
+        /* DX2-era guest driver identification is advisory/write-mostly.
+         * Accept reads without exposing migration-visible state. */
+        ret = 0;
+        VPRINT("guest driver register %u with the return of %u\n", s->index, ret);
         break;
     case SVGA_REG_MEM_START:
         ret = pci_get_bar_addr(PCI_DEVICE(pci_vmsvga), 2);
@@ -8693,6 +8704,15 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       }
       VPRINT("SVGA_REG_DISPLAY_HEIGHT register %u with the value of %u\n",
              s->index, value);
+      break;
+  case SVGA_REG_GUEST_DRIVER_ID:
+  case SVGA_REG_GUEST_DRIVER_VERSION1:
+  case SVGA_REG_GUEST_DRIVER_VERSION2:
+  case SVGA_REG_GUEST_DRIVER_VERSION3:
+      /* DX2-era guest driver identification is advisory. The device only
+       * needs to accept the reporting sequence; no rendering state depends
+       * on these values. */
+      VPRINT("guest driver register %u with the value of %u\n", s->index, value);
       break;
   case SVGA_REG_TRACES:
       s->traces = !!value;

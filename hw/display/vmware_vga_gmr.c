@@ -1240,6 +1240,7 @@ static void vmsvga_screen_reset(struct vmsvga_state_s *s)
     s->screen_backing_pitch = 0;
     s->screen_clone_count = 0;
     s->screen_frontend_deferred = false;
+    s->screen_frontend_hold_frames = 0;
     s->screen_destroyed_reuse_valid = false;
     s->gmrfb_defined = false;
     s->gmrfb_gmr_id = SVGA_GMR_NULL;
@@ -1687,6 +1688,20 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
         s->screen_destroyed_backing_offset = s->screen_backing_offset;
         s->screen_destroyed_backing_pitch = s->screen_backing_pitch;
         s->screen_destroyed_clone_count = s->screen_clone_count;
+
+        if (s->vgpu_generation == VMSVGA_VGPU_9) {
+            s->screen_frontend_hold_frames =
+                VMSVGA_SCREEN_REBUILD_HOLD_FRAMES;
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-FRONTEND-HOLD phase=arm frames=%u "
+                        "size=%ux%u backing=%u:0x%08x\n",
+                        s->screen_frontend_hold_frames, s->screen_width,
+                        s->screen_height, s->screen_backing_gmr_id,
+                        s->screen_backing_offset);
+                s->trace_activity_seq++;
+            }
+        }
     }
 
     /*

@@ -7361,7 +7361,7 @@ static bool vmsvga3d_gb_screen_target_entry_read(
 
 static bool vmsvga3d_screen_target_present_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
-    const SVGA3dRect *rect)
+    const SVGA3dRect *rect, bool readback)
 {
     VMSVGA3DSurface *surface;
     VMSVGA3DSurfaceImage *image;
@@ -7423,7 +7423,7 @@ static bool vmsvga3d_screen_target_present_live(
      * a boxed readback, retain the previous full-subresource path as a
      * correctness fallback.
      */
-    {
+    if (readback) {
         SVGA3dRect readback_rect = {
             .x = copy.srcx,
             .y = copy.srcy,
@@ -7787,6 +7787,7 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     uint32_t rect_count;
     uint32_t sid;
     uint32_t i;
+    bool batch_readback = false;
 
     if (s == NULL || s->svga3d == NULL) {
         return true;
@@ -7802,13 +7803,31 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     memcpy(rects, state->screen_target_dirty_rects,
            rect_count * sizeof(rects[0]));
 
+    if (rect_count > 1 && sid < SVGA3D_MAX_SURFACE_IDS) {
+        VMSVGA3DSurface *surface = state->surfaces[sid];
+        const struct svga3d_surface_desc *desc = NULL;
+
+        if (surface != NULL && surface->screen_target_content_valid &&
+            surface->mips != NULL && surface->mip_count != 0 &&
+            surface->format != SVGA3D_BUFFER &&
+            (surface->surface_flags & SVGA3D_SURFACE_SCREENTARGET) != 0 &&
+            (surface->surface_flags &
+             (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) == 0 &&
+            surface->mips[0].size.depth == 1 &&
+            vmsvga3d_present_format(surface, &desc)) {
+            batch_readback = vmsvga3d_d3d10_readback_image_rects_live(
+                s, surface, 0, rects, rect_count, desc->bytes_per_block);
+        }
+    }
+
     /*
      * Do not consume queued presentation damage until every readback succeeds.
      * A partial failure while the frontend is deferred must leave the old
      * frontend visible and retry the same presentation on the next refresh.
      */
     for (i = 0; i < rect_count; i++) {
-        if (!vmsvga3d_screen_target_present_live(s, sid, 0, &rects[i])) {
+        if (!vmsvga3d_screen_target_present_live(
+                s, sid, 0, &rects[i], !batch_readback)) {
             if (s->screen_frontend_deferred &&
                 vmsvga_trace_flight_enabled()) {
                 fprintf(stderr,

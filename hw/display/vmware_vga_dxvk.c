@@ -8091,7 +8091,6 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
         const struct vmsvga3d_d3d10_box_s *box = &source_boxes[i];
         uint64_t row_bytes;
         uint64_t destination_offset;
-        uint64_t destination_end;
         uint64_t secondary_destination_offset;
         uint64_t secondary_destination_end;
 
@@ -8111,10 +8110,6 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
             (uint64_t)(box->bottom - box->top - 1) * row_pitch >
                 (uint64_t)data_size - destination_offset - row_bytes) {
             return false;
-        }
-        destination_end = destination_offset +
-                          (uint64_t)(box->bottom - box->top - 1) * row_pitch +
-                          row_bytes;
         }
 
         if (secondary_data != NULL) {

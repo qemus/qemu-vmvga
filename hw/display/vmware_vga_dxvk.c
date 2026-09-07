@@ -2369,6 +2369,28 @@ bool vmsvga3d_dxvk_d3d11_supports_multisample(
     return true;
 }
 
+static bool vmsvga3d_dxvk_d3d11_format_supports_advertised_multisample(
+    const VMSVGA3DDxvk *dxvk, uint32_t format, bool include_8x)
+{
+    static const uint32_t sample_counts[] = {2u, 4u, 8u};
+    uint32_t sample_count_limit = include_8x ? ARRAY_SIZE(sample_counts) : 2u;
+    bool any_global_msaa = false;
+    uint32_t i;
+
+    for (i = 0; i < sample_count_limit; i++) {
+        if (vmsvga3d_dxvk_d3d11_supports_multisample(
+                dxvk, sample_counts[i])) {
+            any_global_msaa = true;
+            if (!vmsvga3d_dxvk_d3d11_multisample_format_supported(
+                    dxvk, format, sample_counts[i])) {
+                return false;
+            }
+        }
+    }
+
+    return any_global_msaa;
+}
+
 uint32_t vmsvga3d_dxvk_d3d11_format_caps(
     const VMSVGA3DDxvk *dxvk, uint32_t format)
 {
@@ -2418,7 +2440,12 @@ uint32_t vmsvga3d_dxvk_d3d11_format_caps(
     if (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_IA_VERTEX_BUFFER) {
         caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_DX_VERTEX_BUFFER;
     }
-    if (vmsvga3d_dxvk_d3d11_multisample_format_supported(dxvk, format, 2u)) {
+    /* The VMware MULTISAMPLE format bit is shared by all globally advertised
+     * sample counts.  vGPU11 can expose 2x, 4x and 8x, so only advertise the
+     * per-format bit when this format supports every sample count that the
+     * adapter will expose globally. */
+    if (vmsvga3d_dxvk_d3d11_format_supports_advertised_multisample(
+            dxvk, format, true)) {
         caps |= VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE;
     }
 
@@ -2437,7 +2464,6 @@ uint32_t vmsvga3d_dxvk_d3d11_qualify_format_caps(
     VMSVGA3DDxvkComFunction entry;
     VMSVGA3DDxvkD3D11CheckFormatSupport check_format_support = NULL;
     uint32_t support = 0;
-    uint32_t required;
 
     if (caps == 0 || dxvk == NULL || !dxvk->d3d11_ready ||
         dxvk->d3d11_device == NULL || (!buffer && format == 0)) {
@@ -2454,52 +2480,58 @@ uint32_t vmsvga3d_dxvk_d3d11_qualify_format_caps(
 
     /*
      * DXFMT devcap values are VMware's own compact capability masks, not
-     * D3D11_FORMAT_SUPPORT bitfields.  Use CheckFormatSupport as an
-     * adapter-viability gate and otherwise preserve the canonical VMware mask;
-     * the MSAA-specific per-format bit is qualified separately below.
+     * D3D11_FORMAT_SUPPORT bitfields.  vGPU10 starts with the canonical VMware
+     * mask, then removes only operations that the live D3D11 backend cannot
+     * perform.  Do not require TEXTURE2D for the entire format: some valid
+     * VMware formats can be useful for another resource role even when they are
+     * not usable as a 2D texture.
      */
-    required = buffer ? VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BUFFER
-                      : VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURE2D;
-    if ((support & required) != required) {
-        return 0;
+    if (buffer) {
+        return (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BUFFER) != 0
+                   ? caps
+                   : 0;
     }
 
-    /*
-     * The canonical VMware depth masks all carry bit 3.  For those formats,
-     * also require native D3D11 depth/stencil support before exposing them.
-     * Bit 3 is deliberately used only as a classifier here; the DXFMT mask
-     * itself is never interpreted as D3D11_FORMAT_SUPPORT.
-     */
-    if (!buffer && (caps & 0x00000008u) != 0 &&
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_SHADER_SAMPLE) != 0 &&
+        (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_SHADER_SAMPLE) == 0) {
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_SHADER_SAMPLE;
+    }
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_COLOR_RENDERTARGET) != 0 &&
+        (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_RENDER_TARGET) == 0) {
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_COLOR_RENDERTARGET;
+    }
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_DEPTH_RENDERTARGET) != 0 &&
         (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_DEPTH_STENCIL) == 0) {
-        return 0;
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_DEPTH_RENDERTARGET;
+    }
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_BLENDABLE) != 0 &&
+        (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BLENDABLE) == 0) {
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_BLENDABLE;
+    }
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_MIPS) != 0 &&
+        (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_MIP) == 0) {
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_MIPS;
+    }
+    /* Keep the same conservative ARRAY test used by the vGPU11/VirtualBox
+     * parity path: D3D11 has no direct array-format support bit, so use
+     * TEXTURECUBE as the existing proxy. */
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_ARRAY) != 0 &&
+        (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURECUBE) == 0) {
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_ARRAY;
+    }
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_VOLUME) != 0 &&
+        (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_TEXTURE3D) == 0) {
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_VOLUME;
+    }
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_DX_VERTEX_BUFFER) != 0 &&
+        (support & VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_IA_VERTEX_BUFFER) == 0) {
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_DX_VERTEX_BUFFER;
     }
 
-    /*
-     * MULTISAMPLE is a per-format DXFMT bit while the 2x/4x devcaps are
-     * global.  The guest combines both when answering D3D10 format/sample
-     * queries, so preserve this bit only when the format supports every
-     * sample count that this adapter will advertise globally.
-     */
-    if (!buffer && (caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE) != 0) {
-        static const uint32_t sample_counts[] = {2u, 4u};
-        bool any_global_msaa = false;
-        uint32_t i;
-
-        for (i = 0; i < ARRAY_SIZE(sample_counts); i++) {
-            if (vmsvga3d_dxvk_d3d11_supports_multisample(
-                    dxvk, sample_counts[i])) {
-                any_global_msaa = true;
-                if (!vmsvga3d_dxvk_d3d11_multisample_format_supported(
-                        dxvk, format, sample_counts[i])) {
-                    caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE;
-                    break;
-                }
-            }
-        }
-        if (!any_global_msaa) {
-            caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE;
-        }
+    if ((caps & VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE) != 0 &&
+        !vmsvga3d_dxvk_d3d11_format_supports_advertised_multisample(
+            dxvk, format, false)) {
+        caps &= ~VMSVGA3D_DXVK_SVGA3D_DXFMT_MULTISAMPLE;
     }
 
     return caps;

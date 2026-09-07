@@ -33,7 +33,6 @@
 #include "qapi/error.h"
 #include "qemu/main-loop.h"
 #include "exec/target_page.h"
-#include "system/ram_addr.h"
 #include "trace.h"
 #include "include/vmware_vga_compat.h"
 #include "include/vmware_vga_gmr.h"
@@ -1585,6 +1584,7 @@ static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
 
 static inline uint32_t vmsvga_bytes_per_pixel(uint32_t bpp);
 static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s);
+static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s);
 
 static inline uint32_t vmsvga_active_width(const struct vmsvga_state_s *s)
 {
@@ -1734,9 +1734,8 @@ static inline void vmsvga_mark_vram_dirty_rect(
      */
     dirty_log_mask = memory_region_get_dirty_log_mask(&s->vga.vram);
     dirty_log_mask &= (uint8_t)~(1U << DIRTY_MEMORY_VGA);
-    cpu_physical_memory_set_dirty_range(
-        memory_region_get_ram_addr(&s->vga.vram) + (ram_addr_t)start,
-        (ram_addr_t)span, dirty_log_mask);
+    vmvga_memory_region_set_dirty_mask(&s->vga.vram, (hwaddr)start,
+                                       (hwaddr)span, dirty_log_mask);
 }
 
 static inline void vmsvga_mark_active_rect_dirty(

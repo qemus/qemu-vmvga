@@ -43,16 +43,19 @@
 #include "hw/qdev-properties.h"
 #include "exec/cpu-common.h"
 #include "exec/address-spaces.h"
+#include "exec/ram_addr.h"
 #elif QEMU_VERSION_MAJOR == 9
 #include "hw/pci/pci_device.h"
 #include "hw/qdev-properties.h"
 #include "exec/cpu-common.h"
 #include "exec/address-spaces.h"
+#include "exec/ram_addr.h"
 #elif QEMU_VERSION_MAJOR == 11
 #include "hw/pci/pci_device.h"
 #include "hw/core/qdev-properties.h"
 #include "system/ramblock.h"
 #include "system/address-spaces.h"
+#include "system/physmem.h"
 #else
 #error "qemu-vmvga supports QEMU major versions 7, 9 and 11"
 #endif
@@ -132,6 +135,26 @@ static inline void vmvga_ram_set_migration_id(MemoryRegion *mr,
 {
       qemu_ram_unset_idstr(mr->ram_block);
       qemu_ram_set_idstr(mr->ram_block, name, dev);
+}
+
+/*
+ * QEMU 11 dropped the historical cpu_ prefix from the physical-memory dirty
+ * API.  VMVGA needs the masked form here so device-generated framebuffer
+ * writes can remain dirty for migration and other clients without feeding
+ * them back into DIRTY_MEMORY_VGA.
+ */
+static inline void vmvga_memory_region_set_dirty_mask(MemoryRegion *mr,
+                                                       hwaddr addr,
+                                                       hwaddr size,
+                                                       uint8_t mask)
+{
+      ram_addr_t ram_addr = memory_region_get_ram_addr(mr) + (ram_addr_t)addr;
+
+#if QEMU_VERSION_MAJOR == 11
+      physical_memory_set_dirty_range(ram_addr, (ram_addr_t)size, mask);
+#else
+      cpu_physical_memory_set_dirty_range(ram_addr, (ram_addr_t)size, mask);
+#endif
 }
 
 #if QEMU_VERSION_MAJOR == 7

@@ -1379,7 +1379,17 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         s->new_depth = 32;
         s->screen_frontend_deferred = false;
         s->svga_surface_bound = true;
-        s->invalidated = false;
+        if (s->dirty_log_enabled) {
+            /* Dirty tracking stayed active across DESTROY/DEFINE, so the
+             * direct same-backing frontend remains coherent without another
+             * full redraw. */
+            s->invalidated = false;
+        } else {
+            /* Re-enabling the VGA dirty client starts from a clean baseline.
+             * Preserve one full refresh so BAR1 writes made while logging was
+             * disabled cannot disappear from the frontend. */
+            vmsvga_invalidate(s, "screen-reuse-dirty-gap");
+        }
         s->damage_count = 0;
 
         if (vmsvga_trace_flight_enabled()) {

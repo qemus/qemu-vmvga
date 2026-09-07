@@ -84,6 +84,9 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
         (uint64_t)descriptor_ppn << VMSVGA_GMR_PAGE_SHIFT;
     uint32_t page_offset = 0;
     uint32_t descriptors_read;
+    const char *failure = "descriptor-limit";
+    uint32_t failure_ppn = 0;
+    uint32_t failure_pages = 0;
 
     *out_gmr = NULL;
 
@@ -95,16 +98,20 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
         uint32_t pages;
 
         if (page_offset > VMSVGA_GMR_PAGE_SIZE - sizeof(raw_desc)) {
+            failure = "descriptor-crosses-page";
             goto invalid;
         }
 
         if (!vmsvga_gmr_read_descriptor(s, descriptor_page + page_offset,
                                         &raw_desc)) {
+            failure = "dma-read";
             goto invalid;
         }
 
         ppn = le32_to_cpu(raw_desc.ppn);
         pages = le32_to_cpu(raw_desc.numPages);
+        failure_ppn = ppn;
+        failure_pages = pages;
 
         if (pages != 0) {
             /*
@@ -113,6 +120,7 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
              * effectively limited to UINT32_MAX / 4K pages.
              */
             if (pages > max_pages || num_pages > max_pages - pages) {
+                failure = "page-limit";
                 goto invalid;
             }
 
@@ -147,6 +155,7 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
             struct vmsvga_gmr_s *gmr;
 
             if (num_runs == 0) {
+                failure = "empty-terminator";
                 goto invalid;
             }
 
@@ -164,6 +173,16 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
     }
 
 invalid:
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-GMR-DIAG parse-fail id=%u root_ppn=0x%08x "
+                "reason=%s descriptor=%u page_gpa=0x%" PRIx64 " offset=%u "
+                "ppn=0x%08x pages=%u runs=%u total_pages=%" PRIu64 " "
+                "max_pages=%u\n",
+                s->gmrid, descriptor_ppn, failure, descriptors_read,
+                descriptor_page, page_offset, failure_ppn, failure_pages,
+                num_runs, num_pages, max_pages);
+    }
     g_free(runs);
 
     return false;

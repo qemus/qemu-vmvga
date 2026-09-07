@@ -1311,8 +1311,10 @@ static inline bool vmsvga_effective_traces(const struct vmsvga_state_s *s)
      * guest has not enabled SVGA_REG_TRACES. CPU writes to BAR1 may become
      * visible after the FIFO presentation notification, so the periodic dirty
      * scan is the reliable fallback which refreshes the frontend afterwards.
+     * Keep it enabled during the VGA -> SVGA handoff as well: until a real
+     * SVGA scanout exists, the frontend still presents the VGA/GOP framebuffer.
      */
-    return !s->enable || !s->config || !!s->traces ||
+    return !s->enable || !s->config || !s->active_valid || !!s->traces ||
            vmsvga_direct_screen_vram_scanout(s);
 }
 
@@ -8879,14 +8881,22 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
         goto done;
     }
 
-    vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_SVGA);
-
     if (!s->active_valid) {
-        /* ENABLE still selects SVGA. Keep the previous host surface rather than
-         * implicitly exposing VGA while requested registers are incomplete. */
+        /*
+         * SVGA command/FIFO processing is already active, but the guest has not
+         * defined anything that can be scanned out yet. Keep presenting the
+         * existing VGA/GOP framebuffer until a legacy SVGA mode, Screen Object,
+         * or Screen Target establishes active_valid. Do not manufacture an SVGA
+         * mode from the current host surface: BAR1 may not describe that image.
+         */
+        vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
+        s->svga_surface_bound = false;
         s->damage_count = 0;
+        s->vga.hw_ops->gfx_update(&s->vga);
         goto done;
     }
+
+    vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_SVGA);
 
     /* Screen-target writers only mark the bound target dirty.  Perform the
      * readback/presentation here so command execution stays independent of the
@@ -9086,7 +9096,7 @@ static void vmsvga_invalidate_display(void *opaque)
 
     struct vmsvga_state_s *s = opaque;
 
-    if (!s->enable) {
+    if (!s->enable || (!s->active_valid && !s->hidden)) {
         s->vga.hw_ops->invalidate(&s->vga);
         return;
     }

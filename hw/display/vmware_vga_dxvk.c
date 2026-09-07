@@ -196,6 +196,12 @@ struct vmsvga3d_dxvk_surface_s {
     void *d3d11_readback_staging_2d;
     uint32_t d3d11_readback_staging_width;
     uint32_t d3d11_readback_staging_height;
+    void *d3d11_present_srv;
+    uint32_t d3d11_present_srv_subresource;
+    uint32_t d3d11_present_srv_format;
+    void *d3d11_present_rtv;
+    uint32_t d3d11_present_rtv_subresource;
+    uint32_t d3d11_present_rtv_format;
     bool d3d11_resident;
 };
 
@@ -2774,6 +2780,29 @@ void vmsvga3d_dxvk_d3d11_view_context_destroy(
     }
 }
 
+static void vmsvga3d_dxvk_d3d11_present_views_destroy(
+    VMSVGA3DDxvkSurface *surface)
+{
+    if (surface == NULL) {
+        return;
+    }
+
+    if (surface->d3d11_present_srv != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_present_srv,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        surface->d3d11_present_srv = NULL;
+    }
+    if (surface->d3d11_present_rtv != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_present_rtv,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        surface->d3d11_present_rtv = NULL;
+    }
+    surface->d3d11_present_srv_subresource = 0;
+    surface->d3d11_present_srv_format = 0;
+    surface->d3d11_present_rtv_subresource = 0;
+    surface->d3d11_present_rtv_format = 0;
+}
+
 static void vmsvga3d_dxvk_d3d11_view_surface_destroy(
     VMSVGA3DDxvkSurface *surface)
 {
@@ -2803,6 +2832,7 @@ void vmsvga3d_dxvk_d3d11_surface_invalidate_views(
     VMSVGA3DDxvkSurface *surface)
 {
     vmsvga3d_dxvk_d3d11_view_surface_destroy(surface);
+    vmsvga3d_dxvk_d3d11_present_views_destroy(surface);
 }
 
 void vmsvga3d_dxvk_d3d11_surface_visit_views(
@@ -2885,6 +2915,7 @@ static void vmsvga3d_dxvk_surface_evict_d3d11(
     }
 
     vmsvga3d_dxvk_d3d11_view_surface_destroy(surface);
+    vmsvga3d_dxvk_d3d11_present_views_destroy(surface);
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     if (surface->d3d11_readback_staging_2d != NULL) {
         vmsvga3d_dxvk_release(surface->d3d11_readback_staging_2d,
@@ -5620,54 +5651,6 @@ typedef struct vmsvga3d_dxvk_d3d11_blit_constants_s {
     float dst_offset_y;
 } VMSVGA3DDxvkD3D11BlitConstants;
 
-typedef struct vmsvga3d_dxvk_d3d11_blit_saved_state_s {
-    uint32_t topology;
-    void *input_layout;
-    void *vs_constant_buffer;
-    void *vs;
-    void *hs;
-    void *ds;
-    void *gs;
-    void *ps_srv;
-    void *ps;
-    void *ps_sampler;
-    void *rasterizer;
-    void *blend;
-    float blend_factor[4];
-    uint32_t sample_mask;
-    void *render_targets[VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS];
-    void *depth_stencil;
-    uint32_t viewport_count;
-    SVGA3dViewport viewports[VMSVGA3D_DXVK_D3D11_MAX_VIEWPORTS];
-} VMSVGA3DDxvkD3D11BlitSavedState;
-
-static void vmsvga3d_dxvk_d3d11_blit_release_saved(
-    VMSVGA3DDxvkD3D11BlitSavedState *saved)
-{
-    void **single[] = {
-        &saved->input_layout, &saved->vs_constant_buffer, &saved->vs,
-        &saved->hs, &saved->ds, &saved->gs, &saved->ps_srv, &saved->ps,
-        &saved->ps_sampler,
-        &saved->rasterizer, &saved->blend, &saved->depth_stencil,
-    };
-    uint32_t i;
-
-    for (i = 0; i < G_N_ELEMENTS(single); i++) {
-        if (*single[i] != NULL) {
-            vmsvga3d_dxvk_release(*single[i], VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-            *single[i] = NULL;
-        }
-    }
-
-    for (i = 0; i < VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS; i++) {
-        if (saved->render_targets[i] != NULL) {
-            vmsvga3d_dxvk_release(saved->render_targets[i],
-                                  VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-            saved->render_targets[i] = NULL;
-        }
-    }
-}
-
 static bool vmsvga3d_dxvk_d3d11_blit_shader(
     VMSVGA3DDxvk *dxvk, uint32_t program_type,
     const uint32_t *tokens, uint32_t token_count, bool vertex, void **shader)
@@ -5921,123 +5904,99 @@ fail:
     return false;
 }
 
-static bool vmsvga3d_dxvk_d3d11_blit_save(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkD3D11BlitSavedState *saved)
+static bool vmsvga3d_dxvk_d3d11_present_srv_get(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    uint32_t subresource, uint32_t format, void **view)
 {
-    VMSVGA3DDxvkD3D11IAGetPrimitiveTopology get_topology = NULL;
-    VMSVGA3DDxvkD3D11IAGetInputLayout get_layout = NULL;
-    VMSVGA3DDxvkD3D11GetConstantBuffers get_vs_cb = NULL;
-    VMSVGA3DDxvkD3D11GetShader get_vs = NULL, get_hs = NULL, get_ds = NULL;
-    VMSVGA3DDxvkD3D11GetShader get_gs = NULL, get_ps = NULL;
-    VMSVGA3DDxvkD3D11GetShaderResources get_ps_srv = NULL;
-    VMSVGA3DDxvkD3D11GetSamplers get_ps_sampler = NULL;
-    VMSVGA3DDxvkD3D11RSGetState get_rs = NULL;
-    VMSVGA3DDxvkD3D11OMGetBlendState get_blend = NULL;
-    VMSVGA3DDxvkD3D11OMGetRenderTargets get_rt = NULL;
-    VMSVGA3DDxvkD3D11RSGetViewports get_viewports = NULL;
+    VMSVGA3DDxvkD3D11CreateShaderResourceView create_srv = NULL;
+    VMSVGA3DDxvkD3D11SRVDesc desc = { 0 };
+    void *created = NULL;
+    int32_t result;
 
-#define GET_BLIT_METHOD(slot, fn) \
-  vmsvga3d_dxvk_get_method(dxvk->d3d11_context, (slot), &(fn), sizeof(fn))
-    if (!GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_PRIMITIVE_TOPOLOGY, get_topology)
-        ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INPUT_LAYOUT, get_layout) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_CONSTANT_BUFFERS, get_vs_cb) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_SHADER, get_vs) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_GET_SHADER, get_hs) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_GET_SHADER, get_ds) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_GET_SHADER, get_gs) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER_RESOURCES, get_ps_srv) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER, get_ps) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SAMPLERS, get_ps_sampler) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_STATE, get_rs) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_BLEND_STATE, get_blend) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_RENDER_TARGETS, get_rt) ||
-        !GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_VIEWPORTS, get_viewports)) {
+    if (view == NULL || surface == NULL || surface->d3d11_resource == NULL) {
         return false;
     }
-#undef GET_BLIT_METHOD
 
-    memset(saved, 0, sizeof(*saved));
-    get_topology(dxvk->d3d11_context, &saved->topology);
-    get_layout(dxvk->d3d11_context, &saved->input_layout);
-    get_vs_cb(dxvk->d3d11_context, 0, 1, &saved->vs_constant_buffer);
-    get_vs(dxvk->d3d11_context, &saved->vs, NULL, NULL);
-    get_hs(dxvk->d3d11_context, &saved->hs, NULL, NULL);
-    get_ds(dxvk->d3d11_context, &saved->ds, NULL, NULL);
-    get_gs(dxvk->d3d11_context, &saved->gs, NULL, NULL);
-    get_ps_srv(dxvk->d3d11_context, 0, 1, &saved->ps_srv);
-    get_ps(dxvk->d3d11_context, &saved->ps, NULL, NULL);
-    get_ps_sampler(dxvk->d3d11_context, 0, 1, &saved->ps_sampler);
-    get_rs(dxvk->d3d11_context, &saved->rasterizer);
-    get_blend(dxvk->d3d11_context, &saved->blend, saved->blend_factor,
-              &saved->sample_mask);
-    get_rt(dxvk->d3d11_context, VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS,
-           saved->render_targets, &saved->depth_stencil);
-    saved->viewport_count = VMSVGA3D_DXVK_D3D11_MAX_VIEWPORTS;
-
-    get_viewports(dxvk->d3d11_context, &saved->viewport_count, saved->viewports);
-
-    return saved->viewport_count <= VMSVGA3D_DXVK_D3D11_MAX_VIEWPORTS;
-}
-
-static bool vmsvga3d_dxvk_d3d11_blit_restore(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkD3D11BlitSavedState *saved)
-{
-    VMSVGA3DDxvkD3D11IASetPrimitiveTopology set_topology = NULL;
-    VMSVGA3DDxvkD3D11IASetInputLayout set_layout = NULL;
-    VMSVGA3DDxvkD3D11SetConstantBuffers set_vs_cb = NULL;
-    VMSVGA3DDxvkD3D11SetShader set_vs = NULL, set_hs = NULL, set_ds = NULL;
-    VMSVGA3DDxvkD3D11SetShader set_gs = NULL, set_ps = NULL;
-    VMSVGA3DDxvkD3D11SetShaderResources set_ps_srv = NULL;
-    VMSVGA3DDxvkD3D11SetSamplers set_ps_sampler = NULL;
-    VMSVGA3DDxvkD3D11RSSetState set_rs = NULL;
-    VMSVGA3DDxvkD3D11OMSetBlendState set_blend = NULL;
-    VMSVGA3DDxvkD3D11OMSetRenderTargets set_rt = NULL;
-    VMSVGA3DDxvkD3D11RSSetViewports set_viewports = NULL;
-    bool have_methods;
-
-#define GET_BLIT_METHOD(slot, fn) \
-  vmsvga3d_dxvk_get_method(dxvk->d3d11_context, (slot), &(fn), sizeof(fn))
-    have_methods =
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_PRIMITIVE_TOPOLOGY, set_topology)
-            &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_SET_INPUT_LAYOUT, set_layout) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_CONSTANT_BUFFERS, set_vs_cb) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_SET_SHADER, set_vs) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_SET_SHADER, set_hs) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DS_SET_SHADER, set_ds) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER, set_gs) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER_RESOURCES, set_ps_srv) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SHADER, set_ps) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_SET_SAMPLERS, set_ps_sampler) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_STATE, set_rs) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_BLEND_STATE, set_blend) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS, set_rt) &&
-        GET_BLIT_METHOD(VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_SET_VIEWPORTS, set_viewports);
-#undef GET_BLIT_METHOD
-    if (have_methods) {
-        set_topology(dxvk->d3d11_context, saved->topology);
-        set_layout(dxvk->d3d11_context, saved->input_layout);
-        set_vs_cb(dxvk->d3d11_context, 0, 1, &saved->vs_constant_buffer);
-        set_vs(dxvk->d3d11_context, saved->vs, NULL, 0);
-        set_hs(dxvk->d3d11_context, saved->hs, NULL, 0);
-        set_ds(dxvk->d3d11_context, saved->ds, NULL, 0);
-        set_gs(dxvk->d3d11_context, saved->gs, NULL, 0);
-        set_ps_srv(dxvk->d3d11_context, 0, 1, &saved->ps_srv);
-        set_ps(dxvk->d3d11_context, saved->ps, NULL, 0);
-        set_ps_sampler(dxvk->d3d11_context, 0, 1, &saved->ps_sampler);
-        set_rs(dxvk->d3d11_context, saved->rasterizer);
-        set_blend(dxvk->d3d11_context, saved->blend, saved->blend_factor,
-                  saved->sample_mask);
-        set_rt(dxvk->d3d11_context, VMSVGA3D_DXVK_D3D11_MAX_RENDER_TARGETS,
-               saved->render_targets, saved->depth_stencil);
-
-        set_viewports(dxvk->d3d11_context, saved->viewport_count, saved->viewports);
+    if (surface->d3d11_present_srv != NULL &&
+        surface->d3d11_present_srv_subresource == subresource &&
+        surface->d3d11_present_srv_format == format) {
+        *view = surface->d3d11_present_srv;
+        return true;
     }
 
-    vmsvga3d_dxvk_d3d11_blit_release_saved(saved);
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SHADER_RESOURCE_VIEW,
+            &create_srv, sizeof(create_srv))) {
+        return false;
+    }
 
-    return have_methods;
+    desc.format = format;
+    desc.view_dimension = VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2D;
+    desc.data[0] = subresource;
+    desc.data[1] = 1;
+    result = create_srv(dxvk->d3d11_device, surface->d3d11_resource,
+                        &desc, &created);
+    if (!vmsvga3d_dxvk_succeeded(result) || created == NULL) {
+        return false;
+    }
+
+    if (surface->d3d11_present_srv != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_present_srv,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    surface->d3d11_present_srv = created;
+    surface->d3d11_present_srv_subresource = subresource;
+    surface->d3d11_present_srv_format = format;
+    *view = created;
+    return true;
+}
+
+static bool vmsvga3d_dxvk_d3d11_present_rtv_get(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    uint32_t subresource, uint32_t format, void **view)
+{
+    VMSVGA3DDxvkD3D11CreateRenderTargetView create_rtv = NULL;
+    VMSVGA3DDxvkD3D11RTVDesc desc = { 0 };
+    void *created = NULL;
+    int32_t result;
+
+    if (view == NULL || surface == NULL || surface->d3d11_resource == NULL) {
+        return false;
+    }
+
+    if (surface->d3d11_present_rtv != NULL &&
+        surface->d3d11_present_rtv_subresource == subresource &&
+        surface->d3d11_present_rtv_format == format) {
+        *view = surface->d3d11_present_rtv;
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RENDERTARGET_VIEW,
+            &create_rtv, sizeof(create_rtv))) {
+        return false;
+    }
+
+    desc.format = format;
+    desc.view_dimension = VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE2D;
+    desc.data[0] = subresource;
+    result = create_rtv(dxvk->d3d11_device, surface->d3d11_resource,
+                        &desc, &created);
+    if (!vmsvga3d_dxvk_succeeded(result) || created == NULL) {
+        return false;
+    }
+
+    if (surface->d3d11_present_rtv != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_present_rtv,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    surface->d3d11_present_rtv = created;
+    surface->d3d11_present_rtv_subresource = subresource;
+    surface->d3d11_present_rtv_format = format;
+    *view = created;
+    return true;
 }
 
 bool vmsvga3d_dxvk_d3d11_present_blt(
@@ -6049,8 +6008,6 @@ bool vmsvga3d_dxvk_d3d11_present_blt(
     uint32_t destination_format, const SVGA3dBox *destination_box,
     const SVGA3dSize *destination_size)
 {
-    VMSVGA3DDxvkD3D11CreateShaderResourceView create_srv = NULL;
-    VMSVGA3DDxvkD3D11CreateRenderTargetView create_rtv = NULL;
     VMSVGA3DDxvkD3D11SetConstantBuffers set_vs_cb = NULL;
     VMSVGA3DDxvkD3D11IASetInputLayout set_layout = NULL;
     VMSVGA3DDxvkD3D11IASetPrimitiveTopology set_topology = NULL;
@@ -6065,9 +6022,6 @@ bool vmsvga3d_dxvk_d3d11_present_blt(
     VMSVGA3DDxvkD3D11Map map = NULL;
     VMSVGA3DDxvkD3D11Unmap unmap = NULL;
     VMSVGA3DDxvkD3D11Draw draw = NULL;
-    VMSVGA3DDxvkD3D11SRVDesc srv_desc = { 0 };
-    VMSVGA3DDxvkD3D11RTVDesc rtv_desc = { 0 };
-    VMSVGA3DDxvkD3D11BlitSavedState saved;
     VMSVGA3DDxvkD3D11MappedSubresource mapped = { 0 };
     VMSVGA3DDxvkD3D11BlitConstants constants;
     SVGA3dViewport viewport = { 0 };
@@ -6076,7 +6030,6 @@ bool vmsvga3d_dxvk_d3d11_present_blt(
     void *rtv = NULL;
     void *null_shader = NULL;
     int32_t result;
-    bool saved_valid = false;
     bool mapped_valid = false;
     bool success = false;
 
@@ -6091,42 +6044,13 @@ bool vmsvga3d_dxvk_d3d11_present_blt(
         return false;
     }
 
-    srv_desc.format = source_format;
-    srv_desc.view_dimension = VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2D;
-    srv_desc.data[0] = source_subresource;
-    srv_desc.data[1] = 1;
-    rtv_desc.format = destination_format;
-    rtv_desc.view_dimension = VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE2D;
-    rtv_desc.data[0] = destination_subresource;
-
-    if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device,
-            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SHADER_RESOURCE_VIEW,
-            &create_srv, sizeof(create_srv)) ||
-        !vmsvga3d_dxvk_get_method(dxvk->d3d11_device,
-            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_RENDERTARGET_VIEW,
-            &create_rtv, sizeof(create_rtv))) {
-        return false;
-    }
-
-    result = create_rtv(dxvk->d3d11_device, destination->d3d11_resource,
-                        &rtv_desc, &rtv);
-
-    if (!vmsvga3d_dxvk_succeeded(result) || rtv == NULL) {
+    if (!vmsvga3d_dxvk_d3d11_present_rtv_get(
+            dxvk, destination, destination_subresource, destination_format,
+            &rtv) ||
+        !vmsvga3d_dxvk_d3d11_present_srv_get(
+            dxvk, source, source_subresource, source_format, &srv)) {
         goto out;
     }
-
-    result = create_srv(dxvk->d3d11_device, source->d3d11_resource,
-                        &srv_desc, &srv);
-
-    if (!vmsvga3d_dxvk_succeeded(result) || srv == NULL) {
-        goto out;
-    }
-
-    if (!vmsvga3d_dxvk_d3d11_blit_save(dxvk, &saved)) {
-        goto out;
-    }
-
-    saved_valid = true;
 
 #define GET_BLIT_METHOD(slot, fn) \
   vmsvga3d_dxvk_get_method(dxvk->d3d11_context, (slot), &(fn), sizeof(fn))
@@ -6206,18 +6130,6 @@ bool vmsvga3d_dxvk_d3d11_present_blt(
 out:
     if (mapped_valid && unmap != NULL) {
         unmap(dxvk->d3d11_context, dxvk->d3d11_blit_constant_buffer, 0);
-    }
-
-    if (saved_valid) {
-        success = vmsvga3d_dxvk_d3d11_blit_restore(dxvk, &saved) && success;
-    }
-
-    if (srv != NULL) {
-        vmsvga3d_dxvk_release(srv, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-    }
-
-    if (rtv != NULL) {
-        vmsvga3d_dxvk_release(rtv, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
     }
 
     return success;

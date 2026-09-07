@@ -7680,13 +7680,13 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
         height = surface->mips[0].size.height;
 
         /*
-         * During the initial vGPU10/vGPU11 takeover, ordinary render-target
-         * writes only establish that the target has content.  They are not a
-         * presentation boundary: exposing one here lets a display refresh race
-         * a clear/draw sequence before UPDATE_GB_SCREENTARGET or PRESENTBLT.
-         * Only an explicit presentation command may queue transition damage.
+         * Ordinary render-target writes only establish that the active target
+         * has content.  They are not a presentation boundary: exposing one
+         * here lets a display refresh race a clear/draw sequence before the
+         * guest's actual UPDATE_GB_SCREENTARGET or PRESENTBLT.  Keep storage
+         * mutation separate from presentation for the lifetime of the target.
          */
-        if (s->screen_frontend_deferred && !presentation) {
+        if (!presentation) {
             return true;
         }
 
@@ -8087,10 +8087,14 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
 
                 rect.w = le32_to_cpu(entry.width);
                 rect.h = le32_to_cpu(entry.height);
-                /* Binding a new surface is a flip.  Unlike explicit UPDATE, VBox does
-                 * not require the Surface OTable entry to have a valid MOB here. */
+                /* Binding a new surface is itself a flip.  Treat it as a
+                 * presentation boundary outside deferred takeover; the bind
+                 * path clears content-valid while deferred, so an empty new
+                 * target still cannot become visible prematurely.  Unlike
+                 * explicit UPDATE, VBox does not require the Surface OTable
+                 * entry to have a valid MOB here. */
                 (void)vmsvga3d_screen_target_mark_dirty_live(
-                    s, s->svga3d->active_screen_target_sid, 0, &rect, false);
+                    s, s->svga3d->active_screen_target_sid, 0, &rect, true);
             }
         }
         break;

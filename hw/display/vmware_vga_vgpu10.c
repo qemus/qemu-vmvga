@@ -9238,8 +9238,61 @@ static bool vmsvga3d_d3d10_present_blt_live(
         VMSVGA3D_PRESENTBLT_REJECT("format-level");
     }
 
-    /* mode is intentionally ignored: VirtualBox always uses its fixed
-     * anisotropic blitter and derives sRGB handling from the source format. */
+    /* A 1:1 unfiltered same-format PRESENTBLT does not need the private
+     * shader blitter.  Copying the resource directly avoids view/pipeline
+     * setup, constant-buffer updates and a Draw, and it leaves guest pipeline
+     * state untouched.  Restrict this to the same simple 2D resource shape
+     * that the shader path can view directly, and keep the shader fallback for
+     * scaling, filtering, sRGB conversion, MSAA and overlapping copies within
+     * one subresource.
+     */
+    if (command->mode == 0 &&
+        source->format == destination->format &&
+        source_format.dxgi_format == destination_format.dxgi_format &&
+        !vmsvga3d_d3d10_is_srgb_format(source_format.dxgi_format) &&
+        source_box.w == destination_box.w &&
+        source_box.h == destination_box.h &&
+        source_box.d == destination_box.d &&
+        source->multisample_count <= 1 &&
+        destination->multisample_count <= 1 &&
+        source->array_elements <= 1 && destination->array_elements <= 1 &&
+        source_image->size.depth == 1 && destination_image->size.depth == 1 &&
+        (source->surface_flags & (SVGA3D_SURFACE_1D |
+                                  SVGA3D_SURFACE_VOLUME |
+                                  SVGA3D_SURFACE_CUBEMAP)) == 0 &&
+        (destination->surface_flags & (SVGA3D_SURFACE_1D |
+                                       SVGA3D_SURFACE_VOLUME |
+                                       SVGA3D_SURFACE_CUBEMAP)) == 0 &&
+        (source->surface_flags & SVGA3D_SURFACE_BIND_SHADER_RESOURCE) != 0 &&
+        (destination->surface_flags & SVGA3D_SURFACE_BIND_RENDER_TARGET) != 0 &&
+        (source->dxvk_surface != destination->dxvk_surface ||
+         command->srcSubResource != command->destSubResource ||
+         destination_box.x + destination_box.w <= source_box.x ||
+         source_box.x + source_box.w <= destination_box.x ||
+         destination_box.y + destination_box.h <= source_box.y ||
+         source_box.y + source_box.h <= destination_box.y)) {
+        VMSVGA3DD3D10Box direct_source_box = {
+            .left = source_box.x,
+            .top = source_box.y,
+            .front = source_box.z,
+            .right = source_box.x + source_box.w,
+            .bottom = source_box.y + source_box.h,
+            .back = source_box.z + source_box.d,
+        };
+
+        if (vmsvga3d_dxvk_d3d11_copy_subresource_region(
+                s->dxvk, destination->dxvk_surface,
+                command->destSubResource, destination_box.x,
+                destination_box.y, destination_box.z,
+                source->dxvk_surface, command->srcSubResource,
+                &direct_source_box)) {
+            goto present_complete;
+        }
+    }
+
+    /* mode is intentionally ignored in the fallback: VirtualBox always uses
+     * its fixed anisotropic blitter and derives sRGB handling from the source
+     * format. */
     vmsvga3d_d3d10_present_blt_dirty_active_context(s);
     if (!vmsvga3d_dxvk_d3d11_present_blt(
             s->dxvk, source->dxvk_surface, command->srcSubResource,
@@ -9258,6 +9311,8 @@ static bool vmsvga3d_d3d10_present_blt_live(
             (unsigned)destination_format.min_level);
         VMSVGA3D_PRESENTBLT_REJECT("dxvk-blit");
     }
+
+present_complete:
 
     /* PRESENTBLT is an explicit presentation boundary.  During the deferred
      * ScreenTarget takeover this is what authorizes the first readback; generic

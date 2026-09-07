@@ -46,7 +46,7 @@ _Static_assert(sizeof(SVGA3dCmdDefineGBSurface) == 36,
                "SVGA3dCmdDefineGBSurface wire size");
 _Static_assert(sizeof(SVGA3dCmdDefineGBSurface_v2) == 44,
                "SVGA3dCmdDefineGBSurface_v2 wire size");
-_Static_assert(sizeof(SVGA3dCmdDefineGBSurface_v3) == 48,
+_Static_assert(sizeof(SVGA3dCmdDefineGBSurface_v3) == 52,
                "SVGA3dCmdDefineGBSurface_v3 wire size");
 _Static_assert(sizeof(SVGA3dCmdDefineGBSurface_v4) == 56,
                "SVGA3dCmdDefineGBSurface_v4 wire size");
@@ -8316,8 +8316,9 @@ static bool vmsvga3d_handle_define_gb_surface(struct vmsvga_state_s *s,
 
         (void)vmsvga3d_gb_surface_define_live(
             s, body->sid, body->surfaceFlags, body->format, body->numMipLevels,
-            body->multisampleCount, body->multisamplePattern, 0,
-            body->autogenFilter, &body->size, body->arraySize, 0);
+            body->multisampleCount, body->multisamplePattern,
+            body->qualityLevel, body->autogenFilter, &body->size,
+            body->arraySize, 0);
     } else if (cmd == SVGA_3D_CMD_DEFINE_GB_SURFACE_V4 &&
                size >= sizeof(SVGA3dCmdDefineGBSurface_v4) &&
                s->vgpu_generation == VMSVGA_VGPU_11) {

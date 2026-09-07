@@ -1755,6 +1755,7 @@ struct SVGA3dCmdDefineGBSurface_v3 {
    uint32 numMipLevels;
    uint32 multisampleCount;
    SVGA3dMSPattern multisamplePattern;
+   SVGA3dMSQualityLevel qualityLevel;
    SVGA3dTextureFilter autogenFilter;
    SVGA3dSize size;
    uint32 arraySize;

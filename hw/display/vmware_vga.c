@@ -749,6 +749,14 @@ static const char *vmsvga_trace_reg_name(uint32_t reg)
         return "SVGA_REG_GMRS_MAX_PAGES";
     case SVGA_REG_MEMORY_SIZE:
         return "SVGA_REG_MEMORY_SIZE";
+    case SVGA_REG_COMMAND_LOW:
+        return "SVGA_REG_COMMAND_LOW";
+    case SVGA_REG_COMMAND_HIGH:
+        return "SVGA_REG_COMMAND_HIGH";
+    case SVGA_REG_CMD_PREPEND_LOW:
+        return "SVGA_REG_CMD_PREPEND_LOW";
+    case SVGA_REG_CMD_PREPEND_HIGH:
+        return "SVGA_REG_CMD_PREPEND_HIGH";
     case SVGA_REG_MAX_PRIMARY_BOUNDING_BOX_MEM:
         return "SVGA_REG_MAX_PRIMARY_BOUNDING_BOX_MEM";
     case SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB:
@@ -8684,7 +8692,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       VPRINT("SVGA_REG_COMMAND_LOW register %u with the value of %u\n", s->index,
              value);
       if (s->svga3d_dx_capable) {
-          vmsvga3d_command_buffer_submit(s, s->cmd_low, s->cmd_high);
+          vmsvga3d_command_buffer_submit(s, s->cmd_low, s->cmd_high, false);
       }
       break;
   case SVGA_REG_COMMAND_HIGH:
@@ -8698,7 +8706,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
              s->index, value);
       if (s->svga3d_dx_capable) {
           vmsvga3d_command_buffer_submit(s, s->cmd_prepend_low,
-                                         s->cmd_prepend_high);
+                                         s->cmd_prepend_high, true);
       }
       break;
   case SVGA_REG_CMD_PREPEND_HIGH:

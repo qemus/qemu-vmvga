@@ -8104,13 +8104,17 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
         row_bytes = (uint64_t)(box->right - box->left) * bytes_per_pixel;
         destination_offset = (uint64_t)box->top * row_pitch +
                              (uint64_t)box->left * bytes_per_pixel;
+        if (row_bytes == 0 || row_bytes > row_pitch ||
+            (uint64_t)box->right * bytes_per_pixel > row_pitch ||
+            destination_offset > data_size ||
+            row_bytes > (uint64_t)data_size - destination_offset ||
+            (uint64_t)(box->bottom - box->top - 1) * row_pitch >
+                (uint64_t)data_size - destination_offset - row_bytes) {
+            return false;
+        }
         destination_end = destination_offset +
                           (uint64_t)(box->bottom - box->top - 1) * row_pitch +
                           row_bytes;
-        if (row_bytes == 0 || row_bytes > row_pitch ||
-            (uint64_t)box->right * bytes_per_pixel > row_pitch ||
-            destination_end > data_size) {
-            return false;
         }
 
         if (secondary_data != NULL) {

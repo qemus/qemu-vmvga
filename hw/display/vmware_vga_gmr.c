@@ -1275,6 +1275,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     bool handoff_active;
     bool handoff_same_backing;
     bool duplicate_handoff_define;
+    bool duplicate_active_define;
     bool reuse_destroyed_frontend;
     DisplaySurface *surface;
     uint32_t supported_flags = SVGA_SCREEN_MUST_BE_SET |
@@ -1406,6 +1407,53 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         return true;
     }
     s->screen_destroyed_reuse_valid = false;
+
+    /*
+     * An exact repeated DEFINE_SCREEN of the currently active direct backing
+     * changes no Screen Object state.  A guest can issue this immediately
+     * after an exact DESTROY_SCREEN -> DEFINE_SCREEN reuse.  Keep
+     * the existing frontend binding and any pending invalidation instead of
+     * forcing a redundant mode-set/rebind.
+     */
+    duplicate_active_define =
+        s->screen_defined && !s->screen_handoff_active && backing_present &&
+        backing_gmr_id == SVGA_GMR_FRAMEBUFFER && s->screen_backing_valid &&
+        s->svga_surface_bound && s->active_valid &&
+        !s->screen_frontend_deferred && surface != NULL &&
+        surface_data(surface) ==
+            vmsvga_svga_vram_ptr(s) + (size_t)backing_offset &&
+        surface_width(surface) == width && surface_height(surface) == height &&
+        surface_bits_per_pixel(surface) == 32 &&
+        surface_stride(surface) == screen_stride &&
+        s->active_width == width && s->active_height == height &&
+        s->active_depth == 32 && s->active_stride == screen_stride &&
+        s->screen_flags == flags && s->screen_width == width &&
+        s->screen_height == height && s->screen_root_x == root_x &&
+        s->screen_root_y == root_y && s->screen_clone_count == clone_count &&
+        s->screen_stride == screen_stride &&
+        s->screen_backing_gmr_id == backing_gmr_id &&
+        s->screen_backing_offset == backing_offset &&
+        s->screen_backing_pitch == backing_pitch;
+
+    if (duplicate_active_define) {
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=define duplicate-active=1 "
+                    "size=%ux%u/32/%u backing=%u:0x%08x\n",
+                    width, height, screen_stride, backing_gmr_id,
+                    backing_offset);
+            s->trace_now.screen_defines++;
+            s->trace_activity_seq++;
+        }
+
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                           "SCREEN_DEFINE id=%u flags=0x%08x width=%u height=%u "
+                           "root=%d,%d stride=%u backing=%u:%08x clone=%u",
+                           id, flags, width, height, root_x, root_y,
+                           screen_stride, backing_gmr_id, backing_offset,
+                           clone_count);
+        return true;
+    }
 
     /*
      * Windows can emit an identical DEFINE_SCREEN immediately after a handoff

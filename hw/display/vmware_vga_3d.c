@@ -5840,7 +5840,6 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
     SVGACBHeader header;
     SVGACBStatus status = SVGA_CB_STATUS_CB_HEADER_ERROR;
     uint64_t header_gpa;
-    uint64_t commands_gpa;
     uint8_t *commands = NULL;
     uint32_t context;
     uint32_t processed = 0;
@@ -5865,12 +5864,19 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
     header.id = le64_to_cpu(raw.id);
     header.flags = (SVGACBFlags)le32_to_cpu((uint32_t)raw.flags);
     header.length = le32_to_cpu(raw.length);
-    header.ptr.pa = le64_to_cpu(raw.ptr.pa);
+    if ((header.flags & SVGA_CB_FLAG_MOB) != 0) {
+        header.ptr.mob.mobid = le32_to_cpu(raw.ptr.mob.mobid);
+        header.ptr.mob.mobOffset = le32_to_cpu(raw.ptr.mob.mobOffset);
+    } else {
+        header.ptr.pa = le64_to_cpu(raw.ptr.pa);
+    }
     header.offset = le32_to_cpu(raw.offset);
     header.dxContext = le32_to_cpu(raw.dxContext);
 
     if (header.status != SVGA_CB_STATUS_NONE ||
-        (header.flags & ~(SVGA_CB_FLAG_NO_IRQ | SVGA_CB_FLAG_DX_CONTEXT)) != 0 ||
+        (header.flags & ~(SVGA_CB_FLAG_NO_IRQ | SVGA_CB_FLAG_DX_CONTEXT |
+                          SVGA_CB_FLAG_MOB)) != 0 ||
+        ((header.flags & SVGA_CB_FLAG_MOB) != 0 && !s->svga3d_dx_capable) ||
         header.length > SVGA_CB_MAX_SIZE || header.offset > header.length) {
         irq_flags = SVGA_IRQFLAG_ERROR | SVGA_IRQFLAG_COMMAND_BUFFER;
         goto out;
@@ -5882,9 +5888,30 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
             status = SVGA_CB_STATUS_QUEUE_FULL;
             goto out;
         }
-        commands_gpa = header.ptr.pa;
-        if (!vmsvga3d_guest_memory_read(s, commands_gpa, commands,
-                                        header.length)) {
+
+        if ((header.flags & SVGA_CB_FLAG_MOB) != 0) {
+            VMSVGA3DMob *mob = vmsvga3d_mob_get(s, header.ptr.mob.mobid);
+
+            if (mob == NULL ||
+                !vmsvga3d_mob_read(s, mob, header.ptr.mob.mobOffset,
+                                    commands, header.length)) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "CB source=MOB mobid=%u offset=0x%08x length=%u "
+                    "result=REJECT",
+                    header.ptr.mob.mobid, header.ptr.mob.mobOffset,
+                    header.length);
+                irq_flags = SVGA_IRQFLAG_ERROR | SVGA_IRQFLAG_COMMAND_BUFFER;
+                goto out;
+            }
+
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "CB source=MOB mobid=%u offset=0x%08x length=%u result=OK",
+                header.ptr.mob.mobid, header.ptr.mob.mobOffset,
+                header.length);
+        } else if (!vmsvga3d_guest_memory_read(s, header.ptr.pa, commands,
+                                               header.length)) {
             irq_flags = SVGA_IRQFLAG_ERROR | SVGA_IRQFLAG_COMMAND_BUFFER;
             goto out;
         }

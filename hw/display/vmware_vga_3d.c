@@ -5816,10 +5816,9 @@ static void vmsvga3d_command_buffer_write_status(
             &value, sizeof(value));
     }
 
-    /* SVGA_CAP_CMD_BUFFERS_2 makes offset device-modified.  This device
-     * advertises CMD_BUFFERS_2 together with register command buffers, so
-     * publish the point reached by the synchronous parser on every result. */
-    value = cpu_to_le32(processed_offset);
+    /* Some guests read back `SVGACBHeader.offset` on completion to determine
+     * how far the synchronous parser progressed.  Publish the processed offset
+     * before writing the terminal status value. */
     (void)vmsvga3d_guest_memory_write(
         s, header_gpa + offsetof(SVGACBHeader, offset), &value, sizeof(value));
 

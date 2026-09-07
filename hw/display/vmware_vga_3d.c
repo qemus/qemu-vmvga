@@ -7331,7 +7331,6 @@ static bool vmsvga3d_screen_target_present_live(
         copy.w == s->screen_width && copy.h == s->screen_height) {
         s->screen_handoff_active = false;
         s->screen_handoff_same_backing = false;
-        s->screen_handoff_freeze_until_full = false;
         s->screen_handoff_skipped_same_backing_full = false;
     }
 

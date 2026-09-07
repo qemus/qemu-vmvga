@@ -8984,6 +8984,65 @@ static void vmsvga3d_d3d10_present_blt_clip_box(
     }
 }
 
+static void vmsvga3d_d3d10_present_blt_dirty_active_context(
+    struct vmsvga_state_s *s)
+{
+    VMSVGA3DDXContext *context;
+    uint32_t cid;
+    uint32_t vs_stage;
+    uint32_t ps_stage;
+    uint32_t constant_buffer_end;
+
+    if (s == NULL || s->svga3d == NULL) {
+        return;
+    }
+
+    cid = s->svga3d->active_dx_context_id;
+    if (cid == SVGA3D_INVALID_ID || cid >= SVGA3D_MAX_CONTEXT_IDS) {
+        return;
+    }
+
+    context = vmsvga3d_dx_context(s, cid);
+    if (context == NULL) {
+        return;
+    }
+
+    /* PRESENTBLT installs its private blitter pipeline and deliberately leaves
+     * it bound.  The next guest Draw replays these clobbered states from the
+     * authoritative context shadow instead of paying a save/restore roundtrip
+     * around every present.  Shader stages themselves are rebound on every
+     * dxSetupPipeline call and therefore need no dirty bit here.
+     */
+    context->renderer_dirty |=
+        VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET |
+        VMSVGA3D_DX_CTX_F_STATE_INPUTLAYOUT |
+        VMSVGA3D_DX_CTX_F_STATE_TOPOLOGY |
+        VMSVGA3D_DX_CTX_F_STATE_BLENDSTATE |
+        VMSVGA3D_DX_CTX_F_STATE_VIEWPORT |
+        VMSVGA3D_DX_CTX_F_STATE_RASTERIZERSTATE |
+        VMSVGA3D_DX_CTX_F_STATE_SAMPLER_PS |
+        VMSVGA3D_DX_CTX_F_STATE_SRV_PS;
+
+    /* The blitter overwrites VS constant-buffer slot 0.  Merge slot 0 into
+     * any guest range that was already pending so the next setup restores both.
+     */
+    vs_stage = SVGA3D_SHADERTYPE_VS - SVGA3D_SHADERTYPE_MIN;
+    constant_buffer_end =
+        context->constant_buffer_start_slot[vs_stage] +
+        context->constant_buffer_num_buffers[vs_stage];
+    context->constant_buffer_start_slot[vs_stage] = 0;
+    context->constant_buffer_num_buffers[vs_stage] =
+        MAX(constant_buffer_end, 1u);
+
+    /* The blitter also overwrites PS SRV slot 0.  Keep slot 0 inside the
+     * backend replay span even when the guest currently has no SRVs bound, so
+     * the next setup explicitly NULL-unbinds the private PRESENTBLT SRV.
+     */
+    ps_stage = SVGA3D_SHADERTYPE_PS - SVGA3D_SHADERTYPE_MIN;
+    context->shader_resource_max_bound[ps_stage] =
+        MAX(context->shader_resource_max_bound[ps_stage], 1u);
+}
+
 static bool vmsvga3d_d3d10_present_blt_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXPresentBlt *command)
@@ -9126,6 +9185,7 @@ static bool vmsvga3d_d3d10_present_blt_live(
 
     /* mode is intentionally ignored: VirtualBox always uses its fixed
      * anisotropic blitter and derives sRGB handling from the source format. */
+    vmsvga3d_d3d10_present_blt_dirty_active_context(s);
     if (!vmsvga3d_dxvk_d3d11_present_blt(
             s->dxvk, source->dxvk_surface, command->srcSubResource,
             source_format.dxgi_format, &source_box, &source_image->size,

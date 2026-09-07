@@ -296,11 +296,6 @@ static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
         return true;
     }
 
-    /* VirtualBox requires an existing mapping for a non-zero remap offset. */
-    if (offset_pages != 0 && gmr->num_pages == 0) {
-        return false;
-    }
-
     if (flags & SVGA_REMAP_GMR2_VIA_GMR) {
         vmsvga_fifo_peek_raw_data(s, 0, &ppn_ptr, sizeof(ppn_ptr));
         ppn_gmr_id = le32_to_cpu(ppn_ptr.gmrId);

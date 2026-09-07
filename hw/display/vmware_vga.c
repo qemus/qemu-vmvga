@@ -472,10 +472,6 @@ struct vmsvga_state_s {
      * bytes using the new pitch until a genuine new frame has replaced the
      * transition image. */
     bool screen_handoff_same_backing;
-    /* Freeze a same-backing rebuild mirror until a complete replacement frame
-     * arrives.  This is transient host presentation state and is intentionally
-     * not migrated. */
-    bool screen_handoff_freeze_until_full;
     bool screen_handoff_skipped_same_backing_full;
     uint32_t screen_backing_gmr_id;
     uint32_t screen_backing_offset;

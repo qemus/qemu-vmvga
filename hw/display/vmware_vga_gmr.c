@@ -296,11 +296,6 @@ static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
         return true;
     }
 
-    /* VirtualBox requires an existing mapping for a non-zero remap offset. */
-    if (offset_pages != 0 && gmr->num_pages == 0) {
-        return false;
-    }
-
     if (flags & SVGA_REMAP_GMR2_VIA_GMR) {
         vmsvga_fifo_peek_raw_data(s, 0, &ppn_ptr, sizeof(ppn_ptr));
         ppn_gmr_id = le32_to_cpu(ppn_ptr.gmrId);
@@ -1379,17 +1374,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         s->new_depth = 32;
         s->screen_frontend_deferred = false;
         s->svga_surface_bound = true;
-        if (s->dirty_log_enabled) {
-            /* Dirty tracking stayed active across DESTROY/DEFINE, so the
-             * direct same-backing frontend remains coherent without another
-             * full redraw. */
-            s->invalidated = false;
-        } else {
-            /* Re-enabling the VGA dirty client starts from a clean baseline.
-             * Preserve one full refresh so BAR1 writes made while logging was
-             * disabled cannot disappear from the frontend. */
-            vmsvga_invalidate(s, "screen-reuse-dirty-gap");
-        }
+        s->invalidated = false;
         s->damage_count = 0;
 
         if (vmsvga_trace_flight_enabled()) {

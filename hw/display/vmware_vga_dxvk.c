@@ -8018,7 +8018,8 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d10_box_s *source_boxes, uint32_t box_count,
     void *data, uint32_t bytes_per_pixel, uint32_t row_pitch,
-    uint32_t data_size)
+    uint32_t data_size, void *secondary_data, uint32_t secondary_row_pitch,
+    uint32_t secondary_data_size)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CreateTexture2D create_texture2d = NULL;
@@ -8043,6 +8044,8 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
         dxvk->d3d11_context == NULL || surface == NULL ||
         source_boxes == NULL || box_count == 0 || data == NULL ||
         bytes_per_pixel == 0 || row_pitch == 0 || data_size == 0 ||
+        (secondary_data != NULL &&
+         (secondary_row_pitch == 0 || secondary_data_size == 0)) ||
         surface->d3d9_resident) {
         return false;
     }
@@ -8050,7 +8053,7 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
     /* Like the single-box path, a non-resident resource is already backed by
      * the CPU shadow and therefore needs no GPU readback. */
     if (!surface->d3d11_resident) {
-        return true;
+        return secondary_data == NULL;
     }
 
     if (surface->d3d11_resource == NULL || !surface->d3d11_desc.valid ||
@@ -8089,6 +8092,8 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
         uint64_t row_bytes;
         uint64_t destination_offset;
         uint64_t destination_end;
+        uint64_t secondary_destination_offset;
+        uint64_t secondary_destination_end;
 
         if (box->front != 0 || box->back != 1 ||
             box->left >= box->right || box->top >= box->bottom ||
@@ -8106,6 +8111,22 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
             (uint64_t)box->right * bytes_per_pixel > row_pitch ||
             destination_end > data_size) {
             return false;
+        }
+
+        if (secondary_data != NULL) {
+            secondary_destination_offset =
+                (uint64_t)box->top * secondary_row_pitch +
+                (uint64_t)box->left * bytes_per_pixel;
+            secondary_destination_end = secondary_destination_offset +
+                (uint64_t)(box->bottom - box->top - 1) *
+                    secondary_row_pitch +
+                row_bytes;
+            if (row_bytes > secondary_row_pitch ||
+                (uint64_t)box->right * bytes_per_pixel >
+                    secondary_row_pitch ||
+                secondary_destination_end > secondary_data_size) {
+                return false;
+            }
         }
 
         batch_left = MIN(batch_left, box->left);
@@ -8199,6 +8220,14 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
                 (size_t)box->left * bytes_per_pixel;
 
             memcpy(destination, source, (size_t)row_bytes);
+            if (secondary_data != NULL) {
+                uint8_t *secondary_destination =
+                    (uint8_t *)secondary_data +
+                    (size_t)(box->top + y) * secondary_row_pitch +
+                    (size_t)box->left * bytes_per_pixel;
+
+                memcpy(secondary_destination, source, (size_t)row_bytes);
+            }
         }
     }
 
@@ -8214,6 +8243,9 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
     (void)bytes_per_pixel;
     (void)row_pitch;
     (void)data_size;
+    (void)secondary_data;
+    (void)secondary_row_pitch;
+    (void)secondary_data_size;
     return false;
 #endif
 }

@@ -8436,7 +8436,8 @@ static bool vmsvga3d_d3d10_readback_image_rect_live(
 static bool vmsvga3d_d3d10_readback_image_rects_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     uint32_t subresource, const SVGA3dRect *rects, uint32_t rect_count,
-    uint32_t bytes_per_pixel)
+    uint32_t bytes_per_pixel, uint8_t *secondary_data,
+    uint32_t secondary_row_pitch, uint32_t secondary_data_size)
 {
     VMSVGA3DSurfaceImage *image;
     VMSVGA3DD3D10Box boxes[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
@@ -8445,7 +8446,9 @@ static bool vmsvga3d_d3d10_readback_image_rects_live(
     if (s == NULL || surface == NULL || rects == NULL || rect_count == 0 ||
         rect_count > VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS ||
         surface->mips == NULL || subresource >= surface->mip_count ||
-        bytes_per_pixel == 0) {
+        bytes_per_pixel == 0 ||
+        (secondary_data != NULL &&
+         (secondary_row_pitch == 0 || secondary_data_size == 0))) {
         return false;
     }
 
@@ -8480,7 +8483,8 @@ static bool vmsvga3d_d3d10_readback_image_rects_live(
 
     return vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
         s->dxvk, surface->dxvk_surface, subresource, boxes, rect_count,
-        image->data, bytes_per_pixel, image->pitch, image->data_size);
+        image->data, bytes_per_pixel, image->pitch, image->data_size,
+        secondary_data, secondary_row_pitch, secondary_data_size);
 }
 
 static bool vmsvga3d_d3d10_subresource_offset_live(

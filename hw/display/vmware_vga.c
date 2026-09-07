@@ -33,6 +33,7 @@
 #include "qapi/error.h"
 #include "qemu/main-loop.h"
 #include "exec/target_page.h"
+#include "system/ram_addr.h"
 #include "trace.h"
 #include "include/vmware_vga_compat.h"
 #include "include/vmware_vga_gmr.h"
@@ -1693,6 +1694,7 @@ static inline void vmsvga_mark_vram_dirty_rect(
     uint64_t width_bytes;
     uint64_t tail;
     uint64_t span;
+    uint8_t dirty_log_mask;
 
     if (pitch == 0 || bypp == 0 || w == 0 || h == 0) {
         return;
@@ -1716,7 +1718,17 @@ static inline void vmsvga_mark_vram_dirty_rect(
         return;
     }
 
-    vmsvga_mark_vram_dirty_range(s, start, span);
+    /*
+     * Rectangle writes are produced by the device itself and every caller
+     * queues matching frontend damage.  Keep the range dirty for migration
+     * and any other active clients, but do not feed these known writes back
+     * into the page-granular VGA fallback scanner.
+     */
+    dirty_log_mask = memory_region_get_dirty_log_mask(&s->vga.vram);
+    dirty_log_mask &= (uint8_t)~(1U << DIRTY_MEMORY_VGA);
+    cpu_physical_memory_set_dirty_range(
+        memory_region_get_ram_addr(&s->vga.vram) + (ram_addr_t)start,
+        (ram_addr_t)span, dirty_log_mask);
 }
 
 static inline void vmsvga_mark_active_rect_dirty(

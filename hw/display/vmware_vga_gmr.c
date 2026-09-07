@@ -154,11 +154,6 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
         if (ppn == 0) {
             struct vmsvga_gmr_s *gmr;
 
-            if (num_runs == 0) {
-                failure = "empty-terminator";
-                goto invalid;
-            }
-
             gmr = g_new0(struct vmsvga_gmr_s, 1);
             gmr->runs = runs;
             gmr->num_runs = num_runs;

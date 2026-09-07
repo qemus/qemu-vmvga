@@ -9129,7 +9129,10 @@ static bool vmsvga3d_d3d10_present_blt_live(
         VMSVGA3D_PRESENTBLT_REJECT("dxvk-blit");
     }
 
-    if (!vmsvga3d_surface_changed_live(
+    /* PRESENTBLT is an explicit presentation boundary.  During the deferred
+     * ScreenTarget takeover this is what authorizes the first readback; generic
+     * render-target writes must not expose an intermediate clear/draw state. */
+    if (!vmsvga3d_surface_presented_live(
             s, command->dstSid, command->destSubResource, &destination_box)) {
         VMSVGA3D_PRESENTBLT_REJECT("dirty-mark");
     }

@@ -8292,20 +8292,35 @@ static bool vmsvga3d_d3d10_update_subresource_live(
 
     subresource_offset += layout.box_offset;
 
-    for (z = 0; z < layout.depth_count; z++) {
-        for (y = 0; y < layout.row_count; y++) {
-            uint64_t offset = subresource_offset +
-                              (uint64_t)z * image->plane_size +
-                              (uint64_t)y * image->pitch;
-            uint64_t host_offset = (uint64_t)layout.box_offset +
-                                   (uint64_t)z * image->plane_size +
-                                   (uint64_t)y * image->pitch;
+    if (layout.depth_count == 1 && layout.row_bytes == image->pitch) {
+        uint64_t transfer_size =
+            (uint64_t)layout.row_count * layout.row_bytes;
 
-            if (offset > UINT32_MAX || host_offset > image->data_size ||
-                layout.row_bytes > image->data_size - host_offset ||
-                !vmsvga3d_mob_read(s, mob, (uint32_t)offset,
-                                   image->data + host_offset, layout.row_bytes)) {
-                return false;
+        if (transfer_size > UINT32_MAX ||
+            layout.box_offset > image->data_size ||
+            transfer_size > image->data_size - layout.box_offset ||
+            !vmsvga3d_mob_read(s, mob, (uint32_t)subresource_offset,
+                               image->data + layout.box_offset,
+                               (uint32_t)transfer_size)) {
+            return false;
+        }
+    } else {
+        for (z = 0; z < layout.depth_count; z++) {
+            for (y = 0; y < layout.row_count; y++) {
+                uint64_t offset = subresource_offset +
+                                  (uint64_t)z * image->plane_size +
+                                  (uint64_t)y * image->pitch;
+                uint64_t host_offset = (uint64_t)layout.box_offset +
+                                       (uint64_t)z * image->plane_size +
+                                       (uint64_t)y * image->pitch;
+
+                if (offset > UINT32_MAX || host_offset > image->data_size ||
+                    layout.row_bytes > image->data_size - host_offset ||
+                    !vmsvga3d_mob_read(s, mob, (uint32_t)offset,
+                                       image->data + host_offset,
+                                       layout.row_bytes)) {
+                    return false;
+                }
             }
         }
     }

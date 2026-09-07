@@ -8914,12 +8914,13 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     (void)vmsvga3d_screen_target_flush_live(s);
 
     /*
-     * A direct vGPU9 Screen Object can be torn down while its BAR1 backing is
-     * being rebuilt in place.  Keep servicing FIFO/renderer work, but hold the
-     * frontend for a small, fixed number of display refreshes so an
-     * intermediate backing-store clear is not sampled by VNC.  The counter is
-     * armed by vmsvga_screen_destroy() only for a directly scanned-out Screen
-     * backing.  Preserve a full redraw for the first refresh after the hold.
+     * A scanout can be rebuilt through transient storage: vGPU9 can tear down
+     * a directly scanned-out Screen Object while BAR1 is being rewritten, and
+     * vGPU10/vGPU11 can briefly unbind and recreate the active ScreenTarget.
+     * Keep servicing FIFO/renderer work, but hold the frontend for a small,
+     * fixed number of display refreshes so that intermediate image is not
+     * sampled by VNC. Preserve a full redraw for the first refresh after the
+     * hold.
      */
     if (s->screen_frontend_hold_frames != 0) {
         uint32_t held_damage = s->damage_count;

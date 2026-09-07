@@ -31,6 +31,7 @@
 
 #include "qemu/osdep.h" /* Required to be the first #include */
 #include "qapi/error.h"
+#include "qemu/main-loop.h"
 #include "exec/target_page.h"
 #include "trace.h"
 #include "include/vmware_vga_compat.h"
@@ -420,6 +421,7 @@ struct vmsvga_state_s {
     uint32_t svgaid;
     uint32_t thread;
     uint32_t sync;
+    QEMUBH *fifo_bh;
     uint32_t fifo_size;
     uint32_t fifo_min;
     uint32_t fifo_max;
@@ -6786,6 +6788,39 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
 }
 
 /*
+ * SVGA_REG_SYNC is an asynchronous FIFO wake-up for modern guests.  Keep the
+ * bounded FIFO pass above for fairness, but run it from QEMU's main-loop
+ * bottom half instead of making the vCPU that wrote SYNC execute the graphics
+ * work synchronously.
+ *
+ * If a pass used its fairness budget and made progress, schedule another pass.
+ * A stalled command is left for the normal display-service path (or a legacy
+ * SVGA_REG_BUSY poll) rather than spinning the bottom half.
+ */
+static void vmsvga_fifo_bh(void *opaque)
+{
+    struct vmsvga_state_s *s = opaque;
+    uint32_t previous_stop;
+
+    if (!s->enable || !s->config) {
+        s->sync = 0;
+        if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+            s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(0);
+        }
+        return;
+    }
+
+    vmsvga_try_commit_mode(s);
+    previous_stop = s->fifo_stop;
+    vmsvga_fifo_run(s, false, SVGA3D_INVALID_ID);
+
+    if (s->sync && vmsvga_fifo_pending(s) &&
+        s->fifo_stop != previous_stop) {
+        qemu_bh_schedule(s->fifo_bh);
+    }
+}
+
+/*
  * COMMAND_BUFFERS_2 carries the same SVGA command stream as the normal FIFO.
  * SVGA_CB_FLAG_DX_CONTEXT only associates a DX context with commands in that
  * stream; it does not select a separate DX-only encoding.  Execute both
@@ -8409,6 +8444,9 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           } else if (was_enabled && !enabled) {
               /* VGA needs dirty logging before selecting its isolated framebuffer. */
               vmsvga_set_dirty_log(s, true);
+              if (s->fifo_bh != NULL) {
+                  qemu_bh_cancel(s->fifo_bh);
+              }
               vmsvga_fifo_discard_pending(s);
               vmsvga_legacy_vga_leave(s);
           }
@@ -8467,6 +8505,9 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
             }
             vmsvga_try_commit_mode(s);
         } else if (was_config) {
+            if (s->fifo_bh != NULL) {
+                qemu_bh_cancel(s->fifo_bh);
+            }
             s->sync = 0;
             vmsvga_fifo_upload_reset(s);
             vmsvga_fifo_set_busy(s, false);
@@ -8492,9 +8533,8 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           s->trace_activity_seq++;
       }
       if (s->enable && s->config) {
-          vmsvga_try_commit_mode(s);
           s->sync = 1;
-          vmsvga_fifo_run(s, false, SVGA3D_INVALID_ID);
+          qemu_bh_schedule(s->fifo_bh);
       }
       /* vmware_value_write already traces this register when enabled. */
       VPRINT("SVGA_REG_SYNC register %u with the value of %u\n", s->index, value);
@@ -8863,6 +8903,10 @@ static void vmsvga_reset(DeviceState *dev)
 
     struct pci_vmsvga_state_s *pci = VMVGA(dev);
     struct vmsvga_state_s *s = &pci->chip;
+
+    if (s->fifo_bh != NULL) {
+        qemu_bh_cancel(s->fifo_bh);
+    }
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_STATE,
@@ -9336,6 +9380,10 @@ static int vmsvga_post_load(void *opaque, int version_id)
     size_t shadow_size;
     int ret;
 
+    if (s->fifo_bh != NULL) {
+        qemu_bh_cancel(s->fifo_bh);
+    }
+
     s->scratch_size = VMSVGA_SCRATCH_SIZE;
     s->fifo_size = VMSVGA_FIFO_SIZE;
     s->fifo = (uint32_t *)memory_region_get_ram_ptr(&s->fifo_ram);
@@ -9451,6 +9499,7 @@ static int vmsvga_post_load(void *opaque, int version_id)
         vmsvga_fifo_set_busy(s, false);
     } else if (s->sync) {
         vmsvga_fifo_set_busy(s, true);
+        qemu_bh_schedule(s->fifo_bh);
     }
 
     vmsvga_update_dirty_log(s);
@@ -9685,6 +9734,8 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->vga.con = vmvga_graphic_console_create(dev, 0, &vmsvga_ops, s);
     s->fifo_size = VMSVGA_FIFO_SIZE;
     s->hidden = false;
+    s->fifo_bh = qemu_bh_new_guarded(vmsvga_fifo_bh, s,
+                                      &dev->mem_reentrancy_guard);
 
     vmsvga_trace_display_path_reset(s);
     vmsvga_trace_flight_reset(s);
@@ -9915,6 +9966,12 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
 
     vmsvga_trace_flight_histogram(&s->chip, "uninit");
     vmsvga_trace_gmr2_clear(&s->chip);
+
+    if (s->chip.fifo_bh != NULL) {
+        qemu_bh_cancel(s->chip.fifo_bh);
+        qemu_bh_delete(s->chip.fifo_bh);
+        s->chip.fifo_bh = NULL;
+    }
 
     vmsvga3d_reset(&s->chip);
     vmsvga3d_renderer_unrealize(&s->chip);

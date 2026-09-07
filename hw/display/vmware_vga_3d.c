@@ -5702,8 +5702,11 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_bind_entry(
     uint32_t offset_in_bytes, uint32_t size_in_bytes);
 static bool vmsvga3d_screen_target_mark_dirty_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
-    const SVGA3dRect *rect);
+    const SVGA3dRect *rect, bool presentation);
 static bool vmsvga3d_surface_changed_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dBox *box);
+static bool vmsvga3d_surface_presented_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dBox *box);
 
@@ -7499,7 +7502,7 @@ static void vmsvga3d_screen_target_merge_cheapest_pair(
 
 static bool vmsvga3d_screen_target_mark_dirty_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
-    const SVGA3dRect *rect)
+    const SVGA3dRect *rect, bool presentation)
 {
     struct vmsvga3d_state_s *state;
     VMSVGA3DSurface *surface;
@@ -7532,14 +7535,24 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
 
         width = surface->mips[0].size.width;
         height = surface->mips[0].size.height;
-        if (s->screen_frontend_deferred) {
-            s->screen_frontend_deferred = false;
-            if (vmsvga_trace_flight_enabled()) {
-                fprintf(stderr,
-                        "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
-                        "size=%ux%u\n",
-                        sid, s->screen_width, s->screen_height);
-            }
+
+        /*
+         * During the initial vGPU10/vGPU11 takeover, ordinary render-target
+         * writes only establish that the target has content.  They are not a
+         * presentation boundary: exposing one here lets a display refresh race
+         * a clear/draw sequence before UPDATE_GB_SCREENTARGET or PRESENTBLT.
+         * Only an explicit presentation command may queue transition damage.
+         */
+        if (s->screen_frontend_deferred && !presentation) {
+            return true;
+        }
+
+        if (s->screen_frontend_deferred && presentation &&
+            vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=present-pending sid=%u "
+                    "rect=%u,%u/%ux%u\n",
+                    sid, dirty.x, dirty.y, dirty.w, dirty.h);
         }
 
         if (dirty.x == 0 && dirty.y == 0 &&
@@ -7638,7 +7651,39 @@ static bool vmsvga3d_surface_changed_live(
     }
 
     return vmsvga3d_screen_target_mark_dirty_live(
-        s, sid, subresource, &rect);
+        s, sid, subresource, &rect, false);
+}
+
+static bool vmsvga3d_surface_presented_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dBox *box)
+{
+    VMSVGA3DSurface *surface;
+    SVGA3dRect rect;
+
+    if (s == NULL || box == NULL || s->svga3d == NULL) {
+        return false;
+    }
+
+    if (box->z != 0 || box->d == 0 || box->w == 0 || box->h == 0) {
+        return true;
+    }
+
+    rect.x = box->x;
+    rect.y = box->y;
+    rect.w = box->w;
+    rect.h = box->h;
+
+    surface = sid < SVGA3D_MAX_SURFACE_IDS ? s->svga3d->surfaces[sid] : NULL;
+    if (surface != NULL && subresource == 0) {
+        if (!vmsvga3d_screen_target_clip_rect(surface, &rect)) {
+            return true;
+        }
+        surface->screen_target_content_valid = true;
+    }
+
+    return vmsvga3d_screen_target_mark_dirty_live(
+        s, sid, subresource, &rect, true);
 }
 
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
@@ -7662,13 +7707,37 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     sid = state->active_screen_target_sid;
     memcpy(rects, state->screen_target_dirty_rects,
            rect_count * sizeof(rects[0]));
+
+    /*
+     * Do not consume queued presentation damage until every readback succeeds.
+     * A partial failure while the frontend is deferred must leave the old
+     * frontend visible and retry the same presentation on the next refresh.
+     */
+    for (i = 0; i < rect_count; i++) {
+        if (!vmsvga3d_screen_target_present_live(s, sid, 0, &rects[i])) {
+            if (s->screen_frontend_deferred &&
+                vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-HANDOFF phase=frontend-wait sid=%u "
+                        "reason=present-failed rect=%u,%u/%ux%u\n",
+                        sid, rects[i].x, rects[i].y, rects[i].w,
+                        rects[i].h);
+            }
+            return false;
+        }
+    }
+
     state->screen_target_dirty_count = 0;
     memset(state->screen_target_dirty_rects, 0,
            sizeof(state->screen_target_dirty_rects));
 
-    for (i = 0; i < rect_count; i++) {
-        if (!vmsvga3d_screen_target_present_live(s, sid, 0, &rects[i])) {
-            return false;
+    if (s->screen_frontend_deferred) {
+        s->screen_frontend_deferred = false;
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
+                    "size=%ux%u rects=%u\n",
+                    sid, s->screen_width, s->screen_height, rect_count);
         }
     }
 
@@ -7709,7 +7778,7 @@ static bool vmsvga3d_gb_screen_target_update_live(
     }
 
     return vmsvga3d_screen_target_mark_dirty_live(
-        s, s->svga3d->active_screen_target_sid, 0, rect);
+        s, s->svga3d->active_screen_target_sid, 0, rect, true);
 }
 
 static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
@@ -7828,7 +7897,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 /* Binding a new surface is a flip.  Unlike explicit UPDATE, VBox does
                  * not require the Surface OTable entry to have a valid MOB here. */
                 (void)vmsvga3d_screen_target_mark_dirty_live(
-                    s, s->svga3d->active_screen_target_sid, 0, &rect);
+                    s, s->svga3d->active_screen_target_sid, 0, &rect, false);
             }
         }
         break;

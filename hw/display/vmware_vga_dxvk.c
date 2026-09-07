@@ -8014,6 +8014,247 @@ out:
 }
 
 
+bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    const struct vmsvga3d_d3d10_box_s *source_boxes, uint32_t box_count,
+    void *data, uint32_t bytes_per_pixel, uint32_t row_pitch,
+    uint32_t data_size, void *secondary_data, uint32_t secondary_row_pitch,
+    uint32_t secondary_data_size)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CreateTexture2D create_texture2d = NULL;
+    VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
+    VMSVGA3DDxvkD3D11Map map = NULL;
+    VMSVGA3DDxvkD3D11Unmap unmap = NULL;
+    VMSVGA3DDxvkD3D11MappedSubresource mapped = {0};
+    VMSVGA3DDxvkD3D11Texture2DDesc staging_desc = {0};
+    const VMSVGA3DD3D10CreateDesc *desc;
+    uint64_t max_subresources;
+    uint32_t mip_level;
+    uint32_t source_width;
+    uint32_t source_height;
+    uint32_t batch_left = UINT32_MAX;
+    uint32_t batch_top = UINT32_MAX;
+    uint32_t batch_right = 0;
+    uint32_t batch_bottom = 0;
+    uint32_t i;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+        dxvk->d3d11_context == NULL || surface == NULL ||
+        source_boxes == NULL || box_count == 0 || data == NULL ||
+        bytes_per_pixel == 0 || row_pitch == 0 || data_size == 0 ||
+        (secondary_data != NULL &&
+         (secondary_row_pitch == 0 || secondary_data_size == 0)) ||
+        surface->d3d9_resident) {
+        return false;
+    }
+
+    /* Like the single-box path, a non-resident resource is already backed by
+     * the CPU shadow and therefore needs no GPU readback. */
+    if (!surface->d3d11_resident) {
+        return secondary_data == NULL;
+    }
+
+    if (surface->d3d11_resource == NULL || !surface->d3d11_desc.valid ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE2D,
+            &create_texture2d, sizeof(create_texture2d)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION,
+            &copy_region, sizeof(copy_region)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_MAP,
+            &map, sizeof(map)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UNMAP,
+            &unmap, sizeof(unmap))) {
+        return false;
+    }
+
+    desc = &surface->d3d11_desc;
+    max_subresources = (uint64_t)desc->mip_levels * desc->array_size;
+    if (desc->resource_dimension !=
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
+        desc->mip_levels == 0 || desc->array_size == 0 ||
+        desc->sample_count != 1 || subresource >= max_subresources) {
+        return false;
+    }
+
+    mip_level = subresource % desc->mip_levels;
+    source_width = MAX(1u, desc->width >> mip_level);
+    source_height = MAX(1u, desc->height >> mip_level);
+
+    for (i = 0; i < box_count; i++) {
+        const struct vmsvga3d_d3d10_box_s *box = &source_boxes[i];
+        uint64_t row_bytes;
+        uint64_t destination_offset;
+        uint64_t destination_end;
+        uint64_t secondary_destination_offset;
+        uint64_t secondary_destination_end;
+
+        if (box->front != 0 || box->back != 1 ||
+            box->left >= box->right || box->top >= box->bottom ||
+            box->right > source_width || box->bottom > source_height) {
+            return false;
+        }
+
+        row_bytes = (uint64_t)(box->right - box->left) * bytes_per_pixel;
+        destination_offset = (uint64_t)box->top * row_pitch +
+                             (uint64_t)box->left * bytes_per_pixel;
+        if (row_bytes == 0 || row_bytes > row_pitch ||
+            (uint64_t)box->right * bytes_per_pixel > row_pitch ||
+            destination_offset > data_size ||
+            row_bytes > (uint64_t)data_size - destination_offset ||
+            (uint64_t)(box->bottom - box->top - 1) * row_pitch >
+                (uint64_t)data_size - destination_offset - row_bytes) {
+            return false;
+        }
+        destination_end = destination_offset +
+                          (uint64_t)(box->bottom - box->top - 1) * row_pitch +
+                          row_bytes;
+        }
+
+        if (secondary_data != NULL) {
+            secondary_destination_offset =
+                (uint64_t)box->top * secondary_row_pitch +
+                (uint64_t)box->left * bytes_per_pixel;
+            secondary_destination_end = secondary_destination_offset +
+                (uint64_t)(box->bottom - box->top - 1) *
+                    secondary_row_pitch +
+                row_bytes;
+            if (row_bytes > secondary_row_pitch ||
+                (uint64_t)box->right * bytes_per_pixel >
+                    secondary_row_pitch ||
+                secondary_destination_end > secondary_data_size) {
+                return false;
+            }
+        }
+
+        batch_left = MIN(batch_left, box->left);
+        batch_top = MIN(batch_top, box->top);
+        batch_right = MAX(batch_right, box->right);
+        batch_bottom = MAX(batch_bottom, box->bottom);
+    }
+
+    staging_desc.width = batch_right - batch_left;
+    staging_desc.height = batch_bottom - batch_top;
+    staging_desc.mip_levels = 1;
+    staging_desc.array_size = 1;
+    staging_desc.format = desc->format;
+    staging_desc.sample_desc.count = 1;
+    staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
+    staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
+
+    if (surface->d3d11_readback_staging_2d == NULL ||
+        surface->d3d11_readback_staging_width < staging_desc.width ||
+        surface->d3d11_readback_staging_height < staging_desc.height) {
+        void *new_staging = NULL;
+
+        staging_desc.width = MAX(staging_desc.width,
+                                 surface->d3d11_readback_staging_width);
+        staging_desc.height = MAX(staging_desc.height,
+                                  surface->d3d11_readback_staging_height);
+        result = create_texture2d(dxvk->d3d11_device, &staging_desc, NULL,
+                                  &new_staging);
+        if (!vmsvga3d_dxvk_succeeded(result) || new_staging == NULL) {
+            if (new_staging != NULL) {
+                vmsvga3d_dxvk_release(new_staging,
+                                      VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+            }
+            return false;
+        }
+
+        if (surface->d3d11_readback_staging_2d != NULL) {
+            vmsvga3d_dxvk_release(surface->d3d11_readback_staging_2d,
+                                  VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        }
+        surface->d3d11_readback_staging_2d = new_staging;
+        surface->d3d11_readback_staging_width = staging_desc.width;
+        surface->d3d11_readback_staging_height = staging_desc.height;
+    }
+
+    for (i = 0; i < box_count; i++) {
+        const struct vmsvga3d_d3d10_box_s *box = &source_boxes[i];
+        VMSVGA3DDxvkD3D11Box native_box = {
+            .left = box->left,
+            .top = box->top,
+            .front = 0,
+            .right = box->right,
+            .bottom = box->bottom,
+            .back = 1,
+        };
+
+        copy_region(dxvk->d3d11_context, surface->d3d11_readback_staging_2d,
+                    0, box->left - batch_left, box->top - batch_top, 0,
+                    surface->d3d11_resource, subresource, &native_box);
+    }
+
+    result = map(dxvk->d3d11_context, surface->d3d11_readback_staging_2d, 0,
+                 VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
+    if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
+        return false;
+    }
+
+    for (i = 0; i < box_count; i++) {
+        const struct vmsvga3d_d3d10_box_s *box = &source_boxes[i];
+        uint32_t source_x = box->left - batch_left;
+        uint32_t source_y = box->top - batch_top;
+        uint32_t width = box->right - box->left;
+        uint32_t height = box->bottom - box->top;
+        uint64_t row_bytes = (uint64_t)width * bytes_per_pixel;
+        uint32_t y;
+
+        if ((uint64_t)source_x * bytes_per_pixel + row_bytes >
+            mapped.row_pitch) {
+            unmap(dxvk->d3d11_context,
+                  surface->d3d11_readback_staging_2d, 0);
+            return false;
+        }
+
+        for (y = 0; y < height; y++) {
+            const uint8_t *source =
+                (const uint8_t *)mapped.data +
+                (size_t)(source_y + y) * mapped.row_pitch +
+                (size_t)source_x * bytes_per_pixel;
+            uint8_t *destination =
+                (uint8_t *)data + (size_t)(box->top + y) * row_pitch +
+                (size_t)box->left * bytes_per_pixel;
+
+            memcpy(destination, source, (size_t)row_bytes);
+            if (secondary_data != NULL) {
+                uint8_t *secondary_destination =
+                    (uint8_t *)secondary_data +
+                    (size_t)(box->top + y) * secondary_row_pitch +
+                    (size_t)box->left * bytes_per_pixel;
+
+                memcpy(secondary_destination, source, (size_t)row_bytes);
+            }
+        }
+    }
+
+    unmap(dxvk->d3d11_context, surface->d3d11_readback_staging_2d, 0);
+    return true;
+#else
+    (void)dxvk;
+    (void)surface;
+    (void)subresource;
+    (void)source_boxes;
+    (void)box_count;
+    (void)data;
+    (void)bytes_per_pixel;
+    (void)row_pitch;
+    (void)data_size;
+    (void)secondary_data;
+    (void)secondary_row_pitch;
+    (void)secondary_data_size;
+    return false;
+#endif
+}
+
+
 #if defined(CONFIG_LINUX) && defined(__ELF__)
 static bool vmsvga3d_dxvk_d3d11_rtv_desc(
     const VMSVGA3DD3D10RTVDesc *src, VMSVGA3DDxvkD3D11RTVDesc *dst)

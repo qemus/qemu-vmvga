@@ -8432,6 +8432,61 @@ static bool vmsvga3d_d3d10_readback_image_rect_live(
         rect->h, image->plane_size, 1);
 }
 
+
+static bool vmsvga3d_d3d10_readback_image_rects_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    uint32_t subresource, const SVGA3dRect *rects, uint32_t rect_count,
+    uint32_t bytes_per_pixel, uint8_t *secondary_data,
+    uint32_t secondary_row_pitch, uint32_t secondary_data_size)
+{
+    VMSVGA3DSurfaceImage *image;
+    VMSVGA3DD3D10Box boxes[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    uint32_t i;
+
+    if (s == NULL || surface == NULL || rects == NULL || rect_count == 0 ||
+        rect_count > VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS ||
+        surface->mips == NULL || subresource >= surface->mip_count ||
+        bytes_per_pixel == 0 ||
+        (secondary_data != NULL &&
+         (secondary_row_pitch == 0 || secondary_data_size == 0))) {
+        return false;
+    }
+
+    if (surface->multisample_count > 1) {
+        return false;
+    }
+
+    image = &surface->mips[subresource];
+    if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
+        image->data_size == 0 || image->plane_size % image->pitch != 0 ||
+        image->data_size % image->plane_size != 0 || image->size.depth != 1) {
+        return false;
+    }
+
+    for (i = 0; i < rect_count; i++) {
+        const SVGA3dRect *rect = &rects[i];
+
+        if (rect->w == 0 || rect->h == 0 || rect->x >= image->size.width ||
+            rect->y >= image->size.height ||
+            rect->w > image->size.width - rect->x ||
+            rect->h > image->size.height - rect->y) {
+            return false;
+        }
+
+        boxes[i].left = rect->x;
+        boxes[i].top = rect->y;
+        boxes[i].front = 0;
+        boxes[i].right = rect->x + rect->w;
+        boxes[i].bottom = rect->y + rect->h;
+        boxes[i].back = 1;
+    }
+
+    return vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
+        s->dxvk, surface->dxvk_surface, subresource, boxes, rect_count,
+        image->data, bytes_per_pixel, image->pitch, image->data_size,
+        secondary_data, secondary_row_pitch, secondary_data_size);
+}
+
 static bool vmsvga3d_d3d10_subresource_offset_live(
     const VMSVGA3DSurface *surface, uint32_t subresource,
     uint32_t *offset_out)

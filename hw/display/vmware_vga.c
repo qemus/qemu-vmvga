@@ -1584,6 +1584,7 @@ static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
 
 static inline uint32_t vmsvga_bytes_per_pixel(uint32_t bpp);
 static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s);
+static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s);
 
 static inline uint32_t vmsvga_active_width(const struct vmsvga_state_s *s)
 {

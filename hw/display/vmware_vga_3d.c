@@ -7331,6 +7331,7 @@ static bool vmsvga3d_screen_target_present_live(
         copy.w == s->screen_width && copy.h == s->screen_height) {
         s->screen_handoff_active = false;
         s->screen_handoff_same_backing = false;
+        s->screen_handoff_freeze_until_full = false;
         s->screen_handoff_skipped_same_backing_full = false;
     }
 
@@ -7352,6 +7353,28 @@ static bool vmsvga3d_screen_target_rect_contains(
 
     return inner->x >= outer->x && inner->y >= outer->y &&
            inner_right <= outer_right && inner_bottom <= outer_bottom;
+}
+
+static bool vmsvga3d_screen_target_clip_rect(
+    const VMSVGA3DSurface *surface, SVGA3dRect *rect)
+{
+    uint32_t width;
+    uint32_t height;
+
+    if (surface == NULL || rect == NULL || surface->mips == NULL ||
+        surface->mip_count == 0 || rect->w == 0 || rect->h == 0) {
+        return false;
+    }
+
+    width = surface->mips[0].size.width;
+    height = surface->mips[0].size.height;
+    if (rect->x >= width || rect->y >= height) {
+        return false;
+    }
+
+    rect->w = MIN(rect->w, width - rect->x);
+    rect->h = MIN(rect->h, height - rect->y);
+    return rect->w != 0 && rect->h != 0;
 }
 
 static SVGA3dRect vmsvga3d_screen_target_rect_union(
@@ -7472,28 +7495,25 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
     if (surface != NULL && !surface->screen_target_content_valid) {
         return true;
     }
-    if (surface != NULL && s->screen_frontend_deferred) {
-        s->screen_frontend_deferred = false;
-        if (vmsvga_trace_flight_enabled()) {
-            fprintf(stderr,
-                    "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
-                    "size=%ux%u\n",
-                    sid, s->screen_width, s->screen_height);
-        }
-    }
-    if (surface != NULL && surface->mips != NULL && surface->mip_count != 0) {
-        uint32_t width = surface->mips[0].size.width;
-        uint32_t height = surface->mips[0].size.height;
+    if (surface != NULL) {
+        uint32_t width;
+        uint32_t height;
 
-        /* Damage wholly outside the active image has no visible effect. */
-        if (dirty.x >= width || dirty.y >= height) {
+        /* Only visible, non-empty damage can release a deferred frontend. */
+        if (!vmsvga3d_screen_target_clip_rect(surface, &dirty)) {
             return true;
         }
 
-        dirty.w = MIN(dirty.w, width - dirty.x);
-        dirty.h = MIN(dirty.h, height - dirty.y);
-        if (dirty.w == 0 || dirty.h == 0) {
-            return true;
+        width = surface->mips[0].size.width;
+        height = surface->mips[0].size.height;
+        if (s->screen_frontend_deferred) {
+            s->screen_frontend_deferred = false;
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
+                        "size=%ux%u\n",
+                        sid, s->screen_width, s->screen_height);
+            }
         }
 
         if (dirty.x == 0 && dirty.y == 0 &&
@@ -7564,6 +7584,7 @@ static bool vmsvga3d_surface_changed_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dBox *box)
 {
+    VMSVGA3DSurface *surface;
     SVGA3dRect rect;
 
     if (s == NULL || box == NULL || s->svga3d == NULL) {
@@ -7579,12 +7600,15 @@ static bool vmsvga3d_surface_changed_live(
     rect.w = box->w;
     rect.h = box->h;
 
-    if (sid < SVGA3D_MAX_SURFACE_IDS && subresource == 0 &&
-        s->svga3d->surfaces[sid] != NULL) {
-        /* Only genuine surface writers call this helper.  DEFINE/BIND/UPDATE
-         * screen-target commands use the dirty helper directly, so they cannot
-         * expose a newly materialized texture before it has real contents. */
-        s->svga3d->surfaces[sid]->screen_target_content_valid = true;
+    surface = sid < SVGA3D_MAX_SURFACE_IDS ? s->svga3d->surfaces[sid] : NULL;
+    if (surface != NULL && subresource == 0) {
+        /* A writer establishes ScreenTarget readiness only if it actually
+         * intersects visible subresource 0.  Out-of-bounds writes must not
+         * make a later BIND/UPDATE release a deferred frontend. */
+        if (!vmsvga3d_screen_target_clip_rect(surface, &rect)) {
+            return true;
+        }
+        surface->screen_target_content_valid = true;
     }
 
     return vmsvga3d_screen_target_mark_dirty_live(

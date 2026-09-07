@@ -472,6 +472,10 @@ struct vmsvga_state_s {
      * bytes using the new pitch until a genuine new frame has replaced the
      * transition image. */
     bool screen_handoff_same_backing;
+    /* Freeze a same-backing rebuild mirror until a complete replacement frame
+     * arrives.  This is transient host presentation state and is intentionally
+     * not migrated. */
+    bool screen_handoff_freeze_until_full;
     bool screen_handoff_skipped_same_backing_full;
     uint32_t screen_backing_gmr_id;
     uint32_t screen_backing_offset;
@@ -1151,6 +1155,24 @@ static inline void vmsvga_trace_flight_histogram(struct vmsvga_state_s *s,
         fprintf(stderr, "VMVGA-FIFO-COUNT cmd=%u name=%s count=%" PRIu64 "\n",
                 s->trace_cmd[i].cmd, name != NULL ? name : "SVGA3D/UNKNOWN",
                 s->trace_cmd[i].count);
+    }
+}
+
+static inline void vmsvga_invalidate(struct vmsvga_state_s *s,
+                                      const char *reason)
+{
+    bool was_invalidated = s->invalidated;
+
+    s->invalidated = true;
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-INVALIDATE reason=%s already=%u active=%u "
+                "size=%ux%u/%u/%u screen=%u bound=%u deferred=%u\n",
+                reason, was_invalidated, s->active_valid, s->active_width,
+                s->active_height, s->active_depth, s->active_stride,
+                s->screen_defined, s->svga_surface_bound,
+                s->screen_frontend_deferred);
+        s->trace_activity_seq++;
     }
 }
 
@@ -4764,6 +4786,74 @@ static SVGACBStatus vmsvga_command_buffer_process(
 #include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
 
+static void vmsvga_trace_frontend_snapshot(struct vmsvga_state_s *s,
+                                           const char *phase)
+{
+    DisplaySurface *surface;
+    const uint8_t *data;
+    uint32_t hash = 2166136261u;
+    uint32_t nonzero_rows = 0;
+    uint32_t row;
+    uint32_t height;
+    uint32_t width;
+    uint32_t bypp;
+    uint32_t stride;
+    size_t row_bytes;
+    bool hash_valid = false;
+
+    if (!vmsvga_trace_flight_enabled()) {
+        return;
+    }
+
+    surface = qemu_console_surface(s->vga.con);
+    data = surface != NULL ? surface_data(surface) : NULL;
+    width = surface != NULL && surface_width(surface) > 0
+                ? (uint32_t)surface_width(surface)
+                : 0;
+    height = surface != NULL && surface_height(surface) > 0
+                 ? (uint32_t)surface_height(surface)
+                 : 0;
+    bypp = surface != NULL && surface_bits_per_pixel(surface) > 0
+               ? ((uint32_t)surface_bits_per_pixel(surface) + 7) / 8
+               : 0;
+    stride = surface != NULL && surface_stride(surface) > 0
+                 ? (uint32_t)surface_stride(surface)
+                 : 0;
+
+    if (data != NULL && width != 0 && height != 0 && bypp != 0 &&
+        width <= SIZE_MAX / bypp) {
+        row_bytes = (size_t)width * bypp;
+        if (row_bytes != 0 && row_bytes <= stride) {
+            for (row = 0; row < height; row++) {
+                const uint8_t *src = data + (size_t)row * stride;
+                size_t i;
+                bool row_nonzero = false;
+
+                for (i = 0; i < row_bytes; i++) {
+                    uint8_t value = src[i];
+
+                    hash ^= value;
+                    hash *= 16777619u;
+                    row_nonzero |= value != 0;
+                }
+                if (row_nonzero) {
+                    nonzero_rows++;
+                }
+            }
+            hash_valid = true;
+        }
+    }
+
+    fprintf(stderr,
+            "VMVGA-FRONTEND-SNAPSHOT phase=%s data=%p size=%ux%u "
+            "bpp=%u stride=%u hash=0x%08x hash-valid=%u "
+            "nonzero-rows=%u invalidated=%u screen=%u bound=%u deferred=%u\n",
+            phase, (const void *)data, width, height, bypp * 8, stride, hash,
+            hash_valid, nonzero_rows, s->invalidated, s->screen_defined,
+            s->svga_surface_bound, s->screen_frontend_deferred);
+    s->trace_activity_seq++;
+}
+
 static void vmsvga_trace_gmr2_clear(struct vmsvga_state_s *s)
 {
     g_clear_pointer(&s->trace_gmr2_gpa, g_free);
@@ -7052,7 +7142,7 @@ static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
     s->active_stride = stride;
 
     if (changed) {
-        s->invalidated = true;
+        vmsvga_invalidate(s, "mode-commit");
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
                            "MODE_COMMIT width=%u height=%u depth=%u stride=%u",
                            s->active_width, s->active_height, s->active_depth,
@@ -7723,7 +7813,7 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
         vmvga_console_set_surface(s->vga.con, surface);
 
         s->svga_surface_bound = true;
-        s->invalidated = true;
+        vmsvga_invalidate(s, "scanout-bind");
 
         if (vmsvga_trace_flight_enabled()) {
             uint8_t *backing = NULL;
@@ -8281,7 +8371,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
 #ifdef CONFIG_PIXMAN
         vmsvga_palette_update_entry(s, palette_offset / 3);
         if (vmsvga_active_depth(s) == 8) {
-            s->invalidated = true;
+            vmsvga_invalidate(s, "palette");
         }
 #endif
         vmsvga_cursor_palette_changed(s);
@@ -8336,7 +8426,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
               s->cursor_dirty = true;
               cursor_update_from_fifo(s);
           }
-          s->invalidated = true;
+          vmsvga_invalidate(s, "enable-register");
           vmsvga_trace_resource_snapshot(s, "enable");
           /* vmware_value_write already traces this register when enabled. */
           VPRINT("SVGA_REG_ENABLE register %u with the value of %u\n", s->index,
@@ -8756,6 +8846,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_DRAW,
                            "DAMAGE_FULL x=0 y=0 w=%u h=%u",
                            s->active_width, s->active_height);
+        vmsvga_trace_frontend_snapshot(s, "damage-full");
         vmvga_console_update(s->vga.con, 0, 0, s->active_width,
                              s->active_height);
         s->invalidated = false;
@@ -8893,7 +8984,8 @@ static void vmsvga_invalidate_display(void *opaque)
         return;
     }
 
-    s->invalidated = true;
+    vmsvga_trace_frontend_snapshot(s, "invalidate-request");
+    vmsvga_invalidate(s, "frontend-callback");
 }
 
 static void vmsvga_text_update(void *opaque, uint32_t *chardata)

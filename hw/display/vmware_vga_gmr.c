@@ -1239,6 +1239,7 @@ static void vmsvga_screen_reset(struct vmsvga_state_s *s)
     s->screen_backing_valid = false;
     s->screen_handoff_active = false;
     s->screen_handoff_same_backing = false;
+    s->screen_handoff_freeze_until_full = false;
     s->screen_handoff_skipped_same_backing_full = false;
     s->screen_backing_gmr_id = SVGA_GMR_NULL;
     s->screen_backing_offset = 0;
@@ -1329,10 +1330,10 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
 
     /*
      * An exact DESTROY_SCREEN -> DEFINE_SCREEN of the same backed scanout is
-     * only a logical Screen Object rebuild.  If the frontend is still bound
-     * directly to that backing, keep it there: reseeding a handoff mirror and
-     * forcing another mode-set can expose the guest's temporary clear and
-     * causes a visible desktop flicker for no actual scanout change.
+     * only a logical Screen Object rebuild.  The guest may nevertheless clear
+     * and repaint that backing in place, so bind the known-good snapshot taken
+     * at DESTROY_SCREEN and keep it frozen until a complete replacement frame
+     * arrives.
      */
     reuse_destroyed_frontend =
         s->screen_destroyed_reuse_valid && backing_present &&
@@ -1355,8 +1356,9 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     if (reuse_destroyed_frontend) {
         s->screen_destroyed_reuse_valid = false;
         s->screen_backing_valid = true;
-        s->screen_handoff_active = false;
-        s->screen_handoff_same_backing = false;
+        s->screen_handoff_active = true;
+        s->screen_handoff_same_backing = true;
+        s->screen_handoff_freeze_until_full = true;
         s->screen_handoff_skipped_same_backing_full = false;
         s->screen_backing_gmr_id = backing_gmr_id;
         s->screen_backing_offset = backing_offset;
@@ -1378,14 +1380,14 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         s->new_height = height;
         s->new_depth = 32;
         s->screen_frontend_deferred = false;
-        s->svga_surface_bound = true;
-        s->invalidated = false;
+        s->svga_surface_bound = false;
+        vmsvga_invalidate(s, "screen-rebuild-shield");
         s->damage_count = 0;
 
         if (vmsvga_trace_flight_enabled()) {
             fprintf(stderr,
                     "VMVGA-SCREEN-HANDOFF phase=define reuse-destroyed=1 "
-                    "size=%ux%u/32/%u backing=%u:0x%08x\n",
+                    "shield=1 size=%ux%u/32/%u backing=%u:0x%08x\n",
                     width, height, screen_stride, backing_gmr_id,
                     backing_offset);
             s->trace_now.screen_defines++;
@@ -1398,6 +1400,11 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
                            id, flags, width, height, root_x, root_y,
                            screen_stride, backing_gmr_id, backing_offset,
                            clone_count);
+
+        /* Bind the snapshot captured at DESTROY_SCREEN.  The real backing may
+         * now be rebuilt in place without leaking its transient contents to
+         * the frontend. */
+        vmsvga_check_size(s);
         return true;
     }
     s->screen_destroyed_reuse_valid = false;
@@ -1497,6 +1504,7 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
      */
     s->screen_handoff_active = handoff_active && backing_present;
     s->screen_handoff_same_backing = handoff_same_backing;
+    s->screen_handoff_freeze_until_full = false;
     s->screen_handoff_skipped_same_backing_full = false;
     if (handoff_active) {
         /*
@@ -1531,7 +1539,11 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     s->screen_frontend_deferred = defer_frontend && handoff_active &&
                                   !backing_present;
     s->svga_surface_bound = false;
-    s->invalidated = !s->screen_frontend_deferred;
+    if (s->screen_frontend_deferred) {
+        s->invalidated = false;
+    } else {
+        vmsvga_invalidate(s, "screen-define");
+    }
 
     if (vmsvga_trace_flight_enabled()) {
         fprintf(stderr,
@@ -1630,6 +1642,16 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
         s->screen_destroyed_backing_offset = s->screen_backing_offset;
         s->screen_destroyed_backing_pitch = s->screen_backing_pitch;
         s->screen_destroyed_clone_count = s->screen_clone_count;
+
+        /* Capture the known-good displayed frame before the guest starts
+         * rebuilding the same backingStore in place.  DEFINE_SCREEN can then
+         * bind this mirror and keep the transient clear/repaint sequence out
+         * of the frontend until a complete replacement frame is presented. */
+        if (!vmsvga_screen_handoff_seed(s, surface, s->screen_width,
+                                        s->screen_height,
+                                        s->screen_backing_pitch)) {
+            s->screen_destroyed_reuse_valid = false;
+        }
     }
 
     /*
@@ -1647,7 +1669,7 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
         return true;
     }
 
-    if (!screen_base_visible) {
+    if (!screen_base_visible && !s->screen_destroyed_reuse_valid) {
         vmsvga_screen_base_clear(s);
     }
 
@@ -1660,6 +1682,7 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
     s->screen_backing_valid = false;
     s->screen_handoff_active = false;
     s->screen_handoff_same_backing = false;
+    s->screen_handoff_freeze_until_full = false;
     s->screen_handoff_skipped_same_backing_full = false;
     s->screen_backing_gmr_id = SVGA_GMR_NULL;
     s->screen_backing_offset = 0;
@@ -1670,7 +1693,7 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
     s->screen_annotation_type = VMSVGA_ANNOTATION_NONE;
     s->damage_count = 0;
     s->svga_surface_bound = false;
-    s->invalidated = true;
+    vmsvga_invalidate(s, "screen-destroy");
 
     if (vmsvga_trace_flight_enabled()) {
         s->trace_now.screen_destroys++;
@@ -2029,14 +2052,25 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
      */
     if (s->screen_handoff_active &&
         s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER) {
-        bool source_is_zero;
+        bool full_visible = left == 0 && top == 0 &&
+                            right == s->screen_width &&
+                            bottom == s->screen_height;
 
-        if (!vmsvga_screen_gmrfb_rect_is_zero(
-                s, (int32_t)source_x, (int32_t)source_y, width, height, bypp,
-                &source_is_zero)) {
-            return false;
+        if (s->screen_handoff_freeze_until_full && !full_visible) {
+            /* The guest is rebuilding the same backing in place.  Keep the
+             * known-good mirror completely frozen across partial repaint
+             * notifications; only a full replacement frame may release it. */
+            preserve_handoff_present = true;
+        } else {
+            bool source_is_zero;
+
+            if (!vmsvga_screen_gmrfb_rect_is_zero(
+                    s, (int32_t)source_x, (int32_t)source_y, width, height,
+                    bypp, &source_is_zero)) {
+                return false;
+            }
+            preserve_handoff_present = source_is_zero;
         }
-        preserve_handoff_present = source_is_zero;
     }
 
     if (preserved_handoff_present != NULL) {
@@ -2303,9 +2337,10 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
         !preserved_handoff_present && full_present) {
         s->screen_handoff_active = false;
         s->screen_handoff_same_backing = false;
+        s->screen_handoff_freeze_until_full = false;
         s->screen_handoff_skipped_same_backing_full = false;
         s->svga_surface_bound = false;
-        s->invalidated = true;
+        vmsvga_invalidate(s, "screen-handoff-complete");
         if (vmsvga_trace_flight_enabled()) {
             fprintf(stderr,
                     "VMVGA-SCREEN-HANDOFF phase=complete seq=%" PRIu64

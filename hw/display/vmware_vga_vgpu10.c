@@ -7925,10 +7925,13 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     struct vmsvga_state_s *s, uint32_t sid)
 {
     VMSVGA3DSurface *surface;
+    uint32_t old_sid;
 
     if (s == NULL || s->svga3d == NULL) {
         return false;
     }
+
+    old_sid = s->svga3d->active_screen_target_sid;
 
     if (sid == SVGA3D_INVALID_ID) {
         s->svga3d->active_screen_target_sid = sid;
@@ -7951,7 +7954,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
 
     /* VBox materializes/resolves the surface before this same-SID fast path,
      * but deliberately skips the Texture2D/SCREENTARGET validation afterwards. */
-    if (s->svga3d->active_screen_target_sid == sid) {
+    if (old_sid == sid) {
         return true;
     }
 
@@ -7960,6 +7963,24 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         (surface->surface_flags & (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) != 0 ||
         surface->mips[0].size.depth != 1) {
         return false;
+    }
+
+    /*
+     * A GB surface may have been populated before it becomes the active Screen
+     * Target.  That lifetime-wide content-valid bit must not release a deferred
+     * vGPU10/vGPU11 frontend during BIND itself: wait for a genuine writer
+     * after the target becomes active.  Restrict this reset to the deferred
+     * takeover so ordinary pre-rendered ScreenTarget flips retain their existing
+     * semantics.
+     */
+    if (s->screen_frontend_deferred) {
+        surface->screen_target_content_valid = false;
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=target-arm sid=%u old-sid=%u "
+                    "content-valid=0\n",
+                    sid, old_sid);
+        }
     }
 
     s->svga3d->active_screen_target_sid = sid;

@@ -201,6 +201,11 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     const struct vmsvga3d_d3d10_box_s *source_box, void *data,
     uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
     uint32_t depth_pitch, uint32_t depth_count);
+bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    const struct vmsvga3d_d3d10_box_s *source_boxes, uint32_t box_count,
+    void *data, uint32_t bytes_per_pixel, uint32_t row_pitch,
+    uint32_t data_size);
 bool vmsvga3d_dxvk_d3d11_constant_buffer_define(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t slot, const void *data, uint32_t size);

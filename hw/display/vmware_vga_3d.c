@@ -5802,19 +5802,27 @@ static SVGACBStatus vmsvga3d_device_command_buffer_process(
 
 static void vmsvga3d_command_buffer_write_status(
     struct vmsvga_state_s *s, uint64_t header_gpa, SVGACBStatus status,
-    uint32_t error_offset)
+    uint32_t error_offset, uint32_t processed_offset)
 {
-    uint32_t values[2];
-    size_t size = sizeof(values[0]);
+    uint32_t value;
 
-    values[0] = cpu_to_le32((uint32_t)status);
-    values[1] = cpu_to_le32(error_offset);
+    value = cpu_to_le32((uint32_t)status);
+    (void)vmsvga3d_guest_memory_write(
+        s, header_gpa + offsetof(SVGACBHeader, status), &value, sizeof(value));
 
     if (status == SVGA_CB_STATUS_COMMAND_ERROR) {
-        size = sizeof(values);
+        value = cpu_to_le32(error_offset);
+        (void)vmsvga3d_guest_memory_write(
+            s, header_gpa + offsetof(SVGACBHeader, errorOffset),
+            &value, sizeof(value));
     }
 
-    (void)vmsvga3d_guest_memory_write(s, header_gpa, values, size);
+    /* SVGA_CAP_CMD_BUFFERS_2 makes offset device-modified.  This device
+     * advertises CMD_BUFFERS_2 together with register command buffers, so
+     * publish the point reached by the synchronous parser on every result. */
+    value = cpu_to_le32(processed_offset);
+    (void)vmsvga3d_guest_memory_write(
+        s, header_gpa + offsetof(SVGACBHeader, offset), &value, sizeof(value));
 }
 
 static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
@@ -5837,7 +5845,8 @@ static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
 
 static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
                                            uint32_t command_low,
-                                           uint32_t command_high)
+                                           uint32_t command_high,
+                                           bool prepend)
 {
     SVGACBHeader raw;
     SVGACBHeader header;
@@ -5847,6 +5856,8 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
     uint32_t context;
     uint32_t processed = 0;
     uint32_t irq_flags = 0;
+    bool reserved_nonzero = false;
+    unsigned i;
 
     if (s == NULL) {
         return;
@@ -5856,8 +5867,39 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
                  ((uint64_t)command_low & ~(uint64_t)SVGA_CB_CONTEXT_MASK);
     context = command_low & SVGA_CB_CONTEXT_MASK;
 
-    if ((header_gpa & 63u) != 0 ||
-        !vmsvga3d_guest_memory_read(s, header_gpa, &raw, sizeof(raw))) {
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-SUBMIT kind=%s low=0x%08x high=0x%08x header=0x%016" PRIx64
+        " context=%u enable=%u config=%u",
+        prepend ? "PREPEND" : "COMMAND", command_low, command_high,
+        header_gpa, context, s->enable, s->config);
+
+    /* The register command-buffer interface is only active while the FIFO is
+     * enabled/configured.  Do not consume a stale header outside that state. */
+    if (!s->enable || !s->config) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "CB-COMPLETE kind=%s header=0x%016" PRIx64
+            " context=%u result=IGNORED reason=fifo-disabled",
+            prepend ? "PREPEND" : "COMMAND", header_gpa, context);
+        return;
+    }
+
+    if ((header_gpa & 63u) != 0) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "CB-COMPLETE kind=%s header=0x%016" PRIx64
+            " context=%u result=REJECT reason=header-alignment",
+            prepend ? "PREPEND" : "COMMAND", header_gpa, context);
+        return;
+    }
+
+    if (!vmsvga3d_guest_memory_read(s, header_gpa, &raw, sizeof(raw))) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "CB-COMPLETE kind=%s header=0x%016" PRIx64
+            " context=%u result=REJECT reason=header-read",
+            prepend ? "PREPEND" : "COMMAND", header_gpa, context);
         return;
     }
 
@@ -5875,12 +5917,37 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
     }
     header.offset = le32_to_cpu(raw.offset);
     header.dxContext = le32_to_cpu(raw.dxContext);
+    for (i = 0; i < ARRAY_SIZE(raw.mustBeZero); i++) {
+        if (le32_to_cpu(raw.mustBeZero[i]) != 0) {
+            reserved_nonzero = true;
+            break;
+        }
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-HEADER kind=%s header=0x%016" PRIx64
+        " context=%u status=%u id=0x%016" PRIx64
+        " flags=0x%08x length=%u offset=%u dxContext=%u source=%s",
+        prepend ? "PREPEND" : "COMMAND", header_gpa, context,
+        (unsigned)header.status, header.id, (unsigned)header.flags,
+        header.length, header.offset, header.dxContext,
+        (header.flags & SVGA_CB_FLAG_MOB) ? "MOB" : "PA");
 
     if (header.status != SVGA_CB_STATUS_NONE ||
         (header.flags & ~(SVGA_CB_FLAG_NO_IRQ | SVGA_CB_FLAG_DX_CONTEXT |
                           SVGA_CB_FLAG_MOB)) != 0 ||
         ((header.flags & SVGA_CB_FLAG_MOB) != 0 && !s->svga3d_dx_capable) ||
-        header.length > SVGA_CB_MAX_SIZE || header.offset > header.length) {
+        header.length > SVGA_CB_MAX_SIZE || header.offset > header.length ||
+        reserved_nonzero) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "CB-HEADER kind=%s header=0x%016" PRIx64
+            " result=REJECT status=%u flags=0x%08x length=%u offset=%u "
+            "reserved=%u",
+            prepend ? "PREPEND" : "COMMAND", header_gpa,
+            (unsigned)header.status, (unsigned)header.flags, header.length,
+            header.offset, reserved_nonzero);
         irq_flags = SVGA_IRQFLAG_ERROR | SVGA_IRQFLAG_COMMAND_BUFFER;
         goto out;
     }
@@ -5900,8 +5967,9 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
                                     commands, header.length)) {
                 VMVGA_TRACE_LOCAL(
                     VMVGA_TRACE_3D,
-                    "CB source=MOB mobid=%u offset=0x%08x length=%u "
-                    "result=REJECT",
+                    "CB-SOURCE kind=%s source=MOB mobid=%u offset=0x%08x "
+                    "length=%u result=REJECT",
+                    prepend ? "PREPEND" : "COMMAND",
                     header.ptr.mob.mobid, header.ptr.mob.mobOffset,
                     header.length);
                 irq_flags = SVGA_IRQFLAG_ERROR | SVGA_IRQFLAG_COMMAND_BUFFER;
@@ -5910,13 +5978,28 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
 
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
-                "CB source=MOB mobid=%u offset=0x%08x length=%u result=OK",
+                "CB-SOURCE kind=%s source=MOB mobid=%u offset=0x%08x "
+                "length=%u result=OK",
+                prepend ? "PREPEND" : "COMMAND",
                 header.ptr.mob.mobid, header.ptr.mob.mobOffset,
                 header.length);
         } else if (!vmsvga3d_guest_memory_read(s, header.ptr.pa, commands,
                                                header.length)) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "CB-SOURCE kind=%s source=PA gpa=0x%016" PRIx64
+                " length=%u result=REJECT",
+                prepend ? "PREPEND" : "COMMAND", header.ptr.pa,
+                header.length);
             irq_flags = SVGA_IRQFLAG_ERROR | SVGA_IRQFLAG_COMMAND_BUFFER;
             goto out;
+        } else {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "CB-SOURCE kind=%s source=PA gpa=0x%016" PRIx64
+                " length=%u result=OK",
+                prepend ? "PREPEND" : "COMMAND", header.ptr.pa,
+                header.length);
         }
     }
 
@@ -5959,8 +6042,18 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
 
 out:
     if (status != SVGA_CB_STATUS_NONE) {
-        vmsvga3d_command_buffer_write_status(s, header_gpa, status, processed);
+        vmsvga3d_command_buffer_write_status(
+            s, header_gpa, status, processed, processed);
     }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-COMPLETE kind=%s header=0x%016" PRIx64
+        " context=%u id=0x%016" PRIx64
+        " status=%u processed=%u errorOffset=%u irq=0x%08x",
+        prepend ? "PREPEND" : "COMMAND", header_gpa, context, header.id,
+        (unsigned)status, processed,
+        status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0, irq_flags);
 
     vmsvga3d_command_buffer_raise_irq(s, irq_flags);
 

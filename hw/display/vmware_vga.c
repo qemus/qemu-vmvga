@@ -106,6 +106,7 @@
 #define VMSVGA_DIRTY_BLOCK_PAGES 64
 #define VMSVGA_PSEUDOCOLOR_ENTRIES 256
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
+#define VMSVGA_SCREEN_REBUILD_HOLD_FRAMES 1U
 
 /* #define ANY_FENCE_OFF */
 /* #define EXPCAPS */
@@ -480,6 +481,7 @@ struct vmsvga_state_s {
     uint32_t screen_backing_pitch;
     uint32_t screen_clone_count;
     bool screen_frontend_deferred;
+    uint32_t screen_frontend_hold_frames;
     bool screen_destroyed_reuse_valid;
     uint32_t screen_destroyed_flags;
     uint32_t screen_destroyed_width;
@@ -8890,6 +8892,34 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
      * readback/presentation here so command execution stays independent of the
      * frontend refresh path and multiple writes coalesce into one update. */
     (void)vmsvga3d_screen_target_flush_live(s);
+
+    /*
+     * A direct vGPU9 Screen Object can be torn down while its BAR1 backing is
+     * being rebuilt in place.  Keep servicing FIFO/renderer work, but hold the
+     * frontend for a small, fixed number of display refreshes so an
+     * intermediate backing-store clear is not sampled by VNC.  The counter is
+     * armed by vmsvga_screen_destroy() only for a directly scanned-out Screen
+     * backing.  Preserve a full redraw for the first refresh after the hold.
+     */
+    if (s->screen_frontend_hold_frames != 0) {
+        uint32_t held_damage = s->damage_count;
+
+        s->screen_frontend_hold_frames--;
+        s->damage_count = 0;
+        s->invalidated = true;
+        vmsvga_update_dirty_log(s);
+
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-FRONTEND-HOLD phase=skip remaining=%u "
+                    "damage=%u active=%u size=%ux%u screen=%u\n",
+                    s->screen_frontend_hold_frames, held_damage,
+                    s->active_valid, s->active_width, s->active_height,
+                    s->screen_defined);
+            s->trace_activity_seq++;
+        }
+        goto done;
+    }
 
     /*
      * A Screen transition mirror is seeded from the last valid frontend image,

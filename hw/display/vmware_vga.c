@@ -601,6 +601,16 @@ static inline bool vmsvga_trace_flight_enabled(void)
     return VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_FLIGHT);
 }
 
+static inline bool vmsvga_trace_reg_read_enabled(void)
+{
+    return trace_event_get_state_backends(TRACE_VMWARE_VALUE_READ);
+}
+
+static inline bool vmsvga_trace_reg_write_enabled(void)
+{
+    return trace_event_get_state_backends(TRACE_VMWARE_VALUE_WRITE);
+}
+
 static void vmsvga_trace_gmr2_clear(struct vmsvga_state_s *s);
 
 static inline void vmsvga_trace_flight_reset(struct vmsvga_state_s *s)
@@ -792,7 +802,7 @@ static inline void vmsvga_trace_key_reg_read(struct vmsvga_state_s *s,
     uint32_t word;
     uint64_t bit;
 
-    if (!vmsvga_trace_flight_enabled() || reg >= 128) {
+    if (!vmsvga_trace_reg_read_enabled() || reg >= 128) {
         return;
     }
 
@@ -837,7 +847,7 @@ static inline void vmsvga_trace_key_reg_write(struct vmsvga_state_s *s,
     uint32_t word;
     uint64_t bit;
 
-    if (!vmsvga_trace_flight_enabled() || reg >= 128) {
+    if (!vmsvga_trace_reg_write_enabled() || reg >= 128) {
         return;
     }
 

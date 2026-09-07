@@ -1658,6 +1658,7 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
 {
     DisplaySurface *surface;
     bool screen_base_visible;
+    bool direct_bar1_frontend;
 
     if (screen_id != VMSVGA_SCREEN_V1_ID) {
         VMSVGA_SCREEN_REJECT("destroy reason=screen-id id=%u", screen_id);
@@ -1668,6 +1669,34 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
     screen_base_visible =
         s->screen_base != NULL && surface != NULL &&
         surface_data(surface) == s->screen_base;
+
+    /*
+     * Holding one frontend refresh only needs to know whether vGPU9 is
+     * currently scanning the guest-owned Screen Object backing directly.
+     * Keep this deliberately broader than the exact DESTROY->DEFINE reuse
+     * test below: geometry, format and pitch equality matter for reusing the
+     * logical Screen Object, but not for avoiding one transient BAR1 sample.
+     */
+    direct_bar1_frontend =
+        s->vgpu_generation == VMSVGA_VGPU_9 && s->screen_defined &&
+        s->screen_backing_valid &&
+        s->screen_backing_gmr_id == SVGA_GMR_FRAMEBUFFER &&
+        s->svga_surface_bound && s->active_valid && surface != NULL &&
+        surface_data(surface) ==
+            vmsvga_svga_vram_ptr(s) + (size_t)s->screen_backing_offset;
+
+    if (direct_bar1_frontend) {
+        s->screen_frontend_hold_frames = VMSVGA_SCREEN_REBUILD_HOLD_FRAMES;
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-FRONTEND-HOLD phase=arm frames=%u "
+                    "size=%ux%u backing=%u:0x%08x\n",
+                    s->screen_frontend_hold_frames, s->screen_width,
+                    s->screen_height, s->screen_backing_gmr_id,
+                    s->screen_backing_offset);
+            s->trace_activity_seq++;
+        }
+    }
 
     s->screen_destroyed_reuse_valid =
         s->screen_defined && s->screen_backing_valid &&
@@ -1688,20 +1717,6 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
         s->screen_destroyed_backing_offset = s->screen_backing_offset;
         s->screen_destroyed_backing_pitch = s->screen_backing_pitch;
         s->screen_destroyed_clone_count = s->screen_clone_count;
-
-        if (s->vgpu_generation == VMSVGA_VGPU_9) {
-            s->screen_frontend_hold_frames =
-                VMSVGA_SCREEN_REBUILD_HOLD_FRAMES;
-            if (vmsvga_trace_flight_enabled()) {
-                fprintf(stderr,
-                        "VMVGA-FRONTEND-HOLD phase=arm frames=%u "
-                        "size=%ux%u backing=%u:0x%08x\n",
-                        s->screen_frontend_hold_frames, s->screen_width,
-                        s->screen_height, s->screen_backing_gmr_id,
-                        s->screen_backing_offset);
-                s->trace_activity_seq++;
-            }
-        }
     }
 
     /*

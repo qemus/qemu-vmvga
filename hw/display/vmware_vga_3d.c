@@ -10020,6 +10020,10 @@ static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
         return 0;
     }
 
+    if (index == SVGA3D_DEVCAP_DXFMT_BUFFER) {
+        return 1;
+    }
+
     value = vmsvga3d_devcap[index];
 
     if (index == SVGA3D_DEVCAP_SM5) {

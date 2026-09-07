@@ -5806,10 +5806,9 @@ static void vmsvga3d_command_buffer_write_status(
 {
     uint32_t value;
 
-    value = cpu_to_le32((uint32_t)status);
-    (void)vmsvga3d_guest_memory_write(
-        s, header_gpa + offsetof(SVGACBHeader, status), &value, sizeof(value));
-
+    /* Publish result metadata before status.  The guest may poll status as
+     * the completion indication and must not observe stale offset data after
+     * it sees a terminal status value. */
     if (status == SVGA_CB_STATUS_COMMAND_ERROR) {
         value = cpu_to_le32(error_offset);
         (void)vmsvga3d_guest_memory_write(
@@ -5823,6 +5822,10 @@ static void vmsvga3d_command_buffer_write_status(
     value = cpu_to_le32(processed_offset);
     (void)vmsvga3d_guest_memory_write(
         s, header_gpa + offsetof(SVGACBHeader, offset), &value, sizeof(value));
+
+    value = cpu_to_le32((uint32_t)status);
+    (void)vmsvga3d_guest_memory_write(
+        s, header_gpa + offsetof(SVGACBHeader, status), &value, sizeof(value));
 }
 
 static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
@@ -5916,6 +5919,7 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
         header.ptr.pa = le64_to_cpu(raw.ptr.pa);
     }
     header.offset = le32_to_cpu(raw.offset);
+    processed = header.offset;
     header.dxContext = le32_to_cpu(raw.dxContext);
     for (i = 0; i < ARRAY_SIZE(raw.mustBeZero); i++) {
         if (le32_to_cpu(raw.mustBeZero[i]) != 0) {
@@ -6002,8 +6006,6 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
                 header.length);
         }
     }
-
-    processed = header.offset;
 
     if (context == SVGA_CB_CONTEXT_DEVICE) {
         uint32_t local_offset = 0;

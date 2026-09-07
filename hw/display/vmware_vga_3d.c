@@ -1148,6 +1148,125 @@ static bool vmsvga3d_gart_unmap_live(struct vmsvga_state_s *s,
     return true;
 }
 
+static bool vmsvga3d_gbo_page_gpa(const VMSVGA3DGBO *gbo,
+                                    uint32_t page_index, uint64_t *gpa)
+{
+    uint32_t logical_page = 0;
+    uint32_t run_index;
+
+    if (gbo == NULL || gpa == NULL || page_index >= gbo->page_count) {
+        return false;
+    }
+
+    for (run_index = 0; run_index < gbo->run_count; run_index++) {
+        const VMSVGA3DGBORun *run = &gbo->runs[run_index];
+
+        if (page_index < logical_page + run->pages) {
+            *gpa = run->gpa +
+                   (uint64_t)(page_index - logical_page) *
+                       VMSVGA3D_GBO_PAGE_SIZE;
+            return true;
+        }
+        logical_page += run->pages;
+    }
+
+    return false;
+}
+
+static bool vmsvga3d_mob_redefine(struct vmsvga_state_s *s,
+                                  SVGAMobId mobid, SVGAMobFormat format,
+                                  PPN64 base, uint32_t size)
+{
+    struct vmsvga3d_state_s *state = s != NULL ? s->svga3d : NULL;
+    SVGAOTableMobEntry entry = { 0 };
+    VMSVGA3DGBO replacement;
+    VMSVGA3DGBO old;
+    VMSVGA3DMob *mob;
+    uint32_t refreshed = 0;
+    uint32_t invalidated = 0;
+    uint32_t page;
+
+    if (state == NULL || mobid == SVGA3D_INVALID_ID) {
+        return false;
+    }
+
+    mob = vmsvga3d_mob_get(s, mobid);
+    if (mob == NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "MOB redefine mobid=%u result=REJECT reason=missing-mob",
+            mobid);
+        return false;
+    }
+
+    memset(&replacement, 0, sizeof(replacement));
+    if (!vmsvga3d_gbo_create(s, format, base, size, &replacement)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "MOB redefine mobid=%u format=%u base=0x%016" PRIx64
+            " size=%u result=REJECT reason=gbo-create",
+            mobid, (unsigned)format, (uint64_t)base, size);
+        return false;
+    }
+
+    entry.ptDepth = cpu_to_le32(format);
+    entry.sizeInBytes = cpu_to_le32(size);
+    entry.base = cpu_to_le64(base);
+    if (!vmsvga3d_otable_write(s, SVGA_OTABLE_MOB, mobid,
+                               sizeof(SVGAOTableMobEntry), &entry,
+                               sizeof(entry))) {
+        vmsvga3d_gbo_destroy(&replacement);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "MOB redefine mobid=%u result=REJECT reason=otable-write",
+            mobid);
+        return false;
+    }
+
+    old = mob->gbo;
+    mob->gbo = replacement;
+
+    /*
+     * MAP_MOB_INTO_GART stores a snapshot of each translated MOB page in the
+     * host-side GART shadow.  A redefine changes that translation without a
+     * new MAP command, so refresh every shadow entry which still names this
+     * MOB.  Entries that referred to pages beyond a newly smaller MOB become
+     * unmapped instead of retaining stale guest physical addresses.
+     */
+    if (state->gart_enabled && state->gart_pages != NULL) {
+        for (page = 0; page < state->gart_page_count; page++) {
+            VMSVGA3DGARTPage *gart_page = &state->gart_pages[page];
+            uint64_t gpa;
+
+            if (gart_page->mobid != mobid) {
+                continue;
+            }
+
+            if (vmsvga3d_gbo_page_gpa(&mob->gbo, gart_page->mob_page,
+                                       &gpa)) {
+                gart_page->gpa = gpa;
+                refreshed++;
+            } else {
+                gart_page->gpa = 0;
+                gart_page->mobid = SVGA3D_INVALID_ID;
+                gart_page->mob_page = 0;
+                invalidated++;
+            }
+        }
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "MOB redefine mobid=%u old-format=%u old-base=0x%016" PRIx64
+        " old-size=%u new-format=%u new-base=0x%016" PRIx64
+        " new-size=%u gart-refreshed=%u gart-invalidated=%u result=OK",
+        mobid, (unsigned)old.format, (uint64_t)old.base, old.size,
+        (unsigned)format, (uint64_t)base, size, refreshed, invalidated);
+
+    vmsvga3d_gbo_destroy(&old);
+    return true;
+}
+
 static struct vmsvga3d_state_s *
 vmsvga3d_state_ensure(struct vmsvga_state_s *s)
 {
@@ -8386,6 +8505,13 @@ static bool vmsvga3d_handle_define_gb_mob(struct vmsvga_state_s *s,
         (void)vmsvga3d_mob_define(
             s, ldl_le_p(body), (SVGAMobFormat)ldl_le_p(body + 4),
             ldq_le_p(body + 8), ldl_le_p(body + 16));
+    } else if (cmd == SVGA_3D_CMD_REDEFINE_GB_MOB64 &&
+               size >= VMSVGA3D_WIRE_DEFINE_GB_MOB64_SIZE) {
+        const uint8_t *body = payload;
+
+        (void)vmsvga3d_mob_redefine(
+            s, ldl_le_p(body), (SVGAMobFormat)ldl_le_p(body + 4),
+            ldq_le_p(body + 8), ldl_le_p(body + 16));
     }
 
     g_free(payload);
@@ -8833,7 +8959,7 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
                      vmsvga3d_handle_gb_mob_fence),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, vmsvga3d_handle_define_gb_surface),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_MOB64, vmsvga3d_handle_define_gb_mob),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_REDEFINE_GB_MOB64),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_REDEFINE_GB_MOB64, vmsvga3d_handle_define_gb_mob),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_NOP_ERROR),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_SET_VERTEX_STREAMS,
                      vmsvga3d_handle_set_vertex_streams),

@@ -199,6 +199,12 @@ struct vmsvga3d_dxvk_surface_s {
     void *d3d11_present_srv;
     uint32_t d3d11_present_srv_subresource;
     uint32_t d3d11_present_srv_format;
+    void *d3d11_present_copy;
+    void *d3d11_present_copy_srv;
+    uint32_t d3d11_present_copy_width;
+    uint32_t d3d11_present_copy_height;
+    uint32_t d3d11_present_copy_resource_format;
+    uint32_t d3d11_present_copy_view_format;
     void *d3d11_present_rtv;
     uint32_t d3d11_present_rtv_subresource;
     uint32_t d3d11_present_rtv_format;
@@ -476,6 +482,8 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3D11_BIND_INDEX_BUFFER 0x02u
 #define VMSVGA3D_DXVK_D3D11_BIND_CONSTANT_BUFFER 0x04u
 #define VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT 0x10u
+#define VMSVGA3D_DXVK_D3D11_BIND_SHADER_RESOURCE 0x08u
+#define VMSVGA3D_DXVK_D3D11_BIND_RENDER_TARGET 0x20u
 #define VMSVGA3D_DXVK_D3D11_CPU_ACCESS_WRITE 0x00010000u
 #define VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ 0x00020000u
 #define VMSVGA3D_DXVK_D3D11_MAP_READ 1u
@@ -2824,6 +2832,16 @@ static void vmsvga3d_dxvk_d3d11_present_views_destroy(
                               VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         surface->d3d11_present_srv = NULL;
     }
+    if (surface->d3d11_present_copy_srv != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_present_copy_srv,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        surface->d3d11_present_copy_srv = NULL;
+    }
+    if (surface->d3d11_present_copy != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_present_copy,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        surface->d3d11_present_copy = NULL;
+    }
     if (surface->d3d11_present_rtv != NULL) {
         vmsvga3d_dxvk_release(surface->d3d11_present_rtv,
                               VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -2831,6 +2849,10 @@ static void vmsvga3d_dxvk_d3d11_present_views_destroy(
     }
     surface->d3d11_present_srv_subresource = 0;
     surface->d3d11_present_srv_format = 0;
+    surface->d3d11_present_copy_width = 0;
+    surface->d3d11_present_copy_height = 0;
+    surface->d3d11_present_copy_resource_format = 0;
+    surface->d3d11_present_copy_view_format = 0;
     surface->d3d11_present_rtv_subresource = 0;
     surface->d3d11_present_rtv_format = 0;
 }
@@ -5936,6 +5958,131 @@ fail:
     return false;
 }
 
+static bool vmsvga3d_dxvk_d3d11_present_copy_srv_get(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    uint32_t subresource, uint32_t view_format, void **view)
+{
+    VMSVGA3DDxvkD3D11CreateTexture2D create_texture2d = NULL;
+    VMSVGA3DDxvkD3D11CreateShaderResourceView create_srv = NULL;
+    VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
+    VMSVGA3DDxvkD3D11Texture2DDesc desc = { 0 };
+    VMSVGA3DDxvkD3D11SRVDesc srv_desc = { 0 };
+    const VMSVGA3DD3D10CreateDesc *source_desc;
+    uint64_t max_subresources;
+    uint32_t mip_level;
+    uint32_t width;
+    uint32_t height;
+    void *created = NULL;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+        dxvk->d3d11_context == NULL || view == NULL || surface == NULL ||
+        !surface->d3d11_resident || surface->d3d11_resource == NULL ||
+        !surface->d3d11_desc.valid) {
+        return false;
+    }
+
+    source_desc = &surface->d3d11_desc;
+    max_subresources =
+        (uint64_t)source_desc->mip_levels * source_desc->array_size;
+    if (source_desc->resource_dimension !=
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
+        source_desc->mip_levels == 0 || source_desc->array_size == 0 ||
+        source_desc->sample_count != 1 || subresource >= max_subresources ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE2D,
+            &create_texture2d, sizeof(create_texture2d)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_SHADER_RESOURCE_VIEW,
+            &create_srv, sizeof(create_srv)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION,
+            &copy_region, sizeof(copy_region))) {
+        return false;
+    }
+
+    mip_level = subresource % source_desc->mip_levels;
+    width = MAX(1u, source_desc->width >> mip_level);
+    height = MAX(1u, source_desc->height >> mip_level);
+
+    if (surface->d3d11_present_copy == NULL ||
+        surface->d3d11_present_copy_width != width ||
+        surface->d3d11_present_copy_height != height ||
+        surface->d3d11_present_copy_resource_format != source_desc->format) {
+        if (surface->d3d11_present_copy_srv != NULL) {
+            vmsvga3d_dxvk_release(surface->d3d11_present_copy_srv,
+                                  VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+            surface->d3d11_present_copy_srv = NULL;
+        }
+        if (surface->d3d11_present_copy != NULL) {
+            vmsvga3d_dxvk_release(surface->d3d11_present_copy,
+                                  VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+            surface->d3d11_present_copy = NULL;
+        }
+
+        desc.width = width;
+        desc.height = height;
+        desc.mip_levels = 1;
+        desc.array_size = 1;
+        desc.format = source_desc->format;
+        desc.sample_desc.count = 1;
+        desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_DEFAULT;
+        desc.bind_flags = VMSVGA3D_DXVK_D3D11_BIND_SHADER_RESOURCE;
+
+        result = create_texture2d(dxvk->d3d11_device, &desc, NULL,
+                                  &surface->d3d11_present_copy);
+        if (!vmsvga3d_dxvk_succeeded(result) ||
+            surface->d3d11_present_copy == NULL) {
+            surface->d3d11_present_copy = NULL;
+            return false;
+        }
+
+        surface->d3d11_present_copy_width = width;
+        surface->d3d11_present_copy_height = height;
+        surface->d3d11_present_copy_resource_format = source_desc->format;
+        surface->d3d11_present_copy_view_format = 0;
+    }
+
+    if (surface->d3d11_present_copy_srv == NULL ||
+        surface->d3d11_present_copy_view_format != view_format) {
+        if (surface->d3d11_present_copy_srv != NULL) {
+            vmsvga3d_dxvk_release(surface->d3d11_present_copy_srv,
+                                  VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+            surface->d3d11_present_copy_srv = NULL;
+        }
+
+        srv_desc.format = view_format;
+        srv_desc.view_dimension =
+            VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2D;
+        srv_desc.data[0] = 0;
+        srv_desc.data[1] = 1;
+        result = create_srv(dxvk->d3d11_device,
+                            surface->d3d11_present_copy, &srv_desc, &created);
+        if (!vmsvga3d_dxvk_succeeded(result) || created == NULL) {
+            return false;
+        }
+
+        surface->d3d11_present_copy_srv = created;
+        surface->d3d11_present_copy_view_format = view_format;
+    }
+
+    /*
+     * PRESENTBLT may legally use a render-target-only surface as its source.
+     * Such a resource cannot have an SRV created directly.  Keep the original
+     * guest resource flags intact and copy the selected subresource into this
+     * cached SRV-capable texture entirely on the GPU before running the shader
+     * blitter.
+     */
+    copy_region(dxvk->d3d11_context, surface->d3d11_present_copy, 0,
+                0, 0, 0, surface->d3d11_resource, subresource, NULL);
+
+    *view = surface->d3d11_present_copy_srv;
+    return true;
+}
+
 static bool vmsvga3d_dxvk_d3d11_present_srv_get(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     uint32_t subresource, uint32_t format, void **view)
@@ -5947,6 +6094,12 @@ static bool vmsvga3d_dxvk_d3d11_present_srv_get(
 
     if (view == NULL || surface == NULL || surface->d3d11_resource == NULL) {
         return false;
+    }
+
+    if ((surface->d3d11_desc.bind_flags &
+         VMSVGA3D_DXVK_D3D11_BIND_SHADER_RESOURCE) == 0) {
+        return vmsvga3d_dxvk_d3d11_present_copy_srv_get(
+            dxvk, surface, subresource, format, view);
     }
 
     if (surface->d3d11_present_srv != NULL &&

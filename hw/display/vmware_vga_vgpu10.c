@@ -7981,6 +7981,26 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                     "content-valid=0\n",
                     sid, old_sid);
         }
+    } else if (old_sid == SVGA3D_INVALID_ID &&
+               s->screen_defined && s->svga_surface_bound &&
+               (s->vgpu_generation == VMSVGA_VGPU_10 ||
+                s->vgpu_generation == VMSVGA_VGPU_11)) {
+        /*
+         * A late ScreenTarget rebind can expose one transient renderer image
+         * while Windows tears down and recreates the primary surface.  vGPU9
+         * already hides the analogous Screen Object rebuild by holding one
+         * frontend refresh; use the same bounded hold here instead of adding a
+         * second transition heuristic.
+         */
+        s->screen_frontend_hold_frames = VMSVGA_SCREEN_REBUILD_HOLD_FRAMES;
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-FRONTEND-HOLD phase=arm-target-rebind frames=%u "
+                    "sid=%u old-sid=%u generation=%u\n",
+                    s->screen_frontend_hold_frames, sid, old_sid,
+                    s->vgpu_generation);
+            s->trace_activity_seq++;
+        }
     }
 
     s->svga3d->active_screen_target_sid = sid;

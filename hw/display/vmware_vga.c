@@ -33,6 +33,7 @@
 #include "qapi/error.h"
 #include "qemu/main-loop.h"
 #include "exec/target_page.h"
+#include "system/ram_addr.h"
 #include "trace.h"
 #include "include/vmware_vga_compat.h"
 #include "include/vmware_vga_gmr.h"
@@ -1693,6 +1694,7 @@ static inline void vmsvga_mark_vram_dirty_rect(
     uint64_t width_bytes;
     uint64_t tail;
     uint64_t span;
+    uint8_t dirty_log_mask;
 
     if (pitch == 0 || bypp == 0 || w == 0 || h == 0) {
         return;
@@ -1716,7 +1718,17 @@ static inline void vmsvga_mark_vram_dirty_rect(
         return;
     }
 
-    vmsvga_mark_vram_dirty_range(s, start, span);
+    /*
+     * Rectangle writes are produced by the device itself and every caller
+     * queues matching frontend damage.  Keep the range dirty for migration
+     * and any other active clients, but do not feed these known writes back
+     * into the page-granular VGA fallback scanner.
+     */
+    dirty_log_mask = memory_region_get_dirty_log_mask(&s->vga.vram);
+    dirty_log_mask &= (uint8_t)~(1U << DIRTY_MEMORY_VGA);
+    cpu_physical_memory_set_dirty_range(
+        memory_region_get_ram_addr(&s->vga.vram) + (ram_addr_t)start,
+        (ram_addr_t)span, dirty_log_mask);
 }
 
 static inline void vmsvga_mark_active_rect_dirty(
@@ -4314,11 +4326,35 @@ static inline bool vmsvga_cursor_render_source(struct vmsvga_state_s *s,
     return true;
 }
 
+static inline bool vmsvga_cursor_source_matches(
+    const struct vmsvga_cursor_source_s *src,
+    const struct vmsvga_cursor_definition_s *c, bool alpha,
+    size_t and_size, size_t xor_size)
+{
+    if (src == NULL || src->alpha != alpha || src->width != c->width ||
+        src->height != c->height || src->hot_x != c->hot_x ||
+        src->hot_y != c->hot_y ||
+        src->and_mask_bpp != c->and_mask_bpp ||
+        src->xor_mask_bpp != c->xor_mask_bpp ||
+        src->and_size != and_size || src->xor_size != xor_size) {
+        return false;
+    }
+
+    if (and_size != 0 && memcmp(src->and_data, c->and_mask, and_size) != 0) {
+        return false;
+    }
+    if (xor_size != 0 && memcmp(src->xor_data, c->xor_mask, xor_size) != 0) {
+        return false;
+    }
+
+    return true;
+}
+
 static inline bool vmsvga_cursor_source_set(
-    struct vmsvga_state_s *s, const struct vmsvga_cursor_definition_s *c,
-    bool alpha)
+    struct vmsvga_state_s *s, struct vmsvga_cursor_definition_s *c, bool alpha)
 {
     struct vmsvga_cursor_source_s *src;
+    struct vmsvga_cursor_source_s *old;
     size_t and_size = (size_t)c->and_words * sizeof(uint32_t);
     size_t xor_size = (size_t)c->xor_words * sizeof(uint32_t);
 
@@ -4327,27 +4363,17 @@ static inline bool vmsvga_cursor_source_set(
         return false;
     }
 
+    old = s->cursor_source[c->id];
+    if (vmsvga_cursor_source_matches(old, c, alpha, and_size, xor_size)) {
+        if (vmsvga_cursor_cache_get(s, c->id) != NULL) {
+            return true;
+        }
+        return vmsvga_cursor_render_source(s, c->id);
+    }
+
     src = g_try_new0(struct vmsvga_cursor_source_s, 1);
     if (src == NULL) {
         return false;
-    }
-
-    if (and_size != 0) {
-        src->and_data = g_try_malloc(and_size);
-        if (src->and_data == NULL) {
-            vmsvga_cursor_source_free(src);
-            return false;
-        }
-        memcpy(src->and_data, c->and_mask, and_size);
-    }
-
-    if (xor_size != 0) {
-        src->xor_data = g_try_malloc(xor_size);
-        if (src->xor_data == NULL) {
-            vmsvga_cursor_source_free(src);
-            return false;
-        }
-        memcpy(src->xor_data, c->xor_mask, xor_size);
     }
 
     src->alpha = alpha;
@@ -4359,8 +4385,12 @@ static inline bool vmsvga_cursor_source_set(
     src->xor_mask_bpp = c->xor_mask_bpp;
     src->and_size = and_size;
     src->xor_size = xor_size;
+    src->and_data = c->and_mask;
+    src->xor_data = c->xor_mask;
+    c->and_mask = NULL;
+    c->xor_mask = NULL;
 
-    vmsvga_cursor_source_free(s->cursor_source[c->id]);
+    vmsvga_cursor_source_free(old);
     s->cursor_source[c->id] = src;
     vmsvga_cursor_cache_remove(s, c->id);
 

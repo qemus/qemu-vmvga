@@ -1966,6 +1966,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
     uint32_t screen_stride;
     uint8_t *mirror_base = NULL;
     uint32_t mirror_stride = 0;
+    const uint8_t *framebuffer_source = NULL;
+    size_t framebuffer_row_bytes = 0;
     bool trace_blit;
     uint32_t trace_before_hash;
     uint32_t trace_source_hash;
@@ -2052,6 +2054,61 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         *preserved_handoff_present = preserve_handoff_present;
     }
 
+    /*
+     * The framebuffer GMR is contiguous host memory.  Validate the complete
+     * source rectangle once and read it directly from VRAM, avoiding the
+     * per-row GMR read into blit_scratch.  Keep the generic path for ranges
+     * that could overlap a different VRAM-backed destination so the scratch
+     * buffer continues to provide the original overlap-safe behavior.
+     */
+    if (s->gmrfb_gmr_id == SVGA_GMR_FRAMEBUFFER &&
+        (uint64_t)source_x <= INT32_MAX &&
+        (uint64_t)source_y <= INT32_MAX &&
+        (uint64_t)source_y + height - 1 <= INT32_MAX) {
+        uint64_t source_x_bytes = (uint64_t)source_x * bypp;
+        uint64_t row_bytes = (uint64_t)width * bypp;
+
+        if (source_x_bytes <= s->gmrfb_bytes_per_line &&
+            row_bytes <= s->gmrfb_bytes_per_line - source_x_bytes &&
+            row_bytes <= sizeof(s->blit_scratch)) {
+            uint64_t source_first =
+                (uint64_t)s->gmrfb_offset +
+                (uint64_t)source_y * s->gmrfb_bytes_per_line +
+                source_x_bytes;
+            uint64_t source_span =
+                (uint64_t)(height - 1) * s->gmrfb_bytes_per_line + row_bytes;
+
+            if (source_first <= UINT32_MAX && source_span <= SIZE_MAX &&
+                source_span <= UINT32_MAX - source_first &&
+                vmsvga_gmr_validate_range(
+                    s, SVGA_GMR_FRAMEBUFFER, (uint32_t)source_first,
+                    (size_t)source_span)) {
+                bool overlaps_backing = false;
+
+                if (s->screen_backing_valid && !self_present) {
+                    uint64_t dest_first =
+                        (uint64_t)s->screen_backing_offset +
+                        (uint64_t)top * screen_stride +
+                        (uint64_t)left * 4;
+                    uint64_t dest_span =
+                        (uint64_t)(height - 1) * screen_stride +
+                        (uint64_t)width * 4;
+                    uint64_t source_end = source_first + source_span;
+                    uint64_t dest_end = dest_first + dest_span;
+
+                    overlaps_backing =
+                        source_first < dest_end && dest_first < source_end;
+                }
+
+                if (!overlaps_backing) {
+                    framebuffer_source =
+                        vmsvga_svga_vram_ptr(s) + (size_t)source_first;
+                    framebuffer_row_bytes = (size_t)row_bytes;
+                }
+            }
+        }
+    }
+
     trace_blit = vmsvga_trace_flight_enabled() &&
                  (s->trace_now.gmrfb_to_screen < 16 ||
                   ((s->trace_now.gmrfb_to_screen + 1) & 63) == 0);
@@ -2065,7 +2122,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
     }
 
     for (row = 0; row < height; row++) {
-        uint32_t gmr_offset;
+        const uint8_t *src;
         size_t row_bytes;
         uint8_t *dst = screen_base +
                        (uint64_t)(top + row) * screen_stride +
@@ -2076,29 +2133,41 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
                                     (uint64_t)left * 4
                 : NULL;
 
-        if (!vmsvga_screen_gmrfb_row_offset(s, (int32_t)source_x,
-                                            (int32_t)(source_y + row), width,
-                                            bypp, &gmr_offset, &row_bytes)) {
-            VMSVGA_SCREEN_REJECT(
-                "blit-gmrfb-to-screen reason=row-range row=%u src=%" PRId64 ",%"
-                PRId64 " width=%u", row, source_x, source_y + row, width);
-            return false;
-        }
+        if (framebuffer_source != NULL) {
+            src = framebuffer_source +
+                  (uint64_t)row * s->gmrfb_bytes_per_line;
+            row_bytes = framebuffer_row_bytes;
+        } else {
+            uint32_t gmr_offset;
 
-        if (row_bytes > sizeof(s->blit_scratch)) {
-            VMSVGA_SCREEN_REJECT(
-                "blit-gmrfb-to-screen reason=row-too-wide row=%u bytes=%zu limit=%zu",
-                row, row_bytes, sizeof(s->blit_scratch));
-            return false;
-        }
+            if (!vmsvga_screen_gmrfb_row_offset(
+                    s, (int32_t)source_x, (int32_t)(source_y + row), width,
+                    bypp, &gmr_offset, &row_bytes)) {
+                VMSVGA_SCREEN_REJECT(
+                    "blit-gmrfb-to-screen reason=row-range row=%u src=%" PRId64
+                    ",%" PRId64 " width=%u",
+                    row, source_x, source_y + row, width);
+                return false;
+            }
 
-        if (!vmsvga_gmr_read(s, s->gmrfb_gmr_id, gmr_offset,
-                             s->blit_scratch, row_bytes)) {
-            VMSVGA_SCREEN_REJECT(
-                "blit-gmrfb-to-screen reason=gmr-read row=%u gmr=%u offset=0x%08x "
-                "bytes=%zu",
-                row, s->gmrfb_gmr_id, gmr_offset, row_bytes);
-            return false;
+            if (row_bytes > sizeof(s->blit_scratch)) {
+                VMSVGA_SCREEN_REJECT(
+                    "blit-gmrfb-to-screen reason=row-too-wide row=%u bytes=%zu "
+                    "limit=%zu",
+                    row, row_bytes, sizeof(s->blit_scratch));
+                return false;
+            }
+
+            if (!vmsvga_gmr_read(s, s->gmrfb_gmr_id, gmr_offset,
+                                 s->blit_scratch, row_bytes)) {
+                VMSVGA_SCREEN_REJECT(
+                    "blit-gmrfb-to-screen reason=gmr-read row=%u gmr=%u "
+                    "offset=0x%08x bytes=%zu",
+                    row, s->gmrfb_gmr_id, gmr_offset, row_bytes);
+                return false;
+            }
+
+            src = s->blit_scratch;
         }
 
         if (trace_blit) {
@@ -2110,9 +2179,9 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
             trace_before_hash = vmsvga_gmr_diag_hash_extend(
                 trace_before_hash, trace_dst, (size_t)width * 4);
             trace_source_hash = vmsvga_gmr_diag_hash_extend(
-                trace_source_hash, s->blit_scratch, row_bytes);
+                trace_source_hash, src, row_bytes);
             for (i = 0; i < row_bytes; i++) {
-                if (s->blit_scratch[i] != 0) {
+                if (src[i] != 0) {
                     trace_source_nonzero_rows++;
                     break;
                 }
@@ -2120,10 +2189,10 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
 
             if (self_present) {
                 if (mirror_dst != NULL && !preserve_handoff_present) {
-                    memcpy(mirror_dst, s->blit_scratch, (size_t)width * 4);
+                    memcpy(mirror_dst, src, (size_t)width * 4);
                 }
             } else {
-                vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
+                vmsvga_screen_gmrfb_to_bgrx(dst, src, width, bpp, depth);
                 if (mirror_dst != NULL && !preserve_handoff_present) {
                     memcpy(mirror_dst, dst, (size_t)width * 4);
                 }
@@ -2137,10 +2206,10 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         } else {
             if (self_present) {
                 if (mirror_dst != NULL && !preserve_handoff_present) {
-                    memcpy(mirror_dst, s->blit_scratch, (size_t)width * 4);
+                    memcpy(mirror_dst, src, (size_t)width * 4);
                 }
             } else {
-                vmsvga_screen_gmrfb_to_bgrx(dst, s->blit_scratch, width, bpp, depth);
+                vmsvga_screen_gmrfb_to_bgrx(dst, src, width, bpp, depth);
                 if (mirror_dst != NULL && !preserve_handoff_present) {
                     memcpy(mirror_dst, dst, (size_t)width * 4);
                 }

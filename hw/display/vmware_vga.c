@@ -6014,7 +6014,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
                 SizeOfSVGAFifoCmdUpdate -= 1;
                 VMVGA_TRACE_LOCAL(VMVGA_TRACE_DRAW,
                                    "UPDATE x=%u y=%u w=%u h=%u", x, y, w, h);
-                vmsvga_update_rect(s, x, y, w, h);
+                if (!vmsvga_screen_update_from_legacy_gfb(s, x, y, w, h)) {
+                    vmsvga_update_rect(s, x, y, w, h);
+                }
             }
             VPRINT("SVGA_CMD_UPDATE command %u in SVGA command FIFO\n", cmd);
             break;
@@ -6043,7 +6045,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
                 VMVGA_TRACE_LOCAL(VMVGA_TRACE_DRAW,
                                    "UPDATE_VERBOSE x=%u y=%u w=%u h=%u reason=%u",
                                    x, y, w, h, reason);
-                vmsvga_update_rect(s, x, y, w, h);
+                if (!vmsvga_screen_update_from_legacy_gfb(s, x, y, w, h)) {
+                    vmsvga_update_rect(s, x, y, w, h);
+                }
             }
             VPRINT("SVGA_CMD_UPDATE_VERBOSE command %u in SVGA command FIFO\n", cmd);
             break;

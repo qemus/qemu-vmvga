@@ -636,8 +636,9 @@ static void vmsvga_gmr_reset(struct vmsvga_state_s *s)
  *
  * Cubey currently implements one screen (ID 0). With the original
  * SVGA_FIFO_CAP_SCREEN_OBJECT capability the backingStore fields are optional.
- * Parse and validate them, but keep the Screen base layer host-owned so guest
- * memory is accessed only by explicit FIFO DMA commands.
+ * Preserve the existing direct-backed compatibility path when a supplied
+ * backingStore satisfies our 32-bpp BAR1 requirements, but fall back to the
+ * host-owned v1 base layer when an optional backingStore cannot be used.
  */
 
 #define VMSVGA_SCREEN_V1_ID 0u
@@ -1328,11 +1329,30 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     if (backing_present &&
         !vmsvga_screen_backing_validate(s, width, height, backing_gmr_id,
                                         backing_offset, backing_pitch)) {
-        VMSVGA_SCREEN_REJECT(
-            "define reason=backing id=%u gmr=%u offset=0x%08x pitch=%u "
-            "size=%ux%u",
-            id, backing_gmr_id, backing_offset, backing_pitch, width, height);
-        return false;
+        if (s->fc & SVGA_FIFO_CAP_SCREEN_OBJECT_2) {
+            VMSVGA_SCREEN_REJECT(
+                "define reason=backing id=%u gmr=%u offset=0x%08x pitch=%u "
+                "size=%ux%u",
+                id, backing_gmr_id, backing_offset, backing_pitch, width,
+                height);
+            return false;
+        }
+
+        /*
+         * SCREEN_OBJECT v1 makes backingStore optional.  Some older drivers
+         * still fill these fields with their current GFB layout (for example
+         * a 16-bpp pitch), which is not a valid 32-bpp Screen backingStore.
+         * Keep the modern direct-backed path for valid tuples, but gracefully
+         * ignore an unusable optional tuple and use the host-owned v1 base.
+         */
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-BACKING-FALLBACK id=%u gmr=%u "
+                    "offset=0x%08x pitch=%u size=%ux%u mode=v1-unbacked\n",
+                    id, backing_gmr_id, backing_offset, backing_pitch, width,
+                    height);
+        }
+        backing_present = false;
     }
 
     screen_stride = backing_present ? backing_pitch : (uint32_t)stride;
@@ -1663,6 +1683,83 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
                                                  SVGA_GMR_NULL,
                        s->screen_backing_valid ? s->screen_backing_offset : 0,
                        clone_count);
+
+    return true;
+}
+
+static bool vmsvga_screen_update_from_legacy_gfb(
+    struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t width,
+    uint32_t height)
+{
+    uint8_t *screen_base;
+    size_t screen_size;
+    uint32_t screen_stride;
+    uint32_t copy_width;
+    uint32_t copy_height;
+    uint32_t row;
+    uint64_t right;
+    uint64_t bottom;
+    size_t row_bytes;
+    const uint8_t *gfb;
+
+    /*
+     * A backed Screen Object is already visible through its existing direct
+     * path.  Legacy UPDATE only needs an explicit copy for the host-owned v1
+     * base layer selected by the optional-backing compatibility fallback.
+     */
+    if (!s->screen_defined || s->screen_backing_valid || width == 0 ||
+        height == 0 || x >= s->screen_width || y >= s->screen_height) {
+        return false;
+    }
+
+    if (!vmsvga_screen_base_layer_storage(s, &screen_base, &screen_size,
+                                          &screen_stride) ||
+        screen_stride != (uint64_t)s->screen_width * 4) {
+        VMSVGA_SCREEN_REJECT(
+            "update reason=v1-storage rect=%u,%u %ux%u screen=%ux%u",
+            x, y, width, height, s->screen_width, s->screen_height);
+        return true;
+    }
+    (void)screen_size;
+
+    right = MIN((uint64_t)x + width, (uint64_t)s->screen_width);
+    bottom = MIN((uint64_t)y + height, (uint64_t)s->screen_height);
+    copy_width = (uint32_t)(right - x);
+    copy_height = (uint32_t)(bottom - y);
+    row_bytes = (size_t)copy_width * 4;
+
+    /*
+     * SVGA_CMD_UPDATE always reads from the legacy GFB, never the GMRFB.
+     * Cubey's legacy GFB is 32 bpp while Screen Objects are active, so the
+     * v1 base-layer blit is a straight BAR1-to-host copy.
+     */
+    if (!vmsvga_gmr_validate_range(
+            s, SVGA_GMR_FRAMEBUFFER,
+            (uint32_t)((uint64_t)y * screen_stride + (uint64_t)x * 4),
+            (size_t)((uint64_t)(copy_height - 1) * screen_stride +
+                     row_bytes))) {
+        VMSVGA_SCREEN_REJECT(
+            "update reason=gfb-range rect=%u,%u %ux%u stride=%u",
+            x, y, copy_width, copy_height, screen_stride);
+        return true;
+    }
+
+    gfb = vmsvga_svga_vram_ptr(s);
+    for (row = 0; row < copy_height; row++) {
+        memcpy(screen_base + (size_t)(y + row) * screen_stride +
+                   (size_t)x * 4,
+               gfb + (size_t)(y + row) * screen_stride + (size_t)x * 4,
+               row_bytes);
+    }
+
+    vmsvga_damage_add(s, x, y, copy_width, copy_height);
+
+    if (vmsvga_trace_flight_enabled() && s->trace_now.fifo_updates <= 16) {
+        fprintf(stderr,
+                "VMVGA-SCREEN-UPDATE mode=v1-unbacked source=gfb "
+                "x=%u y=%u w=%u h=%u stride=%u\n",
+                x, y, copy_width, copy_height, screen_stride);
+    }
 
     return true;
 }

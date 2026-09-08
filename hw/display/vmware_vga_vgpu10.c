@@ -9798,6 +9798,33 @@ static void vmsvga3d_d3d10_process_pending_queries(
     }
 }
 
+static bool vmsvga3d_d3d10_move_query_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdDXMoveQuery *command)
+{
+    if (s == NULL || command == NULL || s->svga3d == NULL ||
+        !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
+        vmsvga3d_dx_context(s, cid) == NULL) {
+        return false;
+    }
+
+    /*
+     * VirtualBox treats DX_MOVE_QUERY as a context-level backend notification:
+     * its command wrapper deliberately ignores queryId/mobid/mobOffset and the
+     * backend callback receives only the DX context.  Our query backend likewise
+     * keeps no separate cached guest result: END_QUERY either writes the result
+     * immediately or leaves it on the pending-query pump, using the destination
+     * already established by BIND_QUERY + SET_QUERY_OFFSET.  Service pending
+     * completions here and otherwise accept the notification.
+     */
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-MOVE-QUERY cid=%u query=%u mobid=%u offset=%u action=PUMP",
+        cid, command->queryId, command->mobid, command->mobOffset);
+    vmsvga3d_d3d10_process_pending_queries(s);
+    return true;
+}
+
 static bool vmsvga3d_d3d10_query_begin_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXBeginQuery *command)
@@ -11628,6 +11655,18 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
            * the renderer task pump, so explicit readback remains a validated NOP. */
           return vmsvga3d_dx_cotable_entry_ptr(
                      s, cid, SVGA_COTABLE_DXQUERY, command.queryId) != NULL;
+      }
+
+    case SVGA_3D_CMD_DX_MOVE_QUERY: {
+          SVGA3dCmdDXMoveQuery command;
+
+          if (size < sizeof(command)) {
+              return false;
+          }
+
+          memcpy(&command, payload, sizeof(command));
+
+          return vmsvga3d_d3d10_move_query_live(s, cid, &command);
       }
 
     case SVGA_3D_CMD_DX_BIND_ALL_QUERY: {

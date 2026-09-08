@@ -3205,8 +3205,7 @@ static void vmsvga_objects_clear(struct vmsvga_state_s *s)
 /*
  * SVGA_REG_MEMORY_SIZE is total dedicated device memory excluding FIFO memory.
  * Guests derive the non-VRAM surface budget by subtracting SVGA_REG_VRAM_SIZE.
- * Keep that surface budget independent of vgamem_mb: 480 MiB plus the new
- * 32 MiB default still reports the same 512 MiB total as before.
+ * Keep that surface budget independent of vgamem_mb: 512 MiB plus 32 MiB total.
  */
 static inline size_t
 vmsvga_surface_memory_size(const struct vmsvga_state_s *s)

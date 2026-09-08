@@ -1488,6 +1488,7 @@ static bool vmsvga3d_fifo_supported_command(uint32_t cmd)
     case SVGA_3D_CMD_SHADER_DESTROY:
     case SVGA_3D_CMD_SET_SHADER:
     case SVGA_3D_CMD_SET_SHADER_CONST:
+    case SVGA_3D_CMD_SET_GB_SHADERCONSTS_INLINE:
     case SVGA_3D_CMD_DRAW_PRIMITIVES:
     case SVGA_3D_CMD_SETSCISSORRECT:
     case SVGA_3D_CMD_BEGIN_QUERY:
@@ -3077,6 +3078,76 @@ static bool vmsvga3d_handle_set_shader_const(struct vmsvga_state_s *s,
     (void)vmsvga3d_state_set_shader_const(
         s, body->cid, body->reg, body->type, body->ctype, count,
         (const uint32_t (*)[4])body->values);
+
+    g_free(payload);
+    return true;
+}
+
+static bool vmsvga3d_handle_set_gb_shader_consts_inline(
+    struct vmsvga_state_s *s, uint32_t cmd, int32_t *len,
+    uint32_t fifo_start)
+{
+    const SVGA3dCmdSetGBShaderConstInline *body;
+    const uint8_t *values;
+    void *payload;
+    uint32_t size;
+    uint32_t trailing;
+    uint32_t count = 0;
+    bool applied = false;
+
+    (void)cmd;
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size < sizeof(*body)) {
+        g_free(payload);
+        return true;
+    }
+
+    body = payload;
+    values = (const uint8_t *)(body + 1);
+    trailing = size - sizeof(*body);
+
+    /*
+     * The GB inline command carries no explicit register count.  FLOAT and
+     * INT constants occupy four dwords per register, while BOOL constants
+     * are packed as one dword per register.  Normalize the latter to the
+     * four-dword shadow representation used by the legacy state path.
+     */
+    if (body->constType == SVGA3D_CONST_TYPE_FLOAT ||
+        body->constType == SVGA3D_CONST_TYPE_INT) {
+        if (trailing != 0 && trailing % (4u * sizeof(uint32_t)) == 0) {
+            count = trailing / (4u * sizeof(uint32_t));
+            applied = vmsvga3d_state_set_shader_const(
+                s, body->cid, body->regStart, body->shaderType,
+                body->constType, count,
+                (const uint32_t (*)[4])values);
+        }
+    } else if (body->constType == SVGA3D_CONST_TYPE_BOOL) {
+        if (trailing != 0 && trailing % sizeof(uint32_t) == 0) {
+            uint32_t normalized[SVGA3D_CONSTBOOLREG_MAX][4] = {{ 0 }};
+            const uint32_t *packed = (const uint32_t *)values;
+            uint32_t i;
+
+            count = trailing / sizeof(uint32_t);
+            if (count <= ARRAY_SIZE(normalized)) {
+                for (i = 0; i < count; i++) {
+                    normalized[i][0] = packed[i];
+                }
+                applied = vmsvga3d_state_set_shader_const(
+                    s, body->cid, body->regStart, body->shaderType,
+                    body->constType, count, normalized);
+            }
+        }
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "GB-SHADER-CONSTS cid=%u reg=%u shader=%u ctype=%u count=%u "
+        "result=%s",
+        body->cid, body->regStart, body->shaderType, body->constType, count,
+        applied ? "OK" : "IGNORED");
 
     g_free(payload);
     return true;
@@ -9053,7 +9124,8 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
                      vmsvga3d_handle_gb_screen_target),
     VMSVGA3D_STALL(SVGA_3D_CMD_READBACK_GB_IMAGE_PARTIAL),
     VMSVGA3D_STALL(SVGA_3D_CMD_INVALIDATE_GB_IMAGE_PARTIAL),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_SET_GB_SHADERCONSTS_INLINE),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_SET_GB_SHADERCONSTS_INLINE,
+                     vmsvga3d_handle_set_gb_shader_consts_inline),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_GB_SCREEN_DMA),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_BIND_GB_SURFACE_WITH_PITCH,
                      vmsvga3d_handle_bind_gb_surface),

@@ -5193,7 +5193,9 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_query_execution_plan(
     plan->retry_non_s_ok = false;
     plan->yield_while_waiting = false;
 
-    /* The device does not cache query results, so explicit readback is a NOP. */
+    /* Explicit readback remains a NOP.  The backend caches only raw completed
+     * D3D query bytes so DX_MOVE_QUERY can republish a finished generation; it
+     * does not expose or interpret SVGA result layouts. */
     plan->readback_is_noop = true;
 
     return level;
@@ -10051,6 +10053,161 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
                    : VMSVGA3D_D3D10_QUERY_POLL_FAILED;
 }
 
+static bool vmsvga3d_d3d10_query_publish_cached_live(
+    struct vmsvga_state_s *s, uint32_t cid, uint32_t query_id,
+    const char *source)
+{
+    VMSVGA3DD3D10QueryExecutionPlan plan;
+    SVGADXQueryResultUnion svga_result = { 0 };
+    uint8_t verify[sizeof(uint32_t) + sizeof(SVGADXQueryResultUnion)] = { 0 };
+    const void *d3d_result = NULL;
+    uint8_t *entry;
+    VMSVGA3DMob *mob;
+    SVGA3dQueryType type;
+    uint32_t flags;
+    uint32_t mobid;
+    uint32_t offset;
+    uint32_t d3d_result_size = 0;
+    uint32_t svga_result_size = 0;
+    uint32_t query_state;
+    uint32_t verify_state = UINT32_MAX;
+    uint32_t verify_size;
+    bool cached_failed = false;
+    bool data_write_ok = false;
+    bool state_write_ok = false;
+    bool verify_read_ok = false;
+    bool verify_state_ok = false;
+    bool verify_data_ok = false;
+    bool success = false;
+
+    if (s == NULL || s->svga3d == NULL ||
+        !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
+        return false;
+    }
+
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DXQUERY, query_id);
+    if (entry == NULL) {
+        return false;
+    }
+
+    type = (SVGA3dQueryType)entry[0];
+    flags = query_read_u32(entry + 4);
+    mobid = query_read_u32(entry + 8);
+    offset = query_read_u32(entry + 12);
+
+    if (!vmsvga3d_dx_query_type_allowed(s, type) ||
+        vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID ||
+        !plan.get_data_after_end) {
+        return false;
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_query_cached_result(
+            s->dxvk, cid, query_id, &d3d_result, &d3d_result_size,
+            &cached_failed)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-CACHE-REPLAY source=%s cid=%u query=%u type=%u(%s) "
+            "result=FAIL reason=no-cache",
+            source != NULL ? source : "?", cid, query_id, (unsigned)type,
+            vmsvga3d_dx_query_type_name(type));
+        return false;
+    }
+
+    if (!cached_failed) {
+        if (d3d_result == NULL || d3d_result_size != plan.d3d_result_size) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-QUERY-CACHE-REPLAY source=%s cid=%u query=%u type=%u(%s) "
+                "result=FAIL reason=size cached=%u expected=%u",
+                source != NULL ? source : "?", cid, query_id, (unsigned)type,
+                vmsvga3d_dx_query_type_name(type), d3d_result_size,
+                plan.d3d_result_size);
+            return false;
+        }
+
+        vmsvga3d_d3d10_query_trace_data(
+            "NATIVE-CACHE", cid, query_id, type, d3d_result, d3d_result_size);
+        success = vmsvga3d_d3d10_query_result(
+                      type, d3d_result, d3d_result_size, &svga_result,
+                      &svga_result_size) != VMSVGA3D_D3D10_LEVEL_INVALID;
+        if (!success) {
+            return false;
+        }
+        vmsvga3d_d3d10_query_trace_data(
+            "SVGA-CACHE", cid, query_id, type, &svga_result, svga_result_size);
+    }
+
+    mob = vmsvga3d_mob_get(s, mobid);
+    if (mob == NULL ||
+        (uint64_t)offset + sizeof(uint32_t) +
+            (cached_failed ? 0u : svga_result_size) > mob->gbo.size) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-CACHE-REPLAY source=%s cid=%u query=%u type=%u(%s) "
+            "mobid=%u offset=%u result=FAIL reason=destination",
+            source != NULL ? source : "?", cid, query_id, (unsigned)type,
+            vmsvga3d_dx_query_type_name(type), mobid, offset);
+        return false;
+    }
+
+    query_state = cached_failed ? SVGA3D_QUERYSTATE_FAILED
+                                : SVGA3D_QUERYSTATE_SUCCEEDED;
+    if (!cached_failed) {
+        data_write_ok = vmsvga3d_mob_write(
+            s, mob, offset + sizeof(uint32_t), &svga_result, svga_result_size);
+        if (!data_write_ok) {
+            return false;
+        }
+    }
+
+    /* Publish the completion state last so the guest cannot observe SUCCEEDED
+     * before the moved result bytes are present. */
+    state_write_ok = vmsvga3d_mob_write(
+        s, mob, offset, &query_state, sizeof(query_state));
+    if (!state_write_ok) {
+        return false;
+    }
+
+    verify_size = sizeof(uint32_t) +
+                  (cached_failed ? 0u : svga_result_size);
+    if (verify_size <= sizeof(verify)) {
+        verify_read_ok = vmsvga3d_mob_read(
+            s, mob, offset, verify, verify_size);
+        if (verify_read_ok) {
+            memcpy(&verify_state, verify, sizeof(verify_state));
+            verify_state_ok = verify_state == query_state;
+            verify_data_ok = cached_failed ||
+                memcmp(verify + sizeof(uint32_t), &svga_result,
+                       svga_result_size) == 0;
+        }
+    }
+
+    entry[3] = SVGADX_QDSTATE_FINISHED;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-CACHE-REPLAY source=%s cid=%u query=%u type=%u(%s) "
+        "mobid=%u offset=%u state=%u cached=%s data-size=%u "
+        "state-write=OK data-write=%s verify=%s state-match=%u data-match=%u "
+        "result=OK",
+        source != NULL ? source : "?", cid, query_id, (unsigned)type,
+        vmsvga3d_dx_query_type_name(type), mobid, offset, query_state,
+        cached_failed ? "FAILED" : "READY",
+        cached_failed ? 0u : svga_result_size,
+        cached_failed ? "SKIP" : "OK", verify_read_ok ? "OK" : "FAIL",
+        verify_state_ok ? 1u : 0u, verify_data_ok ? 1u : 0u);
+
+    if (verify_read_ok && !cached_failed) {
+        vmsvga3d_d3d10_query_trace_data(
+            "GUEST-CACHE-VERIFY", cid, query_id, type,
+            verify + sizeof(uint32_t), svga_result_size);
+    }
+
+    return true;
+}
+
 static bool vmsvga3d_d3d10_query_end_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXEndQuery *command)
@@ -10218,42 +10375,130 @@ static bool vmsvga3d_d3d10_move_query_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXMoveQuery *command)
 {
+    VMSVGA3DD3D10QueryExecutionPlan plan;
+    VMSVGA3DD3D10QueryPollResult poll;
+    uint8_t *entry;
+    VMSVGA3DMob *mob;
+    SVGA3dQueryType type;
+    uint32_t flags;
+    uint32_t old_mobid;
+    uint32_t old_offset;
+    uint32_t old_state;
+    uint32_t pending_state = SVGA3D_QUERYSTATE_PENDING;
+    bool state_write_ok = true;
+
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
         vmsvga3d_dx_context(s, cid) == NULL) {
         return false;
     }
 
-    /*
-     * VirtualBox treats DX_MOVE_QUERY as a context-level backend notification:
-     * its command wrapper deliberately ignores queryId/mobid/mobOffset and the
-     * backend callback receives only the DX context.  Our query backend likewise
-     * keeps no separate cached guest result: END_QUERY either writes the result
-     * immediately or leaves it on the pending-query pump, using the destination
-     * already established by BIND_QUERY + SET_QUERY_OFFSET.  Service pending
-     * completions here and otherwise accept the notification.
-     */
-    {
-        uint8_t *entry = vmsvga3d_dx_cotable_entry_ptr(
-            s, cid, SVGA_COTABLE_DXQUERY, command->queryId);
-        uint32_t entry_mobid = entry != NULL ? query_read_u32(entry + 8)
-                                             : SVGA3D_INVALID_ID;
-        uint32_t entry_offset = entry != NULL ? query_read_u32(entry + 12) : 0;
-        SVGA3dQueryType type = entry != NULL
-                             ? (SVGA3dQueryType)entry[0]
-                             : SVGA3D_QUERYTYPE_INVALID;
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DXQUERY, command->queryId);
+    if (entry == NULL ||
+        !vmsvga3d_dxvk_d3d11_query_exists(s->dxvk, cid, command->queryId)) {
+        return false;
+    }
 
+    type = (SVGA3dQueryType)entry[0];
+    flags = query_read_u32(entry + 4);
+    if (!vmsvga3d_dx_query_type_allowed(s, type) ||
+        vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID) {
+        return false;
+    }
+
+    mob = vmsvga3d_mob_get(s, command->mobid);
+    if (mob == NULL ||
+        (uint64_t)command->mobOffset + sizeof(uint32_t) +
+            plan.svga_result_size > mob->gbo.size) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-QUERY-MOVE cid=%u query=%u type=%u(%s) payload-mobid=%u "
-            "payload-offset=%u entry-mobid=%u entry-offset=%u qdstate=%u "
-            "native-pending=%u action=PUMP",
+            "payload-offset=%u result=FAIL reason=destination",
             cid, command->queryId, (unsigned)type,
-            vmsvga3d_dx_query_type_name(type), command->mobid, command->mobOffset,
-            entry_mobid, entry_offset, entry != NULL ? entry[3] : 0xffu,
-            vmsvga3d_dxvk_d3d11_query_pending(
-                s->dxvk, cid, command->queryId) ? 1u : 0u);
+            vmsvga3d_dx_query_type_name(type), command->mobid,
+            command->mobOffset);
+        return false;
     }
+
+    old_mobid = query_read_u32(entry + 8);
+    old_offset = query_read_u32(entry + 12);
+    old_state = entry[3];
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-MOVE cid=%u query=%u type=%u(%s) payload-mobid=%u "
+        "payload-offset=%u entry-mobid=%u entry-offset=%u qdstate=%u "
+        "native-pending=%u action=RELOCATE",
+        cid, command->queryId, (unsigned)type,
+        vmsvga3d_dx_query_type_name(type), command->mobid, command->mobOffset,
+        old_mobid, old_offset, old_state,
+        vmsvga3d_dxvk_d3d11_query_pending(
+            s->dxvk, cid, command->queryId) ? 1u : 0u);
+
+    query_entry_set_u32(entry, 8, command->mobid);
+    query_entry_set_u32(entry, 12, command->mobOffset);
+
+    switch (old_state) {
+    case SVGADX_QDSTATE_IDLE:
+        break;
+
+    case SVGADX_QDSTATE_ACTIVE:
+    case SVGADX_QDSTATE_PENDING:
+        /* MOVE changes the guest-visible result record immediately.  Keep the
+         * new location pending until the current generation completes. */
+        state_write_ok = vmsvga3d_mob_write(
+            s, mob, command->mobOffset, &pending_state, sizeof(pending_state));
+        if (!state_write_ok) {
+            query_entry_set_u32(entry, 8, old_mobid);
+            query_entry_set_u32(entry, 12, old_offset);
+            return false;
+        }
+        break;
+
+    case SVGADX_QDSTATE_FINISHED:
+        /* The native query may have completed before MOVE arrived.  Replay the
+         * cached raw backend result into the new record; dxvk.c deliberately
+         * knows nothing about the SVGA result conversion performed here. */
+        if (!vmsvga3d_d3d10_query_publish_cached_live(
+                s, cid, command->queryId, "MOVE")) {
+            query_entry_set_u32(entry, 8, old_mobid);
+            query_entry_set_u32(entry, 12, old_offset);
+            return false;
+        }
+        break;
+
+    default:
+        query_entry_set_u32(entry, 8, old_mobid);
+        query_entry_set_u32(entry, 12, old_offset);
+        return false;
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-MOVE cid=%u query=%u type=%u(%s) old=%u/%u new=%u/%u "
+        "qdstate=%u pending-write=%s result=OK",
+        cid, command->queryId, (unsigned)type,
+        vmsvga3d_dx_query_type_name(type), old_mobid, old_offset,
+        command->mobid, command->mobOffset, entry[3],
+        (old_state == SVGADX_QDSTATE_ACTIVE ||
+         old_state == SVGADX_QDSTATE_PENDING)
+            ? (state_write_ok ? "OK" : "FAIL") : "SKIP");
+
+    /* Service the moved query first so an already-ready result is published at
+     * its new destination in this command, then preserve the existing
+     * opportunistic pump for other contexts/queries. */
+    if (old_state == SVGADX_QDSTATE_PENDING && plan.get_data_after_end &&
+        vmsvga3d_dxvk_d3d11_query_pending(
+            s->dxvk, cid, command->queryId)) {
+        poll = vmsvga3d_d3d10_query_poll_live(
+            s, cid, command->queryId, "MOVE");
+        if (poll == VMSVGA3D_D3D10_QUERY_POLL_FAILED) {
+            return false;
+        }
+    }
+
     vmsvga3d_d3d10_process_pending_queries(s, "MOVE");
     return true;
 }
@@ -12240,8 +12485,9 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
           memcpy(&command, payload, sizeof(command));
 
-          /* The device does not cache queries; pending completion is handled by
-           * the renderer task pump, so explicit readback remains a validated NOP. */
+          /* Explicit readback remains a validated NOP.  Raw completed backend
+           * bytes are cached only so DX_MOVE_QUERY can replay a finished
+           * generation at its requested destination. */
           {
               uint8_t *entry = vmsvga3d_dx_cotable_entry_ptr(
                   s, cid, SVGA_COTABLE_DXQUERY, command.queryId);

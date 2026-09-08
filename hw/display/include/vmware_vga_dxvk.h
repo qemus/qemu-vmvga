@@ -391,6 +391,12 @@ bool vmsvga3d_dxvk_d3d11_query_end(
 bool vmsvga3d_dxvk_d3d11_query_get_data(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, void *data,
     uint32_t data_size, uint32_t getdata_flags, bool *ready);
+/* Returns the raw backend result cached after a completed GetData call.  The
+ * returned pointer remains owned by the DXVK backend and is invalidated by the
+ * next query generation or query destruction. */
+bool vmsvga3d_dxvk_d3d11_query_cached_result(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id,
+    const void **data, uint32_t *data_size, bool *failed);
 bool vmsvga3d_dxvk_d3d11_query_pending(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id);
 bool vmsvga3d_dxvk_d3d11_set_predication(

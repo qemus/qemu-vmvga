@@ -3552,8 +3552,11 @@ static bool shader_opcode_signature_target(const ShaderOpcode *opcode,
 {
     switch (opcode->opcode_type) {
     case SHADER_OPCODE_DCL_INPUT:
+    case SHADER_OPCODE_DCL_INPUT_SGV:
     case SHADER_OPCODE_DCL_INPUT_SIV:
     case SHADER_OPCODE_DCL_INPUT_PS:
+    case SHADER_OPCODE_DCL_INPUT_PS_SGV:
+    case SHADER_OPCODE_DCL_INPUT_PS_SIV:
         *input = true;
         return true;
     case SHADER_OPCODE_DCL_OUTPUT:
@@ -4417,19 +4420,33 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_update_vs_input_signature(
     VMSVGA3DD3D10ShaderInfo *info, const SVGA3dInputElementDesc *elements,
     uint32_t element_count)
 {
-    uint32_t count;
     uint32_t i;
 
     if (info == NULL || (element_count != 0 && elements == NULL)) {
         return VMSVGA3D_D3D10_LEVEL_INVALID;
     }
 
-    count = element_count < info->input_signature_count ?
-                element_count : info->input_signature_count;
+    /*
+     * The input signature also contains system-generated/interpreted inputs
+     * such as SV_InstanceID and pixel-shader SV_RenderTargetArrayIndex.  Those
+     * inputs are supplied by the pipeline, not by the element layout, so the
+     * layout array and signature array are not positionally equivalent.
+     * Match generic vertex inputs by the VMware input register instead.
+     */
+    for (i = 0; i < element_count; i++) {
+        uint32_t j;
 
-    for (i = 0; i < count; i++) {
-        info->input_signature[i].componentType =
-            vmsvga3d_d3d10_shader_component_type_from_format(elements[i].format);
+        for (j = 0; j < info->input_signature_count; j++) {
+            if (info->input_signature[j].semanticName !=
+                    SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED ||
+                info->input_signature[j].registerIndex != elements[i].inputRegister) {
+                continue;
+            }
+
+            info->input_signature[j].componentType =
+                vmsvga3d_d3d10_shader_component_type_from_format(elements[i].format);
+            break;
+        }
     }
 
     return shader_program_level(info->program_type);

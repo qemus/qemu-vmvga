@@ -458,6 +458,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_SHADER 76u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_PRIMITIVE_TOPOLOGY 83u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INPUT_LAYOUT 78u
+#define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_VERTEX_BUFFERS 79u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INDEX_BUFFER 80u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_GET_SHADER 82u
 #define VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_HS_GET_SHADER 98u
@@ -889,6 +890,9 @@ typedef void (*VMSVGA3DDxvkD3D11GetSamplers)(
 typedef void (*VMSVGA3DDxvkD3D11GetConstantBuffers)(
     void *context, uint32_t start_slot, uint32_t buffer_count, void **buffers);
 typedef void (*VMSVGA3DDxvkD3D11IAGetInputLayout)(void *context, void **layout);
+typedef void (*VMSVGA3DDxvkD3D11IAGetVertexBuffers)(
+    void *context, uint32_t start_slot, uint32_t buffer_count,
+    void **buffers, uint32_t *strides, uint32_t *offsets);
 typedef void (*VMSVGA3DDxvkD3D11IAGetPrimitiveTopology)(
     void *context, uint32_t *topology);
 typedef void (*VMSVGA3DDxvkD3D11OMSetRenderTargets)(
@@ -4551,6 +4555,149 @@ void vmsvga3d_dxvk_d3d11_release_index_buffer(void *buffer)
 #endif
 }
 
+static void vmsvga3d_dxvk_d3d11_trace_draw_state(VMSVGA3DDxvk *dxvk,
+                                                   uint32_t cid)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    /* The native Get* probes AddRef objects and are intentionally diagnostic
+     * only.  Do not pay that cost on every Draw when VMVGA tracing is off.
+     */
+    if (!VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        return;
+    }
+    VMSVGA3DDxvkD3D11GetShader get_vs = NULL;
+    VMSVGA3DDxvkD3D11GetShader get_ps = NULL;
+    VMSVGA3DDxvkD3D11IAGetInputLayout get_layout = NULL;
+    VMSVGA3DDxvkD3D11IAGetVertexBuffers get_vbs = NULL;
+    VMSVGA3DDxvkD3D11GetConstantBuffers get_cbs = NULL;
+    VMSVGA3DDxvkD3D11IAGetPrimitiveTopology get_topology = NULL;
+    VMSVGA3DDxvkD3D11OMGetRenderTargets get_rts = NULL;
+    VMSVGA3DDxvkD3D11OMGetBlendState get_blend = NULL;
+    VMSVGA3DDxvkD3D11RSGetState get_raster = NULL;
+    VMSVGA3DDxvkD3D11RSGetViewports get_viewports = NULL;
+    void *vs = NULL, *ps = NULL, *layout = NULL, *vb0 = NULL, *cb0 = NULL;
+    void *rtv0 = NULL, *blend = NULL, *raster = NULL;
+    float blend_factor[4] = { 0, 0, 0, 0 };
+    SVGA3dViewport viewport = { 0 };
+    uint32_t sample_mask = 0;
+    uint32_t topology = 0;
+    uint32_t viewport_count = 1;
+    uint32_t stride = 0;
+    uint32_t offset = 0;
+    uint32_t get_mask = 0;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                          "DX-DRAW-NATIVE cid=%u result=UNAVAILABLE", cid);
+        return;
+    }
+
+#define GET_DRAW_METHOD(bit, slot, fn)                                         \
+    do {                                                                        \
+        if (vmsvga3d_dxvk_get_method(dxvk->d3d11_context, (slot), &(fn),       \
+                                      sizeof(fn))) {                             \
+            get_mask |= (bit);                                                  \
+        }                                                                       \
+    } while (0)
+    GET_DRAW_METHOD(0x001u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_SHADER,
+                    get_vs);
+    GET_DRAW_METHOD(0x002u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_PS_GET_SHADER,
+                    get_ps);
+    GET_DRAW_METHOD(0x004u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_INPUT_LAYOUT,
+                    get_layout);
+    GET_DRAW_METHOD(0x008u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_VERTEX_BUFFERS,
+                    get_vbs);
+    GET_DRAW_METHOD(0x010u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_VS_GET_CONSTANT_BUFFERS,
+                    get_cbs);
+    GET_DRAW_METHOD(0x020u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_IA_GET_PRIMITIVE_TOPOLOGY,
+                    get_topology);
+    GET_DRAW_METHOD(0x040u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_RENDER_TARGETS,
+                    get_rts);
+    GET_DRAW_METHOD(0x080u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_GET_BLEND_STATE,
+                    get_blend);
+    GET_DRAW_METHOD(0x100u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_STATE,
+                    get_raster);
+    GET_DRAW_METHOD(0x200u, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_RS_GET_VIEWPORTS,
+                    get_viewports);
+#undef GET_DRAW_METHOD
+
+    if (get_vs != NULL) {
+        get_vs(dxvk->d3d11_context, &vs, NULL, NULL);
+    }
+    if (get_ps != NULL) {
+        get_ps(dxvk->d3d11_context, &ps, NULL, NULL);
+    }
+    if (get_layout != NULL) {
+        get_layout(dxvk->d3d11_context, &layout);
+    }
+    if (get_vbs != NULL) {
+        get_vbs(dxvk->d3d11_context, 0, 1, &vb0, &stride, &offset);
+    }
+    if (get_cbs != NULL) {
+        get_cbs(dxvk->d3d11_context, 0, 1, &cb0);
+    }
+    if (get_topology != NULL) {
+        get_topology(dxvk->d3d11_context, &topology);
+    }
+    if (get_rts != NULL) {
+        get_rts(dxvk->d3d11_context, 1, &rtv0, NULL);
+    }
+    if (get_blend != NULL) {
+        get_blend(dxvk->d3d11_context, &blend, blend_factor, &sample_mask);
+    }
+    if (get_raster != NULL) {
+        get_raster(dxvk->d3d11_context, &raster);
+    }
+    if (get_viewports != NULL) {
+        get_viewports(dxvk->d3d11_context, &viewport_count, &viewport);
+    } else {
+        viewport_count = 0;
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-DRAW-NATIVE cid=%u get=0x%03x vs=%u ps=%u layout=%u "
+        "vb0=%u stride=%u offset=%u cb0=%u rtv0=%u blend=%u "
+        "sampleMask=0x%08x raster=%u topology=%u viewports=%u "
+        "vp0=%g,%g/%gx%g/%g..%g",
+        cid, get_mask, vs != NULL ? 1u : 0u, ps != NULL ? 1u : 0u,
+        layout != NULL ? 1u : 0u, vb0 != NULL ? 1u : 0u, stride, offset,
+        cb0 != NULL ? 1u : 0u, rtv0 != NULL ? 1u : 0u,
+        blend != NULL ? 1u : 0u, sample_mask, raster != NULL ? 1u : 0u,
+        topology, viewport_count, (double)viewport.x, (double)viewport.y,
+        (double)viewport.width, (double)viewport.height,
+        (double)viewport.minDepth, (double)viewport.maxDepth);
+
+    if (vs != NULL) {
+        vmsvga3d_dxvk_release(vs, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    if (ps != NULL) {
+        vmsvga3d_dxvk_release(ps, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    if (layout != NULL) {
+        vmsvga3d_dxvk_release(layout, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    if (vb0 != NULL) {
+        vmsvga3d_dxvk_release(vb0, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    if (cb0 != NULL) {
+        vmsvga3d_dxvk_release(cb0, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    if (rtv0 != NULL) {
+        vmsvga3d_dxvk_release(rtv0, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    if (blend != NULL) {
+        vmsvga3d_dxvk_release(blend, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+    if (raster != NULL) {
+        vmsvga3d_dxvk_release(raster, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+#else
+    (void)dxvk;
+    (void)cid;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_draw(
     VMSVGA3DDxvk *dxvk, uint32_t vertex_count,
     uint32_t start_vertex_location)
@@ -4958,6 +5105,11 @@ bool vmsvga3d_dxvk_d3d11_blend_state_define(
     }
 
     result = create_state(dxvk->d3d11_device, desc, &state);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-BLEND-REALIZE cid=%u id=%u hr=0x%08x native=%u result=%s",
+        cid, state_id, (uint32_t)result, state != NULL ? 1u : 0u,
+        vmsvga3d_dxvk_succeeded(result) && state != NULL ? "OK" : "FAIL");
     if (!vmsvga3d_dxvk_succeeded(result) || state == NULL) {
         if (state != NULL) {
             vmsvga3d_dxvk_release(state, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -5016,6 +5168,11 @@ bool vmsvga3d_dxvk_d3d11_depth_stencil_state_define(
     }
 
     result = create_state(dxvk->d3d11_device, desc, &state);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-DEPTH-REALIZE cid=%u id=%u hr=0x%08x native=%u result=%s",
+        cid, state_id, (uint32_t)result, state != NULL ? 1u : 0u,
+        vmsvga3d_dxvk_succeeded(result) && state != NULL ? "OK" : "FAIL");
     if (!vmsvga3d_dxvk_succeeded(result) || state == NULL) {
         if (state != NULL) {
             vmsvga3d_dxvk_release(state, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -5073,6 +5230,11 @@ bool vmsvga3d_dxvk_d3d11_rasterizer_state_define(
     }
 
     result = create_state(dxvk->d3d11_device, desc, &state);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-RASTER-REALIZE cid=%u id=%u hr=0x%08x native=%u result=%s",
+        cid, state_id, (uint32_t)result, state != NULL ? 1u : 0u,
+        vmsvga3d_dxvk_succeeded(result) && state != NULL ? "OK" : "FAIL");
     if (!vmsvga3d_dxvk_succeeded(result) || state == NULL) {
         if (state != NULL) {
             vmsvga3d_dxvk_release(state, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -5473,8 +5635,12 @@ bool vmsvga3d_dxvk_d3d11_set_blend_state(
 
     set_state(dxvk->d3d11_context, state,
               state_id == SVGA3D_INVALID_ID ? NULL : blend_factor,
-              state_id == SVGA3D_INVALID_ID ? 0u : sample_mask);
+              sample_mask);
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-BLEND-BIND cid=%u id=%u native=%u sampleMask=0x%08x result=OK",
+        cid, state_id, state != NULL ? 1u : 0u, sample_mask);
     return true;
 #else
     (void)dxvk;
@@ -5535,6 +5701,10 @@ bool vmsvga3d_dxvk_d3d11_set_rasterizer_state(
     }
 
     set_state(dxvk->d3d11_context, state);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-RASTER-BIND cid=%u id=%u native=%u result=OK",
+        cid, state_id, state != NULL ? 1u : 0u);
 
     return true;
 #else
@@ -6674,6 +6844,11 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         level = vmsvga3d_d3d10_shader_create_dxbc(&shader->info, &dxbc);
         if (level == VMSVGA3D_D3D10_LEVEL_INVALID ||
             dxbc.data == NULL || dxbc.size == 0) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SHADER-REALIZE cid=%u shid=%u type=%u result=FAIL "
+                "reason=dxbc",
+                cid, shader_id, shader->shader_type);
             vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
             return false;
         }
@@ -6705,11 +6880,23 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     } else {
         if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device, method,
                                        &create_shader, sizeof(create_shader))) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SHADER-REALIZE cid=%u shid=%u type=%u result=FAIL "
+                "reason=missing-method",
+                cid, shader_id, shader->shader_type);
             return false;
         }
         result = create_shader(dxvk->d3d11_device, shader->bytecode,
                                shader->bytecode_size, NULL, &native_shader);
     }
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-SHADER-REALIZE cid=%u shid=%u type=%u dxbc=%u hr=0x%08x "
+        "native=%u result=%s",
+        cid, shader_id, shader->shader_type, shader->bytecode_size,
+        (uint32_t)result, native_shader != NULL ? 1u : 0u,
+        vmsvga3d_dxvk_succeeded(result) && native_shader != NULL ? "OK" : "FAIL");
     if (!vmsvga3d_dxvk_succeeded(result) || native_shader == NULL) {
         if (native_shader != NULL) {
             vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -6944,10 +7131,22 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
     shader = vmsvga3d_dxvk_d3d11_shader_find(
         dxvk, cid, shader_id, NULL);
     if (shader == NULL || shader->shader_type != SVGA3D_SHADERTYPE_VS ||
-        shader->bytecode == NULL || shader->bytecode_size == 0 ||
-        !vmsvga3d_dxvk_get_method(
+        shader->bytecode == NULL || shader->bytecode_size == 0) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-LAYOUT-REALIZE cid=%u layout=%u vs=%u result=FAIL "
+            "reason=missing-vs-dxbc",
+            cid, layout_id, shader_id);
+        return false;
+    }
+    if (!vmsvga3d_dxvk_get_method(
             dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_INPUT_LAYOUT,
             &create_input_layout, sizeof(create_input_layout))) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-LAYOUT-REALIZE cid=%u layout=%u vs=%u result=FAIL "
+            "reason=missing-method",
+            cid, layout_id, shader_id);
         return false;
     }
 
@@ -6965,12 +7164,28 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
             native[i].input_slot_class = translated[i].input_slot_class;
             native[i].instance_data_step_rate =
                 translated[i].instance_data_step_rate;
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-LAYOUT-ELEM cid=%u layout=%u elem=%u semantic=%s%u "
+                "format=%u slot=%u offset=%u class=%u step=%u",
+                cid, layout_id, i, VMSVGA3D_D3D10_INPUT_SEMANTIC,
+                native[i].semantic_index, native[i].format, native[i].input_slot,
+                native[i].aligned_byte_offset, native[i].input_slot_class,
+                native[i].instance_data_step_rate);
         }
     }
 
     result = create_input_layout(
         dxvk->d3d11_device, native, element_count, shader->bytecode,
         shader->bytecode_size, &native_layout);
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-LAYOUT-REALIZE cid=%u layout=%u vs=%u elements=%u dxbc=%u "
+        "hr=0x%08x native=%u result=%s",
+        cid, layout_id, shader_id, element_count, shader->bytecode_size,
+        (uint32_t)result, native_layout != NULL ? 1u : 0u,
+        vmsvga3d_dxvk_succeeded(result) && native_layout != NULL ? "OK" : "FAIL");
 
     g_free(native);
 
@@ -7034,6 +7249,11 @@ bool vmsvga3d_dxvk_d3d11_set_input_layout(
     }
 
     set_layout(dxvk->d3d11_context, native_layout);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-LAYOUT-BIND cid=%u layout=%u native=%u result=%s",
+        cid, layout_id, native_layout != NULL ? 1u : 0u,
+        layout_id == SVGA3D_INVALID_ID || native_layout != NULL ? "OK" : "NULL");
 
     return true;
 #else

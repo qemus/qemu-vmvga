@@ -10673,20 +10673,30 @@ static bool vmsvga3d_d3d10_bind_all_query_live(
     entries = (SVGACOTableDXQueryEntry *)binding->host;
 
     for (i = 0; i < binding->capacity_entries; i++) {
-        if (entries[i].type != SVGA3D_QUERYTYPE_INVALID) {
-            uint32_t old_mobid = entries[i].mobid;
+        uint32_t old_mobid;
 
-            entries[i].mobid = command->mobid;
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
-                "DX-QUERY-BIND-ALL cid=%u query=%u type=%u(%s) old-mobid=%u "
-                "new-mobid=%u offset=%u qdstate=%u native-pending=%u",
-                command->cid, i, (unsigned)entries[i].type,
-                vmsvga3d_dx_query_type_name(entries[i].type), old_mobid,
-                command->mobid, entries[i].offset, entries[i].state,
-                vmsvga3d_dxvk_d3d11_query_pending(
-                    s->dxvk, command->cid, i) ? 1u : 0u);
+        /* The COTable host shadow is zero-filled beyond bytes supplied by the
+         * guest.  Query type 0 is OCCLUSION, so using only entry->type would
+         * mistake every untouched zero slot for a real query.  The native
+         * query object is our unambiguous definition record: DEFINE_QUERY
+         * creates it and DESTROY_QUERY removes it, including the legitimate
+         * all-zero OCCLUSION/MOB-0 corner case. */
+        if (!vmsvga3d_dxvk_d3d11_query_exists(
+                s->dxvk, command->cid, i)) {
+            continue;
         }
+
+        old_mobid = entries[i].mobid;
+        entries[i].mobid = command->mobid;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-BIND-ALL cid=%u query=%u type=%u(%s) old-mobid=%u "
+            "new-mobid=%u offset=%u qdstate=%u native-pending=%u",
+            command->cid, i, (unsigned)entries[i].type,
+            vmsvga3d_dx_query_type_name(entries[i].type), old_mobid,
+            command->mobid, entries[i].offset, entries[i].state,
+            vmsvga3d_dxvk_d3d11_query_pending(
+                s->dxvk, command->cid, i) ? 1u : 0u);
     }
 
     return true;
@@ -10728,7 +10738,11 @@ static bool vmsvga3d_d3d10_readback_all_query_live(
     for (i = 0; i < binding->capacity_entries; i++) {
         bool native_pending;
 
-        if (entries[i].type == SVGA3D_QUERYTYPE_INVALID) {
+        /* Match BIND_ALL_QUERY's definition test.  Zero-filled unused slots
+         * otherwise look like type 0 (OCCLUSION) and make READBACK_ALL_QUERY
+         * diagnostics report the entire COTable capacity as active queries. */
+        if (!vmsvga3d_dxvk_d3d11_query_exists(
+                s->dxvk, command->cid, i)) {
             continue;
         }
         active++;

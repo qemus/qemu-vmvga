@@ -7722,6 +7722,125 @@ static bool vmsvga3d_d3d10_context_switch_live(
     return true;
 }
 
+static bool vmsvga3d_d3d10_recover_gb_surface_live(
+    struct vmsvga_state_s *s, uint32_t sid)
+{
+    SVGAOTableSurfaceEntry entry;
+    SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES] = {{0}};
+    SVGA3dSize base_size;
+    SVGA3dSize *mip_sizes;
+    SVGA3dSurfaceAllFlags surface_flags;
+    SVGA3dSurfaceFormat format;
+    uint32_t num_mip_levels;
+    uint32_t multisample_count;
+    SVGA3dMSPattern multisample_pattern;
+    SVGA3dTextureFilter autogen_filter;
+    uint32_t array_size;
+    uint32_t array_elements;
+    uint32_t mip_count;
+    uint32_t array_index;
+    uint32_t mip_index;
+    uint16_t buffer_byte_stride;
+    uint8_t multisample_quality;
+    bool recovered;
+
+    if (s == NULL || s->svga3d == NULL || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    if (s->svga3d->surfaces[sid] != NULL) {
+        return true;
+    }
+
+    if (!vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, sid, sizeof(entry),
+                              &entry, sizeof(entry))) {
+        return false;
+    }
+
+    format = le32_to_cpu(entry.format);
+    num_mip_levels = le32_to_cpu(entry.numMipLevels);
+    array_size = le32_to_cpu(entry.arraySize);
+    surface_flags = (SVGA3dSurfaceAllFlags)le32_to_cpu(entry.surface1Flags) |
+                    ((SVGA3dSurfaceAllFlags)le32_to_cpu(entry.surface2Flags)
+                     << 32);
+    multisample_count = le32_to_cpu(entry.multisampleCount);
+    multisample_pattern = (SVGA3dMSPattern)entry.multisamplePattern;
+    multisample_quality = entry.qualityLevel;
+    autogen_filter = (SVGA3dTextureFilter)le32_to_cpu(entry.autogenFilter);
+    buffer_byte_stride = le16_to_cpu(entry.bufferByteStride);
+    base_size.width = le32_to_cpu(entry.size.width);
+    base_size.height = le32_to_cpu(entry.size.height);
+    base_size.depth = le32_to_cpu(entry.size.depth);
+
+    if (format == SVGA3D_FORMAT_INVALID || num_mip_levels == 0 ||
+        num_mip_levels > VMSVGA3D_MAX_MIP_LEVELS ||
+        array_size > SVGA3D_MAX_SURFACE_ARRAYSIZE) {
+        return false;
+    }
+
+    array_elements = array_size != 0
+                         ? array_size
+                         : ((surface_flags & SVGA3D_SURFACE_CUBEMAP) != 0
+                                ? SVGA3D_MAX_SURFACE_FACES
+                                : 1u);
+    if (array_elements == 0 ||
+        ((surface_flags & SVGA3D_SURFACE_CUBEMAP) != 0 &&
+         array_elements % SVGA3D_MAX_SURFACE_FACES != 0) ||
+        num_mip_levels > UINT32_MAX / array_elements) {
+        return false;
+    }
+    mip_count = num_mip_levels * array_elements;
+
+    mip_sizes = g_try_new(SVGA3dSize, mip_count);
+    if (mip_sizes == NULL) {
+        return false;
+    }
+
+    for (array_index = 0; array_index < array_elements; array_index++) {
+        for (mip_index = 0; mip_index < num_mip_levels; mip_index++) {
+            mip_sizes[array_index * num_mip_levels + mip_index] =
+                svga3dsurface_get_mip_size(base_size, mip_index);
+        }
+    }
+
+    face[0].numMipLevels = num_mip_levels;
+    if ((surface_flags & SVGA3D_SURFACE_CUBEMAP) != 0) {
+        for (array_index = 1; array_index < SVGA3D_MAX_SURFACE_FACES;
+             array_index++) {
+            face[array_index].numMipLevels = num_mip_levels;
+        }
+    }
+
+    /*
+     * GB surfaces are guest-backed and VirtualBox keeps host resource creation
+     * lazy.  Our eager CPU shadow can transiently reject a DEFINE while the
+     * surface budget is full.  The OTable entry remains authoritative, so a
+     * later DX use may retry only the host-side installation after other
+     * surfaces have been released.  Do not rewrite the OTable here because it
+     * may already contain a MOB binding established after the original DEFINE.
+     */
+    vmsvga3d_surface_install(s, sid, surface_flags, format, face,
+                             multisample_count, multisample_pattern,
+                             autogen_filter, array_elements, mip_sizes,
+                             mip_count);
+    g_free(mip_sizes);
+
+    recovered = s->svga3d->surfaces[sid] != NULL;
+    if (recovered) {
+        s->svga3d->surfaces[sid]->multisample_quality = multisample_quality;
+        s->svga3d->surfaces[sid]->buffer_byte_stride = buffer_byte_stride;
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-SURFACE-RECOVER sid=%u format=%u flags=0x%016" PRIx64
+        " mips=%u arrays=%u size=%ux%ux%u result=%s",
+        sid, format, (uint64_t)surface_flags, num_mip_levels, array_size,
+        base_size.width, base_size.height, base_size.depth,
+        recovered ? "OK" : "FAIL");
+    return recovered;
+}
+
 static bool vmsvga3d_d3d10_rtv_realize_live(
     struct vmsvga_state_s *s, uint32_t cid, SVGA3dRenderTargetViewId view_id)
 {
@@ -7829,6 +7948,12 @@ static bool vmsvga3d_d3d10_dsv_realize_live(
     }
 
     surface = s->svga3d->surfaces[entry->sid];
+    if (surface == NULL) {
+        if (!vmsvga3d_d3d10_recover_gb_surface_live(s, entry->sid)) {
+            return false;
+        }
+        surface = s->svga3d->surfaces[entry->sid];
+    }
     if (surface == NULL || surface->dxvk_surface == NULL ||
         !vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
         return false;

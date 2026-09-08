@@ -4175,7 +4175,6 @@ static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
     uint32_t blob_size;
     uint32_t i;
 
-    (void)info;
     if (count > SVGA3D_DX_SM41_MAX_VERTEXINPUTREGISTERS) {
         return false;
     }
@@ -4197,6 +4196,8 @@ static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
         uint32_t j;
         uint32_t name_offset = 0;
         uint32_t name_size;
+        uint32_t component_mask = signature[i].mask & 0xffu;
+        uint32_t mask2 = semantic[i].read_write_mask & 0xffu;
 
         for (j = 0; j < i; j++) {
             const char *prior_name = (const char *)blob_data + elements[j].name_offset;
@@ -4211,8 +4212,24 @@ static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
         elements[i].system_value = shader_system_value(signature[i].semanticName);
         elements[i].component_type = signature[i].componentType;
         elements[i].register_index = signature[i].registerIndex;
-        elements[i].mask = (signature[i].mask & 0xffu) |
-                           ((semantic[i].read_write_mask & 0xffu) << 8);
+
+        /*
+         * Guest DXBC signature mask2 is stage-dependent.  For inputs it is
+         * the AlwaysReadMask; for outputs it is the NeverWritesMask.  Match
+         * the VMware/VirtualBox convention here instead of relying on guest
+         * semantic metadata, which does not carry these derived values.
+         * Internal shaders may provide a deliberately narrower mask2.
+         */
+        if (info != NULL && info->bytecode_size != 0) {
+            if (blob_type == SHADER_DXBC_ISGN) {
+                mask2 = component_mask;
+            } else if (blob_type == SHADER_DXBC_OSGN) {
+                mask2 = (~component_mask) & 0x0fu;
+            } else {
+                mask2 = 0;
+            }
+        }
+        elements[i].mask = component_mask | ((mask2 & 0xffu) << 8);
 
         if (name_offset == 0) {
             name_size = (uint32_t)strlen(semantic[i].semantic_name) + 1u;

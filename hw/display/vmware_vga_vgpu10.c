@@ -6048,9 +6048,7 @@ static void vmsvga3d_d3d10_pipeline_state_realize_live(
         (void)vmsvga3d_dxvk_d3d11_set_blend_state(
             s->dxvk, cid, realized ? id : SVGA3D_INVALID_ID,
             realized && id != SVGA3D_INVALID_ID ? blend_factor : NULL,
-            realized && id != SVGA3D_INVALID_ID
-                ? context->shadow.renderState.sampleMask
-                : 0);
+            context->shadow.renderState.sampleMask);
     }
 
     if ((context->renderer_dirty &
@@ -6519,8 +6517,22 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
                 s->dxvk, cid, shader_id, stream_output_id, stream_output_ptr);
         }
         if (realized) {
-            (void)vmsvga3d_dxvk_d3d11_shader_set(
+            bool bound = vmsvga3d_dxvk_d3d11_shader_set(
                 s->dxvk, cid, shader_id, shader_type);
+
+            if (!bound) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "DX-SHADER-PIPELINE cid=%u shid=%u type=%u prepared=1 "
+                    "realized=1 bound=0",
+                    cid, shader_id, shader_type);
+            }
+        } else {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SHADER-PIPELINE cid=%u shid=%u type=%u prepared=%u "
+                "realized=0 bound=0",
+                cid, shader_id, shader_type, prepared ? 1u : 0u);
         }
     }
 }
@@ -6644,6 +6656,45 @@ static bool vmsvga3d_d3d10_draw_live(
     }
 
     vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    {
+        const uint32_t vs_stage =
+            SVGA3D_SHADERTYPE_VS - SVGA3D_SHADERTYPE_MIN;
+        const uint32_t ps_stage =
+            SVGA3D_SHADERTYPE_PS - SVGA3D_SHADERTYPE_MIN;
+        const SVGA3dBufferBinding *vb0 =
+            &context->shadow.inputAssembly.vertexBuffers[0];
+        const SVGA3dConstantBufferBinding *cb0 =
+            &context->shadow.shaderState[vs_stage].constantBuffers[0];
+        const SVGA3dViewport *vp0 =
+            context->shadow.numViewports != 0 ? &context->shadow.viewports[0] : NULL;
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-DRAW-STATE cid=%u count=%u start=%u layout=%u topology=%u "
+            "vb0=%u/%u/%u vs=%u ps=%u cb0=%u/%u/%u rtv0=%u "
+            "blend=%u sampleMask=0x%08x raster=%u viewports=%u "
+            "vp0=%g,%g/%gx%g/%g..%g dirty=0x%016" PRIx64,
+            cid, vertex_count, start_vertex_location,
+            context->shadow.inputAssembly.layoutId,
+            context->shadow.inputAssembly.topology,
+            vb0->bufferId, vb0->stride, vb0->offset,
+            context->shadow.shaderState[vs_stage].shaderId,
+            context->shadow.shaderState[ps_stage].shaderId,
+            cb0->sid, cb0->offsetInBytes, cb0->sizeInBytes,
+            context->shadow.renderState.renderTargetViewIds[0],
+            context->shadow.renderState.blendStateId,
+            context->shadow.renderState.sampleMask,
+            context->shadow.renderState.rasterizerStateId,
+            context->shadow.numViewports,
+            vp0 != NULL ? (double)vp0->x : 0.0,
+            vp0 != NULL ? (double)vp0->y : 0.0,
+            vp0 != NULL ? (double)vp0->width : 0.0,
+            vp0 != NULL ? (double)vp0->height : 0.0,
+            vp0 != NULL ? (double)vp0->minDepth : 0.0,
+            vp0 != NULL ? (double)vp0->maxDepth : 0.0,
+            context->renderer_dirty);
+        vmsvga3d_dxvk_d3d11_trace_draw_state(s->dxvk, cid);
+    }
     if (context->shadow.inputAssembly.topology ==
         SVGA3D_PRIMITIVE_TRIANGLEFAN) {
         VMSVGA3DDxvkD3D11IndexBinding saved_binding;
@@ -11278,6 +11329,10 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-BLEND-SET cid=%u id=%u sampleMask=0x%08x",
+              cid, command.blendId, command.sampleMask);
 
           return vmsvga3d_d3d10_blend_state_set_plan(
                      &command,

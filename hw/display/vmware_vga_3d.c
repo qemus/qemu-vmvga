@@ -582,8 +582,27 @@ static bool vmsvga3d_gbo_create(struct vmsvga_state_s *s,
     uint32_t page_index = 0;
     bool ppn64;
 
-    if (s == NULL || gbo == NULL || size == 0 ||
-        size > VMSVGA3D_GBO_MAX_SIZE) {
+    if (s == NULL || gbo == NULL || size > VMSVGA3D_GBO_MAX_SIZE) {
+        return false;
+    }
+
+    /*
+     * SVGA3D_MOBFMT_EMPTY is a real protocol state, not an invalid GBO.
+     * The Win7 VMware KMD uses it as a zero-sized placeholder and later
+     * REDEFINE_GB_MOB64 supplies the real backing.  Keep a logical MOB in
+     * the host table with no pages so the redefine preserves object identity.
+     */
+    if (format == SVGA3D_MOBFMT_EMPTY) {
+        if (size != 0 || base != SVGA3D_MOB_EMPTY_BASE) {
+            return false;
+        }
+        memset(gbo, 0, sizeof(*gbo));
+        gbo->format = format;
+        gbo->base = base;
+        return true;
+    }
+
+    if (size == 0) {
         return false;
     }
 

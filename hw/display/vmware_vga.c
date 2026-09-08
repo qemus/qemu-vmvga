@@ -86,7 +86,8 @@
 #define VMSVGA_FIFO_SIZE (2 * 1024 * 1024)
 #define VMSVGA_VGA_FB_BACKUP_SIZE (512 * 1024)
 #define VMSVGA_SCRATCH_SIZE 256
-#define VMSVGA_SURFACE_MEMORY_SIZE (480U * 1024U * 1024U)
+#define VMSVGA_DEFAULT_VRAM_SIZE 32
+#define VMSVGA_SURFACE_MEMORY_SIZE (512U * 1024U * 1024U)
 #define VMSVGA_GBOBJECT_MEM_SIZE_KB (1024U * 1024U)
 #define VMSVGA_GMR_MAX_IDS 8192U
 #define VMSVGA_GMR_MAX_DESCRIPTOR_LENGTH 0x100000U
@@ -10096,7 +10097,7 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
 
 static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {
       DEFINE_PROP_UINT32("vgamem_mb", struct pci_vmsvga_state_s,
-                         chip.vga.vram_size_mb, 32),
+                         chip.vga.vram_size_mb, VMSVGA_DEFAULT_VRAM_SIZE),
       VMVGA_GLOBAL_VMSTATE_PROPERTY(struct pci_vmsvga_state_s,
                                     chip.vga.global_vmstate)
       DEFINE_PROP_BOOL("debug", struct pci_vmsvga_state_s,

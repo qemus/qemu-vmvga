@@ -8507,6 +8507,14 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           if (!was_enabled && enabled) {
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {
+              /*
+               * The SVGA cursor belongs to this display mode. Hide it before
+               * falling back to VGA even if its last position was never made
+               * valid, otherwise the frontend can retain a stale cursor.
+               */
+              vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
+                                      s->active_cursor_y,
+                                      SVGA_CURSOR_ON_HIDE);
               /* VGA needs dirty logging before selecting its isolated framebuffer. */
               vmsvga_set_dirty_log(s, true);
               if (s->fifo_bh != NULL) {
@@ -8521,7 +8529,8 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
               vmsvga_try_commit_mode(s);
           }
           vmsvga_update_dirty_log(s);
-          if (was_hidden != s->hidden) {
+          if (s->enable &&
+              (was_enabled != s->enable || was_hidden != s->hidden)) {
               s->cursor_dirty = true;
               cursor_update_from_fifo(s);
           }
@@ -9029,6 +9038,14 @@ static void vmsvga_reset(DeviceState *dev)
     }
 
     vmsvga_trace_flight_reset(s);
+
+    /*
+     * Reset invalidates all SVGA cursor state. Hide any cursor already
+     * presented by the frontend before clearing its last coordinates.
+     */
+    vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
+                            s->active_cursor_y, SVGA_CURSOR_ON_HIDE);
+
     vmsvga3d_reset(s);
     vmsvga_gmr_reset(s);
     vmsvga_screen_reset(s);
@@ -9081,13 +9098,13 @@ static void vmsvga_reset(DeviceState *dev)
     s->cursor = 0;
     s->cursor_x = 0;
     s->cursor_y = 0;
-    s->cursor_on = SVGA_CURSOR_ON_SHOW;
+    s->cursor_on = SVGA_CURSOR_ON_HIDE;
     s->cursor_x_valid = false;
     s->cursor_y_valid = false;
     s->active_cursor = 0;
     s->active_cursor_x = 0;
     s->active_cursor_y = 0;
-    s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
+    s->active_cursor_on = SVGA_CURSOR_ON_HIDE;
     s->active_cursor_position_valid = false;
     s->cursor_dirty = true;
     s->damage_count = 0;
@@ -9905,13 +9922,13 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->cursor = 0;
     s->cursor_x = 0;
     s->cursor_y = 0;
-    s->cursor_on = SVGA_CURSOR_ON_SHOW;
+    s->cursor_on = SVGA_CURSOR_ON_HIDE;
     s->cursor_x_valid = false;
     s->cursor_y_valid = false;
     s->active_cursor = 0;
     s->active_cursor_x = 0;
     s->active_cursor_y = 0;
-    s->active_cursor_on = SVGA_CURSOR_ON_SHOW;
+    s->active_cursor_on = SVGA_CURSOR_ON_HIDE;
     s->active_cursor_position_valid = false;
     s->cursor_dirty = true;
     s->damage_count = 0;

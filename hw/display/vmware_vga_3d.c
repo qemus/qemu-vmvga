@@ -8739,33 +8739,67 @@ static bool vmsvga3d_handle_bind_gb_surface(struct vmsvga_state_s *s,
                                              uint32_t fifo_start)
 {
     const SVGA3dCmdBindGBSurface *body;
+    const SVGA3dCmdBindGBSurfaceWithPitch *pitched_body;
     struct vmsvga3d_state_s *state;
     SVGAOTableSurfaceEntry entry;
+    uint32_t sid;
+    SVGAMobId mobid;
+    uint32_t mob_pitch = 0;
+    uint32_t surface_flags;
+    bool pitched;
     void *payload;
     uint32_t size;
 
-    (void)cmd;
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
         return true;
     }
 
-    if (size < sizeof(*body)) {
-        g_free(payload);
-        return true;
+    pitched = cmd == SVGA_3D_CMD_BIND_GB_SURFACE_WITH_PITCH;
+    if (pitched) {
+        if (size < sizeof(*pitched_body)) {
+            g_free(payload);
+            return true;
+        }
+        pitched_body = payload;
+        sid = pitched_body->sid;
+        mobid = pitched_body->mobid;
+        mob_pitch = pitched_body->baseLevelPitch;
+    } else {
+        if (size < sizeof(*body)) {
+            g_free(payload);
+            return true;
+        }
+        body = payload;
+        sid = body->sid;
+        mobid = body->mobid;
     }
 
-    body = payload;
     state = s != NULL ? s->svga3d : NULL;
     if (state != NULL &&
-        (body->mobid == SVGA3D_INVALID_ID ||
+        (mobid == SVGA3D_INVALID_ID ||
          vmsvga3d_otable_index_valid(&state->otables[SVGA_OTABLE_MOB],
-                                      body->mobid,
+                                      mobid,
                                       sizeof(SVGAOTableMobEntry))) &&
-        vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, body->sid,
+        vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, sid,
                              sizeof(entry), &entry, sizeof(entry))) {
-        entry.mobid = cpu_to_le32(body->mobid);
-        (void)vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, body->sid,
+        surface_flags = le32_to_cpu(entry.surface1Flags);
+        entry.mobid = cpu_to_le32(mobid);
+        if (pitched && mobid != SVGA3D_INVALID_ID && mob_pitch != 0) {
+            entry.mobPitch = cpu_to_le32(mob_pitch);
+            surface_flags |= (uint32_t)SVGA3D_SURFACE_MOB_PITCH;
+        } else {
+            entry.mobPitch = cpu_to_le32(0);
+            surface_flags &= ~(uint32_t)SVGA3D_SURFACE_MOB_PITCH;
+        }
+        entry.surface1Flags = cpu_to_le32(surface_flags);
+        (void)vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, sid,
                                     sizeof(entry), &entry, sizeof(entry));
+        if (pitched) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-BIND-PITCH sid=%u mobid=%u pitch=%u flags=0x%08x",
+                sid, mobid, mob_pitch, surface_flags);
+        }
     }
 
     g_free(payload);
@@ -9021,7 +9055,8 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
     VMSVGA3D_STALL(SVGA_3D_CMD_INVALIDATE_GB_IMAGE_PARTIAL),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_SET_GB_SHADERCONSTS_INLINE),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_GB_SCREEN_DMA),
-    VMSVGA3D_STALL(SVGA_3D_CMD_BIND_GB_SURFACE_WITH_PITCH),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_BIND_GB_SURFACE_WITH_PITCH,
+                     vmsvga3d_handle_bind_gb_surface),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_GB_MOB_FENCE,
                      vmsvga3d_handle_gb_mob_fence),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_DEFINE_GB_SURFACE_V2, vmsvga3d_handle_define_gb_surface),

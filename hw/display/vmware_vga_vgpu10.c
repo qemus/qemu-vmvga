@@ -7989,6 +7989,90 @@ typedef struct vmsvga3d_d3d10_update_layout_s {
     uint32_t depth_count;
 } VMSVGA3DD3D10UpdateLayout;
 
+typedef struct vmsvga3d_d3d10_mob_layout_s {
+    uint32_t subresource_offset;
+    uint32_t row_pitch;
+    uint32_t plane_size;
+} VMSVGA3DD3D10MobLayout;
+
+static bool vmsvga3d_d3d10_mob_subresource_layout_live(
+    const SVGAOTableSurfaceEntry *entry, const VMSVGA3DSurface *surface,
+    uint32_t subresource, VMSVGA3DD3D10MobLayout *layout)
+{
+    const struct svga3d_surface_desc *desc;
+    uint32_t levels;
+    uint32_t mob_pitch;
+    uint32_t surface_flags;
+    uint64_t offset = 0;
+    uint32_t i;
+
+    if (entry == NULL || surface == NULL || surface->mips == NULL ||
+        layout == NULL || subresource >= surface->mip_count) {
+        return false;
+    }
+
+    desc = svga3dsurface_get_desc(surface->format);
+    if (desc->format != surface->format) {
+        return false;
+    }
+
+    levels = le32_to_cpu(entry->numMipLevels);
+    if (levels == 0) {
+        return false;
+    }
+
+    surface_flags = le32_to_cpu(entry->surface1Flags);
+    mob_pitch = (surface_flags & (uint32_t)SVGA3D_SURFACE_MOB_PITCH) != 0
+                    ? le32_to_cpu(entry->mobPitch)
+                    : 0;
+
+    for (i = 0; i <= subresource; i++) {
+        const VMSVGA3DSurfaceImage *image = &surface->mips[i];
+        uint32_t row_pitch = image->pitch;
+        uint32_t row_count;
+        uint32_t depth_count;
+        uint64_t plane_size;
+        uint64_t data_size;
+
+        if (image->pitch == 0 || image->plane_size == 0 ||
+            image->data_size == 0 || image->plane_size % image->pitch != 0 ||
+            image->data_size % image->plane_size != 0) {
+            return false;
+        }
+
+        /* BIND_GB_SURFACE_WITH_PITCH supplies a pitch for mip level zero.
+         * The same base-level pitch applies to each array/cube layer; the
+         * remaining mip levels retain their normal tightly-packed pitch. */
+        if (mob_pitch != 0 && i % levels == 0 &&
+            !svga3dsurface_is_planar_surface(desc)) {
+            row_pitch = mob_pitch;
+        }
+        if (row_pitch < image->pitch) {
+            return false;
+        }
+
+        row_count = image->plane_size / image->pitch;
+        depth_count = image->data_size / image->plane_size;
+        plane_size = (uint64_t)row_count * row_pitch;
+        data_size = plane_size * depth_count;
+        if (plane_size > UINT32_MAX || data_size > UINT32_MAX ||
+            offset > UINT32_MAX) {
+            return false;
+        }
+
+        if (i == subresource) {
+            layout->subresource_offset = (uint32_t)offset;
+            layout->row_pitch = row_pitch;
+            layout->plane_size = (uint32_t)plane_size;
+            return true;
+        }
+
+        offset += data_size;
+    }
+
+    return false;
+}
+
 static bool vmsvga3d_d3d10_screen_target_bind_live(
     struct vmsvga_state_s *s, uint32_t sid)
 {
@@ -8334,11 +8418,15 @@ static bool vmsvga3d_d3d10_update_subresource_live(
     VMSVGA3DSurfaceImage *image;
     VMSVGA3DMob *mob;
     VMSVGA3DD3D10UpdateLayout layout;
+    VMSVGA3DD3D10MobLayout mob_layout;
     VMSVGA3DD3D10Box native_box;
-    uint64_t subresource_offset = 0;
+    uint64_t subresource_offset;
+    uint64_t guest_box_offset;
+    uint32_t guest_x_offset;
+    uint32_t guest_y;
+    uint32_t guest_z;
     uint32_t z;
     uint32_t y;
-    uint32_t i;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         command->sid >= SVGA3D_MAX_SURFACE_IDS ||
@@ -8365,22 +8453,33 @@ static bool vmsvga3d_d3d10_update_subresource_live(
 
     image = &surface->mips[command->subResource];
     if (!vmsvga3d_d3d10_update_box_live(
-            surface, image, &command->box, &layout)) {
+            surface, image, &command->box, &layout) ||
+        !vmsvga3d_d3d10_mob_subresource_layout_live(
+            &entry, surface, command->subResource, &mob_layout) ||
+        image->pitch == 0 || image->plane_size == 0 ||
+        image->plane_size % image->pitch != 0) {
         return false;
     }
 
-    for (i = 0; i < command->subResource; i++) {
-        subresource_offset += surface->mips[i].data_size;
-    }
-
-    if (subresource_offset > UINT32_MAX ||
-        layout.box_offset > UINT32_MAX - (uint32_t)subresource_offset) {
+    guest_z = layout.box_offset / image->plane_size;
+    guest_y = (layout.box_offset % image->plane_size) / image->pitch;
+    guest_x_offset = layout.box_offset % image->pitch;
+    if (guest_x_offset > mob_layout.row_pitch ||
+        layout.row_bytes > mob_layout.row_pitch - guest_x_offset) {
         return false;
     }
 
-    subresource_offset += layout.box_offset;
+    guest_box_offset = (uint64_t)guest_z * mob_layout.plane_size +
+                       (uint64_t)guest_y * mob_layout.row_pitch +
+                       guest_x_offset;
+    subresource_offset = (uint64_t)mob_layout.subresource_offset +
+                         guest_box_offset;
+    if (subresource_offset > UINT32_MAX) {
+        return false;
+    }
 
-    if (layout.depth_count == 1 && layout.row_bytes == image->pitch) {
+    if (layout.depth_count == 1 && layout.row_bytes == image->pitch &&
+        mob_layout.row_pitch == image->pitch) {
         uint64_t transfer_size =
             (uint64_t)layout.row_count * layout.row_bytes;
 
@@ -8396,8 +8495,8 @@ static bool vmsvga3d_d3d10_update_subresource_live(
         for (z = 0; z < layout.depth_count; z++) {
             for (y = 0; y < layout.row_count; y++) {
                 uint64_t offset = subresource_offset +
-                                  (uint64_t)z * image->plane_size +
-                                  (uint64_t)y * image->pitch;
+                                  (uint64_t)z * mob_layout.plane_size +
+                                  (uint64_t)y * mob_layout.row_pitch;
                 uint64_t host_offset = (uint64_t)layout.box_offset +
                                        (uint64_t)z * image->plane_size +
                                        (uint64_t)y * image->pitch;
@@ -8653,29 +8752,6 @@ static bool vmsvga3d_d3d10_readback_image_rects_live(
         secondary_data, secondary_row_pitch, secondary_data_size);
 }
 
-static bool vmsvga3d_d3d10_subresource_offset_live(
-    const VMSVGA3DSurface *surface, uint32_t subresource,
-    uint32_t *offset_out)
-{
-    uint64_t offset = 0;
-    uint32_t i;
-
-    if (surface == NULL || surface->mips == NULL || offset_out == NULL ||
-        subresource >= surface->mip_count) {
-        return false;
-    }
-
-    for (i = 0; i < subresource; i++) {
-        offset += surface->mips[i].data_size;
-    }
-
-    if (offset > UINT32_MAX) {
-        return false;
-    }
-
-    *offset_out = (uint32_t)offset;
-    return true;
-}
 
 static bool vmsvga3d_d3d10_readback_subresource_live(
     struct vmsvga_state_s *s,
@@ -8685,7 +8761,7 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
     VMSVGA3DSurface *surface;
     VMSVGA3DSurfaceImage *image;
     VMSVGA3DMob *mob;
-    uint32_t subresource_offset;
+    VMSVGA3DD3D10MobLayout mob_layout;
     uint32_t row_count;
     uint32_t depth_count;
     uint32_t z;
@@ -8719,8 +8795,8 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
     if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
         image->data_size == 0 || image->plane_size % image->pitch != 0 ||
         image->data_size % image->plane_size != 0 ||
-        !vmsvga3d_d3d10_subresource_offset_live(
-            surface, command->subResource, &subresource_offset) ||
+        !vmsvga3d_d3d10_mob_subresource_layout_live(
+            &entry, surface, command->subResource, &mob_layout) ||
         !vmsvga3d_d3d10_readback_image_live(
             s, surface, command->subResource)) {
         return false;
@@ -8731,9 +8807,9 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
 
     for (z = 0; z < depth_count; z++) {
         for (y = 0; y < row_count; y++) {
-            uint64_t offset = (uint64_t)subresource_offset +
-                              (uint64_t)z * image->plane_size +
-                              (uint64_t)y * image->pitch;
+            uint64_t offset = (uint64_t)mob_layout.subresource_offset +
+                              (uint64_t)z * mob_layout.plane_size +
+                              (uint64_t)y * mob_layout.row_pitch;
             const uint8_t *source = image->data +
                                     (size_t)z * image->plane_size +
                                     (size_t)y * image->pitch;

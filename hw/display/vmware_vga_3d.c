@@ -6368,9 +6368,10 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
         prepend ? "PREPEND" : "COMMAND", command_low, command_high,
         header_gpa, context, s->enable, s->config);
 
-    /* The register command-buffer interface is only active while the FIFO is
-     * enabled/configured.  Do not consume a stale header outside that state. */
-    if (!s->enable || !s->config) {
+    /* CONFIG_DONE is required for register command buffers.  Device-context
+     * teardown commands may still arrive after SVGA_REG_ENABLE is cleared. */
+    if (!s->config ||
+        (!s->enable && context != SVGA_CB_CONTEXT_DEVICE)) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "CB-COMPLETE kind=%s header=0x%016" PRIx64

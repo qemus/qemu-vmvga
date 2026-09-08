@@ -12162,7 +12162,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     case SVGA_3D_CMD_DX_BIND_QUERY: {
           SVGA3dCmdDXBindQuery command;
           VMSVGA3DMob *mob;
-          void *entry;
+          uint8_t *entry;
           uint32_t mobid;
 
           if (size < sizeof(command)) {

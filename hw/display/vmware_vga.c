@@ -591,6 +591,8 @@ struct pci_vmsvga_state_s {
     PCIDevice parent_obj;
     struct vmsvga_state_s chip;
     MemoryRegion io_bar;
+    MemoryRegion bar1;
+    MemoryRegion bar1_vram;
 };
 
 static inline bool vmsvga_trace_devcap_enabled(void)
@@ -10081,7 +10083,20 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
     vmsvga3d_renderer_realize(&s->chip);
     vmsvga_vgpu_apply(&s->chip);
 
-    pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.vga.vram);
+    /*
+     * BAR1 is the SVGA framebuffer/GART aperture.  Keep the ordinary VRAM
+     * RAMBlock as the background mapping so legacy framebuffer accesses stay
+     * direct and migratable, while GART can overlay individual aperture pages
+     * with aliases to guest-backed MOB pages.
+     */
+    memory_region_init(&s->bar1, OBJECT(dev), "vmsvga-bar1",
+                       s->chip.vga.vram_size);
+    memory_region_init_alias(&s->bar1_vram, OBJECT(dev),
+                             "vmsvga-bar1-vram", &s->chip.vga.vram, 0,
+                             s->chip.vga.vram_size);
+    memory_region_add_subregion(&s->bar1, 0, &s->bar1_vram);
+
+    pci_register_bar(dev, 1, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->bar1);
     pci_register_bar(dev, 2, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->chip.fifo_ram);
 
     vmsvga_trace_resource_snapshot(&s->chip, "realize");

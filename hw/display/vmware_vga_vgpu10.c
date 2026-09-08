@@ -7699,10 +7699,14 @@ static bool vmsvga3d_d3d10_context_switch_live(
     VMSVGA3DDXContext *old_context = NULL;
     VMSVGA3DD3D10SOTargetsPlan plan;
     uint32_t null_views[SVGA3D_DX_MAX_SRVIEWS];
+    VMSVGA3DDxvkSurface *null_vertex_buffers[
+        SVGA3D_DX_MAX_VERTEXBUFFERS] = { NULL };
+    uint32_t zero_vertex_strides[SVGA3D_DX_MAX_VERTEXBUFFERS] = { 0 };
+    uint32_t zero_vertex_offsets[SVGA3D_DX_MAX_VERTEXBUFFERS] = { 0 };
     uint32_t old_cid;
     uint32_t stage;
     uint32_t slot;
-    uint32_t old_vb_count;
+    uint32_t new_vb_count;
 
     if (s == NULL || s->svga3d == NULL || cid >= SVGA3D_MAX_CONTEXT_IDS) {
         return false;
@@ -7758,23 +7762,27 @@ static bool vmsvga3d_d3d10_context_switch_live(
         }
     }
 
-    /* Preserve VirtualBox's exact modified-mask quirk: the new context's VB
-     * mask is reset to the span that was bound by the old context (all 32 slots
-     * on the first switch).  Do not silently widen this to the new context's
-     * cMaxBound even though that would look more intuitive.
+    /* All guest DX contexts share one native D3D11 immediate context.  Clear
+     * the complete native VB table on every guest-context switch so bindings
+     * from a context with a wider/higher VB span cannot leak into the next
+     * context.  Then mark the new context's remembered span modified so the
+     * next pipeline setup restores its own buffers, strides and offsets.
      */
-    old_vb_count = old_context != NULL
-                       ? MIN(old_context->vertex_buffer_max_bound,
-                             (uint32_t)SVGA3D_DX_MAX_VERTEXBUFFERS)
-                       : SVGA3D_DX_MAX_VERTEXBUFFERS;
+    if (!vmsvga3d_dxvk_d3d11_set_vertex_buffers(
+            s->dxvk, 0, SVGA3D_DX_MAX_VERTEXBUFFERS, null_vertex_buffers,
+            zero_vertex_strides, zero_vertex_offsets)) {
+        return false;
+    }
 
-    if (old_vb_count == 0) {
+    new_vb_count = MIN(context->vertex_buffer_max_bound,
+                       (uint32_t)SVGA3D_DX_MAX_VERTEXBUFFERS);
+    if (new_vb_count == 0) {
         context->vertex_buffer_modified = 0;
-    } else if (old_vb_count >= 64) {
+    } else if (new_vb_count >= 64) {
         context->vertex_buffer_modified = UINT64_MAX;
     } else {
         context->vertex_buffer_modified =
-            (UINT64_C(1) << old_vb_count) - UINT64_C(1);
+            (UINT64_C(1) << new_vb_count) - UINT64_C(1);
     }
 
     /* VirtualBox restores SO targets on every DX context switch.  The context
@@ -8245,6 +8253,12 @@ static bool vmsvga3d_d3d10_mob_subresource_layout_live(
         uint32_t depth_count;
         uint64_t plane_size;
         uint64_t data_size;
+
+        /* SVGA3D_SURFACE_ALIGN16 aligns the start of every image in the
+         * guest-backing MOB, not the size of the host CPU shadow image. */
+        if ((surface_flags & (uint32_t)SVGA3D_SURFACE_ALIGN16) != 0) {
+            offset = QEMU_ALIGN_UP(offset, UINT64_C(16));
+        }
 
         if (image->pitch == 0 || image->plane_size == 0 ||
             image->data_size == 0 || image->plane_size % image->pitch != 0 ||

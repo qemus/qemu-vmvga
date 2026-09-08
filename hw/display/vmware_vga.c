@@ -86,7 +86,8 @@
 #define VMSVGA_FIFO_SIZE (2 * 1024 * 1024)
 #define VMSVGA_VGA_FB_BACKUP_SIZE (512 * 1024)
 #define VMSVGA_SCRATCH_SIZE 256
-#define VMSVGA_MEMORY_SIZE (512U * 1024U * 1024U)
+#define VMSVGA_SURFACE_MEMORY_SIZE (480U * 1024U * 1024U)
+#define VMSVGA_GBOBJECT_MEM_SIZE_KB (1024U * 1024U)
 #define VMSVGA_GMR_MAX_IDS 8192U
 #define VMSVGA_GMR_MAX_DESCRIPTOR_LENGTH 0x100000U
 #define VMSVGA_GMR_MAX_PAGES 0x100000U
@@ -3201,24 +3202,22 @@ static void vmsvga_objects_clear(struct vmsvga_state_s *s)
 }
 
 /*
- * SVGA_REG_MEMORY_SIZE is the total dedicated device-memory budget excluding
- * FIFO memory. Current VirtualBox exposes 512 MiB here, and its Windows driver
- * subtracts SVGA_REG_VRAM_SIZE to obtain the non-VRAM surface-memory budget.
- * Keep our allocation limit consistent with that contract.
+ * SVGA_REG_MEMORY_SIZE is total dedicated device memory excluding FIFO memory.
+ * Guests derive the non-VRAM surface budget by subtracting SVGA_REG_VRAM_SIZE.
+ * Keep that surface budget independent of vgamem_mb: 480 MiB plus the new
+ * 32 MiB default still reports the same 512 MiB total as before.
  */
 static inline size_t
 vmsvga_surface_memory_size(const struct vmsvga_state_s *s)
 {
-    return s->vga.vram_size < VMSVGA_MEMORY_SIZE
-               ? VMSVGA_MEMORY_SIZE - s->vga.vram_size
-               : 0;
+    (void)s;
+    return VMSVGA_SURFACE_MEMORY_SIZE;
 }
 
 static inline uint32_t
 vmsvga_memory_size(const struct vmsvga_state_s *s)
 {
-    (void)s;
-    return VMSVGA_MEMORY_SIZE;
+    return s->vga.vram_size + VMSVGA_SURFACE_MEMORY_SIZE;
 }
 
 static inline bool vmsvga_object_layout(uint32_t type, uint32_t width,
@@ -8145,14 +8144,16 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
                s->index, ret);
         break;
     case SVGA_REG_GBOBJECT_MEM_SIZE_KB:
-        /* VirtualBox reports a 1 GiB residency limit even when GB objects are not
-         * advertised by the active capability mask. */
-        ret = (1024U * 1024U * 1024U) / 1024U;
+        /* Guest-backed objects live in guest memory, not BAR1 VRAM.  Keep the
+         * residency budget independent of vgamem_mb. */
+        ret = VMSVGA_GBOBJECT_MEM_SIZE_KB;
         VPRINT("SVGA_REG_GBOBJECT_MEM_SIZE_KB register %u with the return of %u\n",
                s->index, ret);
         break;
     case SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB:
-        ret = s->vga.vram_size / 1024U;
+        /* Legacy form of GBOBJECT_MEM_SIZE_KB.  The 1 GiB value safely fits
+         * the older 32-bit KB-to-byte conversion and must not track VRAM. */
+        ret = VMSVGA_GBOBJECT_MEM_SIZE_KB;
         VPRINT("SVGA_REG_SUGGESTED_GBOBJECT_MEM_SIZE_KB register %u with the "
                "return of %u\n",
                s->index, ret);
@@ -8205,7 +8206,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         }
 #else
         ret = s->svga3d_dx_capable
-                  ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2)
+                  ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2 |
+                     SVGA_CAP2_GB_MEMSIZE_2)
                   : SVGA_CAP2_NONE;
         if (s->svga3d_dx_capable &&
             s->vgpu_generation == VMSVGA_VGPU_11) {
@@ -10094,7 +10096,7 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
 
 static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {
       DEFINE_PROP_UINT32("vgamem_mb", struct pci_vmsvga_state_s,
-                         chip.vga.vram_size_mb, 128),
+                         chip.vga.vram_size_mb, 32),
       VMVGA_GLOBAL_VMSTATE_PROPERTY(struct pci_vmsvga_state_s,
                                     chip.vga.global_vmstate)
       DEFINE_PROP_BOOL("debug", struct pci_vmsvga_state_s,

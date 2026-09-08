@@ -111,9 +111,16 @@ struct vmsvga3d_dxvk_query_s {
     uint32_t d3d_query;
     uint32_t misc_flags;
     bool pending;
+    bool completion_valid;
+    bool completion_failed;
+    uint32_t completion_size;
+    uint8_t *completion_data;
     void *query;
     VMSVGA3DDxvkQuery *next;
 };
+
+static void vmsvga3d_dxvk_d3d11_query_completion_reset(
+    VMSVGA3DDxvkQuery *query);
 
 typedef enum vmsvga3d_dxvk_state_kind_e {
     VMSVGA3D_DXVK_STATE_BLEND = 0,
@@ -2025,6 +2032,7 @@ static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
         if (query->query != NULL) {
             vmsvga3d_dxvk_release(query->query, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         }
+        vmsvga3d_dxvk_d3d11_query_completion_reset(query);
         g_free(query);
     }
 
@@ -7616,6 +7624,53 @@ static VMSVGA3DDxvkQuery *vmsvga3d_dxvk_d3d11_query_find(
     return NULL;
 }
 
+static void vmsvga3d_dxvk_d3d11_query_completion_reset(
+    VMSVGA3DDxvkQuery *query)
+{
+    if (query == NULL) {
+        return;
+    }
+
+    g_free(query->completion_data);
+    query->completion_data = NULL;
+    query->completion_size = 0;
+    query->completion_valid = false;
+    query->completion_failed = false;
+}
+
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+static bool vmsvga3d_dxvk_d3d11_query_completion_store(
+    VMSVGA3DDxvkQuery *query, const void *data, uint32_t data_size)
+{
+    uint8_t *copy;
+
+    if (query == NULL || data == NULL || data_size == 0) {
+        return false;
+    }
+
+    /* Completed D3D11 query payloads are tiny.  Use the normal GLib allocator
+     * so a successfully completed query always has an authoritative raw result
+     * available for a later MOVE replay instead of silently losing the cache. */
+    copy = g_malloc(data_size);
+    memcpy(copy, data, data_size);
+    vmsvga3d_dxvk_d3d11_query_completion_reset(query);
+    query->completion_data = copy;
+    query->completion_size = data_size;
+    query->completion_valid = true;
+    return true;
+}
+
+static void vmsvga3d_dxvk_d3d11_query_completion_store_failure(
+    VMSVGA3DDxvkQuery *query)
+{
+    vmsvga3d_dxvk_d3d11_query_completion_reset(query);
+    if (query != NULL) {
+        query->completion_valid = true;
+        query->completion_failed = true;
+    }
+}
+#endif
+
 bool vmsvga3d_dxvk_d3d11_query_exists(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id)
 {
@@ -7653,6 +7708,7 @@ bool vmsvga3d_dxvk_d3d11_query_destroy(
 
     *link = query->next;
 
+    vmsvga3d_dxvk_d3d11_query_completion_reset(query);
     g_free(query);
     return true;
 }
@@ -7681,6 +7737,7 @@ void vmsvga3d_dxvk_d3d11_query_context_destroy(
         }
 #endif
         *link = query->next;
+        vmsvga3d_dxvk_d3d11_query_completion_reset(query);
         g_free(query);
     }
 }
@@ -7790,6 +7847,10 @@ bool vmsvga3d_dxvk_d3d11_query_begin(
         return false;
     }
 
+    /* A new Begin starts a new logical query generation.  Any completed raw
+     * result from the previous generation must not be replayed by a later
+     * DX_MOVE_QUERY. */
+    vmsvga3d_dxvk_d3d11_query_completion_reset(query);
     begin(dxvk->d3d11_context, query->query);
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
@@ -7832,6 +7893,9 @@ bool vmsvga3d_dxvk_d3d11_query_end(
         return false;
     }
 
+    /* End is the generation boundary for timestamp queries, and clearing here
+     * is harmless for Begin/End queries whose Begin already cleared the cache. */
+    vmsvga3d_dxvk_d3d11_query_completion_reset(query);
     end_query(dxvk->d3d11_context, query->query);
 
     /* VBox keeps backend-pending membership separate from the guest COTable
@@ -7895,13 +7959,16 @@ bool vmsvga3d_dxvk_d3d11_query_get_data(
             (uint32_t)result, pending_before ? 1u : 0u);
     }
     if (result == 0) { /* S_OK */
+        bool cache_ok = vmsvga3d_dxvk_d3d11_query_completion_store(
+            query, data, data_size);
+
         query->pending = false;
         *ready = true;
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-QUERY-NATIVE-GETDATA cid=%u query=%u hr=S_OK ready=1 "
-            "pending-after=0",
-            cid, query_id);
+            "pending-after=0 cache=%s size=%u",
+            cid, query_id, cache_ok ? "OK" : "FAIL", data_size);
         return true;
     }
 
@@ -7915,10 +7982,11 @@ bool vmsvga3d_dxvk_d3d11_query_get_data(
     }
 
     query->pending = false;
+    vmsvga3d_dxvk_d3d11_query_completion_store_failure(query);
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-QUERY-NATIVE-GETDATA cid=%u query=%u hr=0x%08x ready=0 "
-        "pending-after=0 result=FAIL",
+        "pending-after=0 result=FAIL cache=FAILED",
         cid, query_id, (uint32_t)result);
 
     return false;
@@ -7932,6 +8000,42 @@ bool vmsvga3d_dxvk_d3d11_query_get_data(
     (void)ready;
     return false;
 #endif
+}
+
+bool vmsvga3d_dxvk_d3d11_query_cached_result(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id,
+    const void **data, uint32_t *data_size, bool *failed)
+{
+    VMSVGA3DDxvkQuery *query =
+        vmsvga3d_dxvk_d3d11_query_find(dxvk, cid, query_id, NULL);
+
+    if (data != NULL) {
+        *data = NULL;
+    }
+    if (data_size != NULL) {
+        *data_size = 0;
+    }
+    if (failed != NULL) {
+        *failed = false;
+    }
+
+    if (query == NULL || !query->completion_valid) {
+        return false;
+    }
+
+    if (failed != NULL) {
+        *failed = query->completion_failed;
+    }
+    if (!query->completion_failed) {
+        if (data != NULL) {
+            *data = query->completion_data;
+        }
+        if (data_size != NULL) {
+            *data_size = query->completion_size;
+        }
+    }
+
+    return true;
 }
 
 bool vmsvga3d_dxvk_d3d11_query_pending(

@@ -4876,6 +4876,46 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_stage(
     return VMSVGA3D_D3D10_LEVEL_11_0;
 }
 
+static const char *vmsvga3d_dx_query_type_name(SVGA3dQueryType type)
+{
+    switch (type) {
+    case SVGA3D_QUERYTYPE_OCCLUSION:
+        return "OCCLUSION";
+    case SVGA3D_QUERYTYPE_TIMESTAMP:
+        return "TIMESTAMP";
+    case SVGA3D_QUERYTYPE_TIMESTAMPDISJOINT:
+        return "TIMESTAMP_DISJOINT";
+    case SVGA3D_QUERYTYPE_PIPELINESTATS:
+        return "PIPELINE_STATS";
+    case SVGA3D_QUERYTYPE_OCCLUSIONPREDICATE:
+        return "OCCLUSION_PREDICATE";
+    case SVGA3D_QUERYTYPE_STREAMOUTPUTSTATS:
+        return "SO_STATS";
+    case SVGA3D_QUERYTYPE_STREAMOVERFLOWPREDICATE:
+        return "SO_OVERFLOW_PREDICATE";
+    case SVGA3D_QUERYTYPE_OCCLUSION64:
+        return "OCCLUSION64";
+    case SVGA3D_QUERYTYPE_SOSTATS_STREAM0:
+        return "SO_STATS_STREAM0";
+    case SVGA3D_QUERYTYPE_SOSTATS_STREAM1:
+        return "SO_STATS_STREAM1";
+    case SVGA3D_QUERYTYPE_SOSTATS_STREAM2:
+        return "SO_STATS_STREAM2";
+    case SVGA3D_QUERYTYPE_SOSTATS_STREAM3:
+        return "SO_STATS_STREAM3";
+    case SVGA3D_QUERYTYPE_SOP_STREAM0:
+        return "SO_PRED_STREAM0";
+    case SVGA3D_QUERYTYPE_SOP_STREAM1:
+        return "SO_PRED_STREAM1";
+    case SVGA3D_QUERYTYPE_SOP_STREAM2:
+        return "SO_PRED_STREAM2";
+    case SVGA3D_QUERYTYPE_SOP_STREAM3:
+        return "SO_PRED_STREAM3";
+    default:
+        return "INVALID";
+    }
+}
+
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_info(
     SVGA3dQueryType type, uint32_t flags, VMSVGA3DD3D10QueryInfo *info)
 {
@@ -5171,6 +5211,34 @@ static uint64_t query_read_u64(const uint8_t *src)
     uint64_t value;
     memcpy(&value, src, sizeof(value));
     return value;
+}
+
+static void vmsvga3d_d3d10_query_trace_data(
+    const char *stage, uint32_t cid, uint32_t query_id,
+    SVGA3dQueryType type, const void *data, uint32_t size)
+{
+    uint64_t words[11] = { 0 };
+    size_t copy_size;
+
+    if (!VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D) || data == NULL) {
+        return;
+    }
+
+    copy_size = size < sizeof(words) ? size : sizeof(words);
+    memcpy(words, data, copy_size);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-DATA stage=%s cid=%u query=%u type=%u(%s) size=%u "
+        "q0=0x%016" PRIx64 " q1=0x%016" PRIx64
+        " q2=0x%016" PRIx64 " q3=0x%016" PRIx64
+        " q4=0x%016" PRIx64 " q5=0x%016" PRIx64
+        " q6=0x%016" PRIx64 " q7=0x%016" PRIx64
+        " q8=0x%016" PRIx64 " q9=0x%016" PRIx64
+        " q10=0x%016" PRIx64,
+        stage != NULL ? stage : "?", cid, query_id, (unsigned)type,
+        vmsvga3d_dx_query_type_name(type), size,
+        words[0], words[1], words[2], words[3], words[4], words[5],
+        words[6], words[7], words[8], words[9], words[10]);
 }
 
 VMSVGA3DD3D10Level vmsvga3d_d3d10_query_result(
@@ -9818,11 +9886,12 @@ typedef enum vmsvga3d_d3d10_query_poll_result_e {
 
 static VMSVGA3DD3D10QueryPollResult
 vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
-                                uint32_t query_id)
+                                uint32_t query_id, const char *source)
 {
     VMSVGA3DD3D10QueryExecutionPlan plan;
     SVGADXQueryResultUnion svga_result = { 0 };
     uint8_t d3d_result[sizeof(SVGADXQueryResultUnion)] = { 0 };
+    uint8_t verify[sizeof(uint32_t) + sizeof(SVGADXQueryResultUnion)] = { 0 };
     uint8_t *entry;
     VMSVGA3DMob *mob;
     SVGA3dQueryType type;
@@ -9831,58 +9900,146 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
     uint32_t offset;
     uint32_t svga_result_size = 0;
     uint32_t query_state;
+    uint32_t verify_state = UINT32_MAX;
+    uint32_t verify_size;
+    bool get_data_ok;
+    bool data_write_ok = false;
+    bool state_write_ok = false;
+    bool verify_read_ok = false;
+    bool verify_state_ok = false;
+    bool verify_data_ok = false;
     bool ready = false;
     bool success = false;
 
     if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-POLL source=%s cid=%u query=%u result=FAIL reason=not-ready",
+            source != NULL ? source : "?", cid, query_id);
         return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
     }
 
     entry = vmsvga3d_dx_cotable_entry_ptr(
         s, cid, SVGA_COTABLE_DXQUERY, query_id);
 
-    if (entry == NULL ||
-        !vmsvga3d_dxvk_d3d11_query_pending(s->dxvk, cid, query_id)) {
+    if (entry == NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-POLL source=%s cid=%u query=%u result=FAIL reason=no-entry",
+            source != NULL ? source : "?", cid, query_id);
+        return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
+    }
+    if (!vmsvga3d_dxvk_d3d11_query_pending(s->dxvk, cid, query_id)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-POLL source=%s cid=%u query=%u qdstate=%u result=FAIL "
+            "reason=native-not-pending",
+            source != NULL ? source : "?", cid, query_id, entry[3]);
         return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
     }
 
     type = (SVGA3dQueryType)entry[0];
     flags = query_read_u32(entry + 4);
+    mobid = query_read_u32(entry + 8);
+    offset = query_read_u32(entry + 12);
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-POLL source=%s cid=%u query=%u type=%u(%s) qdstate=%u "
+        "flags=0x%08x mobid=%u offset=%u native-pending=1 action=GETDATA",
+        source != NULL ? source : "?", cid, query_id, (unsigned)type,
+        vmsvga3d_dx_query_type_name(type), entry[3], flags, mobid, offset);
 
     if (!vmsvga3d_dx_query_type_allowed(s, type) ||
         vmsvga3d_d3d10_query_execution_plan(type, flags, &plan) ==
             VMSVGA3D_D3D10_LEVEL_INVALID ||
         !plan.get_data_after_end ||
         plan.d3d_result_size > sizeof(d3d_result)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-POLL source=%s cid=%u query=%u type=%u(%s) result=FAIL "
+            "reason=invalid-plan",
+            source != NULL ? source : "?", cid, query_id, (unsigned)type,
+            vmsvga3d_dx_query_type_name(type));
         return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
     }
 
-    if (vmsvga3d_dxvk_d3d11_query_get_data(
-            s->dxvk, cid, query_id, d3d_result, plan.d3d_result_size,
-            plan.getdata_flags, &ready)) {
+    get_data_ok = vmsvga3d_dxvk_d3d11_query_get_data(
+        s->dxvk, cid, query_id, d3d_result, plan.d3d_result_size,
+        plan.getdata_flags, &ready);
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-POLL-RESULT source=%s cid=%u query=%u type=%u(%s) "
+        "call=%s ready=%u d3d-size=%u",
+        source != NULL ? source : "?", cid, query_id, (unsigned)type,
+        vmsvga3d_dx_query_type_name(type), get_data_ok ? "OK" : "FAIL",
+        ready ? 1u : 0u, plan.d3d_result_size);
+
+    if (get_data_ok) {
         if (!ready) {
             return VMSVGA3D_D3D10_QUERY_POLL_PENDING;
         }
 
+        vmsvga3d_d3d10_query_trace_data(
+            "NATIVE", cid, query_id, type, d3d_result, plan.d3d_result_size);
         success = vmsvga3d_d3d10_query_result(
                       type, d3d_result, plan.d3d_result_size, &svga_result,
                       &svga_result_size) != VMSVGA3D_D3D10_LEVEL_INVALID;
+        if (success) {
+            vmsvga3d_d3d10_query_trace_data(
+                "SVGA", cid, query_id, type, &svga_result, svga_result_size);
+        }
     }
 
-    mobid = query_read_u32(entry + 8);
-    offset = query_read_u32(entry + 12);
     mob = vmsvga3d_mob_get(s, mobid);
+    query_state = success ? SVGA3D_QUERYSTATE_SUCCEEDED
+                          : SVGA3D_QUERYSTATE_FAILED;
 
     if (mob != NULL) {
         if (success) {
-            (void)vmsvga3d_mob_write(
+            data_write_ok = vmsvga3d_mob_write(
                 s, mob, offset + sizeof(uint32_t), &svga_result, svga_result_size);
         }
-        query_state = success ? SVGA3D_QUERYSTATE_SUCCEEDED
-                              : SVGA3D_QUERYSTATE_FAILED;
-        (void)vmsvga3d_mob_write(
+        state_write_ok = vmsvga3d_mob_write(
             s, mob, offset, &query_state, sizeof(query_state));
+
+        verify_size = sizeof(uint32_t) + (success ? svga_result_size : 0u);
+        if (verify_size <= sizeof(verify)) {
+            verify_read_ok = vmsvga3d_mob_read(
+                s, mob, offset, verify, verify_size);
+            if (verify_read_ok) {
+                memcpy(&verify_state, verify, sizeof(verify_state));
+                verify_state_ok = verify_state == query_state;
+                verify_data_ok = !success ||
+                    memcmp(verify + sizeof(uint32_t), &svga_result,
+                           svga_result_size) == 0;
+            }
+        }
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-WRITE source=%s cid=%u query=%u type=%u(%s) mobid=%u "
+        "offset=%u state=%u state-write=%s data-size=%u data-write=%s "
+        "mob=%s",
+        source != NULL ? source : "?", cid, query_id, (unsigned)type,
+        vmsvga3d_dx_query_type_name(type), mobid, offset, query_state,
+        state_write_ok ? "OK" : "FAIL", success ? svga_result_size : 0u,
+        success ? (data_write_ok ? "OK" : "FAIL") : "SKIP",
+        mob != NULL ? "present" : "missing");
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-VERIFY source=%s cid=%u query=%u mobid=%u offset=%u "
+        "read=%s state=0x%08x expected=0x%08x state-match=%u data-match=%u",
+        source != NULL ? source : "?", cid, query_id, mobid, offset,
+        verify_read_ok ? "OK" : "FAIL", verify_state, query_state,
+        verify_state_ok ? 1u : 0u, verify_data_ok ? 1u : 0u);
+    if (verify_read_ok && success) {
+        vmsvga3d_d3d10_query_trace_data(
+            "GUEST-VERIFY", cid, query_id, type,
+            verify + sizeof(uint32_t), svga_result_size);
     }
 
     /* vmsvga3dDXCbFinishQuery marks both successful and failed completions
@@ -9941,19 +10098,52 @@ static bool vmsvga3d_d3d10_query_end_live(
 
         if (mob != NULL) {
             uint32_t query_state = SVGA3D_QUERYSTATE_PENDING;
+            uint32_t verify_state = UINT32_MAX;
+            uint32_t mobid = query_read_u32(entry + 8);
+            uint32_t offset = query_read_u32(entry + 12);
+            bool state_write_ok;
+            bool verify_ok;
 
-            (void)vmsvga3d_mob_write(
-                s, mob, query_read_u32(entry + 12), &query_state,
-                sizeof(query_state));
+            state_write_ok = vmsvga3d_mob_write(
+                s, mob, offset, &query_state, sizeof(query_state));
+            verify_ok = vmsvga3d_mob_read(
+                s, mob, offset, &verify_state, sizeof(verify_state));
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-QUERY-GUEST-STATE stage=TIMESTAMP-END cid=%u query=%u "
+                "mobid=%u offset=%u write=%s verify=%s state=0x%08x "
+                "expected=0x%08x match=%u",
+                cid, command->queryId, mobid, offset,
+                state_write_ok ? "OK" : "FAIL", verify_ok ? "OK" : "FAIL",
+                verify_state, query_state,
+                verify_ok && verify_state == query_state ? 1u : 0u);
         }
     }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-END cid=%u query=%u type=%u(%s) qdstate=%u flags=0x%08x "
+        "mobid=%u offset=%u issue=%u",
+        cid, command->queryId, (unsigned)type, vmsvga3d_dx_query_type_name(type),
+        entry[3], flags, query_read_u32(entry + 8), query_read_u32(entry + 12),
+        plan.issue_end ? 1u : 0u);
 
     entry[3] = SVGADX_QDSTATE_PENDING;
 
     if (!vmsvga3d_dxvk_d3d11_query_end(
             s->dxvk, cid, command->queryId, plan.issue_end)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-END cid=%u query=%u type=%u(%s) result=FAIL",
+            cid, command->queryId, (unsigned)type,
+            vmsvga3d_dx_query_type_name(type));
         return false;
     }
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-END cid=%u query=%u type=%u(%s) result=OK native-pending=%u",
+        cid, command->queryId, (unsigned)type, vmsvga3d_dx_query_type_name(type),
+        vmsvga3d_dxvk_d3d11_query_pending(s->dxvk, cid, command->queryId) ? 1u : 0u);
 
     if (!plan.get_data_after_end) {
         /* Predicate-hint queries intentionally remain pending forever from the
@@ -9964,13 +10154,14 @@ static bool vmsvga3d_d3d10_query_end_live(
     /* VBox probes once here.  S_OK may finish immediately, S_FALSE stays
      * pending for ProcessPendingTasks, and any real HRESULT failure finishes
      * the guest query with FAILED. */
-    poll = vmsvga3d_d3d10_query_poll_live(s, cid, command->queryId);
+    poll = vmsvga3d_d3d10_query_poll_live(
+        s, cid, command->queryId, "END");
 
     return poll != VMSVGA3D_D3D10_QUERY_POLL_FAILED;
 }
 
 static void vmsvga3d_d3d10_process_pending_queries(
-    struct vmsvga_state_s *s)
+    struct vmsvga_state_s *s, const char *source)
 {
     uint32_t cid;
 
@@ -10017,7 +10208,8 @@ static void vmsvga3d_d3d10_process_pending_queries(
                     continue;
                 }
             }
-            (void)vmsvga3d_d3d10_query_poll_live(s, cid, query_id);
+            (void)vmsvga3d_d3d10_query_poll_live(
+                s, cid, query_id, source);
         }
     }
 }
@@ -10041,11 +10233,28 @@ static bool vmsvga3d_d3d10_move_query_live(
      * already established by BIND_QUERY + SET_QUERY_OFFSET.  Service pending
      * completions here and otherwise accept the notification.
      */
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "DX-MOVE-QUERY cid=%u query=%u mobid=%u offset=%u action=PUMP",
-        cid, command->queryId, command->mobid, command->mobOffset);
-    vmsvga3d_d3d10_process_pending_queries(s);
+    {
+        uint8_t *entry = vmsvga3d_dx_cotable_entry_ptr(
+            s, cid, SVGA_COTABLE_DXQUERY, command->queryId);
+        uint32_t entry_mobid = entry != NULL ? query_read_u32(entry + 8)
+                                             : SVGA3D_INVALID_ID;
+        uint32_t entry_offset = entry != NULL ? query_read_u32(entry + 12) : 0;
+        SVGA3dQueryType type = entry != NULL
+                             ? (SVGA3dQueryType)entry[0]
+                             : SVGA3D_QUERYTYPE_INVALID;
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-MOVE cid=%u query=%u type=%u(%s) payload-mobid=%u "
+            "payload-offset=%u entry-mobid=%u entry-offset=%u qdstate=%u "
+            "native-pending=%u action=PUMP",
+            cid, command->queryId, (unsigned)type,
+            vmsvga3d_dx_query_type_name(type), command->mobid, command->mobOffset,
+            entry_mobid, entry_offset, entry != NULL ? entry[3] : 0xffu,
+            vmsvga3d_dxvk_d3d11_query_pending(
+                s->dxvk, cid, command->queryId) ? 1u : 0u);
+    }
+    vmsvga3d_d3d10_process_pending_queries(s, "MOVE");
     return true;
 }
 
@@ -10110,23 +10319,65 @@ static bool vmsvga3d_d3d10_query_begin_live(
     offset = query_read_u32(entry + 12);
     mob = vmsvga3d_mob_get(s, mobid);
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-BEGIN cid=%u query=%u type=%u(%s) qdstate=%u flags=0x%08x "
+        "mobid=%u offset=%u issue=1",
+        cid, command->queryId, (unsigned)type, vmsvga3d_dx_query_type_name(type),
+        entry[3], flags, mobid, offset);
+
     if (!vmsvga3d_dxvk_d3d11_query_begin(
             s->dxvk, cid, command->queryId, true)) {
+        bool state_write_ok = false;
+
         if (mob != NULL) {
             query_state = SVGA3D_QUERYSTATE_FAILED;
-            (void)vmsvga3d_mob_write(
+            state_write_ok = vmsvga3d_mob_write(
                 s, mob, offset, &query_state, sizeof(query_state));
         }
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-BEGIN cid=%u query=%u type=%u(%s) result=FAIL "
+            "state-write=%s",
+            cid, command->queryId, (unsigned)type,
+            vmsvga3d_dx_query_type_name(type), state_write_ok ? "OK" : "FAIL");
         return false;
     }
 
     entry[3] = SVGADX_QDSTATE_ACTIVE;
 
     if (mob != NULL) {
+        uint32_t verify_state = UINT32_MAX;
+        bool state_write_ok;
+        bool verify_ok;
+
         query_state = SVGA3D_QUERYSTATE_PENDING;
-        (void)vmsvga3d_mob_write(
+        state_write_ok = vmsvga3d_mob_write(
             s, mob, offset, &query_state, sizeof(query_state));
+        verify_ok = vmsvga3d_mob_read(
+            s, mob, offset, &verify_state, sizeof(verify_state));
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-GUEST-STATE stage=BEGIN cid=%u query=%u mobid=%u "
+            "offset=%u write=%s verify=%s state=0x%08x expected=0x%08x "
+            "match=%u",
+            cid, command->queryId, mobid, offset,
+            state_write_ok ? "OK" : "FAIL", verify_ok ? "OK" : "FAIL",
+            verify_state, query_state,
+            verify_ok && verify_state == query_state ? 1u : 0u);
+    } else {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-GUEST-STATE stage=BEGIN cid=%u query=%u mobid=%u "
+            "offset=%u write=SKIP reason=missing-mob",
+            cid, command->queryId, mobid, offset);
     }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-BEGIN cid=%u query=%u type=%u(%s) result=OK qdstate=%u",
+        cid, command->queryId, (unsigned)type, vmsvga3d_dx_query_type_name(type),
+        entry[3]);
 
     return true;
 }
@@ -10164,7 +10415,18 @@ static bool vmsvga3d_d3d10_bind_all_query_live(
 
     for (i = 0; i < binding->capacity_entries; i++) {
         if (entries[i].type != SVGA3D_QUERYTYPE_INVALID) {
+            uint32_t old_mobid = entries[i].mobid;
+
             entries[i].mobid = command->mobid;
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-QUERY-BIND-ALL cid=%u query=%u type=%u(%s) old-mobid=%u "
+                "new-mobid=%u offset=%u qdstate=%u native-pending=%u",
+                command->cid, i, (unsigned)entries[i].type,
+                vmsvga3d_dx_query_type_name(entries[i].type), old_mobid,
+                command->mobid, entries[i].offset, entries[i].state,
+                vmsvga3d_dxvk_d3d11_query_pending(
+                    s->dxvk, command->cid, i) ? 1u : 0u);
         }
     }
 
@@ -10174,8 +10436,63 @@ static bool vmsvga3d_d3d10_bind_all_query_live(
 static bool vmsvga3d_d3d10_readback_all_query_live(
     struct vmsvga_state_s *s, const SVGA3dCmdDXReadbackAllQuery *command)
 {
-    return s != NULL && command != NULL &&
-           vmsvga3d_dx_context(s, command->cid) != NULL;
+    VMSVGA3DDXContext *context;
+    VMSVGA3DDXCOTable *binding;
+    SVGACOTableDXQueryEntry *entries;
+    uint32_t active = 0;
+    uint32_t pending = 0;
+    uint32_t i;
+
+    if (s == NULL || command == NULL) {
+        return false;
+    }
+
+    context = vmsvga3d_dx_context(s, command->cid);
+    if (context == NULL) {
+        return false;
+    }
+
+    binding = &context->cotables[SVGA_COTABLE_DXQUERY];
+    if (binding->capacity_entries == 0 || binding->host == NULL ||
+        binding->entry_size != sizeof(SVGACOTableDXQueryEntry) ||
+        binding->host_size / sizeof(SVGACOTableDXQueryEntry) <
+            binding->capacity_entries) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-READBACK-ALL cid=%u action=NOP active=0 pending=0 "
+            "table=unavailable",
+            command->cid);
+        return true;
+    }
+
+    entries = (SVGACOTableDXQueryEntry *)binding->host;
+    for (i = 0; i < binding->capacity_entries; i++) {
+        bool native_pending;
+
+        if (entries[i].type == SVGA3D_QUERYTYPE_INVALID) {
+            continue;
+        }
+        active++;
+        native_pending = vmsvga3d_dxvk_d3d11_query_pending(
+            s->dxvk, command->cid, i);
+        if (native_pending) {
+            pending++;
+        }
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-READBACK-ALL-ENTRY cid=%u query=%u type=%u(%s) "
+            "qdstate=%u mobid=%u offset=%u native-pending=%u",
+            command->cid, i, (unsigned)entries[i].type,
+            vmsvga3d_dx_query_type_name(entries[i].type), entries[i].state,
+            entries[i].mobid, entries[i].offset, native_pending ? 1u : 0u);
+    }
+
+    /* Diagnostics only: preserve the current validated-NOP behavior. */
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-READBACK-ALL cid=%u action=NOP active=%u pending=%u",
+        command->cid, active, pending);
+    return true;
 }
 
 static bool vmsvga3d_d3d10_mob_fence64_live(
@@ -11771,8 +12088,22 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               return false;
           }
 
-          return vmsvga3d_dxvk_d3d11_query_define(
-              s->dxvk, cid, command.queryId, plan.d3d_query, plan.misc_flags);
+          {
+              bool native_ok = vmsvga3d_dxvk_d3d11_query_define(
+                  s->dxvk, cid, command.queryId, plan.d3d_query, plan.misc_flags);
+
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-QUERY-DEFINE cid=%u query=%u type=%u(%s) flags=0x%08x "
+                  "d3d=%u d3d-size=%u svga-size=%u predicate=%u native=%u "
+                  "result=%s",
+                  cid, command.queryId, (unsigned)command.type,
+                  vmsvga3d_dx_query_type_name(command.type), command.flags,
+                  plan.d3d_query, plan.d3d_result_size, plan.svga_result_size,
+                  plan.misc_flags != 0 ? 1u : 0u, native_ok ? 1u : 0u,
+                  native_ok ? "OK" : "FAIL");
+              return native_ok;
+          }
       }
 
     case SVGA_3D_CMD_DX_DESTROY_QUERY: {
@@ -11793,8 +12124,15 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               return false;
           }
 
-          return vmsvga3d_d3d10_query_destroy_entry(entry) !=
-                 VMSVGA3D_D3D10_LEVEL_INVALID;
+          {
+              bool entry_ok = vmsvga3d_d3d10_query_destroy_entry(entry) !=
+                              VMSVGA3D_D3D10_LEVEL_INVALID;
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-QUERY-DESTROY cid=%u query=%u result=%s",
+                  cid, command.queryId, entry_ok ? "OK" : "FAIL");
+              return entry_ok;
+          }
       }
 
     case SVGA_3D_CMD_DX_BEGIN_QUERY: {
@@ -11844,8 +12182,20 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           mob = vmsvga3d_mob_get(s, command.mobid);
           mobid = mob != NULL ? command.mobid : SVGA3D_INVALID_ID;
 
-          return vmsvga3d_d3d10_query_bind_entry(entry, mobid) !=
-                 VMSVGA3D_D3D10_LEVEL_INVALID;
+          {
+              bool bind_ok = vmsvga3d_d3d10_query_bind_entry(entry, mobid) !=
+                             VMSVGA3D_D3D10_LEVEL_INVALID;
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-QUERY-BIND cid=%u query=%u type=%u(%s) requested-mobid=%u "
+                  "effective-mobid=%u mob=%s offset=%u qdstate=%u result=%s",
+                  cid, command.queryId, (unsigned)entry[0],
+                  vmsvga3d_dx_query_type_name((SVGA3dQueryType)entry[0]),
+                  command.mobid, mobid, mob != NULL ? "present" : "missing",
+                  query_read_u32((uint8_t *)entry + 12), ((uint8_t *)entry)[3],
+                  bind_ok ? "OK" : "FAIL");
+              return bind_ok;
+          }
       }
 
     case SVGA_3D_CMD_DX_SET_QUERY_OFFSET: {
@@ -11861,9 +12211,24 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           entry = vmsvga3d_dx_cotable_entry_ptr(
               s, cid, SVGA_COTABLE_DXQUERY, command.queryId);
 
-          return entry != NULL &&
-                 vmsvga3d_d3d10_query_set_offset(entry, command.mobOffset) !=
-                     VMSVGA3D_D3D10_LEVEL_INVALID;
+          if (entry == NULL) {
+              return false;
+          }
+          {
+              bool offset_ok = vmsvga3d_d3d10_query_set_offset(
+                                   entry, command.mobOffset) !=
+                               VMSVGA3D_D3D10_LEVEL_INVALID;
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-QUERY-OFFSET cid=%u query=%u type=%u(%s) mobid=%u "
+                  "offset=%u qdstate=%u result=%s",
+                  cid, command.queryId, (unsigned)((uint8_t *)entry)[0],
+                  vmsvga3d_dx_query_type_name(
+                      (SVGA3dQueryType)((uint8_t *)entry)[0]),
+                  query_read_u32((uint8_t *)entry + 8), command.mobOffset,
+                  ((uint8_t *)entry)[3], offset_ok ? "OK" : "FAIL");
+              return offset_ok;
+          }
       }
 
     case SVGA_3D_CMD_DX_READBACK_QUERY: {
@@ -11877,8 +12242,24 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
           /* The device does not cache queries; pending completion is handled by
            * the renderer task pump, so explicit readback remains a validated NOP. */
-          return vmsvga3d_dx_cotable_entry_ptr(
-                     s, cid, SVGA_COTABLE_DXQUERY, command.queryId) != NULL;
+          {
+              uint8_t *entry = vmsvga3d_dx_cotable_entry_ptr(
+                  s, cid, SVGA_COTABLE_DXQUERY, command.queryId);
+
+              if (entry == NULL) {
+                  return false;
+              }
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-QUERY-READBACK cid=%u query=%u type=%u(%s) qdstate=%u "
+                  "mobid=%u offset=%u native-pending=%u action=NOP",
+                  cid, command.queryId, (unsigned)entry[0],
+                  vmsvga3d_dx_query_type_name((SVGA3dQueryType)entry[0]),
+                  entry[3], query_read_u32(entry + 8), query_read_u32(entry + 12),
+                  vmsvga3d_dxvk_d3d11_query_pending(
+                      s->dxvk, cid, command.queryId) ? 1u : 0u);
+              return true;
+          }
       }
 
     case SVGA_3D_CMD_DX_MOVE_QUERY: {

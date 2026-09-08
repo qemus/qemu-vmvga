@@ -7729,6 +7729,14 @@ bool vmsvga3d_dxvk_d3d11_query_define(
         result = create_query(dxvk->d3d11_device, &desc, &query->query);
     }
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-NATIVE-DEFINE cid=%u query=%u d3d=%u misc=0x%08x "
+        "hr=0x%08x native=%u result=%s",
+        cid, query_id, d3d_query, misc_flags, (uint32_t)result,
+        query->query != NULL ? 1u : 0u,
+        vmsvga3d_dxvk_succeeded(result) && query->query != NULL ? "OK" : "FAIL");
+
     if (!vmsvga3d_dxvk_succeeded(result) || query->query == NULL) {
         if (query->query != NULL) {
             vmsvga3d_dxvk_release(query->query, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -7783,6 +7791,10 @@ bool vmsvga3d_dxvk_d3d11_query_begin(
     }
 
     begin(dxvk->d3d11_context, query->query);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-NATIVE-BEGIN cid=%u query=%u d3d=%u issue=1 result=OK",
+        cid, query_id, query->d3d_query);
 
     return true;
 #else
@@ -7826,6 +7838,11 @@ bool vmsvga3d_dxvk_d3d11_query_end(
      * state.  Predicate-hint queries deliberately never enter that list. */
     query->pending =
         (query->misc_flags & VMSVGA3D_D3D10_QUERY_MISC_PREDICATEHINT) == 0;
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-NATIVE-END cid=%u query=%u d3d=%u issue=1 pending=%u "
+        "result=OK",
+        cid, query_id, query->d3d_query, query->pending ? 1u : 0u);
 
     return true;
 #else
@@ -7865,19 +7882,44 @@ bool vmsvga3d_dxvk_d3d11_query_get_data(
         return false;
     }
 
-    result = get_data(dxvk->d3d11_context, query->query, data, data_size,
-                      getdata_flags);
+    {
+        bool pending_before = query->pending;
+
+        result = get_data(dxvk->d3d11_context, query->query, data, data_size,
+                          getdata_flags);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-NATIVE-GETDATA cid=%u query=%u d3d=%u size=%u "
+            "flags=0x%08x hr=0x%08x pending-before=%u",
+            cid, query_id, query->d3d_query, data_size, getdata_flags,
+            (uint32_t)result, pending_before ? 1u : 0u);
+    }
     if (result == 0) { /* S_OK */
         query->pending = false;
         *ready = true;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-NATIVE-GETDATA cid=%u query=%u hr=S_OK ready=1 "
+            "pending-after=0",
+            cid, query_id);
         return true;
     }
 
     if (result == 1) { /* S_FALSE: query is still pending. */
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-QUERY-NATIVE-GETDATA cid=%u query=%u hr=S_FALSE ready=0 "
+            "pending-after=1",
+            cid, query_id);
         return true;
     }
 
     query->pending = false;
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-NATIVE-GETDATA cid=%u query=%u hr=0x%08x ready=0 "
+        "pending-after=0 result=FAIL",
+        cid, query_id, (uint32_t)result);
 
     return false;
 #else

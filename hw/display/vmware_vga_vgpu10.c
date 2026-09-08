@@ -8367,6 +8367,10 @@ static bool vmsvga3d_d3d10_buffer_update_live(
     struct vmsvga_state_s *s, const SVGA3dCmdDXBufferUpdate *command)
 {
     SVGA3dCmdDXUpdateSubResource update = { 0 };
+    SVGAOTableSurfaceEntry entry;
+    uint32_t words[8] = { 0 };
+    uint32_t dump_bytes = 0;
+    uint32_t mobid = SVGA3D_INVALID_ID;
     VMSVGA3DSurface *surface;
     bool result;
 
@@ -8405,11 +8409,35 @@ static bool vmsvga3d_d3d10_buffer_update_live(
     update.box.h = 1;
     update.box.d = 1;
 
+    if (vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, command->sid,
+                              sizeof(entry), &entry, sizeof(entry))) {
+        mobid = le32_to_cpu(entry.mobid);
+    }
+    if (mobid == SVGA3D_INVALID_ID || vmsvga3d_mob_get(s, mobid) == NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-BUFFER-UPDATE sid=%u mobid=%u x=%u width=%u result=FAIL reason=missing-mob",
+            command->sid, mobid, command->x, command->width);
+        return false;
+    }
+
     result = vmsvga3d_d3d10_update_subresource_live(s, &update);
+    if (result && surface->mips[0].data != NULL &&
+        command->x < surface->mips[0].data_size) {
+        dump_bytes = MIN((uint32_t)sizeof(words), command->width);
+        dump_bytes = MIN(dump_bytes,
+                         surface->mips[0].data_size - command->x);
+        memcpy(words, surface->mips[0].data + command->x, dump_bytes);
+    }
+
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "DX-BUFFER-UPDATE sid=%u x=%u width=%u result=%s",
-        command->sid, command->x, command->width, result ? "OK" : "FAIL");
+        "DX-BUFFER-UPDATE sid=%u mobid=%u x=%u width=%u result=%s "
+        "dump=%u words=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x",
+        command->sid, mobid, command->x, command->width,
+        result ? "OK" : "FAIL", dump_bytes,
+        words[0], words[1], words[2], words[3],
+        words[4], words[5], words[6], words[7]);
     return result;
 }
 

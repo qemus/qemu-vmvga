@@ -912,28 +912,56 @@ static bool vmsvga3d_mob_define(struct vmsvga_state_s *s, SVGAMobId mobid,
         return false;
     }
 
-    entry.ptDepth = cpu_to_le32(format);
-    entry.sizeInBytes = cpu_to_le32(size);
-    entry.base = cpu_to_le64(base);
-
-    if (!vmsvga3d_otable_write(s, SVGA_OTABLE_MOB, mobid,
-                                sizeof(SVGAOTableMobEntry), &entry,
-                                sizeof(entry))) {
-        return false;
-    }
-
+    /*
+     * Build the host-side GBO before publishing the MOB in the guest-visible
+     * OTable.  If page-table decoding fails, leaving a valid-looking OTable
+     * entry behind lets later surface binds refer to a MOB which does not
+     * exist in our host-side MOB table.
+     */
     mob = g_try_new0(VMSVGA3DMob, 1);
     if (mob == NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "MOB define mobid=%u format=%u base=0x%016" PRIx64
+            " size=%u result=REJECT reason=alloc",
+            mobid, (unsigned)format, (uint64_t)base, size);
         return false;
     }
 
     mob->mobid = mobid;
     if (!vmsvga3d_gbo_create(s, format, base, size, &mob->gbo)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "MOB define mobid=%u format=%u base=0x%016" PRIx64
+            " size=%u result=REJECT reason=gbo-create",
+            mobid, (unsigned)format, (uint64_t)base, size);
+        g_free(mob);
+        return false;
+    }
+
+    entry.ptDepth = cpu_to_le32(format);
+    entry.sizeInBytes = cpu_to_le32(size);
+    entry.base = cpu_to_le64(base);
+    if (!vmsvga3d_otable_write(s, SVGA_OTABLE_MOB, mobid,
+                                sizeof(SVGAOTableMobEntry), &entry,
+                                sizeof(entry))) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "MOB define mobid=%u format=%u base=0x%016" PRIx64
+            " size=%u result=REJECT reason=otable-write",
+            mobid, (unsigned)format, (uint64_t)base, size);
+        vmsvga3d_gbo_destroy(&mob->gbo);
         g_free(mob);
         return false;
     }
 
     g_hash_table_replace(state->mobs, vmsvga3d_mob_key(mobid), mob);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "MOB define mobid=%u format=%u base=0x%016" PRIx64
+        " size=%u pages=%u runs=%u result=OK",
+        mobid, (unsigned)format, (uint64_t)base, size,
+        mob->gbo.page_count, mob->gbo.run_count);
     return true;
 }
 
@@ -1192,11 +1220,23 @@ static bool vmsvga3d_mob_redefine(struct vmsvga_state_s *s,
 
     mob = vmsvga3d_mob_get(s, mobid);
     if (mob == NULL) {
+        bool recovered;
+
+        /*
+         * The command carries a complete replacement mapping.  Recover a
+         * missing host-side MOB as a fresh definition rather than preserving
+         * a stale guest-visible binding with no host object behind it.  This
+         * also repairs state after an earlier DEFINE whose GBO construction
+         * could not be completed.
+         */
+        recovered = vmsvga3d_mob_define(s, mobid, format, base, size);
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
-            "MOB redefine mobid=%u result=REJECT reason=missing-mob",
-            mobid);
-        return false;
+            "MOB redefine mobid=%u format=%u base=0x%016" PRIx64
+            " size=%u missing-mob=1 recovery=%s",
+            mobid, (unsigned)format, (uint64_t)base, size,
+            recovered ? "DEFINE-OK" : "DEFINE-FAIL");
+        return recovered;
     }
 
     memset(&replacement, 0, sizeof(replacement));
@@ -8721,6 +8761,7 @@ static bool vmsvga3d_handle_cond_bind_gb_surface(
     struct vmsvga3d_state_s *state;
     SVGAOTableSurfaceEntry entry;
     SVGAMobId old_mobid;
+    bool host_mob_present;
     void *payload;
     uint32_t size;
 
@@ -8744,6 +8785,13 @@ static bool vmsvga3d_handle_cond_bind_gb_surface(
         vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, body->sid,
                              sizeof(entry), &entry, sizeof(entry))) {
         old_mobid = le32_to_cpu(entry.mobid);
+        host_mob_present = body->mobid == SVGA3D_INVALID_ID ||
+                           vmsvga3d_mob_get(s, body->mobid) != NULL;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "COND-BIND sid=%u test=%u old=%u new=%u flags=0x%08x host-mob=%s",
+            body->sid, body->testMobid, old_mobid, body->mobid, body->flags,
+            host_mob_present ? "present" : "missing");
         if (old_mobid == body->testMobid && old_mobid != body->mobid) {
             if (body->flags & SVGA3D_COND_BIND_GB_SURFACE_FLAG_READBACK) {
                 (void)vmsvga3d_gb_surface_transfer_live(s, body->sid, true);

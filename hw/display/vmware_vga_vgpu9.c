@@ -2895,63 +2895,221 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     uint32_t i;
     bool scene_started = false;
     bool success = false;
+    bool trace = vmsvga_trace_flight_enabled();
+    const char *failure_stage = NULL;
+    uint32_t failure_range = UINT32_MAX;
 
     if (s == NULL || !vmsvga3d_dxvk_ready(s->dxvk) || s->svga3d == NULL ||
         vertex_decls == NULL || ranges == NULL || vertex_decl_count == 0 ||
         range_count == 0 ||
         (divisor_count != 0 && divisors == NULL) ||
         (context = vmsvga3d_context(s, cid)) == NULL) {
+        if (trace) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW unavailable cid=%u decls=%u ranges=%u "
+                    "divisors=%u state=%u dxvk=%u vertex=%u range=%u "
+                    "divisor_ptr=%u context=%u\n",
+                    cid, vertex_decl_count, range_count, divisor_count,
+                    s != NULL && s->svga3d != NULL,
+                    s != NULL && vmsvga3d_dxvk_ready(s->dxvk),
+                    vertex_decls != NULL, ranges != NULL,
+                    divisor_count == 0 || divisors != NULL,
+                    s != NULL && s->svga3d != NULL &&
+                        vmsvga3d_context(s, cid) != NULL);
+        }
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
+
+    if (trace) {
+        fprintf(stderr,
+                "VMVGA-D3D9-DRAW begin cid=%u decls=%u ranges=%u divisors=%u "
+                "rt0=%u:%u:%u depth=%u:%u:%u viewport=%u,%u/%ux%u "
+                "viewport_valid=%u scissor=%u,%u/%ux%u scissor_valid=%u "
+                "vs=%u ps=%u\n",
+                cid, vertex_decl_count, range_count, divisor_count,
+                context->render_targets[SVGA3D_RT_COLOR0].sid,
+                context->render_targets[SVGA3D_RT_COLOR0].face,
+                context->render_targets[SVGA3D_RT_COLOR0].mipmap,
+                context->render_targets[SVGA3D_RT_DEPTH].sid,
+                context->render_targets[SVGA3D_RT_DEPTH].face,
+                context->render_targets[SVGA3D_RT_DEPTH].mipmap,
+                context->viewport.x, context->viewport.y,
+                context->viewport.w, context->viewport.h,
+                context->viewport_valid,
+                context->scissor.x, context->scissor.y,
+                context->scissor.w, context->scissor.h,
+                context->scissor_valid,
+                context->bound_shader[SVGA3D_SHADERTYPE_VS -
+                                      SVGA3D_SHADERTYPE_MIN],
+                context->bound_shader[SVGA3D_SHADERTYPE_PS -
+                                      SVGA3D_SHADERTYPE_MIN]);
+
+        for (i = 0; i < vertex_decl_count; i++) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW decl[%u] sid=%u offset=%u stride=%u "
+                    "type=%u method=%u usage=%u usage_index=%u "
+                    "range_hint=%u:%u\n",
+                    i, vertex_decls[i].array.surfaceId,
+                    vertex_decls[i].array.offset,
+                    vertex_decls[i].array.stride,
+                    vertex_decls[i].identity.type,
+                    vertex_decls[i].identity.method,
+                    vertex_decls[i].identity.usage,
+                    vertex_decls[i].identity.usageIndex,
+                    vertex_decls[i].rangeHint.first,
+                    vertex_decls[i].rangeHint.last);
+        }
+
+        for (i = 0; i < range_count; i++) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW range[%u] prim=%u count=%u index_sid=%u "
+                    "index_offset=%u index_stride=%u index_width=%u bias=%d\n",
+                    i, ranges[i].primType, ranges[i].primitiveCount,
+                    ranges[i].indexArray.surfaceId,
+                    ranges[i].indexArray.offset,
+                    ranges[i].indexArray.stride,
+                    ranges[i].indexWidth, ranges[i].indexBias);
+        }
+
+        for (i = 0; i < divisor_count; i++) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW divisor[%u] value=0x%08x count=%u "
+                    "indexed=%u instance=%u\n",
+                    i, divisors[i].value, divisors[i].count,
+                    divisors[i].indexedData, divisors[i].instanceData);
+        }
     }
 
     if (!vmsvga3d_d3d9_vertex_layout(
             vertex_decls, vertex_decl_count, divisors, divisor_count, elements,
             G_N_ELEMENTS(elements), streams, G_N_ELEMENTS(streams),
-            &stream_count) ||
-        !vmsvga3d_d3d9_draw_batch_plan(stream_count, vertex_decl_count,
-                                        divisor_count, &batch) ||
-        !vmsvga3d_dxvk_reset_state(s->dxvk) ||
-        !vmsvga3d_dxvk_apply_context_targets(s, context) ||
-        !vmsvga3d_dxvk_apply_context_fixed_state(s, context) ||
-        !vmsvga3d_dxvk_apply_context_textures(s, context) ||
-        !vmsvga3d_dxvk_apply_context_shaders(s, context, shaders)) {
+            &stream_count)) {
+        failure_stage = "vertex-layout";
+        goto out;
+    }
+
+    if (trace) {
+        fprintf(stderr, "VMVGA-D3D9-DRAW layout streams=%u\n", stream_count);
+        for (i = 0; i < vertex_decl_count; i++) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW element[%u] stream=%u offset=%u type=%u "
+                    "method=%u usage=%u usage_index=%u\n",
+                    i, elements[i].stream, elements[i].offset,
+                    elements[i].type, elements[i].method,
+                    elements[i].usage, elements[i].usage_index);
+        }
+        for (i = 0; i < stream_count; i++) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW stream[%u] sid=%u source_offset=%u "
+                    "stride=%u frequency=0x%08x first_decl=%u decl_count=%u\n",
+                    i, streams[i].surface_id, streams[i].source_offset,
+                    streams[i].stride, streams[i].frequency,
+                    streams[i].first_decl, streams[i].decl_count);
+        }
+    }
+
+    if (!vmsvga3d_d3d9_draw_batch_plan(stream_count, vertex_decl_count,
+                                        divisor_count, &batch)) {
+        failure_stage = "batch-plan";
+        goto out;
+    }
+    if (!vmsvga3d_dxvk_reset_state(s->dxvk)) {
+        failure_stage = "reset-state-before";
+        goto out;
+    }
+    if (!vmsvga3d_dxvk_apply_context_targets(s, context)) {
+        failure_stage = "apply-targets";
+        goto out;
+    }
+    if (!vmsvga3d_dxvk_apply_context_fixed_state(s, context)) {
+        failure_stage = "apply-fixed-state";
+        goto out;
+    }
+    if (!vmsvga3d_dxvk_apply_context_textures(s, context)) {
+        failure_stage = "apply-textures";
+        goto out;
+    }
+    if (!vmsvga3d_dxvk_apply_context_shaders(s, context, shaders)) {
+        failure_stage = "apply-shaders";
         goto out;
     }
 
     declaration = vmsvga3d_dxvk_vertex_declaration_create(s->dxvk, elements);
-    if (declaration == NULL ||
-        !vmsvga3d_dxvk_vertex_declaration_bind(s->dxvk, declaration)) {
+    if (declaration == NULL) {
+        failure_stage = "create-vertex-declaration";
+        goto out;
+    }
+    if (!vmsvga3d_dxvk_vertex_declaration_bind(s->dxvk, declaration)) {
+        failure_stage = "bind-vertex-declaration";
         goto out;
     }
 
     for (i = 0; i < stream_count; i++) {
         VMSVGA3DSurface *surface;
 
-        if (streams[i].surface_id >= SVGA3D_MAX_SURFACE_IDS ||
-            (surface = s->svga3d->surfaces[streams[i].surface_id]) == NULL ||
-            !vmsvga3d_dxvk_materialize_buffer(
-                s, surface, VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER, 0) ||
-            !vmsvga3d_dxvk_set_stream_source(
+        if (streams[i].surface_id >= SVGA3D_MAX_SURFACE_IDS) {
+            failure_stage = "stream-sid-range";
+            goto out;
+        }
+        surface = s->svga3d->surfaces[streams[i].surface_id];
+        if (surface == NULL) {
+            failure_stage = "stream-surface-missing";
+            goto out;
+        }
+        if (trace) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW stream-bind[%u] sid=%u storage=%llu "
+                    "dxvk=%p offset=%u stride=%u frequency=0x%08x\n",
+                    i, streams[i].surface_id,
+                    (unsigned long long)surface->storage_bytes,
+                    surface->dxvk_surface, streams[i].source_offset,
+                    streams[i].stride, streams[i].frequency);
+        }
+        if (!vmsvga3d_dxvk_materialize_buffer(
+                s, surface, VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER, 0)) {
+            failure_stage = "materialize-vertex-buffer";
+            goto out;
+        }
+        if (!vmsvga3d_dxvk_set_stream_source(
                 s->dxvk, i, surface->dxvk_surface, streams[i].source_offset,
-                streams[i].stride) ||
-            (divisor_count != 0 &&
-             !vmsvga3d_dxvk_set_stream_frequency(
-                 s->dxvk, i, streams[i].frequency))) {
+                streams[i].stride)) {
+            failure_stage = "set-stream-source";
+            goto out;
+        }
+        if (divisor_count != 0 &&
+            !vmsvga3d_dxvk_set_stream_frequency(
+                s->dxvk, i, streams[i].frequency)) {
+            failure_stage = "set-stream-frequency";
             goto out;
         }
     }
 
-    if (vertex_decls[0].array.surfaceId >= SVGA3D_MAX_SURFACE_IDS ||
-        s->svga3d->surfaces[vertex_decls[0].array.surfaceId] == NULL ||
-        s->svga3d->surfaces[vertex_decls[0].array.surfaceId]->storage_bytes >
-            UINT32_MAX) {
+    if (vertex_decls[0].array.surfaceId >= SVGA3D_MAX_SURFACE_IDS) {
+        failure_stage = "vertex-buffer-sid-range";
+        goto out;
+    }
+    if (s->svga3d->surfaces[vertex_decls[0].array.surfaceId] == NULL) {
+        failure_stage = "vertex-buffer-missing";
+        goto out;
+    }
+    if (s->svga3d->surfaces[vertex_decls[0].array.surfaceId]->storage_bytes >
+        UINT32_MAX) {
+        failure_stage = "vertex-buffer-too-large";
         goto out;
     }
 
     vertex_buffer_bytes = (uint32_t)s->svga3d
                               ->surfaces[vertex_decls[0].array.surfaceId]
                               ->storage_bytes;
+    if (trace) {
+        fprintf(stderr,
+                "VMVGA-D3D9-DRAW batch streams=%u begin_scene=%u end_scene=%u "
+                "vertex_buffer_bytes=%u\n",
+                batch.stream_count, batch.begin_scene, batch.end_scene,
+                vertex_buffer_bytes);
+    }
     if (batch.begin_scene && !vmsvga3d_dxvk_begin_scene(s->dxvk)) {
+        failure_stage = "begin-scene";
         goto out;
     }
     scene_started = batch.begin_scene;
@@ -2959,42 +3117,107 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     for (i = 0; i < range_count; i++) {
         VMSVGA3DD3D9DrawRangePlan plan;
 
+        failure_range = i;
         if (!vmsvga3d_d3d9_draw_range_plan(&vertex_decls[0], &ranges[i],
                                             vertex_buffer_bytes, &plan)) {
+            failure_stage = "range-plan";
             goto out;
         }
 
+        if (trace) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW plan[%u] action=%u prim=%u count=%u "
+                    "start_vertex=%u index_sid=%u unbind=%u sync_index=%u "
+                    "index_format=%u base=%d min=%u vertices=%u start_index=%u "
+                    "indexed_count=%u\n",
+                    i, plan.action, plan.primitive_type,
+                    plan.primitive_count, plan.start_vertex,
+                    plan.index_surface_id, plan.unbind_indices,
+                    plan.sync_index_buffer, plan.index_format,
+                    plan.indexed.base_vertex_index,
+                    plan.indexed.min_vertex_index,
+                    plan.indexed.num_vertices, plan.indexed.start_index,
+                    plan.indexed.primitive_count);
+        }
+
         if (plan.action == VMSVGA3D_D3D9_DRAW_ACTION_NONINDEXED) {
-            if ((plan.unbind_indices &&
-                 !vmsvga3d_dxvk_set_indices(s->dxvk, NULL)) ||
-                !vmsvga3d_dxvk_draw_primitive(
+            if (plan.unbind_indices &&
+                !vmsvga3d_dxvk_set_indices(s->dxvk, NULL)) {
+                failure_stage = "unbind-indices";
+                goto out;
+            }
+            if (!vmsvga3d_dxvk_draw_primitive(
                     s->dxvk, plan.primitive_type, plan.start_vertex,
                     plan.primitive_count)) {
+                failure_stage = "draw-primitive";
                 goto out;
+            }
+            if (trace) {
+                fprintf(stderr,
+                        "VMVGA-D3D9-DRAW issued[%u] nonindexed prim=%u "
+                        "start=%u count=%u\n",
+                        i, plan.primitive_type, plan.start_vertex,
+                        plan.primitive_count);
             }
         } else {
             VMSVGA3DSurface *index_surface;
 
-            if (plan.index_surface_id >= SVGA3D_MAX_SURFACE_IDS ||
-                (index_surface = s->svga3d->surfaces[plan.index_surface_id]) ==
-                    NULL ||
-                !vmsvga3d_dxvk_materialize_buffer(
-                    s, index_surface, VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER,
-                    ranges[i].indexWidth) ||
-                !vmsvga3d_dxvk_set_indices(s->dxvk,
-                                           index_surface->dxvk_surface) ||
-                !vmsvga3d_dxvk_draw_indexed_primitive(
-                    s->dxvk, plan.primitive_type, plan.indexed.base_vertex_index,
-                    plan.indexed.min_vertex_index, plan.indexed.num_vertices,
-                    plan.indexed.start_index, plan.indexed.primitive_count)) {
+            if (plan.index_surface_id >= SVGA3D_MAX_SURFACE_IDS) {
+                failure_stage = "index-sid-range";
                 goto out;
+            }
+            index_surface = s->svga3d->surfaces[plan.index_surface_id];
+            if (index_surface == NULL) {
+                failure_stage = "index-surface-missing";
+                goto out;
+            }
+            if (trace) {
+                fprintf(stderr,
+                        "VMVGA-D3D9-DRAW index-bind[%u] sid=%u storage=%llu "
+                        "dxvk=%p width=%u\n",
+                        i, plan.index_surface_id,
+                        (unsigned long long)index_surface->storage_bytes,
+                        index_surface->dxvk_surface, ranges[i].indexWidth);
+            }
+            if (!vmsvga3d_dxvk_materialize_buffer(
+                    s, index_surface,
+                    VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER,
+                    ranges[i].indexWidth)) {
+                failure_stage = "materialize-index-buffer";
+                goto out;
+            }
+            if (!vmsvga3d_dxvk_set_indices(s->dxvk,
+                                           index_surface->dxvk_surface)) {
+                failure_stage = "set-indices";
+                goto out;
+            }
+            if (!vmsvga3d_dxvk_draw_indexed_primitive(
+                    s->dxvk, plan.primitive_type,
+                    plan.indexed.base_vertex_index,
+                    plan.indexed.min_vertex_index, plan.indexed.num_vertices,
+                    plan.indexed.start_index,
+                    plan.indexed.primitive_count)) {
+                failure_stage = "draw-indexed-primitive";
+                goto out;
+            }
+            if (trace) {
+                fprintf(stderr,
+                        "VMVGA-D3D9-DRAW issued[%u] indexed prim=%u base=%d "
+                        "min=%u vertices=%u start=%u count=%u\n",
+                        i, plan.primitive_type,
+                        plan.indexed.base_vertex_index,
+                        plan.indexed.min_vertex_index,
+                        plan.indexed.num_vertices, plan.indexed.start_index,
+                        plan.indexed.primitive_count);
             }
         }
     }
 
+    failure_range = UINT32_MAX;
     if (batch.end_scene) {
         if (!vmsvga3d_dxvk_end_scene(s->dxvk)) {
             scene_started = false;
+            failure_stage = "end-scene";
             goto out;
         }
         scene_started = false;
@@ -3003,11 +3226,34 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     success = true;
 
 out:
+    if (trace && !success) {
+        if (failure_range == UINT32_MAX) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW fail cid=%u stage=%s\n",
+                    cid, failure_stage != NULL ? failure_stage : "unknown");
+        } else {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW fail cid=%u range=%u stage=%s\n",
+                    cid, failure_range,
+                    failure_stage != NULL ? failure_stage : "unknown");
+        }
+    }
+
     if (scene_started) {
+        if (trace) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW cleanup cid=%u forced-end-scene\n",
+                    cid);
+        }
         (void)vmsvga3d_dxvk_end_scene(s->dxvk);
     }
 
     if (!vmsvga3d_dxvk_reset_state(s->dxvk)) {
+        if (trace) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-DRAW fail cid=%u stage=reset-state-after\n",
+                    cid);
+        }
         success = false;
     }
 
@@ -3021,10 +3267,14 @@ out:
         }
     }
 
+    if (trace && success) {
+        fprintf(stderr, "VMVGA-D3D9-DRAW complete cid=%u ranges=%u\n",
+                cid, range_count);
+    }
+
     return success ? VMSVGA3D_D3D9_ACCEL_COMPLETE
                    : VMSVGA3D_D3D9_ACCEL_FAILED;
 }
-
 
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceCopy *command,

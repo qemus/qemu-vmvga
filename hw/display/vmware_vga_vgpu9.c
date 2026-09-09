@@ -2542,7 +2542,7 @@ static bool vmsvga3d_dxvk_bind_context_target(
 
     surface = s->svga3d->surfaces[target->sid];
     fprintf(stderr, "VMVGA-D3D9-TARGET bind sid=%u face=%u mip=%u use=%u depth=%u surface=%p\n",
-            target->sid, target->face, target->mip, use, depth_stencil, surface);
+            target->sid, target->face, target->mipmap, use, depth_stencil, surface);
 
     if (!vmsvga3d_dxvk_surface_level_index(surface, target, &image, &level)) {
         fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=surface-level-index\n", target->sid);

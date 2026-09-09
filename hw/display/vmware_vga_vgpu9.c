@@ -2541,16 +2541,40 @@ static bool vmsvga3d_dxvk_bind_context_target(
     }
 
     surface = s->svga3d->surfaces[target->sid];
-    if (!vmsvga3d_dxvk_surface_level_index(surface, target, &image, &level) ||
-        !vmsvga3d_dxvk_materialize_surface(s, surface, use, true)) {
+    fprintf(stderr, "VMVGA-D3D9-TARGET bind sid=%u face=%u mip=%u use=%u depth=%u surface=%p\n",
+            target->sid, target->face, target->mip, use, depth_stencil, surface);
+
+    if (!vmsvga3d_dxvk_surface_level_index(surface, target, &image, &level)) {
+        fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=surface-level-index\n", target->sid);
         return false;
     }
 
-    return depth_stencil
-               ? vmsvga3d_dxvk_set_depth_stencil(s->dxvk,
-                                                  surface->dxvk_surface, level)
-               : vmsvga3d_dxvk_set_render_target(s->dxvk, color_index,
-                                                  surface->dxvk_surface, level);
+    fprintf(stderr, "VMVGA-D3D9-TARGET image sid=%u level=%u image=%p\n",
+            target->sid, level, image);
+
+    if (!vmsvga3d_dxvk_materialize_surface(s, surface, use, true)) {
+        fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=materialize\n", target->sid);
+        return false;
+    }
+
+    fprintf(stderr, "VMVGA-D3D9-TARGET materialized sid=%u dxvk_surface=%p\n",
+            target->sid, surface->dxvk_surface);
+
+    if (depth_stencil) {
+        if (!vmsvga3d_dxvk_set_depth_stencil(s->dxvk,
+                                             surface->dxvk_surface, level)) {
+            fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=set-depth\n", target->sid);
+            return false;
+        }
+    } else {
+        if (!vmsvga3d_dxvk_set_render_target(s->dxvk, color_index,
+                                             surface->dxvk_surface, level)) {
+            fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=set-color\n", target->sid);
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static bool vmsvga3d_dxvk_apply_context_targets(

@@ -5631,14 +5631,22 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
             !vmsvga3d_present_format(surface, &desc) || image == NULL) {
             valid = false;
         }
-        /* VBox's D3D11 SurfaceBlitToScreen consumes the native resource, not the
-         * stale system-memory backing.  Our scanout path is CPU-backed, so make
-         * the resident D3D11 image authoritative here before any conversion or
-         * scaling reads image->data.
+        /* The CPU-backed Screen Object presenter reads image->data.  Synchronize
+         * whichever renderer currently owns the surface before conversion,
+         * clipping or scaling.  D3D9 and D3D11 residency are mutually exclusive,
+         * so only one backend can supply authoritative pixels here.
          */
-        if (valid && !vmsvga3d_d3d11_readback_surface_image(
-                         s, surface, image, 0)) {
-            valid = false;
+        if (valid) {
+            VMSVGA3DD3D9AccelResult readback =
+                vmsvga3d_d3d9_runtime_readback_surface_image(
+                    s, surface, image, 0);
+
+            if (readback == VMSVGA3D_D3D9_ACCEL_FAILED ||
+                (readback == VMSVGA3D_D3D9_ACCEL_UNAVAILABLE &&
+                 !vmsvga3d_d3d11_readback_surface_image(
+                     s, surface, image, 0))) {
+                valid = false;
+            }
         }
 
         copy_count = clip_count != 0 ? clip_count : 1;

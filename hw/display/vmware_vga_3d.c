@@ -303,6 +303,21 @@ typedef struct vmsvga3d_surface_s {
     VMSVGA3DDxvkSurface *dxvk_surface;
     bool screen_target_content_valid;
     bool legacy_active;
+    /* Diagnostic-only legacy presentation bookkeeping.  These fields are
+     * touched only while the local vmware_setmode trace gate is enabled. */
+    uint64_t trace_vgpu9_write_count;
+    uint64_t trace_vgpu9_draw_count;
+    uint64_t trace_vgpu9_copy_count;
+    uint64_t trace_vgpu9_full_copy_count;
+    uint64_t trace_vgpu9_dma_write_count;
+    uint64_t trace_vgpu9_clear_count;
+    uint64_t trace_vgpu9_stretch_count;
+    uint64_t trace_vgpu9_present_count;
+    uint64_t trace_vgpu9_last_present_write_count;
+    uint64_t trace_vgpu9_last_write_3d_cmd;
+    uint64_t trace_vgpu9_last_present_3d_cmd;
+    uint32_t trace_vgpu9_last_write_kind;
+    uint32_t trace_vgpu9_last_write_cid;
 } VMSVGA3DSurface;
 
 /* vmware_vga_vgpu10.c is included below after the legacy command handlers.
@@ -328,6 +343,9 @@ struct vmsvga3d_state_s {
     uint32_t screen_target_dirty_count;
     SVGA3dRect screen_target_dirty_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
     bool dx_context_ever_defined;
+    uint64_t trace_vgpu9_present_seq;
+    uint32_t trace_vgpu9_last_present_sid;
+    uint64_t trace_vgpu9_last_present_3d_cmd;
     size_t surface_bytes;
     size_t shader_bytes;
 };
@@ -1536,6 +1554,7 @@ vmsvga3d_state_ensure(struct vmsvga_state_s *s)
             s->svga3d->gart_mobid = SVGA3D_INVALID_ID;
             s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
+            s->svga3d->trace_vgpu9_last_present_sid = SVGA3D_INVALID_ID;
         }
     }
 
@@ -2592,6 +2611,283 @@ static VMSVGA3DDXContext *vmsvga3d_dx_context(struct vmsvga_state_s *s,
     return s->svga3d->dx_contexts[cid];
 }
 
+typedef enum VMSVGA3DTraceVgpu9WriteKind {
+    VMSVGA3D_TRACE_VGPU9_WRITE_NONE = 0,
+    VMSVGA3D_TRACE_VGPU9_WRITE_DRAW,
+    VMSVGA3D_TRACE_VGPU9_WRITE_COPY,
+    VMSVGA3D_TRACE_VGPU9_WRITE_DMA,
+    VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR,
+    VMSVGA3D_TRACE_VGPU9_WRITE_STRETCH,
+} VMSVGA3DTraceVgpu9WriteKind;
+
+static const char *vmsvga3d_trace_vgpu9_write_name(uint32_t kind)
+{
+    switch ((VMSVGA3DTraceVgpu9WriteKind)kind) {
+    case VMSVGA3D_TRACE_VGPU9_WRITE_DRAW:
+        return "draw";
+    case VMSVGA3D_TRACE_VGPU9_WRITE_COPY:
+        return "copy";
+    case VMSVGA3D_TRACE_VGPU9_WRITE_DMA:
+        return "dma";
+    case VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR:
+        return "clear";
+    case VMSVGA3D_TRACE_VGPU9_WRITE_STRETCH:
+        return "stretch";
+    case VMSVGA3D_TRACE_VGPU9_WRITE_NONE:
+    default:
+        return "none";
+    }
+}
+
+static bool vmsvga3d_trace_vgpu9_enabled(struct vmsvga_state_s *s)
+{
+    return s != NULL && s->vgpu_generation == VMSVGA_VGPU_9 &&
+           VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
+}
+
+static bool vmsvga3d_trace_vgpu9_full_surface(struct vmsvga_state_s *s,
+                                               VMSVGA3DSurface *surface)
+{
+    uint32_t width;
+    uint32_t height;
+
+    if (s == NULL || surface == NULL || surface->mips == NULL ||
+        surface->mip_count == 0 || !s->active_valid) {
+        return false;
+    }
+
+    width = s->screen_defined ? s->screen_width : s->active_width;
+    height = s->screen_defined ? s->screen_height : s->active_height;
+    return surface->mips[0].size.width == width &&
+           surface->mips[0].size.height == height;
+}
+
+static void vmsvga3d_trace_vgpu9_surface_write(
+    struct vmsvga_state_s *s, uint32_t sid, VMSVGA3DTraceVgpu9WriteKind kind,
+    uint32_t cid, bool full_copy)
+{
+    VMSVGA3DSurface *surface;
+
+    if (!vmsvga3d_trace_vgpu9_enabled(s) || s->svga3d == NULL ||
+        sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return;
+    }
+
+    surface = s->svga3d->surfaces[sid];
+    if (surface == NULL) {
+        return;
+    }
+
+    surface->trace_vgpu9_write_count++;
+    surface->trace_vgpu9_last_write_3d_cmd = s->trace_now.fifo_3d_cmds;
+    surface->trace_vgpu9_last_write_kind = kind;
+    surface->trace_vgpu9_last_write_cid = cid;
+
+    switch (kind) {
+    case VMSVGA3D_TRACE_VGPU9_WRITE_DRAW:
+        surface->trace_vgpu9_draw_count++;
+        break;
+    case VMSVGA3D_TRACE_VGPU9_WRITE_COPY:
+        surface->trace_vgpu9_copy_count++;
+        if (full_copy) {
+            surface->trace_vgpu9_full_copy_count++;
+        }
+        break;
+    case VMSVGA3D_TRACE_VGPU9_WRITE_DMA:
+        surface->trace_vgpu9_dma_write_count++;
+        break;
+    case VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR:
+        surface->trace_vgpu9_clear_count++;
+        break;
+    case VMSVGA3D_TRACE_VGPU9_WRITE_STRETCH:
+        surface->trace_vgpu9_stretch_count++;
+        break;
+    case VMSVGA3D_TRACE_VGPU9_WRITE_NONE:
+    default:
+        break;
+    }
+}
+
+static void vmsvga3d_trace_vgpu9_render_target_write(
+    struct vmsvga_state_s *s, uint32_t cid, VMSVGA3DTraceVgpu9WriteKind kind)
+{
+    VMSVGA3DContext *context;
+    uint32_t type;
+
+    if (!vmsvga3d_trace_vgpu9_enabled(s)) {
+        return;
+    }
+
+    context = vmsvga3d_context(s, cid);
+    if (context == NULL) {
+        return;
+    }
+
+    for (type = SVGA3D_RT_COLOR0; type <= SVGA3D_RT_COLOR3; type++) {
+        uint32_t sid = context->render_targets[type].sid;
+
+        if (sid != SVGA3D_INVALID_ID) {
+            vmsvga3d_trace_vgpu9_surface_write(s, sid, kind, cid, false);
+        }
+    }
+}
+
+static void vmsvga3d_trace_vgpu9_present(struct vmsvga_state_s *s,
+                                          uint32_t sid,
+                                          const char *present_kind)
+{
+    struct vmsvga3d_state_s *state;
+    VMSVGA3DSurface *surface;
+    uint64_t pending_writes;
+    uint64_t write_age;
+
+    if (!vmsvga3d_trace_vgpu9_enabled(s) || s->svga3d == NULL ||
+        sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return;
+    }
+
+    state = s->svga3d;
+    surface = state->surfaces[sid];
+    if (surface == NULL) {
+        return;
+    }
+
+    pending_writes = surface->trace_vgpu9_write_count -
+                     surface->trace_vgpu9_last_present_write_count;
+    write_age = surface->trace_vgpu9_write_count == 0
+                    ? 0
+                    : s->trace_now.fifo_3d_cmds -
+                          surface->trace_vgpu9_last_write_3d_cmd;
+
+    state->trace_vgpu9_present_seq++;
+    surface->trace_vgpu9_present_count++;
+    fprintf(stderr,
+            "VMVGA-VGPU9-PRESENT-LINK seq=%" PRIu64 " kind=%s sid=%u "
+            "full=%u active=%u writes=%" PRIu64 " pending=%" PRIu64
+            " draws=%" PRIu64 " copies=%" PRIu64 " fullcopies=%" PRIu64
+            " dma=%" PRIu64 " clears=%" PRIu64 " stretch=%" PRIu64
+            " last=%s cid=%u write-age-3d=%" PRIu64 "\n",
+            state->trace_vgpu9_present_seq, present_kind, sid,
+            vmsvga3d_trace_vgpu9_full_surface(s, surface),
+            surface->legacy_active, surface->trace_vgpu9_write_count,
+            pending_writes, surface->trace_vgpu9_draw_count,
+            surface->trace_vgpu9_copy_count,
+            surface->trace_vgpu9_full_copy_count,
+            surface->trace_vgpu9_dma_write_count,
+            surface->trace_vgpu9_clear_count,
+            surface->trace_vgpu9_stretch_count,
+            vmsvga3d_trace_vgpu9_write_name(surface->trace_vgpu9_last_write_kind),
+            surface->trace_vgpu9_last_write_cid, write_age);
+
+    surface->trace_vgpu9_last_present_write_count =
+        surface->trace_vgpu9_write_count;
+    surface->trace_vgpu9_last_present_3d_cmd = s->trace_now.fifo_3d_cmds;
+    state->trace_vgpu9_last_present_sid = sid;
+    state->trace_vgpu9_last_present_3d_cmd = s->trace_now.fifo_3d_cmds;
+}
+
+static void vmsvga3d_trace_vgpu9_frame_state(struct vmsvga_state_s *s,
+                                               const char *reason)
+{
+    enum { RECENT_MAX = 6 };
+    struct vmsvga3d_state_s *state;
+    VMSVGA3DSurface *recent[RECENT_MAX] = { 0 };
+    uint32_t tracked = 0;
+    uint32_t pending_surfaces = 0;
+    uint32_t full_surfaces = 0;
+    uint32_t sid;
+    uint32_t i;
+    uint64_t last_present_age;
+
+    if (!vmsvga3d_trace_vgpu9_enabled(s) || s->svga3d == NULL) {
+        return;
+    }
+
+    state = s->svga3d;
+    for (sid = 0; sid < SVGA3D_MAX_SURFACE_IDS; sid++) {
+        VMSVGA3DSurface *surface = state->surfaces[sid];
+        uint64_t pending;
+
+        if (surface == NULL ||
+            (surface->trace_vgpu9_write_count == 0 &&
+             surface->trace_vgpu9_present_count == 0)) {
+            continue;
+        }
+
+        tracked++;
+        pending = surface->trace_vgpu9_write_count -
+                  surface->trace_vgpu9_last_present_write_count;
+        if (pending != 0) {
+            pending_surfaces++;
+        }
+        if (vmsvga3d_trace_vgpu9_full_surface(s, surface)) {
+            full_surfaces++;
+        }
+
+        for (i = 0; i < RECENT_MAX; i++) {
+            if (recent[i] == NULL ||
+                surface->trace_vgpu9_last_write_3d_cmd >
+                    recent[i]->trace_vgpu9_last_write_3d_cmd) {
+                uint32_t j;
+
+                for (j = RECENT_MAX - 1; j > i; j--) {
+                    recent[j] = recent[j - 1];
+                }
+                recent[i] = surface;
+                break;
+            }
+        }
+    }
+
+    last_present_age = state->trace_vgpu9_present_seq == 0
+                           ? 0
+                           : s->trace_now.fifo_3d_cmds -
+                                 state->trace_vgpu9_last_present_3d_cmd;
+    fprintf(stderr,
+            "VMVGA-VGPU9-FRAMESTATE reason=%s 3d=%" PRIu64
+            " presents=%" PRIu64 " last-sid=%u last-present-age-3d=%" PRIu64
+            " tracked=%u full=%u pending-surfaces=%u\n",
+            reason != NULL ? reason : "unknown", s->trace_now.fifo_3d_cmds,
+            state->trace_vgpu9_present_seq,
+            state->trace_vgpu9_last_present_sid, last_present_age, tracked,
+            full_surfaces, pending_surfaces);
+
+    for (i = 0; i < RECENT_MAX && recent[i] != NULL; i++) {
+        VMSVGA3DSurface *surface = recent[i];
+        uint64_t pending = surface->trace_vgpu9_write_count -
+                           surface->trace_vgpu9_last_present_write_count;
+        uint64_t write_age = s->trace_now.fifo_3d_cmds -
+                             surface->trace_vgpu9_last_write_3d_cmd;
+        uint32_t width = surface->mips != NULL && surface->mip_count != 0
+                             ? surface->mips[0].size.width
+                             : 0;
+        uint32_t height = surface->mips != NULL && surface->mip_count != 0
+                              ? surface->mips[0].size.height
+                              : 0;
+
+        fprintf(stderr,
+                "VMVGA-VGPU9-SURFACE rank=%u sid=%u size=%ux%u full=%u "
+                "active=%u writes=%" PRIu64 " pending=%" PRIu64
+                " presents=%" PRIu64 " last=%s cid=%u age-3d=%" PRIu64
+                " draws=%" PRIu64 " copies=%" PRIu64 " fullcopies=%" PRIu64
+                " dma=%" PRIu64 " clears=%" PRIu64 " stretch=%" PRIu64
+                "\n",
+                i, surface->sid, width, height,
+                vmsvga3d_trace_vgpu9_full_surface(s, surface),
+                surface->legacy_active, surface->trace_vgpu9_write_count,
+                pending, surface->trace_vgpu9_present_count,
+                vmsvga3d_trace_vgpu9_write_name(
+                    surface->trace_vgpu9_last_write_kind),
+                surface->trace_vgpu9_last_write_cid, write_age,
+                surface->trace_vgpu9_draw_count,
+                surface->trace_vgpu9_copy_count,
+                surface->trace_vgpu9_full_copy_count,
+                surface->trace_vgpu9_dma_write_count,
+                surface->trace_vgpu9_clear_count,
+                surface->trace_vgpu9_stretch_count);
+    }
+}
+
 
 static bool vmsvga3d_handle_set_vertex_decls(struct vmsvga_state_s *s,
                                               uint32_t cmd, int32_t *len,
@@ -3524,9 +3820,14 @@ static bool vmsvga3d_handle_draw(struct vmsvga_state_s *s,
             if (vmsvga3d_state_draw_primitives(
                     s, body->cid, numDecls, decls, 1, &range,
                     context->num_vertex_divisors, context->vertex_divisors)) {
-                (void)vmsvga3d_d3d9_runtime_draw_primitives(
-                    s, body->cid, numDecls, decls, 1, &range,
-                    context->num_vertex_divisors, context->vertex_divisors);
+                if (vmsvga3d_d3d9_runtime_draw_primitives(
+                        s, body->cid, numDecls, decls, 1, &range,
+                        context->num_vertex_divisors,
+                        context->vertex_divisors) ==
+                    VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                    vmsvga3d_trace_vgpu9_render_target_write(
+                        s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+                }
             }
         }
     }
@@ -3571,9 +3872,14 @@ static bool vmsvga3d_handle_draw_indexed(struct vmsvga_state_s *s,
             if (vmsvga3d_state_draw_primitives(
                     s, body->cid, numDecls, decls, 1, &range,
                     context->num_vertex_divisors, context->vertex_divisors)) {
-                (void)vmsvga3d_d3d9_runtime_draw_primitives(
-                    s, body->cid, numDecls, decls, 1, &range,
-                    context->num_vertex_divisors, context->vertex_divisors);
+                if (vmsvga3d_d3d9_runtime_draw_primitives(
+                        s, body->cid, numDecls, decls, 1, &range,
+                        context->num_vertex_divisors,
+                        context->vertex_divisors) ==
+                    VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                    vmsvga3d_trace_vgpu9_render_target_write(
+                        s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+                }
             }
         }
     }
@@ -3638,9 +3944,13 @@ static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
     if (vmsvga3d_state_draw_primitives(
             s, body->cid, body->numVertexDecls, decls, body->numRanges, ranges,
             divisor_count, divisors)) {
-        (void)vmsvga3d_d3d9_runtime_draw_primitives(
-            s, body->cid, body->numVertexDecls, decls, body->numRanges, ranges,
-            divisor_count, divisors);
+        if (vmsvga3d_d3d9_runtime_draw_primitives(
+                s, body->cid, body->numVertexDecls, decls, body->numRanges,
+                ranges, divisor_count, divisors) ==
+            VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+            vmsvga3d_trace_vgpu9_render_target_write(
+                s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+        }
     }
 
     g_free(payload);
@@ -4018,6 +4328,7 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     uint32_t rect_bytes;
     uint32_t rect_count;
     VMSVGA3DD3D9AccelResult accel;
+    bool wrote = false;
 
     (void)cmd;
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
@@ -4049,12 +4360,20 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     }
 
     accel = vmsvga3d_d3d9_try_clear(s, body, rects, rect_count);
-    if (accel == VMSVGA3D_D3D9_ACCEL_UNAVAILABLE) {
+    if (accel == VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+        wrote = true;
+    } else if (accel == VMSVGA3D_D3D9_ACCEL_UNAVAILABLE) {
         if (vmsvga3d_state_clear(s, body->cid, body->clearFlag, body->color,
                                  body->depth, body->stencil, rect_count, rects)) {
             vmsvga3d_d3d9_runtime_sync_clear_targets_from_cpu(
                 s, body->cid, body->clearFlag);
+            wrote = true;
         }
+    }
+
+    if (wrote && (body->clearFlag & SVGA3D_CLEAR_COLOR)) {
+        vmsvga3d_trace_vgpu9_render_target_write(
+            s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR);
     }
 
     g_free(payload);
@@ -4800,6 +5119,18 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, dst_surface);
     }
 
+    if (valid && dst_image != NULL) {
+        bool full_copy = box_count == 1 && boxes[0].x == 0 && boxes[0].y == 0 &&
+                         boxes[0].z == 0 &&
+                         boxes[0].w == dst_image->size.width &&
+                         boxes[0].h == dst_image->size.height &&
+                         boxes[0].d == dst_image->size.depth;
+
+        vmsvga3d_trace_vgpu9_surface_write(
+            s, body->dest.sid, VMSVGA3D_TRACE_VGPU9_WRITE_COPY,
+            SVGA3D_INVALID_ID, full_copy);
+    }
+
     g_free(scratch);
     g_free(payload);
 
@@ -5127,6 +5458,12 @@ static bool vmsvga3d_handle_surface_stretchblt(struct vmsvga_state_s *s,
     if (valid && !d3d11_stretch &&
         accel != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
         vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, dst_surface);
+    }
+
+    if (valid && !d3d11_stretch) {
+        vmsvga3d_trace_vgpu9_surface_write(
+            s, body->dest.sid, VMSVGA3D_TRACE_VGPU9_WRITE_STRETCH,
+            SVGA3D_INVALID_ID, false);
     }
 
     g_free(scratch);
@@ -6063,6 +6400,10 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
             body->srcImage.sid, valid,
             vmsvga3d_d3d9_accel_result_name(accel), copy_count);
 
+    if (valid) {
+        vmsvga3d_trace_vgpu9_present(s, body->srcImage.sid, "screen-blit");
+    }
+
     g_free(copies);
     g_free(payload);
 
@@ -6166,6 +6507,10 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
             valid = vmsvga3d_present_rect(
                 s, surface, image, desc, &rects[i], true);
         }
+    }
+
+    if (valid) {
+        vmsvga3d_trace_vgpu9_present(s, body->sid, "present");
     }
 
     g_free(payload);
@@ -6526,6 +6871,12 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
             valid = vmsvga3d_surface_dma_d3d11_upload_box(
                 s, surface, image, subresource, &boxes[i]);
         }
+    }
+
+    if (valid && box_count != 0 && body->transfer == SVGA3D_WRITE_HOST_VRAM) {
+        vmsvga3d_trace_vgpu9_surface_write(
+            s, body->host.sid, VMSVGA3D_TRACE_VGPU9_WRITE_DMA,
+            SVGA3D_INVALID_ID, false);
     }
 
     g_free(payload);

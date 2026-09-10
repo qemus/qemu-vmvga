@@ -50,6 +50,7 @@
 
 struct vmsvga_state_s;
 struct vmsvga3d_surface_s;
+struct vmsvga3d_surface_image_s;
 
 #define VMSVGA3D_D3D9_MAKE_FOURCC(a, b, c, d) \
   ((uint32_t)(uint8_t)(a) | ((uint32_t)(uint8_t)(b) << 8) | \

@@ -616,6 +616,8 @@ static inline bool vmsvga_trace_reg_write_enabled(void)
 }
 
 static void vmsvga_trace_gmr2_clear(struct vmsvga_state_s *s);
+static void vmsvga3d_trace_vgpu9_frame_state(struct vmsvga_state_s *s,
+                                               const char *reason);
 
 static inline void vmsvga_trace_flight_reset(struct vmsvga_state_s *s)
 {
@@ -1155,6 +1157,8 @@ static inline void vmsvga_trace_flight_report(struct vmsvga_state_s *s,
                 n->gmrfb_to_screen, n->screen_to_gmrfb, n->annotation_fills,
                 n->annotation_copies, n->surface_to_screen);
     }
+
+    vmsvga3d_trace_vgpu9_frame_state(s, reason);
 
     s->trace_last = s->trace_now;
     s->trace_last_report_seq = s->trace_activity_seq;

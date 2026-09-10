@@ -2588,7 +2588,7 @@ static bool vmsvga3d_dxvk_apply_context_targets(
         return false;
     }
 
-    for (type = SVGA3D_RT_COLOR0; type <= SVGA3D_RT_COLOR7; type++) {
+    for (type = SVGA3D_RT_COLOR0; type <= SVGA3D_RT_COLOR3; type++) {
         if (!vmsvga3d_dxvk_bind_context_target(
                 s, &context->render_targets[type],
                 VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET,

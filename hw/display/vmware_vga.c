@@ -5262,7 +5262,15 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
     }
 
     if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-        s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(1);
+        /*
+         * Diagnostic A/B test for the legacy vgpu9 FIFO path: do not promise
+         * the guest that commands appended during this processing pass will be
+         * noticed without another SYNC kick.  Clearing BUSY before processing
+         * removes the BUSY->idle missed-wakeup window while leaving newer vGPU
+         * generations on the normal asynchronous FIFO handshake.
+         */
+        s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(
+            s->vgpu_generation == VMSVGA_VGPU_9 ? 0 : 1);
     }
 
     while ((len >= 1) && maxloop > 0) {
@@ -6887,10 +6895,12 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
         /*
          * Pending work includes both fairness-budget exhaustion and a command
          * which was rewound/stalled. In either case the FIFO is not drained, so
-         * preserve an explicit SYNC and keep the FIFO-side busy hint asserted.
+         * preserve an explicit SYNC. Newer vGPU generations also keep the
+         * FIFO-side busy hint asserted; the vgpu9 A/B test keeps it clear.
          */
         if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
-            s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(1);
+            s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(
+                s->vgpu_generation == VMSVGA_VGPU_9 ? 0 : 1);
         }
     } else {
         s->sync = 0;
@@ -8274,9 +8284,6 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
 #endif
         if (!s->svga3d_capable) {
             caps &= ~SVGA_CAP_3D;
-        }
-        if (s->vgpu_generation == VMSVGA_VGPU_9) {
-            caps &= ~SVGA_CAP_IRQMASK;
         }
         if (s->svga3d_dx_capable) {
             caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |

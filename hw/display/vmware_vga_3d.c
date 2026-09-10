@@ -8446,12 +8446,38 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
              (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) == 0 &&
             surface->mips[0].size.depth == 1 &&
             vmsvga3d_present_format(surface, &desc)) {
+            VMSVGA3DD3D9TransferSurface d3d9_info;
             uint8_t *screen_base = NULL;
             size_t screen_size = 0;
             uint32_t screen_stride = 0;
+            bool d3d9_resident =
+                vmsvga3d_d3d9_runtime_surface_info(s, surface, &d3d9_info) &&
+                d3d9_info.resident;
+            bool d3d11_resident =
+                vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
             bool direct_candidate = false;
 
-            if (desc->bytes_per_block == 4 &&
+            /* ScreenTarget binding is backend-neutral.  Synchronize from the
+             * renderer that actually owns the surface instead of assuming a
+             * vGPU10 ScreenTarget must be D3D11-resident. */
+            if (d3d9_resident && d3d11_resident) {
+                return false;
+            }
+
+            if (d3d9_resident) {
+                if (vmsvga3d_d3d9_runtime_readback_surface_image(
+                        s, surface, &surface->mips[0], 0) !=
+                    VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                    return false;
+                }
+                batch_readback = true;
+            } else if (!d3d11_resident) {
+                /* No accelerated backend owns newer contents; the canonical
+                 * CPU shadow is already authoritative. */
+                batch_readback = true;
+            }
+
+            if (d3d11_resident && desc->bytes_per_block == 4 &&
                 (surface->format == SVGA3D_X8R8G8B8 ||
                  surface->format == SVGA3D_A8R8G8B8) &&
                 vmsvga_screen_storage(s, &screen_base, &screen_size,
@@ -8469,7 +8495,7 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
                 }
             }
 
-            if (rect_count > 1 || direct_candidate) {
+            if (d3d11_resident && (rect_count > 1 || direct_candidate)) {
                 batch_readback = vmsvga3d_d3d10_readback_image_rects_live(
                     s, surface, 0, rects, rect_count, desc->bytes_per_block,
                     direct_candidate ? screen_base : NULL,

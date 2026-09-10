@@ -5292,10 +5292,22 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
             vmsvga_trace_fifo_record(s, cmd, is_3d, supported_3d);
         }
 
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_FIFO,
-            "FIFO cmd=%u stop=0x%08x next=0x%08x words=%d sync=%u",
-            cmd, fifo_start, s->fifo_next, len, s->sync);
+        {
+            const char *name = vmsvga_trace_fifo_cmd_name(cmd);
+
+            if (name != NULL) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_FIFO,
+                    "FIFO name=%s cmd=%u stop=0x%08x next=0x%08x "
+                    "words=%d sync=%u",
+                    name, cmd, fifo_start, s->fifo_next, len, s->sync);
+            } else {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_FIFO,
+                    "FIFO cmd=%u stop=0x%08x next=0x%08x words=%d sync=%u",
+                    cmd, fifo_start, s->fifo_next, len, s->sync);
+            }
+        }
 
         irq_status = 0;
 

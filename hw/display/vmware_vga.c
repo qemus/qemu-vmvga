@@ -5250,6 +5250,14 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
         if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
             s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(0);
         }
+        if (trace_flight) {
+            fprintf(stderr,
+                    "VMVGA-SYNC fifo-run-end reason=empty sync=%u pending=0 "
+                    "busy=0 stop=0x%08x next=0x%08x mask=0x%08x "
+                    "status=0x%08x fence=%u\n",
+                    s->sync, s->fifo_stop, s->fifo_next, s->irq_mask,
+                    s->irq_status, s->fence);
+        }
         return;
     }
 
@@ -5270,7 +5278,17 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
                 irq_status =
                     SVGA_IRQFLAG_FIFO_PROGRESS & s->irq_mask & ~s->irq_status;
                 if (irq_status) {
+                    uint32_t status_before = s->irq_status;
                     s->irq_status |= irq_status;
+                    if (trace_flight) {
+                        fprintf(stderr,
+                                "VMVGA-IRQ event=raise reason=fifo-upload "
+                                "flags=0x%08x mask=0x%08x "
+                                "status-before=0x%08x status-after=0x%08x "
+                                "line=1\n",
+                                irq_status, s->irq_mask, status_before,
+                                s->irq_status);
+                    }
 #ifndef RAISE_IRQ_OFF
                     if (irq_status & s->irq_mask) {
                         struct pci_vmsvga_state_s *pci_vmsvga =
@@ -6248,6 +6266,9 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
         case SVGA_CMD_FENCE: {
               uint32_t command_words =
                   sizeof(SVGAFifoCmdFence) / sizeof(uint32_t);
+              bool fifo_goal_present;
+              uint32_t fifo_goal = 0;
+              uint32_t irq_before = s->irq_status;
               if (len < (int32_t)command_words + 1) {
                   s->fifo_stop = fifo_start;
                   s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -6261,13 +6282,28 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
               if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
                   s->fifo[SVGA_FIFO_FENCE] = cpu_to_le32(fence_arg);
               }
-              if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE_GOAL) &&
-                  le32_to_cpu(s->fifo[SVGA_FIFO_FENCE_GOAL]) == fence_arg) {
-                  irq_status |= SVGA_IRQFLAG_FENCE_GOAL;
+              fifo_goal_present =
+                  vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE_GOAL);
+              if (fifo_goal_present) {
+                  fifo_goal = le32_to_cpu(s->fifo[SVGA_FIFO_FENCE_GOAL]);
+                  if (fifo_goal == fence_arg) {
+                      irq_status |= SVGA_IRQFLAG_FENCE_GOAL;
+                  }
               }
 #ifndef ANY_FENCE_OFF
               irq_status |= SVGA_IRQFLAG_ANY_FENCE;
 #endif
+              if (trace_flight) {
+                  fprintf(stderr,
+                          "VMVGA-FENCE value=%u fifo-fence=%u "
+                          "fifo-goal-present=%u fifo-goal=%u reg-goal=%u "
+                          "goal-hit=%u generated=0x%08x mask=0x%08x "
+                          "status-before=0x%08x\n",
+                          fence_arg, s->fence, fifo_goal_present, fifo_goal,
+                          s->fence_goal,
+                          !!(irq_status & SVGA_IRQFLAG_FENCE_GOAL), irq_status,
+                          s->irq_mask, irq_before);
+              }
               VPRINT("SVGA_CMD_FENCE command %u in SVGA command FIFO %u\n", cmd,
                      fence_arg);
               break;
@@ -6820,7 +6856,16 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
         irq_status &= ~s->irq_status;
 
         if (irq_status) {
+            uint32_t status_before = s->irq_status;
             s->irq_status |= irq_status;
+            if (trace_flight) {
+                fprintf(stderr,
+                        "VMVGA-IRQ event=raise reason=fifo "
+                        "flags=0x%08x mask=0x%08x status-before=0x%08x "
+                        "status-after=0x%08x line=1 fence=%u\n",
+                        irq_status, s->irq_mask, status_before, s->irq_status,
+                        s->fence);
+            }
 #ifndef RAISE_IRQ_OFF
             if (irq_status & s->irq_mask) {
                 struct pci_vmsvga_state_s *pci_vmsvga =
@@ -6852,6 +6897,21 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
         if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
             s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(0);
         }
+    }
+    if (trace_flight) {
+        uint32_t fifo_busy =
+            vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY) ?
+            le32_to_cpu(s->fifo[SVGA_FIFO_BUSY]) : 0;
+        uint32_t fifo_goal =
+            vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE_GOAL) ?
+            le32_to_cpu(s->fifo[SVGA_FIFO_FENCE_GOAL]) : 0;
+        fprintf(stderr,
+                "VMVGA-SYNC fifo-run-end reason=processed sync=%u pending=%u "
+                "busy=%u stop=0x%08x next=0x%08x mask=0x%08x "
+                "status=0x%08x fence=%u fifo-goal=%u reg-goal=%u\n",
+                s->sync, vmsvga_fifo_pending(s), fifo_busy, s->fifo_stop,
+                s->fifo_next, s->irq_mask, s->irq_status, s->fence,
+                fifo_goal, s->fence_goal);
     }
 }
 
@@ -8010,6 +8070,16 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
     switch (s->index) {
     case SVGA_REG_FENCE_GOAL:
         ret = 0;
+        if (vmsvga_trace_flight_enabled()) {
+            uint32_t fifo_goal =
+                s->fifo != NULL && s->config &&
+                vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE_GOAL) ?
+                le32_to_cpu(s->fifo[SVGA_FIFO_FENCE_GOAL]) : 0;
+            fprintf(stderr,
+                    "VMVGA-FENCE-GOAL event=reg-read returned=%u stored=%u "
+                    "fifo-goal=%u mask=0x%08x status=0x%08x\n",
+                    ret, s->fence_goal, fifo_goal, s->irq_mask, s->irq_status);
+        }
         VPRINT("SVGA_REG_FENCE_GOAL register %u with the return of %u\n", s->index,
                ret);
         break;
@@ -8206,8 +8276,6 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
             caps &= ~SVGA_CAP_3D;
         }
         if (s->vgpu_generation == VMSVGA_VGPU_9) {
-            /* Diagnostic A/B test: force the legacy WDDM path to operate
-             * without SVGA IRQMASK support.  Keep vGPU10/11 unchanged. */
             caps &= ~SVGA_CAP_IRQMASK;
         }
         if (s->svga3d_dx_capable) {
@@ -8329,6 +8397,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         break;
     case SVGA_REG_IRQMASK:
         ret = s->irq_mask;
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-IRQ event=mask-read mask=0x%08x "
+                    "status=0x%08x line=%u\n",
+                    ret, s->irq_status, !!(s->irq_status & ret));
+        }
         VPRINT("SVGA_REG_IRQMASK register %u with the return of %u\n", s->index,
                ret);
         break;
@@ -8519,6 +8593,18 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         VPRINT("SVGA_REG_ID register %u with the value of %u\n", s->index, value);
         break;
     case SVGA_REG_FENCE_GOAL:
+        if (vmsvga_trace_flight_enabled()) {
+            uint32_t fifo_goal =
+                s->fifo != NULL && s->config &&
+                vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE_GOAL) ?
+                le32_to_cpu(s->fifo[SVGA_FIFO_FENCE_GOAL]) : 0;
+            fprintf(stderr,
+                    "VMVGA-FENCE-GOAL event=reg-write value=%u action=ignored "
+                    "stored=%u fifo-goal=%u fence=%u mask=0x%08x "
+                    "status=0x%08x\n",
+                    value, s->fence_goal, fifo_goal, s->fence, s->irq_mask,
+                    s->irq_status);
+        }
         VPRINT("SVGA_REG_FENCE_GOAL register %u ignored value %u\n", s->index,
                value);
         break;
@@ -8617,6 +8703,25 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
     }
   case SVGA_REG_SYNC:
       if (vmsvga_trace_flight_enabled()) {
+          uint32_t fifo_busy =
+              s->fifo != NULL && s->config &&
+              vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY) ?
+              le32_to_cpu(s->fifo[SVGA_FIFO_BUSY]) : 0;
+          uint32_t fifo_fence =
+              s->fifo != NULL && s->config &&
+              vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE) ?
+              le32_to_cpu(s->fifo[SVGA_FIFO_FENCE]) : 0;
+          uint32_t fifo_goal =
+              s->fifo != NULL && s->config &&
+              vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE_GOAL) ?
+              le32_to_cpu(s->fifo[SVGA_FIFO_FENCE_GOAL]) : 0;
+          fprintf(stderr,
+                  "VMVGA-SYNC value=%u enable=%u config=%u sync-before=%u "
+                  "fifo-stop=0x%08x fifo-next=0x%08x busy=%u fence=%u "
+                  "fifo-goal=%u reg-goal=%u mask=0x%08x status=0x%08x\n",
+                  value, s->enable, s->config, s->sync, s->fifo_stop,
+                  s->fifo_next, fifo_busy, fifo_fence, fifo_goal,
+                  s->fence_goal, s->irq_mask, s->irq_status);
           s->trace_now.sync_writes++;
           if (s->fifo != NULL && s->config &&
               vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
@@ -8631,6 +8736,12 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       if (s->enable && s->config) {
           s->sync = 1;
           qemu_bh_schedule(s->fifo_bh);
+      }
+      if (vmsvga_trace_flight_enabled()) {
+          fprintf(stderr,
+                  "VMVGA-SYNC result sync-after=%u scheduled=%u "
+                  "mask=0x%08x status=0x%08x\n",
+                  s->sync, s->enable && s->config, s->irq_mask, s->irq_status);
       }
       /* vmware_value_write already traces this register when enabled. */
       VPRINT("SVGA_REG_SYNC register %u with the value of %u\n", s->index, value);
@@ -8682,11 +8793,21 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
              value);
       break;
   case SVGA_REG_IRQMASK: {
+        uint32_t old_mask = s->irq_mask;
+        bool old_line = !!(s->irq_status & old_mask);
+        bool new_line;
         s->irq_mask = value;
+        new_line = !!(s->irq_status & s->irq_mask);
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-IRQ event=mask-write old=0x%08x new=0x%08x "
+                    "status=0x%08x line-before=%u line-after=%u\n",
+                    old_mask, s->irq_mask, s->irq_status, old_line, new_line);
+        }
 #ifndef RAISE_IRQ_OFF
         struct pci_vmsvga_state_s *pci_vmsvga =
             container_of(s, struct pci_vmsvga_state_s, chip);
-        pci_set_irq(PCI_DEVICE(pci_vmsvga), !!(s->irq_status & s->irq_mask));
+        pci_set_irq(PCI_DEVICE(pci_vmsvga), new_line);
 #endif
         VPRINT("SVGA_REG_IRQMASK register %u with the value of %u\n", s->index,
                value);
@@ -8816,6 +8937,13 @@ static uint32_t vmsvga_irqstatus_read(void *opaque, uint32_t address)
 
     struct vmsvga_state_s *s = opaque;
 
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-IRQ event=status-read address=0x%x status=0x%08x "
+                "mask=0x%08x line=%u fence=%u\n",
+                address, s->irq_status, s->irq_mask,
+                !!(s->irq_status & s->irq_mask), s->fence);
+    }
     VPRINT("vmsvga_irqstatus_read %u %u\n", address, s->irq_status);
 
     return s->irq_status;
@@ -8827,14 +8955,26 @@ static void vmsvga_irqstatus_write(void *opaque, uint32_t address,
     VPRINT("vmsvga_irqstatus_write was just executed\n");
 
     struct vmsvga_state_s *s = opaque;
+    uint32_t status_before = s->irq_status;
+    bool line_before = !!(status_before & s->irq_mask);
+    bool line_after;
     s->irq_status &= ~data;
+    line_after = !!(s->irq_status & s->irq_mask);
 
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-IRQ event=status-ack address=0x%x ack=0x%08x "
+                "mask=0x%08x status-before=0x%08x status-after=0x%08x "
+                "line-before=%u line-after=%u fence=%u\n",
+                address, data, s->irq_mask, status_before, s->irq_status,
+                line_before, line_after, s->fence);
+    }
     VPRINT("vmsvga_irqstatus_write %u %u\n", address, data);
 
 #ifndef RAISE_IRQ_OFF
     struct pci_vmsvga_state_s *pci_vmsvga =
         container_of(s, struct pci_vmsvga_state_s, chip);
-    pci_set_irq(PCI_DEVICE(pci_vmsvga), !!(s->irq_status & s->irq_mask));
+    pci_set_irq(PCI_DEVICE(pci_vmsvga), line_after);
 #endif
 }
 

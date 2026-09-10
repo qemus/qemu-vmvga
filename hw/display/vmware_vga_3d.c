@@ -5632,6 +5632,219 @@ static bool vmsvga3d_screen_blit_copy_rect(
     return true;
 }
 
+typedef struct vmsvga3d_screen_blit_trace_s {
+    uint8_t *before;
+    size_t row_bytes;
+    size_t snapshot_size;
+    size_t source_bytes;
+    uint32_t width;
+    uint32_t height;
+    uint32_t source_hash;
+    uint32_t screen_before_hash;
+    uint32_t damage_before;
+    bool enabled;
+    bool captured;
+    bool source_hash_valid;
+} VMSVGA3DScreenBlitTrace;
+
+static void vmsvga3d_screen_blit_trace_capture(
+    struct vmsvga_state_s *s, const VMSVGA3DSurfaceImage *image,
+    VMSVGA3DScreenBlitTrace *trace)
+{
+    uint8_t *screen_base;
+    size_t screen_size;
+    uint32_t screen_stride;
+    uint64_t required;
+    uint32_t row;
+
+    memset(trace, 0, sizeof(*trace));
+    if (!VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        return;
+    }
+
+    trace->enabled = true;
+    trace->damage_before = s != NULL ? s->damage_count : 0;
+    if (image != NULL && image->data != NULL && image->data_size != 0) {
+        trace->source_hash =
+            vmsvga_gmr_diag_hash(image->data, image->data_size);
+        trace->source_bytes = image->data_size;
+        trace->source_hash_valid = true;
+    }
+
+    if (s == NULL || s->screen_width == 0 || s->screen_height == 0 ||
+        !vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride) ||
+        s->screen_width > UINT32_MAX / 4) {
+        return;
+    }
+
+    trace->row_bytes = (size_t)s->screen_width * 4;
+    if (screen_stride < trace->row_bytes ||
+        s->screen_height > SIZE_MAX / trace->row_bytes) {
+        return;
+    }
+
+    required = (uint64_t)(s->screen_height - 1) * screen_stride +
+               trace->row_bytes;
+    trace->snapshot_size = trace->row_bytes * s->screen_height;
+    if (required > screen_size || trace->snapshot_size == 0) {
+        return;
+    }
+
+    trace->before = g_try_malloc(trace->snapshot_size);
+    if (trace->before == NULL) {
+        return;
+    }
+
+    trace->width = s->screen_width;
+    trace->height = s->screen_height;
+    for (row = 0; row < trace->height; row++) {
+        memcpy(trace->before + (size_t)row * trace->row_bytes,
+               screen_base + (uint64_t)row * screen_stride,
+               trace->row_bytes);
+    }
+    trace->screen_before_hash =
+        vmsvga_gmr_diag_hash(trace->before, trace->snapshot_size);
+    trace->captured = true;
+}
+
+static void vmsvga3d_screen_blit_trace_report(
+    struct vmsvga_state_s *s, uint32_t sid,
+    const VMSVGA3DScreenBlitTrace *trace)
+{
+    uint8_t *screen_base;
+    size_t screen_size;
+    uint32_t screen_stride;
+    uint32_t screen_after_hash = 2166136261u;
+    uint32_t region_before_hash = 2166136261u;
+    uint32_t region_after_hash = 2166136261u;
+    uint32_t min_x = UINT32_MAX;
+    uint32_t min_y = UINT32_MAX;
+    uint32_t max_x = 0;
+    uint32_t max_y = 0;
+    uint32_t changed_rows = 0;
+    uint64_t raw_changed_pixels = 0;
+    uint64_t rgb_changed_pixels = 0;
+    uint64_t required;
+    uint32_t row;
+    bool bbox_valid = false;
+
+    if (!trace->enabled) {
+        return;
+    }
+
+    if (!trace->captured || s == NULL || s->screen_width != trace->width ||
+        s->screen_height != trace->height ||
+        !vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride) ||
+        screen_stride < trace->row_bytes) {
+        fprintf(stderr,
+                "VMVGA-SCREEN-BLIT3D-DIFF sid=%u capture=0 "
+                "source-hash=0x%08x source-valid=%u source-bytes=0x%zx "
+                "damage-before=%u damage-after=%u\n",
+                sid, trace->source_hash, trace->source_hash_valid,
+                trace->source_bytes, trace->damage_before,
+                s != NULL ? s->damage_count : 0);
+        return;
+    }
+
+    required = (uint64_t)(trace->height - 1) * screen_stride +
+               trace->row_bytes;
+    if (required > screen_size) {
+        fprintf(stderr,
+                "VMVGA-SCREEN-BLIT3D-DIFF sid=%u capture=0 reason=screen-range "
+                "source-hash=0x%08x source-valid=%u source-bytes=0x%zx "
+                "damage-before=%u damage-after=%u\n",
+                sid, trace->source_hash, trace->source_hash_valid,
+                trace->source_bytes, trace->damage_before, s->damage_count);
+        return;
+    }
+
+    for (row = 0; row < trace->height; row++) {
+        const uint8_t *before_row =
+            trace->before + (size_t)row * trace->row_bytes;
+        const uint8_t *after_row = screen_base + (uint64_t)row * screen_stride;
+        uint32_t column;
+        bool row_rgb_changed = false;
+
+        screen_after_hash = vmsvga_gmr_diag_hash_extend(
+            screen_after_hash, after_row, trace->row_bytes);
+        for (column = 0; column < trace->width; column++) {
+            const uint8_t *before_pixel = before_row + (size_t)column * 4;
+            const uint8_t *after_pixel = after_row + (size_t)column * 4;
+            bool raw_changed =
+                before_pixel[0] != after_pixel[0] ||
+                before_pixel[1] != after_pixel[1] ||
+                before_pixel[2] != after_pixel[2] ||
+                before_pixel[3] != after_pixel[3];
+            bool rgb_changed =
+                before_pixel[0] != after_pixel[0] ||
+                before_pixel[1] != after_pixel[1] ||
+                before_pixel[2] != after_pixel[2];
+
+            if (raw_changed) {
+                raw_changed_pixels++;
+            }
+            if (!rgb_changed) {
+                continue;
+            }
+
+            rgb_changed_pixels++;
+            row_rgb_changed = true;
+            bbox_valid = true;
+            min_x = MIN(min_x, column);
+            min_y = MIN(min_y, row);
+            max_x = MAX(max_x, column);
+            max_y = MAX(max_y, row);
+        }
+        if (row_rgb_changed) {
+            changed_rows++;
+        }
+    }
+
+    if (bbox_valid) {
+        size_t region_row_bytes = (size_t)(max_x - min_x + 1) * 4;
+
+        for (row = min_y; ; row++) {
+            const uint8_t *before_row =
+                trace->before + (size_t)row * trace->row_bytes +
+                (size_t)min_x * 4;
+            const uint8_t *after_row =
+                screen_base + (uint64_t)row * screen_stride +
+                (size_t)min_x * 4;
+
+            region_before_hash = vmsvga_gmr_diag_hash_extend(
+                region_before_hash, before_row, region_row_bytes);
+            region_after_hash = vmsvga_gmr_diag_hash_extend(
+                region_after_hash, after_row, region_row_bytes);
+            if (row == max_y) {
+                break;
+            }
+        }
+    }
+
+    fprintf(stderr,
+            "VMVGA-SCREEN-BLIT3D-DIFF sid=%u capture=1 "
+            "source-hash=0x%08x source-valid=%u source-bytes=0x%zx "
+            "screen-before=0x%08x screen-after=0x%08x raw-pixels=%" PRIu64
+            " rgb-pixels=%" PRIu64 " rgb-rows=%u bbox-valid=%u "
+            "bbox=%u,%u-%u,%u region-before=0x%08x region-after=0x%08x "
+            "damage-before=%u damage-after=%u\n",
+            sid, trace->source_hash, trace->source_hash_valid,
+            trace->source_bytes, trace->screen_before_hash, screen_after_hash,
+            raw_changed_pixels, rgb_changed_pixels, changed_rows, bbox_valid,
+            bbox_valid ? min_x : 0, bbox_valid ? min_y : 0,
+            bbox_valid ? max_x + 1 : 0, bbox_valid ? max_y + 1 : 0,
+            bbox_valid ? region_before_hash : 0,
+            bbox_valid ? region_after_hash : 0, trace->damage_before,
+            s->damage_count);
+}
+
+static void vmsvga3d_screen_blit_trace_cleanup(
+    VMSVGA3DScreenBlitTrace *trace)
+{
+    g_free(trace->before);
+    trace->before = NULL;
+}
+
 static bool vmsvga3d_handle_blit_surface_to_screen(
     struct vmsvga_state_s *s, uint32_t cmd, int32_t *len,
     uint32_t fifo_start)
@@ -5649,6 +5862,7 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
     uint32_t clip_count;
     uint32_t copy_count;
     uint32_t i;
+    VMSVGA3DScreenBlitTrace trace_diff = { 0 };
     bool valid = true;
 
     (void)cmd;
@@ -5758,6 +5972,9 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
                  !d3d11_readback)) {
                 valid = false;
             }
+            if (valid) {
+                vmsvga3d_screen_blit_trace_capture(s, image, &trace_diff);
+            }
         }
 
         copy_count = clip_count != 0 ? clip_count : 1;
@@ -5813,6 +6030,9 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
     } else {
         copy_count = 0;
     }
+
+    vmsvga3d_screen_blit_trace_report(s, body->srcImage.sid, &trace_diff);
+    vmsvga3d_screen_blit_trace_cleanup(&trace_diff);
 
     fprintf(stderr,
             "VMVGA-SCREEN-BLIT3D result sid=%u valid=%u accel=%s copies=%u\n",

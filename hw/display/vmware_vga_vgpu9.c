@@ -2339,6 +2339,63 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_image(
     return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }
 
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_rects(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, uint32_t level, const SVGA3dRect *rects,
+    uint32_t rect_count, uint32_t bytes_per_pixel, uint8_t *secondary_data,
+    uint32_t secondary_row_pitch, uint32_t secondary_data_size)
+{
+    VMSVGA3DD3D9TransferSurface info;
+    VMSVGA3DD3D9Rect *d3d_rects;
+    uint32_t i;
+    bool success;
+
+    if (s == NULL || surface == NULL || image == NULL || rects == NULL ||
+        rect_count == 0 || bytes_per_pixel == 0 ||
+        !vmsvga3d_dxvk_ready(s->dxvk) ||
+        !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
+        !info.resident) {
+        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
+
+    if (surface->dxvk_surface == NULL || surface->multisample_count > 1 ||
+        level >= surface->mip_count || image->data == NULL ||
+        image->pitch == 0 || image->data_size == 0 || image->size.depth != 1 ||
+        info.block_width != 1 || info.block_height != 1 ||
+        info.block_depth != 1 || info.bytes_per_block != bytes_per_pixel) {
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
+    }
+
+    d3d_rects = g_try_new(VMSVGA3DD3D9Rect, rect_count);
+    if (d3d_rects == NULL) {
+        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
+
+    for (i = 0; i < rect_count; i++) {
+        uint64_t right = (uint64_t)rects[i].x + rects[i].w;
+        uint64_t bottom = (uint64_t)rects[i].y + rects[i].h;
+
+        if (rects[i].w == 0 || rects[i].h == 0 ||
+            rects[i].x > INT32_MAX || rects[i].y > INT32_MAX ||
+            right > INT32_MAX || bottom > INT32_MAX ||
+            right > image->size.width || bottom > image->size.height) {
+            g_free(d3d_rects);
+            return VMSVGA3D_D3D9_ACCEL_FAILED;
+        }
+        vmsvga3d_d3d9_rect(&rects[i], &d3d_rects[i]);
+    }
+
+    success = vmsvga3d_dxvk_surface_readback_rects(
+        s->dxvk, surface->dxvk_surface, level, d3d_rects, rect_count,
+        image->size.width, image->size.height, image->data, bytes_per_pixel,
+        image->pitch, image->data_size, secondary_data, secondary_row_pitch,
+        secondary_data_size);
+    g_free(d3d_rects);
+
+    return success ? VMSVGA3D_D3D9_ACCEL_COMPLETE :
+                     VMSVGA3D_D3D9_ACCEL_FAILED;
+}
+
 static void vmsvga3d_dxvk_sync_surface_from_cpu(struct vmsvga_state_s *s,
                                                 VMSVGA3DSurface *surface)
 {

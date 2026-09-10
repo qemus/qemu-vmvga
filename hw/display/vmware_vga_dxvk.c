@@ -195,6 +195,10 @@ struct vmsvga3d_dxvk_surface_s {
     uint32_t d3d9_length;
     void *d3d9_resource;
     void *d3d9_bounce;
+    void *d3d9_readback_render_target;
+    void *d3d9_readback_staging;
+    uint32_t d3d9_readback_width;
+    uint32_t d3d9_readback_height;
     bool d3d9_resident;
     bool d3d9_has_bounce;
 
@@ -343,6 +347,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3DUSAGE_QUERY_WRAPANDMIP 0x00200000u
 #define VMSVGA3D_DXVK_D3DPOOL_DEFAULT 0u
 #define VMSVGA3D_DXVK_D3DPOOL_SYSTEMMEM 2u
+#define VMSVGA3D_DXVK_D3DTEXF_NONE 0u
 #define VMSVGA3D_DXVK_D3DLOCK_READONLY 0x00000010u
 #define VMSVGA3D_DXVK_D3DLOCK_DISCARD 0x00002000u
 #define VMSVGA3D_DXVK_D3DSBT_ALL 1u
@@ -2953,6 +2958,18 @@ static void vmsvga3d_dxvk_surface_evict_d3d9(
     }
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
+    if (surface->d3d9_readback_staging != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d9_readback_staging,
+                              VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+        surface->d3d9_readback_staging = NULL;
+    }
+
+    if (surface->d3d9_readback_render_target != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d9_readback_render_target,
+                              VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+        surface->d3d9_readback_render_target = NULL;
+    }
+
     if (surface->d3d9_bounce != NULL) {
         vmsvga3d_dxvk_release(surface->d3d9_bounce,
                               VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
@@ -2969,6 +2986,8 @@ static void vmsvga3d_dxvk_surface_evict_d3d9(
     surface->d3d9_usage = 0;
     surface->d3d9_format = 0;
     surface->d3d9_length = 0;
+    surface->d3d9_readback_width = 0;
+    surface->d3d9_readback_height = 0;
     surface->d3d9_resident = false;
     surface->d3d9_has_bounce = false;
 }
@@ -9543,6 +9562,340 @@ out:
     (void)data;
     (void)row_bytes;
     (void)rows;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_surface_readback_rects(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
+    const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
+    uint32_t source_width, uint32_t source_height, void *data,
+    uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
+    void *secondary_data, uint32_t secondary_row_pitch,
+    uint32_t secondary_data_size)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkCreateRenderTarget create_render_target = NULL;
+    VMSVGA3DDxvkCreateOffscreenPlainSurface create_offscreen = NULL;
+    VMSVGA3DDxvkGetRenderTargetData get_render_target_data = NULL;
+    VMSVGA3DDxvkStretchRect stretch_rect = NULL;
+    VMSVGA3DDxvkSurfaceLockRect lock_rect = NULL;
+    VMSVGA3DDxvkSurfaceUnlockRect unlock_rect = NULL;
+    VMSVGA3DDxvkLockedRect locked = { 0 };
+    void *source_surface = NULL;
+    uint32_t batch_left = UINT32_MAX;
+    uint32_t batch_top = UINT32_MAX;
+    uint32_t batch_right = 0;
+    uint32_t batch_bottom = 0;
+    uint32_t batch_width;
+    uint32_t batch_height;
+    uint32_t i;
+    int32_t result;
+    bool locked_staging = false;
+    bool success = false;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL || rects == NULL ||
+        rect_count == 0 || source_width == 0 || source_height == 0 ||
+        data == NULL || bytes_per_pixel == 0 || row_pitch == 0 ||
+        data_size == 0 || !surface->d3d9_resident ||
+        surface->d3d9_resource == NULL ||
+        (surface->d3d9_usage & VMSVGA3D_DXVK_D3DUSAGE_RENDERTARGET) == 0 ||
+        (secondary_data != NULL &&
+         (secondary_row_pitch == 0 || secondary_data_size == 0)) ||
+        !vmsvga3d_dxvk_surface_level_acquire(surface, false, level,
+                                             &source_surface)) {
+        goto out;
+    }
+
+    for (i = 0; i < rect_count; i++) {
+        const VMSVGA3DD3D9Rect *rect = &rects[i];
+        uint32_t left;
+        uint32_t top;
+        uint32_t right;
+        uint32_t bottom;
+        uint64_t row_bytes;
+        uint64_t destination_offset;
+        uint64_t destination_end;
+
+        if (rect->left < 0 || rect->top < 0 || rect->right <= rect->left ||
+            rect->bottom <= rect->top) {
+            goto out;
+        }
+
+        left = (uint32_t)rect->left;
+        top = (uint32_t)rect->top;
+        right = (uint32_t)rect->right;
+        bottom = (uint32_t)rect->bottom;
+        if (right > source_width || bottom > source_height) {
+            goto out;
+        }
+
+        row_bytes = (uint64_t)(right - left) * bytes_per_pixel;
+        destination_offset = (uint64_t)top * row_pitch +
+                             (uint64_t)left * bytes_per_pixel;
+        destination_end = destination_offset +
+                          (uint64_t)(bottom - top - 1) * row_pitch +
+                          row_bytes;
+        if (row_bytes == 0 || row_bytes > row_pitch ||
+            (uint64_t)right * bytes_per_pixel > row_pitch ||
+            destination_end > data_size) {
+            goto out;
+        }
+
+        if (secondary_data != NULL) {
+            uint64_t secondary_offset =
+                (uint64_t)top * secondary_row_pitch +
+                (uint64_t)left * bytes_per_pixel;
+            uint64_t secondary_end =
+                secondary_offset +
+                (uint64_t)(bottom - top - 1) * secondary_row_pitch +
+                row_bytes;
+
+            if (row_bytes > secondary_row_pitch ||
+                (uint64_t)right * bytes_per_pixel > secondary_row_pitch ||
+                secondary_end > secondary_data_size) {
+                goto out;
+            }
+        }
+
+        batch_left = MIN(batch_left, left);
+        batch_top = MIN(batch_top, top);
+        batch_right = MAX(batch_right, right);
+        batch_bottom = MAX(batch_bottom, bottom);
+    }
+
+    batch_width = batch_right - batch_left;
+    batch_height = batch_bottom - batch_top;
+
+    /* GetRenderTargetData has no source rectangle.  When the dirty bounding
+     * box already spans the whole image, the surface's normal full-size bounce
+     * is cheaper than adding an extra StretchRect pass. */
+    if (batch_left == 0 && batch_top == 0 && batch_width == source_width &&
+        batch_height == source_height &&
+        (uint64_t)row_pitch * source_height <= data_size) {
+        if (!vmsvga3d_dxvk_surface_readback_level(
+                dxvk, surface, level, data, row_pitch, source_height)) {
+            goto out;
+        }
+
+        if (secondary_data != NULL) {
+            for (i = 0; i < rect_count; i++) {
+                const VMSVGA3DD3D9Rect *rect = &rects[i];
+                uint32_t width = (uint32_t)(rect->right - rect->left);
+                uint32_t height = (uint32_t)(rect->bottom - rect->top);
+                size_t row_bytes = (size_t)width * bytes_per_pixel;
+                uint32_t y;
+
+                for (y = 0; y < height; y++) {
+                    const uint8_t *source =
+                        (const uint8_t *)data +
+                        (size_t)((uint32_t)rect->top + y) * row_pitch +
+                        (size_t)(uint32_t)rect->left * bytes_per_pixel;
+                    uint8_t *destination =
+                        (uint8_t *)secondary_data +
+                        (size_t)((uint32_t)rect->top + y) *
+                            secondary_row_pitch +
+                        (size_t)(uint32_t)rect->left * bytes_per_pixel;
+
+                    memcpy(destination, source, row_bytes);
+                }
+            }
+        }
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-READBACK sid=%u mode=full rects=%u bbox=%u,%u/%ux%u",
+            surface->sid, rect_count, batch_left, batch_top, batch_width,
+            batch_height);
+        success = true;
+        goto out;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device,
+            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_RENDER_TARGET,
+            &create_render_target, sizeof(create_render_target)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device,
+            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_OFFSCREEN_PLAIN_SURFACE,
+            &create_offscreen, sizeof(create_offscreen)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device,
+            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_RENDER_TARGET_DATA,
+            &get_render_target_data, sizeof(get_render_target_data)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_STRETCH_RECT,
+            &stretch_rect, sizeof(stretch_rect))) {
+        goto out;
+    }
+
+    /* Unlike the D3D11 staging cache, keep the D3D9 scratch pair at the exact
+     * current bounding-box size.  GetRenderTargetData transfers the complete
+     * scratch surface, so retaining a previous larger allocation would erase
+     * the bandwidth benefit of later small updates. */
+    if (surface->d3d9_readback_render_target == NULL ||
+        surface->d3d9_readback_staging == NULL ||
+        surface->d3d9_readback_width != batch_width ||
+        surface->d3d9_readback_height != batch_height) {
+        void *new_render_target = NULL;
+        void *new_staging = NULL;
+
+        result = create_render_target(
+            dxvk->d3d9_device, batch_width, batch_height,
+            surface->d3d9_format, 0, 0, 0, &new_render_target, NULL);
+        if (!vmsvga3d_dxvk_succeeded(result) || new_render_target == NULL) {
+            if (new_render_target != NULL) {
+                vmsvga3d_dxvk_release(
+                    new_render_target,
+                    VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+            }
+            goto out;
+        }
+
+        result = create_offscreen(
+            dxvk->d3d9_device, batch_width, batch_height,
+            surface->d3d9_format, VMSVGA3D_DXVK_D3DPOOL_SYSTEMMEM,
+            &new_staging, NULL);
+        if (!vmsvga3d_dxvk_succeeded(result) || new_staging == NULL) {
+            if (new_staging != NULL) {
+                vmsvga3d_dxvk_release(
+                    new_staging, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+            }
+            vmsvga3d_dxvk_release(
+                new_render_target,
+                VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+            goto out;
+        }
+
+        if (surface->d3d9_readback_staging != NULL) {
+            vmsvga3d_dxvk_release(
+                surface->d3d9_readback_staging,
+                VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+        }
+        if (surface->d3d9_readback_render_target != NULL) {
+            vmsvga3d_dxvk_release(
+                surface->d3d9_readback_render_target,
+                VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+        }
+
+        surface->d3d9_readback_render_target = new_render_target;
+        surface->d3d9_readback_staging = new_staging;
+        surface->d3d9_readback_width = batch_width;
+        surface->d3d9_readback_height = batch_height;
+    }
+
+    for (i = 0; i < rect_count; i++) {
+        const VMSVGA3DD3D9Rect *source_rect = &rects[i];
+        VMSVGA3DD3D9Rect destination_rect = {
+            .left = source_rect->left - (int32_t)batch_left,
+            .top = source_rect->top - (int32_t)batch_top,
+            .right = source_rect->right - (int32_t)batch_left,
+            .bottom = source_rect->bottom - (int32_t)batch_top,
+        };
+
+        result = stretch_rect(
+            dxvk->d3d9_device, source_surface, source_rect,
+            surface->d3d9_readback_render_target, &destination_rect,
+            VMSVGA3D_DXVK_D3DTEXF_NONE);
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            goto out;
+        }
+    }
+
+    result = get_render_target_data(
+        dxvk->d3d9_device, surface->d3d9_readback_render_target,
+        surface->d3d9_readback_staging);
+    if (!vmsvga3d_dxvk_succeeded(result) ||
+        !vmsvga3d_dxvk_get_method(
+            surface->d3d9_readback_staging,
+            VMSVGA3D_DXVK_IDIRECT3DSURFACE9_LOCK_RECT,
+            &lock_rect, sizeof(lock_rect)) ||
+        !vmsvga3d_dxvk_get_method(
+            surface->d3d9_readback_staging,
+            VMSVGA3D_DXVK_IDIRECT3DSURFACE9_UNLOCK_RECT,
+            &unlock_rect, sizeof(unlock_rect))) {
+        goto out;
+    }
+
+    result = lock_rect(surface->d3d9_readback_staging, &locked, NULL,
+                       VMSVGA3D_DXVK_D3DLOCK_READONLY);
+    if (!vmsvga3d_dxvk_succeeded(result) || locked.bits == NULL ||
+        locked.pitch < 0 ||
+        (uint64_t)(uint32_t)locked.pitch <
+            (uint64_t)batch_width * bytes_per_pixel) {
+        if (vmsvga3d_dxvk_succeeded(result)) {
+            unlock_rect(surface->d3d9_readback_staging);
+        }
+        goto out;
+    }
+    locked_staging = true;
+
+    for (i = 0; i < rect_count; i++) {
+        const VMSVGA3DD3D9Rect *rect = &rects[i];
+        uint32_t source_x = (uint32_t)rect->left - batch_left;
+        uint32_t source_y = (uint32_t)rect->top - batch_top;
+        uint32_t width = (uint32_t)(rect->right - rect->left);
+        uint32_t height = (uint32_t)(rect->bottom - rect->top);
+        size_t row_bytes = (size_t)width * bytes_per_pixel;
+        uint32_t y;
+
+        for (y = 0; y < height; y++) {
+            const uint8_t *source =
+                (const uint8_t *)locked.bits +
+                (size_t)(source_y + y) * (uint32_t)locked.pitch +
+                (size_t)source_x * bytes_per_pixel;
+            uint8_t *destination =
+                (uint8_t *)data +
+                (size_t)((uint32_t)rect->top + y) * row_pitch +
+                (size_t)(uint32_t)rect->left * bytes_per_pixel;
+
+            memcpy(destination, source, row_bytes);
+            if (secondary_data != NULL) {
+                uint8_t *secondary_destination =
+                    (uint8_t *)secondary_data +
+                    (size_t)((uint32_t)rect->top + y) *
+                        secondary_row_pitch +
+                    (size_t)(uint32_t)rect->left * bytes_per_pixel;
+
+                memcpy(secondary_destination, source, row_bytes);
+            }
+        }
+    }
+
+    result = unlock_rect(surface->d3d9_readback_staging);
+    locked_staging = false;
+    success = vmsvga3d_dxvk_succeeded(result);
+    if (success) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-READBACK sid=%u mode=rects rects=%u bbox=%u,%u/%ux%u",
+            surface->sid, rect_count, batch_left, batch_top, batch_width,
+            batch_height);
+    }
+
+out:
+    if (locked_staging && unlock_rect != NULL) {
+        unlock_rect(surface->d3d9_readback_staging);
+    }
+    if (source_surface != NULL) {
+        vmsvga3d_dxvk_release(source_surface,
+                              VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+    }
+    return success;
+#else
+    (void)dxvk;
+    (void)surface;
+    (void)level;
+    (void)rects;
+    (void)rect_count;
+    (void)source_width;
+    (void)source_height;
+    (void)data;
+    (void)bytes_per_pixel;
+    (void)row_pitch;
+    (void)data_size;
+    (void)secondary_data;
+    (void)secondary_row_pitch;
+    (void)secondary_data_size;
     return false;
 #endif
 }

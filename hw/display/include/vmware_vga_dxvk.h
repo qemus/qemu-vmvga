@@ -435,6 +435,13 @@ bool vmsvga3d_dxvk_surface_upload_level(
 bool vmsvga3d_dxvk_surface_readback_level(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
     void *data, uint32_t row_bytes, uint32_t rows);
+bool vmsvga3d_dxvk_surface_readback_rects(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
+    const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
+    uint32_t source_width, uint32_t source_height, void *data,
+    uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
+    void *secondary_data, uint32_t secondary_row_pitch,
+    uint32_t secondary_data_size);
 bool vmsvga3d_dxvk_surface_upload_buffer(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const void *data, uint32_t size);

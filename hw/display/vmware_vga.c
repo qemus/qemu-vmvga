@@ -8275,6 +8275,9 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         if (!s->svga3d_capable) {
             caps &= ~SVGA_CAP_3D;
         }
+        if (s->vgpu_generation == VMSVGA_VGPU_9) {
+            caps &= ~SVGA_CAP_IRQMASK;
+        }
         if (s->svga3d_dx_capable) {
             caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
                     SVGA_CAP_GBOBJECTS | SVGA_CAP_DX | SVGA_CAP_CAP2_REGISTER;

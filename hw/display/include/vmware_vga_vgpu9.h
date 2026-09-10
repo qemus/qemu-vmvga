@@ -68,7 +68,6 @@ typedef struct vmsvga3d_d3d9_state_op_s {
 
 typedef struct vmsvga3d_d3d9_render_state_plan_s {
     uint32_t count;
-    /* Fog mode can emit range, inactive-mode, and active-mode states. */
     VMSVGA3DD3D9StateOp ops[3];
 } VMSVGA3DD3D9RenderStatePlan;
 
@@ -600,6 +599,9 @@ vmsvga3d_d3d9_shader_const_target(SVGA3dShaderType type,
 bool vmsvga3d_d3d9_runtime_surface_info(
     struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
     VMSVGA3DD3D9TransferSurface *info);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_image(
+    struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
+    struct vmsvga3d_surface_image_s *image, uint32_t level);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceCopy *command,
     const SVGA3dCopyBox *boxes, uint32_t box_count,

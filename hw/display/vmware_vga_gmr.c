@@ -40,6 +40,9 @@ struct vmsvga_gmr_s {
     uint64_t *page_gpas;
 };
 
+/* Shared immutable representation of a defined GMR with no pages. */
+static struct vmsvga_gmr_s vmsvga_gmr_empty;
+
 static void vmsvga_gmr_destroy(struct vmsvga_state_s *s, uint32_t gmr_id)
 {
     struct vmsvga_gmr_s *gmr;
@@ -53,9 +56,11 @@ static void vmsvga_gmr_destroy(struct vmsvga_state_s *s, uint32_t gmr_id)
         return;
     }
 
-    g_free(gmr->runs);
-    g_free(gmr->page_gpas);
-    g_free(gmr);
+    if (gmr != &vmsvga_gmr_empty) {
+        g_free(gmr->runs);
+        g_free(gmr->page_gpas);
+        g_free(gmr);
+    }
 
     s->gmrs[gmr_id] = NULL;
 }
@@ -154,6 +159,11 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
         if (ppn == 0) {
             struct vmsvga_gmr_s *gmr;
 
+            if (num_runs == 0 && num_pages == 0) {
+                *out_gmr = &vmsvga_gmr_empty;
+                return true;
+            }
+
             gmr = g_new0(struct vmsvga_gmr_s, 1);
             gmr->runs = runs;
             gmr->num_runs = num_runs;
@@ -200,7 +210,7 @@ static bool vmsvga_gmr_define2(struct vmsvga_state_s *s, uint32_t gmr_id,
     }
 
     gmr = s->gmrs[gmr_id];
-    if (gmr == NULL) {
+    if (gmr == NULL || gmr == &vmsvga_gmr_empty) {
         gmr = g_new0(struct vmsvga_gmr_s, 1);
         s->gmrs[gmr_id] = gmr;
     }
@@ -435,7 +445,8 @@ static bool vmsvga_gmr_descriptor_write(struct vmsvga_state_s *s,
     /* Commit only after the complete replacement descriptor list is valid. */
     vmsvga_gmr_destroy(s, gmr_id);
     s->gmrs[gmr_id] = new_gmr;
-    if (vmsvga_trace_flight_enabled()) {
+    if (vmsvga_trace_flight_enabled() &&
+        (new_gmr->num_runs != 0 || new_gmr->num_pages != 0)) {
         uint64_t first_gpa = new_gmr->num_runs != 0 ? new_gmr->runs[0].gpa : 0;
         uint32_t first_pages =
             new_gmr->num_runs != 0 ? new_gmr->runs[0].num_pages : 0;

@@ -1028,6 +1028,8 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
           fog.uintValue = state->uintValue;
           switch (fog.function) {
           case SVGA3D_FOGFUNC_INVALID:
+          case SVGA3D_FOGFUNC_PER_VERTEX:
+              /* Supplied per-vertex fog factors need no fog equation. */
               fog_value = D3D9_FOG_NONE;
               break;
           case SVGA3D_FOGFUNC_EXP:
@@ -1058,6 +1060,12 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
                   fog.base == SVGA3D_FOGBASE_RANGEBASED ? 1u : 0u;
               plan->count++;
           }
+          /* Clear the opposite mode so stale pixel fog cannot win. */
+          plan->ops[plan->count].state =
+              fog_state == D3D9_RS_FOGVERTEXMODE
+                  ? D3D9_RS_FOGTABLEMODE : D3D9_RS_FOGVERTEXMODE;
+          plan->ops[plan->count].value = D3D9_FOG_NONE;
+          plan->count++;
           plan->ops[plan->count].state = fog_state;
           plan->ops[plan->count].value = fog_value;
           plan->count++;

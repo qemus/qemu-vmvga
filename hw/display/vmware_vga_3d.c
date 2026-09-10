@@ -4292,6 +4292,34 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_screen_blit(
 #endif
 }
 
+static const char *vmsvga3d_d3d9_accel_result_name(
+    VMSVGA3DD3D9AccelResult result)
+{
+    switch (result) {
+    case VMSVGA3D_D3D9_ACCEL_UNAVAILABLE:
+        return "unavailable";
+    case VMSVGA3D_D3D9_ACCEL_COMPLETE:
+        return "complete";
+    case VMSVGA3D_D3D9_ACCEL_FAILED:
+        return "failed";
+    default:
+        return "invalid";
+    }
+}
+
+static const char *vmsvga3d_d3d9_execution_name(
+    VMSVGA3DD3D9ExecutionPreference execution)
+{
+    switch (execution) {
+    case VMSVGA3D_D3D9_EXECUTION_CPU_ONLY:
+        return "cpu";
+    case VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED:
+        return "gpu-preferred";
+    default:
+        return "invalid";
+    }
+}
+
 static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_surface_copy(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceCopy *command,
     const SVGA3dCopyBox *boxes, uint32_t box_count,
@@ -4617,9 +4645,47 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         valid = false;
     }
 
+    if (valid && d3d11_copy) {
+        fprintf(stderr,
+                "VMVGA-D3D9-COPY src=%u:%u:%u dst=%u:%u:%u boxes=%u "
+                "path=d3d11 src-d3d11=%u dst-d3d11=%u\n",
+                body->src.sid, body->src.face, body->src.mipmap,
+                body->dest.sid, body->dest.face, body->dest.mipmap, box_count,
+                vmsvga3d_dxvk_d3d11_surface_resident(src_surface->dxvk_surface),
+                vmsvga3d_dxvk_d3d11_surface_resident(dst_surface->dxvk_surface));
+    } else if (valid) {
+        fprintf(stderr,
+                "VMVGA-D3D9-COPY src=%u:%u:%u dst=%u:%u:%u boxes=%u "
+                "src-resident=%u src-bounce=%u src-kind=%u src-usage=0x%08x "
+                "dst-resident=%u dst-bounce=%u dst-kind=%u dst-usage=0x%08x "
+                "plan=%s lock-single=%u lock-src-ro=%u update-dst=%u\n",
+                body->src.sid, body->src.face, body->src.mipmap,
+                body->dest.sid, body->dest.face, body->dest.mipmap, box_count,
+                src_info.resident, src_info.has_bounce, src_info.resource_type,
+                src_info.usage, dst_info.resident, dst_info.has_bounce,
+                dst_info.resource_type, dst_info.usage,
+                vmsvga3d_d3d9_execution_name(transfer_plan.execution),
+                transfer_plan.lock_single_gpu_surface,
+                transfer_plan.lock_source_readonly,
+                transfer_plan.update_destination_texture);
+        for (i = 0; i < box_count; i++) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-COPY box[%u] src=%u,%u,%u dst=%u,%u,%u "
+                    "size=%ux%ux%u\n",
+                    i, boxes[i].srcx, boxes[i].srcy, boxes[i].srcz, boxes[i].x,
+                    boxes[i].y, boxes[i].z, boxes[i].w, boxes[i].h, boxes[i].d);
+        }
+    }
+
     if (valid && !d3d11_copy) {
         accel = vmsvga3d_d3d9_try_surface_copy(s, body, boxes, box_count,
                                                 &transfer_plan);
+        fprintf(stderr,
+                "VMVGA-D3D9-COPY result src=%u dst=%u accel=%s "
+                "fallback=%s\n",
+                body->src.sid, body->dest.sid,
+                vmsvga3d_d3d9_accel_result_name(accel),
+                accel == VMSVGA3D_D3D9_ACCEL_COMPLETE ? "none" : "cpu-shadow");
         if (accel == VMSVGA3D_D3D9_ACCEL_FAILED) {
             valid = false;
         }
@@ -5604,7 +5670,34 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
 
     surface = valid ? state->surfaces[body->srcImage.sid] : NULL;
     if (valid && surface != NULL) {
+        VMSVGA3DD3D9TransferSurface surface_info;
+        bool d3d9_info =
+            vmsvga3d_d3d9_runtime_surface_info(s, surface, &surface_info);
+        bool d3d11_resident =
+            vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+
+        fprintf(stderr,
+                "VMVGA-SCREEN-BLIT3D sid=%u face=%u mip=%u "
+                "src=%d,%d-%d,%d dst-screen=%u dst=%d,%d-%d,%d clips=%u "
+                "screen-defined=%u d3d9-info=%u d3d9-resident=%u "
+                "d3d9-bounce=%u d3d11-resident=%u\n",
+                body->srcImage.sid, body->srcImage.face, body->srcImage.mipmap,
+                body->srcRect.left, body->srcRect.top, body->srcRect.right,
+                body->srcRect.bottom, body->destScreenId, body->destRect.left,
+                body->destRect.top, body->destRect.right, body->destRect.bottom,
+                clip_count, s->screen_defined, d3d9_info,
+                d3d9_info ? surface_info.resident : 0,
+                d3d9_info ? surface_info.has_bounce : 0, d3d11_resident);
+        for (i = 0; i < clip_count; i++) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-BLIT3D clip[%u]=%d,%d-%d,%d\n", i,
+                    clips[i].left, clips[i].top, clips[i].right,
+                    clips[i].bottom);
+        }
+
         accel = vmsvga3d_d3d9_try_screen_blit(s, body, clips, clip_count);
+        fprintf(stderr, "VMVGA-SCREEN-BLIT3D accel=%s\n",
+                vmsvga3d_d3d9_accel_result_name(accel));
         if (accel == VMSVGA3D_D3D9_ACCEL_FAILED) {
             valid = false;
         }
@@ -5640,11 +5733,24 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
             VMSVGA3DD3D9AccelResult readback =
                 vmsvga3d_d3d9_runtime_readback_surface_image(
                     s, surface, image, 0);
+            bool d3d11_readback = false;
+
+            if (readback == VMSVGA3D_D3D9_ACCEL_UNAVAILABLE) {
+                d3d11_readback =
+                    vmsvga3d_d3d11_readback_surface_image(s, surface, image, 0);
+            }
+            fprintf(stderr,
+                    "VMVGA-SCREEN-BLIT3D readback sid=%u d3d9=%s "
+                    "d3d11=%s\n",
+                    body->srcImage.sid,
+                    vmsvga3d_d3d9_accel_result_name(readback),
+                    readback == VMSVGA3D_D3D9_ACCEL_UNAVAILABLE
+                        ? (d3d11_readback ? "complete" : "failed")
+                        : "not-needed");
 
             if (readback == VMSVGA3D_D3D9_ACCEL_FAILED ||
                 (readback == VMSVGA3D_D3D9_ACCEL_UNAVAILABLE &&
-                 !vmsvga3d_d3d11_readback_surface_image(
-                     s, surface, image, 0))) {
+                 !d3d11_readback)) {
                 valid = false;
             }
         }
@@ -5664,6 +5770,13 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
                 } else if (empty) {
                     copies[i].w = 0;
                     copies[i].h = 0;
+                }
+                if (valid) {
+                    fprintf(stderr,
+                            "VMVGA-SCREEN-BLIT3D copy[%u] src=%u,%u "
+                            "dst=%u,%u size=%ux%u empty=%u\n",
+                            i, copies[i].srcx, copies[i].srcy, copies[i].x,
+                            copies[i].y, copies[i].w, copies[i].h, empty);
                 }
             }
             for (i = 0; valid && i < copy_count; i++) {
@@ -5695,6 +5808,11 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
     } else {
         copy_count = 0;
     }
+
+    fprintf(stderr,
+            "VMVGA-SCREEN-BLIT3D result sid=%u valid=%u accel=%s copies=%u\n",
+            body->srcImage.sid, valid,
+            vmsvga3d_d3d9_accel_result_name(accel), copy_count);
 
     g_free(copies);
     g_free(payload);

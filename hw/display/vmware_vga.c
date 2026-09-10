@@ -8382,15 +8382,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
                s->index, ret);
         break;
     case SVGA_REG_MEM_REGS:
-        /*
-         * Diagnostic A/B test for the legacy vgpu9 path: advertise the
-         * extended FIFO only through GUEST_3D_HWVERSION.  FENCE_GOAL and
-         * BUSY are truly optional trailing registers, and hiding them lets
-         * the guest select the older synchronization contract without
-         * changing Screen Object, GMR, or D3D9 capabilities.
-         */
-        ret = s->vgpu_generation == VMSVGA_VGPU_9 ?
-              SVGA_FIFO_FENCE_GOAL : SVGA_FIFO_NUM_REGS;
+        ret = SVGA_FIFO_NUM_REGS;
         VPRINT("SVGA_REG_MEM_REGS register %u with the return of %u\n", s->index,
                ret);
         break;

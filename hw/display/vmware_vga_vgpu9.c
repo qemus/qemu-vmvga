@@ -2317,6 +2317,28 @@ static bool vmsvga3d_dxvk_readback_image(
         dxvk, dxvk_surface, level, image->data, image->pitch, rows);
 }
 
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_image(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, uint32_t level)
+{
+    VMSVGA3DD3D9TransferSurface info;
+
+    if (s == NULL || surface == NULL || image == NULL ||
+        !vmsvga3d_dxvk_ready(s->dxvk) ||
+        !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
+        !info.resident) {
+        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
+
+    if (surface->dxvk_surface == NULL || level >= surface->mip_count ||
+        !vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, level,
+                                      image)) {
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
+    }
+
+    return VMSVGA3D_D3D9_ACCEL_COMPLETE;
+}
+
 static void vmsvga3d_dxvk_sync_surface_from_cpu(struct vmsvga_state_s *s,
                                                 VMSVGA3DSurface *surface)
 {

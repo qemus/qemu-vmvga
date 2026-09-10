@@ -8324,14 +8324,18 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     }
 
     surface = s->svga3d->surfaces[sid];
-    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0 ||
-        !vmsvga3d_d3d10_copy_surface_materialize_live(
-            s, surface, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
+    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
         return false;
     }
 
-    /* VBox materializes/resolves the surface before this same-SID fast path,
-     * but deliberately skips the Texture2D/SCREENTARGET validation afterwards. */
+    /*
+     * Binding a ScreenTarget selects presentation metadata, not a rendering
+     * backend.  In particular, Windows 7 can bind a GB ScreenTarget and later
+     * render to that same surface through the legacy SVGA3D/D3D9 command path.
+     * Materializing it as D3D11 here would make the surface D3D11-resident and
+     * prevent the D3D9 backend from subsequently materializing it as a render
+     * target.  Let the first actual rendering/copy operation choose residency.
+     */
     if (old_sid == sid) {
         return true;
     }

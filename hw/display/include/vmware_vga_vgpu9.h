@@ -68,7 +68,8 @@ typedef struct vmsvga3d_d3d9_state_op_s {
 
 typedef struct vmsvga3d_d3d9_render_state_plan_s {
     uint32_t count;
-    VMSVGA3DD3D9StateOp ops[2];
+    /* Fog mode can emit range, inactive-mode, and active-mode states. */
+    VMSVGA3DD3D9StateOp ops[3];
 } VMSVGA3DD3D9RenderStatePlan;
 
 typedef enum vmsvga3d_d3d9_texture_action_e {

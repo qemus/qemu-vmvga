@@ -1023,13 +1023,12 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
     case SVGA3D_RS_FOGMODE: {
           SVGA3dFogMode fog;
           uint32_t fog_value;
-          uint32_t fog_state;
+          uint32_t vertex_value = D3D9_FOG_NONE;
+          uint32_t table_value = D3D9_FOG_NONE;
 
           fog.uintValue = state->uintValue;
           switch (fog.function) {
           case SVGA3D_FOGFUNC_INVALID:
-          case SVGA3D_FOGFUNC_PER_VERTEX:
-              /* Supplied per-vertex fog factors need no fog equation. */
               fog_value = D3D9_FOG_NONE;
               break;
           case SVGA3D_FOGFUNC_EXP:
@@ -1041,13 +1040,19 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
           case SVGA3D_FOGFUNC_LINEAR:
               fog_value = D3D9_FOG_LINEAR;
               break;
+          case SVGA3D_FOGFUNC_PER_VERTEX:
+              if (fog.type != SVGA3D_FOGTYPE_VERTEX) {
+                  return VMSVGA3D_D3D9_TRANSLATE_INVALID;
+              }
+              fog_value = D3D9_FOG_NONE;
+              break;
           default:
               return VMSVGA3D_D3D9_TRANSLATE_INVALID;
           }
           if (fog.type == SVGA3D_FOGTYPE_VERTEX) {
-              fog_state = D3D9_RS_FOGVERTEXMODE;
+              vertex_value = fog_value;
           } else if (fog.type == SVGA3D_FOGTYPE_PIXEL) {
-              fog_state = D3D9_RS_FOGTABLEMODE;
+              table_value = fog_value;
           } else {
               return VMSVGA3D_D3D9_TRANSLATE_INVALID;
           }
@@ -1060,14 +1065,11 @@ vmsvga3d_d3d9_render_state(const SVGA3dRenderState *state,
                   fog.base == SVGA3D_FOGBASE_RANGEBASED ? 1u : 0u;
               plan->count++;
           }
-          /* Clear the opposite mode so stale pixel fog cannot win. */
-          plan->ops[plan->count].state =
-              fog_state == D3D9_RS_FOGVERTEXMODE
-                  ? D3D9_RS_FOGTABLEMODE : D3D9_RS_FOGVERTEXMODE;
-          plan->ops[plan->count].value = D3D9_FOG_NONE;
+          plan->ops[plan->count].state = D3D9_RS_FOGVERTEXMODE;
+          plan->ops[plan->count].value = vertex_value;
           plan->count++;
-          plan->ops[plan->count].state = fog_state;
-          plan->ops[plan->count].value = fog_value;
+          plan->ops[plan->count].state = D3D9_RS_FOGTABLEMODE;
+          plan->ops[plan->count].value = table_value;
           plan->count++;
           break;
       }
@@ -1510,7 +1512,9 @@ bool vmsvga3d_d3d9_vertex_layout(
         streams[stream_id].surface_id = sid;
         streams[stream_id].source_offset = min_offset;
         streams[stream_id].stride = stride;
-        streams[stream_id].frequency = divisor_count ? divisors[current].value : 1u;
+        streams[stream_id].frequency =
+            divisor_count && divisors[current].value != 0 ?
+            divisors[current].value : 1u;
         streams[stream_id].first_decl = current;
         streams[stream_id].decl_count = end - current;
 

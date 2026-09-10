@@ -60,7 +60,7 @@ echo "options kvm enable_vmware_backdoor=Y" | sudo tee /etc/modprobe.d/kvm-vmwar
 sudo reboot
 ```
 
-Without this setting, KVM raises a general protection exception when a user-mode component of the VMware driver accesses the VMware backdoor I/O port for logging, causing the driver to fail.
+Without this setting, KVM raises a general protection exception when a user-mode component of the VMware driver accesses the VMware backdoor I/O port for logging, causing the driver to disable 3D acceleration.
 
 If KVM is built directly into the kernel rather than loaded as a module, add `kvm.enable_vmware_backdoor=1` to the kernel command line instead.
 

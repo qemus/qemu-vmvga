@@ -9951,12 +9951,24 @@ bool vmsvga3d_dxvk_set_render_state(VMSVGA3DDxvk *dxvk, uint32_t state,
         !vmsvga3d_dxvk_get_method(
             dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_RENDER_STATE,
             &set_state, sizeof(set_state))) {
+        fprintf(stderr,
+                "VMVGA-D3D9-SETRENDERSTATE fail stage=method state=%u "
+                "value=0x%08x\n",
+                state, value);
         return false;
     }
 
     result = set_state(dxvk->d3d9_device, state, value);
 
-    return vmsvga3d_dxvk_succeeded(result);
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        fprintf(stderr,
+                "VMVGA-D3D9-SETRENDERSTATE fail stage=call state=%u "
+                "value=0x%08x hr=0x%08x\n",
+                state, value, (uint32_t)result);
+        return false;
+    }
+
+    return true;
 #else
     (void)dxvk;
     (void)state;

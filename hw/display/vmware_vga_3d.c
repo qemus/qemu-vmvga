@@ -8464,20 +8464,7 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
                 return false;
             }
 
-            if (d3d9_resident) {
-                if (vmsvga3d_d3d9_runtime_readback_surface_image(
-                        s, surface, &surface->mips[0], 0) !=
-                    VMSVGA3D_D3D9_ACCEL_COMPLETE) {
-                    return false;
-                }
-                batch_readback = true;
-            } else if (!d3d11_resident) {
-                /* No accelerated backend owns newer contents; the canonical
-                 * CPU shadow is already authoritative. */
-                batch_readback = true;
-            }
-
-            if (d3d11_resident && desc->bytes_per_block == 4 &&
+            if (desc->bytes_per_block == 4 &&
                 (surface->format == SVGA3D_X8R8G8B8 ||
                  surface->format == SVGA3D_A8R8G8B8) &&
                 vmsvga_screen_storage(s, &screen_base, &screen_size,
@@ -8493,6 +8480,35 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
                         break;
                     }
                 }
+            }
+
+            if (d3d9_resident) {
+                batch_readback =
+                    vmsvga3d_d3d9_runtime_readback_surface_rects(
+                        s, surface, &surface->mips[0], 0, rects, rect_count,
+                        desc->bytes_per_block,
+                        direct_candidate ? screen_base : NULL,
+                        direct_candidate ? screen_stride : 0,
+                        direct_candidate ? (uint32_t)screen_size : 0) ==
+                    VMSVGA3D_D3D9_ACCEL_COMPLETE;
+                direct_screen_readback = batch_readback && direct_candidate;
+
+                /* Keep the proven full-surface path as a correctness fallback
+                 * if a host D3D9 implementation rejects the scratch-copy
+                 * optimization for a particular render-target format. */
+                if (!batch_readback) {
+                    if (vmsvga3d_d3d9_runtime_readback_surface_image(
+                            s, surface, &surface->mips[0], 0) !=
+                        VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                        return false;
+                    }
+                    batch_readback = true;
+                    direct_screen_readback = false;
+                }
+            } else if (!d3d11_resident) {
+                /* No accelerated backend owns newer contents; the canonical
+                 * CPU shadow is already authoritative. */
+                batch_readback = true;
             }
 
             if (d3d11_resident && (rect_count > 1 || direct_candidate)) {

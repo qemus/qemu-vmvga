@@ -302,6 +302,7 @@ typedef struct vmsvga3d_surface_s {
     VMSVGA3DSurfaceImage *mips;
     VMSVGA3DDxvkSurface *dxvk_surface;
     bool screen_target_content_valid;
+    bool legacy_active;
 } VMSVGA3DSurface;
 
 /* vmware_vga_vgpu10.c is included below after the legacy command handlers.
@@ -4648,19 +4649,23 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
     if (valid && d3d11_copy) {
         fprintf(stderr,
                 "VMVGA-D3D9-COPY src=%u:%u:%u dst=%u:%u:%u boxes=%u "
-                "path=d3d11 src-d3d11=%u dst-d3d11=%u\n",
+                "src-active=%u dst-active=%u path=d3d11 "
+                "src-d3d11=%u dst-d3d11=%u\n",
                 body->src.sid, body->src.face, body->src.mipmap,
                 body->dest.sid, body->dest.face, body->dest.mipmap, box_count,
+                src_surface->legacy_active, dst_surface->legacy_active,
                 vmsvga3d_dxvk_d3d11_surface_resident(src_surface->dxvk_surface),
                 vmsvga3d_dxvk_d3d11_surface_resident(dst_surface->dxvk_surface));
     } else if (valid) {
         fprintf(stderr,
                 "VMVGA-D3D9-COPY src=%u:%u:%u dst=%u:%u:%u boxes=%u "
+                "src-active=%u dst-active=%u "
                 "src-resident=%u src-bounce=%u src-kind=%u src-usage=0x%08x "
                 "dst-resident=%u dst-bounce=%u dst-kind=%u dst-usage=0x%08x "
                 "plan=%s lock-single=%u lock-src-ro=%u update-dst=%u\n",
                 body->src.sid, body->src.face, body->src.mipmap,
                 body->dest.sid, body->dest.face, body->dest.mipmap, box_count,
+                src_surface->legacy_active, dst_surface->legacy_active,
                 src_info.resident, src_info.has_bounce, src_info.resource_type,
                 src_info.usage, dst_info.resident, dst_info.has_bounce,
                 dst_info.resource_type, dst_info.usage,
@@ -5679,13 +5684,13 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
         fprintf(stderr,
                 "VMVGA-SCREEN-BLIT3D sid=%u face=%u mip=%u "
                 "src=%d,%d-%d,%d dst-screen=%u dst=%d,%d-%d,%d clips=%u "
-                "screen-defined=%u d3d9-info=%u d3d9-resident=%u "
-                "d3d9-bounce=%u d3d11-resident=%u\n",
+                "screen-defined=%u surface-active=%u d3d9-info=%u "
+                "d3d9-resident=%u d3d9-bounce=%u d3d11-resident=%u\n",
                 body->srcImage.sid, body->srcImage.face, body->srcImage.mipmap,
                 body->srcRect.left, body->srcRect.top, body->srcRect.right,
                 body->srcRect.bottom, body->destScreenId, body->destRect.left,
                 body->destRect.top, body->destRect.right, body->destRect.bottom,
-                clip_count, s->screen_defined, d3d9_info,
+                clip_count, s->screen_defined, surface->legacy_active, d3d9_info,
                 d3d9_info ? surface_info.resident : 0,
                 d3d9_info ? surface_info.has_bounce : 0, d3d11_resident);
         for (i = 0; i < clip_count; i++) {
@@ -9346,6 +9351,64 @@ static bool vmsvga3d_handle_dx_cotable(struct vmsvga_state_s *s,
     return true;
 }
 
+static bool vmsvga3d_handle_surface_activation(
+    struct vmsvga_state_s *s, uint32_t cmd, int32_t *len,
+    uint32_t fifo_start)
+{
+    struct vmsvga3d_state_s *state = s->svga3d;
+    VMSVGA3DSurface *surface = NULL;
+    void *payload;
+    uint32_t size;
+    uint32_t sid;
+    bool activate;
+    bool previous = false;
+
+    if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
+        return true;
+    }
+
+    if (size < sizeof(SVGA3dCmdActivateSurface)) {
+        fprintf(stderr,
+                "VMVGA-SURFACE-ACTIVE cmd=%s result=short bytes=%u expected=%zu\n",
+                cmd == SVGA_3D_CMD_ACTIVATE_SURFACE ? "activate" : "deactivate",
+                size, sizeof(SVGA3dCmdActivateSurface));
+        g_free(payload);
+        return true;
+    }
+
+    sid = ((const SVGA3dCmdActivateSurface *)payload)->sid;
+    activate = cmd == SVGA_3D_CMD_ACTIVATE_SURFACE;
+    if (state != NULL && sid < SVGA3D_MAX_SURFACE_IDS) {
+        surface = state->surfaces[sid];
+    }
+
+    if (surface != NULL) {
+        VMSVGA3DD3D9TransferSurface info;
+        bool d3d9_info =
+            vmsvga3d_d3d9_runtime_surface_info(s, surface, &info);
+        bool d3d11_resident =
+            vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+
+        previous = surface->legacy_active;
+        surface->legacy_active = activate;
+        fprintf(stderr,
+                "VMVGA-SURFACE-ACTIVE cmd=%s sid=%u present=1 old=%u new=%u "
+                "flags=0x%016" PRIx64 " d3d9-info=%u d3d9-resident=%u "
+                "d3d9-bounce=%u d3d11-resident=%u\n",
+                activate ? "activate" : "deactivate", sid, previous,
+                surface->legacy_active, (uint64_t)surface->surface_flags,
+                d3d9_info, d3d9_info ? info.resident : 0,
+                d3d9_info ? info.has_bounce : 0, d3d11_resident);
+    } else {
+        fprintf(stderr,
+                "VMVGA-SURFACE-ACTIVE cmd=%s sid=%u present=0 old=0 new=%u\n",
+                activate ? "activate" : "deactivate", sid, activate);
+    }
+
+    g_free(payload);
+    return true;
+}
+
 #define VMSVGA3D_STALL(cmd) \
   { (cmd), VMSVGA3D_COMMAND_STALL, NULL, #cmd }
 #define VMSVGA3D_DISCARD(cmd) \
@@ -9396,8 +9459,10 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
     VMSVGA3D_STALL(SVGA_3D_CMD_DEAD9),
     VMSVGA3D_STALL(SVGA_3D_CMD_DEAD10),
     VMSVGA3D_STALL(SVGA_3D_CMD_DEAD11),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_ACTIVATE_SURFACE),
-    VMSVGA3D_DISCARD(SVGA_3D_CMD_DEACTIVATE_SURFACE),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_ACTIVATE_SURFACE,
+                     vmsvga3d_handle_surface_activation),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_DEACTIVATE_SURFACE,
+                     vmsvga3d_handle_surface_activation),
     VMSVGA3D_DISCARD(SVGA_3D_CMD_SCREEN_DMA),
     VMSVGA3D_STALL(SVGA_3D_CMD_DEAD1),
     VMSVGA3D_STALL(SVGA_3D_CMD_DEAD2),

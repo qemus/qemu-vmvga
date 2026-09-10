@@ -3048,6 +3048,13 @@ static bool vmsvga3d_handle_begin_query(struct vmsvga_state_s *s,
                 context->occlusion.defined = false;
             }
         }
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-QUERY phase=begin cid=%u type=%u context=%u "
+                    "defined=%u\n",
+                    body->cid, body->type, context != NULL,
+                    context != NULL && context->occlusion.defined);
+        }
     }
 
     g_free(payload);
@@ -3082,6 +3089,14 @@ static bool vmsvga3d_handle_end_query(struct vmsvga_state_s *s,
             } else {
                 context->occlusion.defined = false;
             }
+        }
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-QUERY phase=end cid=%u type=%u context=%u "
+                    "defined=%u guest=%u:0x%08x\n",
+                    body->cid, body->type, context != NULL,
+                    context != NULL && context->occlusion.defined,
+                    body->guestResult.gmrId, body->guestResult.offset);
         }
     }
 
@@ -3133,6 +3148,15 @@ static bool vmsvga3d_handle_wait_for_query(struct vmsvga_state_s *s,
         } else {
             (void)vmsvga3d_query_write_result(s, &body->guestResult,
                                               SVGA3D_QUERYSTATE_FAILED, 0);
+        }
+        if (vmsvga_trace_flight_enabled()) {
+            VMSVGA3DContext *context = vmsvga3d_context(s, body->cid);
+            fprintf(stderr,
+                    "VMVGA-QUERY phase=wait cid=%u type=%u status=%u "
+                    "result=%u defined=%u guest=%u:0x%08x\n",
+                    body->cid, body->type, (uint32_t)status, result,
+                    context != NULL && context->occlusion.defined,
+                    body->guestResult.gmrId, body->guestResult.offset);
         }
     }
 
@@ -6673,11 +6697,27 @@ static void vmsvga3d_command_buffer_write_status(
 static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
                                                uint32_t flags)
 {
-    if (s == NULL || flags == 0 || (flags & s->irq_mask) == 0) {
+    if (s == NULL || flags == 0) {
+        return;
+    }
+
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-IRQ event=cb-request flags=0x%08x mask=0x%08x "
+                "status=0x%08x enabled=%u\n",
+                flags, s->irq_mask, s->irq_status, !!(flags & s->irq_mask));
+    }
+    if ((flags & s->irq_mask) == 0) {
         return;
     }
 
     s->irq_status |= flags;
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-IRQ event=raise reason=command-buffer "
+                "flags=0x%08x mask=0x%08x status=0x%08x line=1\n",
+                flags, s->irq_mask, s->irq_status);
+    }
 
 #ifndef RAISE_IRQ_OFF
     {

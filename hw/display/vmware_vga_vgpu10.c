@@ -8983,6 +8983,320 @@ static bool vmsvga3d_d3d10_readback_image_rects_live(
 }
 
 
+static bool vmsvga3d_gb_readback_image_partial_live(
+    struct vmsvga_state_s *s, const SVGA3dSurfaceImageId *image_id,
+    const SVGA3dBox *requested_box, bool invert_box)
+{
+    SVGAOTableSurfaceEntry entry;
+    VMSVGA3DSurface *surface;
+    VMSVGA3DSurfaceImage *image;
+    VMSVGA3DMob *mob;
+    VMSVGA3DD3D10UpdateLayout requested_layout;
+    VMSVGA3DD3D10MobLayout mob_layout;
+    VMSVGA3DD3D9TransferSurface d3d9_info = {0};
+    const struct svga3d_surface_desc *desc;
+    SVGA3dBox boxes[6];
+    SVGA3dRect rects[6];
+    uint32_t levels;
+    uint32_t subresource;
+    uint32_t box_count = 0;
+    uint32_t i;
+    bool d3d9_resident;
+    bool d3d11_resident;
+    bool gpu_readback_ok = false;
+    const char *backend = "cpu";
+    const char *readback_mode = "shadow";
+
+    if (s == NULL || image_id == NULL || requested_box == NULL ||
+        s->svga3d == NULL || image_id->sid >= SVGA3D_MAX_SURFACE_IDS ||
+        !vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, image_id->sid,
+                              sizeof(entry), &entry, sizeof(entry))) {
+        return false;
+    }
+
+    mob = vmsvga3d_mob_get(s, le32_to_cpu(entry.mobid));
+    /* Match the full GB readback commands: an unbound surface is already a
+     * successful no-op because there is no guest backing to update. */
+    if (mob == NULL) {
+        return true;
+    }
+
+    surface = s->svga3d->surfaces[image_id->sid];
+    if (surface == NULL || surface->mips == NULL ||
+        !vmsvga3d_surface_image(surface, image_id, &image)) {
+        return false;
+    }
+
+    levels = surface->face[0].numMipLevels;
+    if (levels == 0 || image_id->face > UINT32_MAX / levels) {
+        return false;
+    }
+    subresource = image_id->face * levels + image_id->mipmap;
+    if (subresource >= surface->mip_count || &surface->mips[subresource] != image) {
+        return false;
+    }
+
+    /* VirtualBox skips guest-backed transfers for multisampled surfaces. */
+    if (surface->multisample_count > 1) {
+        return true;
+    }
+
+    if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
+        image->data_size == 0 || image->plane_size % image->pitch != 0 ||
+        image->data_size % image->plane_size != 0 ||
+        !vmsvga3d_d3d10_update_box_live(
+            surface, image, requested_box, &requested_layout) ||
+        !vmsvga3d_d3d10_mob_subresource_layout_live(
+            &entry, surface, subresource, &mob_layout)) {
+        return false;
+    }
+
+    desc = svga3dsurface_get_desc(surface->format);
+    if (desc->format != surface->format || desc->pitch_bytes_per_block == 0 ||
+        desc->block_size.width == 0 || desc->block_size.height == 0 ||
+        desc->block_size.depth == 0) {
+        return false;
+    }
+
+    if (!invert_box) {
+        boxes[box_count++] = requested_layout.box;
+    } else {
+        const SVGA3dBox *cut = &requested_layout.box;
+        uint32_t right = cut->x + cut->w;
+        uint32_t bottom = cut->y + cut->h;
+        uint32_t back = cut->z + cut->d;
+
+        /* Partition the inverse into non-overlapping slabs.  Keeping the
+         * pieces disjoint matters because each piece is independently copied
+         * into the guest MOB below. */
+        if (cut->z != 0) {
+            boxes[box_count++] = (SVGA3dBox) {
+                .x = 0, .y = 0, .z = 0,
+                .w = image->size.width, .h = image->size.height, .d = cut->z,
+            };
+        }
+        if (back < image->size.depth) {
+            boxes[box_count++] = (SVGA3dBox) {
+                .x = 0, .y = 0, .z = back,
+                .w = image->size.width, .h = image->size.height,
+                .d = image->size.depth - back,
+            };
+        }
+        if (cut->y != 0) {
+            boxes[box_count++] = (SVGA3dBox) {
+                .x = 0, .y = 0, .z = cut->z,
+                .w = image->size.width, .h = cut->y, .d = cut->d,
+            };
+        }
+        if (bottom < image->size.height) {
+            boxes[box_count++] = (SVGA3dBox) {
+                .x = 0, .y = bottom, .z = cut->z,
+                .w = image->size.width, .h = image->size.height - bottom,
+                .d = cut->d,
+            };
+        }
+        if (cut->x != 0) {
+            boxes[box_count++] = (SVGA3dBox) {
+                .x = 0, .y = cut->y, .z = cut->z,
+                .w = cut->x, .h = cut->h, .d = cut->d,
+            };
+        }
+        if (right < image->size.width) {
+            boxes[box_count++] = (SVGA3dBox) {
+                .x = right, .y = cut->y, .z = cut->z,
+                .w = image->size.width - right, .h = cut->h, .d = cut->d,
+            };
+        }
+    }
+
+    /* Inverting a box that covers the whole image leaves nothing to flush. */
+    if (box_count == 0) {
+        return true;
+    }
+
+    d3d9_resident =
+        vmsvga3d_d3d9_runtime_surface_info(s, surface, &d3d9_info) &&
+        d3d9_info.resident;
+    d3d11_resident =
+        surface->dxvk_surface != NULL &&
+        vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+
+    /* A surface must have one authoritative accelerated backend. */
+    if (d3d9_resident && d3d11_resident) {
+        return false;
+    }
+
+    if (d3d9_resident) {
+        VMSVGA3DD3D9AccelResult result = VMSVGA3D_D3D9_ACCEL_FAILED;
+        bool rect_compatible = image->size.depth == 1 &&
+                               d3d9_info.block_width == 1 &&
+                               d3d9_info.block_height == 1 &&
+                               d3d9_info.block_depth == 1;
+
+        backend = "d3d9";
+        if (rect_compatible) {
+            for (i = 0; i < box_count; i++) {
+                if (boxes[i].z != 0 || boxes[i].d != 1) {
+                    rect_compatible = false;
+                    break;
+                }
+                rects[i].x = boxes[i].x;
+                rects[i].y = boxes[i].y;
+                rects[i].w = boxes[i].w;
+                rects[i].h = boxes[i].h;
+            }
+        }
+
+        if (rect_compatible) {
+            result = vmsvga3d_d3d9_runtime_readback_surface_rects(
+                s, surface, image, subresource, rects, box_count,
+                d3d9_info.bytes_per_block, NULL, 0, 0);
+            if (result == VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                gpu_readback_ok = true;
+                readback_mode = "partial";
+            }
+        }
+
+        if (!gpu_readback_ok) {
+            result = vmsvga3d_d3d9_runtime_readback_surface_image(
+                s, surface, image, subresource);
+            gpu_readback_ok = result == VMSVGA3D_D3D9_ACCEL_COMPLETE;
+            readback_mode = "full-shadow";
+        }
+    } else if (d3d11_resident) {
+        bool partial_ok = true;
+
+        backend = "d3d11";
+        for (i = 0; i < box_count; i++) {
+            VMSVGA3DD3D10UpdateLayout layout;
+            VMSVGA3DD3D10Box native_box;
+
+            if (!vmsvga3d_d3d10_update_box_live(
+                    surface, image, &boxes[i], &layout)) {
+                partial_ok = false;
+                break;
+            }
+
+            native_box.left = layout.box.x;
+            native_box.top = layout.box.y;
+            native_box.front = layout.box.z;
+            native_box.right = layout.box.x + layout.box.w;
+            native_box.bottom = layout.box.y + layout.box.h;
+            native_box.back = layout.box.z + layout.box.d;
+
+            if (!vmsvga3d_dxvk_d3d11_readback_subresource_box(
+                    s->dxvk, surface->dxvk_surface, subresource, &native_box,
+                    image->data + layout.box_offset, layout.row_bytes,
+                    image->pitch, layout.row_count, image->plane_size,
+                    layout.depth_count)) {
+                partial_ok = false;
+                break;
+            }
+        }
+
+        if (partial_ok) {
+            gpu_readback_ok = true;
+            readback_mode = "partial";
+        } else {
+            gpu_readback_ok = vmsvga3d_d3d10_readback_image_live(
+                s, surface, subresource);
+            readback_mode = "full-shadow";
+        }
+    } else {
+        /* No accelerated resource owns newer contents; the CPU shadow is
+         * already authoritative. */
+        gpu_readback_ok = true;
+    }
+
+    if (!gpu_readback_ok) {
+        return false;
+    }
+
+    /* Only the requested region (or its inverse) is written to guest memory.
+     * A whole-surface backend fallback above is therefore externally
+     * indistinguishable from a true partial GPU readback. */
+    for (i = 0; i < box_count; i++) {
+        VMSVGA3DD3D10UpdateLayout layout;
+        uint32_t guest_x_offset;
+        uint32_t guest_y;
+        uint32_t guest_z;
+        uint64_t guest_box_offset;
+        uint64_t subresource_offset;
+        uint32_t z;
+        uint32_t y;
+
+        if (!vmsvga3d_d3d10_update_box_live(
+                surface, image, &boxes[i], &layout)) {
+            return false;
+        }
+
+        guest_z = layout.box_offset / image->plane_size;
+        guest_y = (layout.box_offset % image->plane_size) / image->pitch;
+        guest_x_offset = layout.box_offset % image->pitch;
+        if (guest_x_offset > mob_layout.row_pitch ||
+            layout.row_bytes > mob_layout.row_pitch - guest_x_offset) {
+            return false;
+        }
+
+        guest_box_offset = (uint64_t)guest_z * mob_layout.plane_size +
+                           (uint64_t)guest_y * mob_layout.row_pitch +
+                           guest_x_offset;
+        subresource_offset = (uint64_t)mob_layout.subresource_offset +
+                             guest_box_offset;
+        if (subresource_offset > UINT32_MAX) {
+            return false;
+        }
+
+        if (layout.depth_count == 1 && layout.row_bytes == image->pitch &&
+            mob_layout.row_pitch == image->pitch) {
+            uint64_t transfer_size =
+                (uint64_t)layout.row_count * layout.row_bytes;
+
+            if (transfer_size > UINT32_MAX ||
+                layout.box_offset > image->data_size ||
+                transfer_size > image->data_size - layout.box_offset ||
+                !vmsvga3d_mob_write(
+                    s, mob, (uint32_t)subresource_offset,
+                    image->data + layout.box_offset, (uint32_t)transfer_size)) {
+                return false;
+            }
+        } else {
+            for (z = 0; z < layout.depth_count; z++) {
+                for (y = 0; y < layout.row_count; y++) {
+                    uint64_t guest_offset =
+                        subresource_offset +
+                        (uint64_t)z * mob_layout.plane_size +
+                        (uint64_t)y * mob_layout.row_pitch;
+                    uint64_t host_offset =
+                        (uint64_t)layout.box_offset +
+                        (uint64_t)z * image->plane_size +
+                        (uint64_t)y * image->pitch;
+
+                    if (guest_offset > UINT32_MAX ||
+                        host_offset > image->data_size ||
+                        layout.row_bytes > image->data_size - host_offset ||
+                        !vmsvga3d_mob_write(
+                            s, mob, (uint32_t)guest_offset,
+                            image->data + host_offset, layout.row_bytes)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "GB-READBACK-PARTIAL sid=%u face=%u mip=%u box=%u,%u,%u/%ux%ux%u "
+        "invert=%u regions=%u backend=%s gpu=%s result=OK",
+        image_id->sid, image_id->face, image_id->mipmap,
+        requested_layout.box.x, requested_layout.box.y, requested_layout.box.z,
+        requested_layout.box.w, requested_layout.box.h, requested_layout.box.d,
+        invert_box ? 1u : 0u, box_count, backend, readback_mode);
+
+    return true;
+}
+
 static bool vmsvga3d_d3d10_readback_subresource_live(
     struct vmsvga_state_s *s,
     const SVGA3dCmdDXReadbackSubResource *command)

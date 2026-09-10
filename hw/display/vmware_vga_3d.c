@@ -8173,6 +8173,23 @@ static bool vmsvga3d_handle_gb_surface_sync(struct vmsvga_state_s *s,
             (void)vmsvga3d_gb_surface_transfer_live(s, body->sid, true);
         }
         break;
+    case SVGA_3D_CMD_READBACK_GB_IMAGE_PARTIAL:
+        if (size >= sizeof(SVGA3dCmdReadbackGBImagePartial)) {
+            const SVGA3dCmdReadbackGBImagePartial *body = payload;
+            bool success = vmsvga3d_gb_readback_image_partial_live(
+                s, &body->image, &body->box, body->invertBox != 0);
+
+            if (!success) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "GB-READBACK-PARTIAL sid=%u face=%u mip=%u "
+                    "box=%u,%u,%u/%ux%ux%u invert=%u result=REJECT",
+                    body->image.sid, body->image.face, body->image.mipmap,
+                    body->box.x, body->box.y, body->box.z, body->box.w,
+                    body->box.h, body->box.d, body->invertBox);
+            }
+        }
+        break;
     case SVGA_3D_CMD_INVALIDATE_GB_IMAGE:
         if (size >= sizeof(SVGA3dCmdInvalidateGBImage)) {
             const SVGA3dCmdInvalidateGBImage *body = payload;
@@ -9776,7 +9793,8 @@ static const VMSVGA3DCommandInfo vmsvga3d_commands[] = {
                      vmsvga3d_handle_gb_screen_target),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_UPDATE_GB_SCREENTARGET,
                      vmsvga3d_handle_gb_screen_target),
-    VMSVGA3D_STALL(SVGA_3D_CMD_READBACK_GB_IMAGE_PARTIAL),
+    VMSVGA3D_HANDLER(SVGA_3D_CMD_READBACK_GB_IMAGE_PARTIAL,
+                     vmsvga3d_handle_gb_surface_sync),
     VMSVGA3D_STALL(SVGA_3D_CMD_INVALIDATE_GB_IMAGE_PARTIAL),
     VMSVGA3D_HANDLER(SVGA_3D_CMD_SET_GB_SHADERCONSTS_INLINE,
                      vmsvga3d_handle_set_gb_shader_consts_inline),

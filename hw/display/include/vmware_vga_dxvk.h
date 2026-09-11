@@ -124,6 +124,24 @@ bool vmsvga3d_dxvk_d3d9_query_end(
 bool vmsvga3d_dxvk_d3d9_query_get_data(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t data_size,
     uint32_t flags, uint32_t *result);
+
+typedef enum vmsvga3d_dxvk_d3d9_gb_query_poll_result_e {
+    VMSVGA3D_D3D9_GB_QUERY_POLL_FAILED = 0,
+    VMSVGA3D_D3D9_GB_QUERY_POLL_PENDING,
+    VMSVGA3D_D3D9_GB_QUERY_POLL_READY,
+} VMSVGA3DD3D9GBQueryPollResult;
+
+bool vmsvga3d_dxvk_d3d9_gb_query_begin(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type,
+    uint32_t issue_flags);
+bool vmsvga3d_dxvk_d3d9_gb_query_end(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type,
+    uint32_t issue_flags, uint64_t *token);
+VMSVGA3DD3D9GBQueryPollResult vmsvga3d_dxvk_d3d9_gb_query_poll(
+    VMSVGA3DDxvk *dxvk, uint64_t token, uint32_t data_size,
+    uint32_t flags, bool wait, uint32_t *result);
+void vmsvga3d_dxvk_d3d9_gb_query_cancel(
+    VMSVGA3DDxvk *dxvk, uint64_t token);
 void vmsvga3d_dxvk_d3d9_query_context_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid);
 

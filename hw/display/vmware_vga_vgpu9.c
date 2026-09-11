@@ -2250,13 +2250,14 @@ static bool vmsvga3d_d3d9_transfer_surface_info(
 
 
 static bool vmsvga3d_dxvk_resource_plan(
-    VMSVGA3DSurface *surface, VMSVGA3DD3D9ResourceUse use,
-    VMSVGA3DD3D9ResourcePlan *plan)
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DD3D9ResourceUse use, VMSVGA3DD3D9ResourcePlan *plan)
 {
     VMSVGA3DD3D9SurfaceInfo info = { 0 };
     VMSVGA3DD3D9ResourceCaps caps = { 0 };
 
-    if (surface == NULL || plan == NULL || surface->mip_count == 0 ||
+    if (s == NULL || surface == NULL || plan == NULL ||
+        surface->mip_count == 0 ||
         surface->mips == NULL || surface->multisample_count > 1 ||
         surface->storage_bytes > UINT32_MAX ||
         (surface->surface_flags &
@@ -2271,6 +2272,7 @@ static bool vmsvga3d_dxvk_resource_plan(
     info.multisample_count = surface->multisample_count;
     info.autogen_filter = surface->autogen_filter;
     info.surface_bytes = (uint32_t)surface->storage_bytes;
+    caps.supports_intz = vmsvga3d_dxvk_d3d9_supports_intz(s->dxvk);
 
     if (!vmsvga3d_d3d9_resource_plan(&info, use, &caps, plan) ||
         plan->needs_format_conversion || plan->has_emulated) {
@@ -2569,7 +2571,7 @@ static bool vmsvga3d_dxvk_materialize_surface(
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
         !vmsvga3d_dxvk_handoff_d3d11_to_shadow(s, surface) ||
         !vmsvga3d_d3d9_transfer_surface_info(s, surface, &before) ||
-        !vmsvga3d_dxvk_resource_plan(surface, use, &plan)) {
+        !vmsvga3d_dxvk_resource_plan(s, surface, use, &plan)) {
         return false;
     }
 
@@ -2585,10 +2587,17 @@ static bool vmsvga3d_dxvk_materialize_surface(
             (before.usage & D3D9_USAGE_RENDERTARGET) != 0;
         break;
     case VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET:
-        compatible =
-            (before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE ||
-             before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE) &&
-            (before.usage & D3D9_USAGE_DEPTHSTENCIL) != 0;
+        if (plan.primary.resource_type == D3D9_RTYPE_TEXTURE) {
+            compatible =
+                before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+                before.format == plan.primary.format && before.has_bounce &&
+                (before.usage & D3D9_USAGE_DEPTHSTENCIL) != 0;
+        } else {
+            compatible =
+                before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&
+                before.format == plan.primary.format &&
+                (before.usage & D3D9_USAGE_DEPTHSTENCIL) != 0;
+        }
         break;
     default:
         break;

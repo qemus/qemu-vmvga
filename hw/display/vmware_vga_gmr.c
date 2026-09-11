@@ -1108,19 +1108,10 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
     }
 
     /*
-     * qemu_console_surface() can still reference the current screen_base until
-     * vmsvga_check_size() installs the replacement DisplaySurface.  Keep one
-     * previous mirror generation alive across that rebind instead of freeing
-     * it here.  The next handoff (or reset) retires it once more and releases
-     * the older generation.
+     * Compute diagnostics while the source DisplaySurface is guaranteed to be
+     * alive.  It may point at either mirror generation, and the ownership
+     * rotation below can release a non-visible generation.
      */
-    g_free(s->screen_retired_base);
-    s->screen_retired_base = s->screen_base;
-
-    s->screen_base = new_base;
-    s->screen_base_size = (size_t)size64;
-    s->screen_stride = stride;
-
     if (vmsvga_trace_flight_enabled()) {
         if (used_preseed) {
             src_hash_valid = vmsvga_gmr_diag_hash_rows(
@@ -1137,13 +1128,61 @@ static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
                     (size_t)src_width * src_bypp, src_height, &src_hash);
             }
         }
-        fprintf(stderr,
-                "VMVGA-SCREEN-HANDOFF phase=seed source=%ux%u/%u/%u "
-                "source-hash=0x%08x source-hash-valid=%u preseed=%u "
-                "dest=%ux%u/32/%u seeded=%u mirror=%p\n",
-                src_width, src_height, src_bpp, src_stride,
-                src_hash, src_hash_valid, used_preseed,
-                width, height, stride, seeded, (void *)s->screen_base);
+    }
+
+    /*
+     * qemu_console_surface() can continue to reference either screen_base or
+     * screen_retired_base while a deferred handoff is in progress.  Never
+     * release the generation currently owned by the frontend.  If the retired
+     * generation is still visible, the current base is already superseded and
+     * can be replaced directly.  If the current base is visible, retire it as
+     * usual.  An external frontend owns neither mirror, so both old generations
+     * can be released.
+     */
+    {
+        uint8_t *front = surface != NULL ? surface_data(surface) : NULL;
+        uint8_t *old_base = s->screen_base;
+        uint8_t *old_retired = s->screen_retired_base;
+        bool base_visible = old_base != NULL && front == old_base;
+        bool retired_visible = old_retired != NULL && front == old_retired;
+        const char *visible = base_visible ? "base" :
+                              retired_visible ? "retired" : "external";
+
+        if (retired_visible) {
+            if (old_base != old_retired) {
+                g_free(old_base);
+            }
+        } else if (base_visible) {
+            if (old_retired != old_base) {
+                g_free(old_retired);
+            }
+            s->screen_retired_base = old_base;
+        } else {
+            if (old_retired != old_base) {
+                g_free(old_retired);
+            }
+            g_free(old_base);
+            s->screen_retired_base = NULL;
+        }
+
+        s->screen_base = new_base;
+        s->screen_base_size = (size_t)size64;
+        s->screen_stride = stride;
+
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-LIFETIME phase=seed visible=%s frontend=%p "
+                    "old-base=%p old-retired=%p new-base=%p\n",
+                    visible, (void *)front, (void *)old_base,
+                    (void *)old_retired, (void *)s->screen_base);
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=seed source=%ux%u/%u/%u "
+                    "source-hash=0x%08x source-hash-valid=%u preseed=%u "
+                    "dest=%ux%u/32/%u seeded=%u mirror=%p\n",
+                    src_width, src_height, src_bpp, src_stride,
+                    src_hash, src_hash_valid, used_preseed,
+                    width, height, stride, seeded, (void *)s->screen_base);
+        }
     }
 
     if (had_preseed) {
@@ -1779,7 +1818,9 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
                                   uint32_t screen_id)
 {
     DisplaySurface *surface;
+    uint8_t *front;
     bool screen_base_visible;
+    bool screen_retired_base_visible;
     bool direct_bar1_frontend;
 
     if (screen_id != VMSVGA_SCREEN_V1_ID) {
@@ -1788,9 +1829,10 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
     }
 
     surface = qemu_console_surface(s->vga.con);
-    screen_base_visible =
-        s->screen_base != NULL && surface != NULL &&
-        surface_data(surface) == s->screen_base;
+    front = surface != NULL ? surface_data(surface) : NULL;
+    screen_base_visible = s->screen_base != NULL && front == s->screen_base;
+    screen_retired_base_visible =
+        s->screen_retired_base != NULL && front == s->screen_retired_base;
 
     /*
      * Holding one frontend refresh only needs to know whether vGPU9 is
@@ -1842,22 +1884,32 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
     }
 
     /*
-     * The console DisplaySurface directly references screen_base while a
-     * handoff mirror is visible.  DESTROY_SCREEN does not replace that
-     * DisplaySurface, so freeing the mirror here leaves the frontend pointing
-     * at freed memory and makes an immediately following DEFINE_SCREEN seed
-     * from a dangling pointer.  Keep the buffer alive until the next define
-     * snapshots/replaces it, but retain the old cleanup for non-visible bases.
+     * DESTROY_SCREEN does not replace the console DisplaySurface.  During a
+     * deferred handoff that surface may reference either the current mirror or
+     * the retired generation.  Release only generations that the frontend no
+     * longer owns; otherwise an immediately following DEFINE_SCREEN would seed
+     * from freed memory.
      */
-    if (!s->screen_defined) {
-        if (!screen_base_visible) {
-            vmsvga_screen_base_clear(s);
-        }
-        return true;
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-SCREEN-LIFETIME phase=destroy visible=%s frontend=%p "
+                "base=%p retired=%p\n",
+                screen_base_visible ? "base" :
+                screen_retired_base_visible ? "retired" : "external",
+                (void *)front, (void *)s->screen_base,
+                (void *)s->screen_retired_base);
     }
 
     if (!screen_base_visible) {
-        vmsvga_screen_base_clear(s);
+        g_clear_pointer(&s->screen_base, g_free);
+        s->screen_base_size = 0;
+    }
+    if (!screen_retired_base_visible) {
+        g_clear_pointer(&s->screen_retired_base, g_free);
+    }
+
+    if (!s->screen_defined) {
+        return true;
     }
 
     s->screen_defined = false;

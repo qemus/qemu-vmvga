@@ -8312,10 +8312,14 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     old_sid = s->svga3d->active_screen_target_sid;
 
     if (sid == SVGA3D_INVALID_ID) {
+        if (old_sid == sid) {
+            return true;
+        }
+        if (!vmsvga3d_screen_target_quiesce_live(s)) {
+            return false;
+        }
         s->svga3d->active_screen_target_sid = sid;
-        s->svga3d->screen_target_dirty_count = 0;
-        memset(s->svga3d->screen_target_dirty_rects, 0,
-               sizeof(s->svga3d->screen_target_dirty_rects));
+        s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
         return true;
     }
 
@@ -8344,6 +8348,14 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         (surface->surface_flags & SVGA3D_SURFACE_SCREENTARGET) == 0 ||
         (surface->surface_flags & (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) != 0 ||
         surface->mips[0].size.depth != 1) {
+        return false;
+    }
+
+    /* A target switch is a coalescing barrier.  Consume presentation damage
+     * while the old SID is still active and its backing surface still exists;
+     * otherwise a later bind/unbind could silently reinterpret or discard it.
+     */
+    if (!vmsvga3d_screen_target_quiesce_live(s)) {
         return false;
     }
 
@@ -8386,9 +8398,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     }
 
     s->svga3d->active_screen_target_sid = sid;
-    s->svga3d->screen_target_dirty_count = 0;
-    memset(s->svga3d->screen_target_dirty_rects, 0,
-           sizeof(s->svga3d->screen_target_dirty_rects));
+    s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
     return true;
 }
 

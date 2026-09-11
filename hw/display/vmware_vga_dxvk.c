@@ -3314,11 +3314,7 @@ bool vmsvga3d_dxvk_surface_materialize(
             if (!vmsvga3d_dxvk_get_method(
                     dxvk->d3d9_device,
                     VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_RENDER_TARGET,
-                    &create_render_target, sizeof(create_render_target)) ||
-                !vmsvga3d_dxvk_get_method(
-                    dxvk->d3d9_device,
-                    VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_OFFSCREEN_PLAIN_SURFACE,
-                    &create_offscreen, sizeof(create_offscreen))) {
+                    &create_render_target, sizeof(create_render_target))) {
                 return false;
             }
             result = create_render_target(
@@ -3331,18 +3327,36 @@ bool vmsvga3d_dxvk_surface_materialize(
                     "CreateRenderTarget", surface, primary_desc, result);
                 return false;
             }
-            result = create_offscreen(
-                dxvk->d3d9_device, primary_desc->width, primary_desc->height,
-                primary_desc->format, VMSVGA3D_DXVK_D3DPOOL_SYSTEMMEM,
-                &bounce, NULL);
-            if (!vmsvga3d_dxvk_succeeded(result) || bounce == NULL) {
-                vmsvga3d_dxvk_trace_d3d9_create_failure(
-                    "CreateOffscreenPlainSurface", surface, primary_desc, result);
-                vmsvga3d_dxvk_release(primary,
-                                      VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
-                return false;
+            if (primary_desc->multisample_type ==
+                VMSVGA3D_DXVK_D3DMULTISAMPLE_NONE) {
+                if (!vmsvga3d_dxvk_get_method(
+                        dxvk->d3d9_device,
+                        VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_OFFSCREEN_PLAIN_SURFACE,
+                        &create_offscreen, sizeof(create_offscreen))) {
+                    vmsvga3d_dxvk_release(
+                        primary, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+                    return false;
+                }
+                result = create_offscreen(
+                    dxvk->d3d9_device, primary_desc->width, primary_desc->height,
+                    primary_desc->format, VMSVGA3D_DXVK_D3DPOOL_SYSTEMMEM,
+                    &bounce, NULL);
+                if (!vmsvga3d_dxvk_succeeded(result) || bounce == NULL) {
+                    vmsvga3d_dxvk_trace_d3d9_create_failure(
+                        "CreateOffscreenPlainSurface", surface, primary_desc,
+                        result);
+                    vmsvga3d_dxvk_release(
+                        primary, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+                    return false;
+                }
+                surface->d3d9_has_bounce = true;
+            } else {
+                /* D3D9 cannot upload/read back arbitrary per-sample data via
+                 * the ordinary SYSTEMMEM bounce path.  Keep MSAA targets
+                 * native-only and use an explicit ResolveCopy to cross back
+                 * into a single-sample resource. */
+                surface->d3d9_has_bounce = false;
             }
-            surface->d3d9_has_bounce = true;
         } else {
             return false;
         }
@@ -3404,6 +3418,17 @@ bool vmsvga3d_dxvk_surface_materialize(
     surface->d3d9_format = primary_desc->format;
     surface->d3d9_length = primary_desc->length;
     surface->d3d9_resident = true;
+
+    if (resource_plan->use == VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET &&
+        primary_desc->multisample_type !=
+            VMSVGA3D_DXVK_D3DMULTISAMPLE_NONE) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-MSAA sid=%u samples=%u quality=%u bounce=%u",
+            surface->sid, primary_desc->multisample_type,
+            primary_desc->multisample_quality,
+            surface->d3d9_has_bounce ? 1u : 0u);
+    }
 
     if (resource_plan->use == VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET) {
         const char *depth_plan =

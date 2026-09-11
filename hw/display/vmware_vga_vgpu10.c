@@ -11720,6 +11720,13 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+          if (cid == SVGA3D_INVALID_ID) {
+              return vmsvga3d_d3d9_runtime_resolve_copy(
+                         s, command.dstSid, command.dstSubResource,
+                         command.srcSid, command.srcSubResource,
+                         command.copyFormat) ==
+                     VMSVGA3D_D3D9_ACCEL_COMPLETE;
+          }
           return vmsvga3d_d3d10_resolve_copy_live(s, cid, &command);
       }
 

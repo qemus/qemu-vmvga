@@ -323,7 +323,7 @@ typedef struct vmsvga3d_surface_s {
     bool screen_target_content_valid;
     bool legacy_active;
     /* Diagnostic-only legacy presentation bookkeeping.  These fields are
-     * touched only while the local vmware_setmode trace gate is enabled. */
+     * touched only while the local debug trace gate is enabled. */
     uint64_t trace_vgpu9_write_count;
     uint64_t trace_vgpu9_draw_count;
     uint64_t trace_vgpu9_copy_count;

@@ -286,13 +286,13 @@ struct vmsvga_cursor_source_s {
  *
  * This project overlays vmware_vga.c onto an otherwise stock QEMU source
  * tree, so it cannot add generated trace events without also replacing
- * hw/display/trace-events.  Reuse QEMU's existing vmware_setmode trace event
- * as the runtime master switch, then keep the extra diagnostics local.
+ * hw/display/trace-events.  Use the existing VMVGA debug device property as
+ * the runtime master switch, then keep the extra diagnostics local.
  *
  * Enable at runtime with:
- *   -trace "vmware_setmode"
+ *   -device vmvga,debug=on
  *
- * Add -trace "vmware_value_read" when register reads/BUSY polling are needed.
+ * QEMU trace events such as vmware_value_read remain independently gated.
  * Categories set to 0 compile down to a constant-false branch.
  */
 #define VMVGA_TRACE_STATE   1
@@ -316,8 +316,13 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_GMR2_MAX_PAGES 16384U
 #define VMVGA_TRACE_GMR2_SAMPLE_INTERVAL_US 1000000
 
+/* Keep the local trace gate process-wide, matching the QEMU trace event it
+ * replaced.  A count keeps tracing active until the last debug-enabled VMVGA
+ * device is unrealized. */
+static unsigned int vmvga_trace_debug_devices;
+
 #define VMVGA_TRACE_LOCAL_MASTER_ENABLED() \
-  trace_event_get_state_backends(TRACE_VMWARE_SETMODE)
+  (vmvga_trace_debug_devices != 0)
 
 #define VMVGA_TRACE_LOCAL_ENABLED(category)                              \
   ((category) && VMVGA_TRACE_LOCAL_MASTER_ENABLED())
@@ -10331,6 +10336,10 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
         return;
     }
 
+    if (s->chip.debug) {
+        vmvga_trace_debug_devices++;
+    }
+
     memory_region_init_io(&s->io_bar, OBJECT(dev), &vmsvga_io_ops, &s->chip,
                           "vmsvga-io", 0x10);
     memory_region_set_flush_coalesced(&s->io_bar);
@@ -10382,6 +10391,11 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     vmsvga_objects_clear(&s->chip);
 
     g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
+
+    if (s->chip.debug) {
+        assert(vmvga_trace_debug_devices > 0);
+        vmvga_trace_debug_devices--;
+    }
 }
 
 static VMVGA_PROPERTY_QUALIFIER Property vga_vmware_properties[] = {

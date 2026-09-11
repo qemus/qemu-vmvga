@@ -4780,6 +4780,7 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     uint32_t rect_count;
     VMSVGA3DD3D9AccelResult accel;
     bool wrote = false;
+    bool trace_3d;
 
     (void)cmd;
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
@@ -4800,7 +4801,8 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     body = payload;
     rects = (SVGA3dRect *)(body + 1);
     rect_count = rect_bytes / sizeof(SVGA3dRect);
-    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+    trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
+    if (trace_3d) {
         VMSVGA3DContext *context = vmsvga3d_context(s, body->cid);
         uint32_t color_sid = SVGA3D_INVALID_ID;
         uint32_t depth_sid = SVGA3D_INVALID_ID;
@@ -4811,8 +4813,8 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
             depth_sid = context->render_targets[SVGA3D_RT_DEPTH].sid;
             stencil_sid = context->render_targets[SVGA3D_RT_STENCIL].sid;
         }
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "D3D9-CLEAR cid=%u flags=0x%08x color=0x%08x depth=%g "
             "stencil=0x%08x rects=%u rt0=%u depth-sid=%u stencil-sid=%u",
             body->cid, body->clearFlag, body->color, (double)body->depth,
@@ -4846,14 +4848,14 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     }
 
     if (wrote && (body->clearFlag & SVGA3D_CLEAR_COLOR)) {
-        if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        if (trace_3d) {
             vmsvga3d_trace_vgpu9_render_target_write(
                 s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR);
         }
     }
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "D3D9-CLEAR result cid=%u accel=%u wrote=%u",
         body->cid, (uint32_t)accel, wrote ? 1u : 0u);
     g_free(payload);
@@ -5618,8 +5620,7 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, dst_surface);
     }
 
-    if (valid && dst_image != NULL &&
-        VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+    if (valid && dst_image != NULL && trace_3d) {
         bool full_copy = box_count == 1 && boxes[0].x == 0 && boxes[0].y == 0 &&
                          boxes[0].z == 0 &&
                          boxes[0].w == dst_image->size.width &&

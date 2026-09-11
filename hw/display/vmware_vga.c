@@ -316,16 +316,22 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_GMR2_MAX_PAGES 16384U
 #define VMVGA_TRACE_GMR2_SAMPLE_INTERVAL_US 1000000
 
-#define VMVGA_TRACE_LOCAL_ENABLED(category)                              \
-  ((category) &&                                                         \
-   trace_event_get_state_backends(TRACE_VMWARE_SETMODE))
+#define VMVGA_TRACE_LOCAL_MASTER_ENABLED() \
+  trace_event_get_state_backends(TRACE_VMWARE_SETMODE)
 
-#define VMVGA_TRACE_LOCAL(category, fmt, ...)                            \
+#define VMVGA_TRACE_LOCAL_ENABLED(category)                              \
+  ((category) && VMVGA_TRACE_LOCAL_MASTER_ENABLED())
+
+#define VMVGA_TRACE_LOCAL_CACHED(enabled, fmt, ...)                      \
   do {                                                                   \
-      if (VMVGA_TRACE_LOCAL_ENABLED(category)) {                            \
+      if (enabled) {                                                       \
           fprintf(stderr, "VMVGA-" fmt "\n", ##__VA_ARGS__);                 \
       };                                                                   \
   } while (0)
+
+#define VMVGA_TRACE_LOCAL(category, fmt, ...)                            \
+  VMVGA_TRACE_LOCAL_CACHED(VMVGA_TRACE_LOCAL_ENABLED(category), fmt,     \
+                            ##__VA_ARGS__)
 
 #if VMVGA_TRACE_QEMU
 #define VMVGA_QEMU_TRACE(event, call)                                         \
@@ -1533,17 +1539,20 @@ static void cursor_update_from_fifo(struct vmsvga_state_s *s)
 static inline void vmsvga_damage_flush(struct vmsvga_state_s *s)
 {
     uint32_t i;
+    bool trace_local = s->damage_count != 0 &&
+                       VMVGA_TRACE_LOCAL_MASTER_ENABLED();
 
-    if (vmsvga_trace_flight_enabled() && s->damage_count != 0) {
+    if (VMVGA_TRACE_FLIGHT && trace_local) {
         s->trace_now.damage_rects += s->damage_count;
         s->trace_activity_seq++;
     }
 
     for (i = 0; i < s->damage_count; i++) {
         struct vmsvga_damage_rect_s *rect = &s->damage[i];
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_DRAW,
-                           "DAMAGE x=%u y=%u w=%u h=%u",
-                           rect->x, rect->y, rect->w, rect->h);
+        VMVGA_TRACE_LOCAL_CACHED(
+            VMVGA_TRACE_DRAW && trace_local,
+            "DAMAGE x=%u y=%u w=%u h=%u",
+            rect->x, rect->y, rect->w, rect->h);
         vmvga_console_update(s->vga.con, rect->x, rect->y, rect->w, rect->h);
     }
 
@@ -7418,29 +7427,13 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
     } bar1_trace_state;
     struct vmsvga_bar1_trace_s *bar1_trace = NULL;
     bool direct_screen = vmsvga_direct_screen_vram_scanout(s);
-    bool trace_flight = vmsvga_trace_flight_enabled();
-    bool trace_full_bar1 = direct_screen && trace_flight;
-    bool trace_dirty = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_DIRTY);
+    bool trace_local;
+    bool trace_flight;
+    bool trace_full_bar1;
+    bool trace_dirty;
     bool trace_range_open;
     hwaddr trace_range_start;
     hwaddr trace_range_end;
-
-    if (trace_full_bar1) {
-        bar1_trace_state.bar1_dirty_pages = 0;
-        bar1_trace_state.bar1_first_dirty = 0;
-        bar1_trace_state.bar1_last_dirty = 0;
-        bar1_trace_state.dirty_pages = 0;
-        bar1_trace_state.first_dirty = 0;
-        bar1_trace_state.last_dirty = 0;
-        bar1_trace_state.damage_before = s->damage_count;
-        bar1_trace = &bar1_trace_state;
-    }
-
-    if (trace_dirty) {
-        trace_range_open = false;
-        trace_range_start = 0;
-        trace_range_end = 0;
-    }
 
     if (!s->dirty_log_enabled) {
         return;
@@ -7462,6 +7455,28 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
         return;
     }
     visible_end = visible_offset + visible_size;
+
+    trace_local = VMVGA_TRACE_LOCAL_MASTER_ENABLED();
+    trace_flight = VMVGA_TRACE_FLIGHT && trace_local;
+    trace_full_bar1 = direct_screen && trace_flight;
+    trace_dirty = VMVGA_TRACE_DIRTY && trace_local;
+
+    if (trace_full_bar1) {
+        bar1_trace_state.bar1_dirty_pages = 0;
+        bar1_trace_state.bar1_first_dirty = 0;
+        bar1_trace_state.bar1_last_dirty = 0;
+        bar1_trace_state.dirty_pages = 0;
+        bar1_trace_state.first_dirty = 0;
+        bar1_trace_state.last_dirty = 0;
+        bar1_trace_state.damage_before = s->damage_count;
+        bar1_trace = &bar1_trace_state;
+    }
+
+    if (trace_dirty) {
+        trace_range_open = false;
+        trace_range_start = 0;
+        trace_range_end = 0;
+    }
 
     /*
      * Normal scanout tracking needs only the visible Screen backing. The full
@@ -7541,8 +7556,8 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
                 }
                 if (trace_dirty) {
                     if (trace_range_open && page_addr != trace_range_end) {
-                        VMVGA_TRACE_LOCAL(
-                            VMVGA_TRACE_DIRTY,
+                        VMVGA_TRACE_LOCAL_CACHED(
+                            trace_dirty,
                             "DIRTY pages=[0x%" PRIx64 ",0x%" PRIx64
                             ") y=%u..%u stride=%u bypp=%u",
                             (uint64_t)trace_range_start, (uint64_t)trace_range_end,
@@ -7583,8 +7598,8 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
     }
 
     if (trace_dirty && trace_range_open) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_DIRTY,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_dirty,
             "DIRTY pages=[0x%" PRIx64 ",0x%" PRIx64
             ") y=%u..%u stride=%u bypp=%u",
             (uint64_t)trace_range_start, (uint64_t)trace_range_end,

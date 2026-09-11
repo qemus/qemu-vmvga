@@ -3467,9 +3467,9 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     for (i = 0; i < range_count; i++) {
         VMSVGA3DD3D9DrawRangePlan plan;
 
-        failure_range = i;
         if (!vmsvga3d_d3d9_draw_range_plan(&vertex_decls[0], &ranges[i],
                                             vertex_buffer_bytes, &plan)) {
+            failure_range = i;
             failure_stage = "range-plan";
             goto out;
         }
@@ -3493,12 +3493,14 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         if (plan.action == VMSVGA3D_D3D9_DRAW_ACTION_NONINDEXED) {
             if (plan.unbind_indices &&
                 !vmsvga3d_dxvk_set_indices(s->dxvk, NULL)) {
+                failure_range = i;
                 failure_stage = "unbind-indices";
                 goto out;
             }
             if (!vmsvga3d_dxvk_draw_primitive(
                     s->dxvk, plan.primitive_type, plan.start_vertex,
                     plan.primitive_count)) {
+                failure_range = i;
                 failure_stage = "draw-primitive";
                 goto out;
             }
@@ -3513,11 +3515,13 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
             VMSVGA3DSurface *index_surface;
 
             if (plan.index_surface_id >= SVGA3D_MAX_SURFACE_IDS) {
+                failure_range = i;
                 failure_stage = "index-sid-range";
                 goto out;
             }
             index_surface = s->svga3d->surfaces[plan.index_surface_id];
             if (index_surface == NULL) {
+                failure_range = i;
                 failure_stage = "index-surface-missing";
                 goto out;
             }
@@ -3533,11 +3537,13 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                     s, index_surface,
                     VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER,
                     ranges[i].indexWidth)) {
+                failure_range = i;
                 failure_stage = "materialize-index-buffer";
                 goto out;
             }
             if (!vmsvga3d_dxvk_set_indices(s->dxvk,
                                            index_surface->dxvk_surface)) {
+                failure_range = i;
                 failure_stage = "set-indices";
                 goto out;
             }
@@ -3547,6 +3553,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                     plan.indexed.min_vertex_index, plan.indexed.num_vertices,
                     plan.indexed.start_index,
                     plan.indexed.primitive_count)) {
+                failure_range = i;
                 failure_stage = "draw-indexed-primitive";
                 goto out;
             }
@@ -3563,7 +3570,6 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         }
     }
 
-    failure_range = UINT32_MAX;
     if (batch.end_scene) {
         if (!vmsvga3d_dxvk_end_scene(s->dxvk)) {
             scene_started = false;

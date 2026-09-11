@@ -1305,7 +1305,8 @@ static inline void vmsvga_set_dirty_log(struct vmsvga_state_s *s,
                    explicit_count * sizeof(explicit_damage[0]));
         }
         if (s->active_valid) {
-            vmsvga_scan_vram_dirty(s, explicit_damage, explicit_count);
+            vmsvga_scan_vram_dirty(
+                s, explicit_count != 0 ? explicit_damage : NULL, explicit_count);
         } else {
             vmsvga_clear_vram_dirty(s);
         }
@@ -9157,7 +9158,8 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
             memcpy(explicit_damage, s->damage,
                    explicit_count * sizeof(explicit_damage[0]));
         }
-        vmsvga_scan_vram_dirty(s, explicit_damage, explicit_count);
+        vmsvga_scan_vram_dirty(
+            s, explicit_count != 0 ? explicit_damage : NULL, explicit_count);
     }
 
     if (s->invalidated) {

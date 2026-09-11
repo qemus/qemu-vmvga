@@ -10616,9 +10616,9 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
         }
         fprintf(
             stderr,
-            "VMVGA-3D-RAW id=%u name=%s size=%s%u action=%s fifo=0x%08x "
+            "VMVGA-3D-RAW name=%s cmd=%u size=%s%u action=%s fifo=0x%08x "
             "words=%d\n",
-            cmd, info != NULL ? info->name : "UNKNOWN",
+            info != NULL ? info->name : "UNKNOWN", cmd,
             payload_size == UINT32_MAX ? "INVALID/" : "",
             payload_size == UINT32_MAX ? 0 : payload_size,
             info != NULL ? vmsvga3d_trace_command_action(cmd, info) : "STALL",

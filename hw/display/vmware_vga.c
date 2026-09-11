@@ -511,7 +511,6 @@ struct vmsvga_state_s {
     uint32_t screen_annotation_src_id;
     struct vmsvga3d_state_s *svga3d;
     struct vmsvga3d_dxvk_s *dxvk;
-    bool d3d9_fence_work_pending;
     bool debug;
     bool enable_3d;
     char *vgpu;
@@ -6284,20 +6283,6 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
               }
               len -= command_words + 1;
               fence_arg = vmsvga_fifo_read(s);
-              if (s->vgpu_generation == VMSVGA_VGPU_9 &&
-                  s->d3d9_fence_work_pending && s->dxvk != NULL &&
-                  vmsvga3d_dxvk_ready(s->dxvk)) {
-                  bool barrier_ok = vmsvga3d_dxvk_d3d9_finish(s->dxvk);
-
-                  if (barrier_ok) {
-                      s->d3d9_fence_work_pending = false;
-                  }
-                  if (trace_flight) {
-                      fprintf(stderr,
-                              "VMVGA-D3D9-FENCE-BARRIER fence=%u result=%s\n",
-                              fence_arg, barrier_ok ? "complete" : "failed");
-                  }
-              }
               s->fence = fence_arg;
               if (vmsvga_fifo_has_reg(s, SVGA_FIFO_FENCE)) {
                   s->fifo[SVGA_FIFO_FENCE] = cpu_to_le32(fence_arg);
@@ -6839,10 +6824,6 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
             break;
         default:
             if (vmsvga3d_fifo_command(s, dx_context, cmd, &len, fifo_start)) {
-                if (s->vgpu_generation == VMSVGA_VGPU_9 &&
-                    cmd >= SVGA_3D_CMD_BASE && cmd < SVGA_3D_CMD_MAX) {
-                    s->d3d9_fence_work_pending = true;
-                }
                 break;
             }
             if (len < 1) {
@@ -9294,7 +9275,6 @@ static void vmsvga_reset(DeviceState *dev)
     s->damage_count = 0;
     s->fence = 0;
     s->fence_goal = 0;
-    s->d3d9_fence_work_pending = false;
     s->thread = 0;
     s->invalidated = false;
     s->svga_surface_bound = false;
@@ -10119,7 +10099,6 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->damage_count = 0;
     s->fence = 0;
     s->fence_goal = 0;
-    s->d3d9_fence_work_pending = false;
     s->invalidated = false;
     s->svga_surface_bound = false;
 

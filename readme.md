@@ -29,7 +29,7 @@ The device supports DirectX acceleration. VMware SVGA 3D commands are processed 
 
 It requires a Vulkan-capable graphics card, and the DXVK package to be present on the host, otherwise it automatically falls back to 2D acceleration.
 
-### Legacy 2D acceleration
+### 2D acceleration
 
 The implementation provides the full legacy 2D command stack used by VMware display drivers, including:
 

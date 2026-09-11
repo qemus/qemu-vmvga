@@ -122,6 +122,7 @@ bool vmsvga3d_dxvk_d3d9_query_end(
 bool vmsvga3d_dxvk_d3d9_query_get_data(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t data_size,
     uint32_t flags, uint32_t *result);
+bool vmsvga3d_dxvk_d3d9_finish(VMSVGA3DDxvk *dxvk);
 void vmsvga3d_dxvk_d3d9_query_context_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid);
 

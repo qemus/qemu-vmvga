@@ -34,6 +34,7 @@
 #include "include/vmware_vga_dxvk_wsi.h"
 
 typedef struct vmsvga3d_dxvk_d3d9_query_s VMSVGA3DDxvkD3D9Query;
+typedef struct vmsvga3d_dxvk_d3d9_gb_query_s VMSVGA3DDxvkD3D9GBQuery;
 typedef struct vmsvga3d_dxvk_query_s VMSVGA3DDxvkQuery;
 typedef struct vmsvga3d_dxvk_state_s VMSVGA3DDxvkState;
 typedef struct vmsvga3d_dxvk_shader_s VMSVGA3DDxvkShader;
@@ -50,6 +51,8 @@ struct vmsvga3d_dxvk_s {
     void *d3d9_device;
     void *d3d9_pristine_state;
     VMSVGA3DDxvkD3D9Query *d3d9_queries;
+    VMSVGA3DDxvkD3D9GBQuery *d3d9_gb_queries;
+    uint64_t d3d9_gb_query_next_token;
     void *d3d11_device;
     void *d3d11_context;
     void *d3d11_context1;
@@ -94,6 +97,15 @@ struct vmsvga3d_dxvk_d3d9_query_s {
     uint32_t cid;
     void *query;
     VMSVGA3DDxvkD3D9Query *next;
+};
+
+struct vmsvga3d_dxvk_d3d9_gb_query_s {
+    uint32_t cid;
+    uint32_t query_type;
+    uint64_t token;
+    bool ended;
+    void *query;
+    VMSVGA3DDxvkD3D9GBQuery *next;
 };
 
 struct vmsvga3d_dxvk_view_s {
@@ -2107,6 +2119,17 @@ static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
         VMSVGA3DDxvkD3D9Query *query = dxvk->d3d9_queries;
 
         dxvk->d3d9_queries = query->next;
+        if (query->query != NULL) {
+            vmsvga3d_dxvk_release(query->query,
+                                  VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE);
+        }
+        g_free(query);
+    }
+
+    while (dxvk->d3d9_gb_queries != NULL) {
+        VMSVGA3DDxvkD3D9GBQuery *query = dxvk->d3d9_gb_queries;
+
+        dxvk->d3d9_gb_queries = query->next;
         if (query->query != NULL) {
             vmsvga3d_dxvk_release(query->query,
                                   VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE);
@@ -7719,14 +7742,318 @@ bool vmsvga3d_dxvk_d3d9_query_get_data(
 #endif
 }
 
+static VMSVGA3DDxvkD3D9GBQuery *vmsvga3d_dxvk_d3d9_gb_query_find_active(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type,
+    VMSVGA3DDxvkD3D9GBQuery ***link_out)
+{
+    VMSVGA3DDxvkD3D9GBQuery **link;
+
+    if (dxvk == NULL) {
+        return NULL;
+    }
+
+    link = &dxvk->d3d9_gb_queries;
+    while (*link != NULL) {
+        if (!(*link)->ended && (*link)->cid == cid &&
+            (*link)->query_type == query_type) {
+            if (link_out != NULL) {
+                *link_out = link;
+            }
+            return *link;
+        }
+        link = &(*link)->next;
+    }
+
+    if (link_out != NULL) {
+        *link_out = link;
+    }
+    return NULL;
+}
+
+static VMSVGA3DDxvkD3D9GBQuery *vmsvga3d_dxvk_d3d9_gb_query_find_token(
+    VMSVGA3DDxvk *dxvk, uint64_t token,
+    VMSVGA3DDxvkD3D9GBQuery ***link_out)
+{
+    VMSVGA3DDxvkD3D9GBQuery **link;
+
+    if (dxvk == NULL || token == 0) {
+        return NULL;
+    }
+
+    link = &dxvk->d3d9_gb_queries;
+    while (*link != NULL) {
+        if ((*link)->ended && (*link)->token == token) {
+            if (link_out != NULL) {
+                *link_out = link;
+            }
+            return *link;
+        }
+        link = &(*link)->next;
+    }
+
+    if (link_out != NULL) {
+        *link_out = link;
+    }
+    return NULL;
+}
+
+static void vmsvga3d_dxvk_d3d9_gb_query_delete_link(
+    VMSVGA3DDxvkD3D9GBQuery **link)
+{
+    VMSVGA3DDxvkD3D9GBQuery *query;
+
+    if (link == NULL || *link == NULL) {
+        return;
+    }
+
+    query = *link;
+    *link = query->next;
+    if (query->query != NULL) {
+        vmsvga3d_dxvk_release(query->query,
+                              VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE);
+    }
+    g_free(query);
+}
+
+static VMSVGA3DDxvkD3D9GBQuery *vmsvga3d_dxvk_d3d9_gb_query_create(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkCreateQuery create_query = NULL;
+    VMSVGA3DDxvkD3D9GBQuery *query;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_QUERY,
+            &create_query, sizeof(create_query))) {
+        return NULL;
+    }
+
+    query = g_try_new0(VMSVGA3DDxvkD3D9GBQuery, 1);
+    if (query == NULL) {
+        return NULL;
+    }
+
+    result = create_query(dxvk->d3d9_device, query_type, &query->query);
+    if (result != 0 || query->query == NULL) {
+        if (query->query != NULL) {
+            vmsvga3d_dxvk_release(query->query,
+                                  VMSVGA3D_DXVK_IDIRECT3DQUERY9_RELEASE);
+        }
+        g_free(query);
+        return NULL;
+    }
+
+    query->cid = cid;
+    query->query_type = query_type;
+    query->next = dxvk->d3d9_gb_queries;
+    dxvk->d3d9_gb_queries = query;
+    return query;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)query_type;
+    return NULL;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d9_gb_query_begin(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type,
+    uint32_t issue_flags)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D9GBQuery **link = NULL;
+    VMSVGA3DDxvkD3D9GBQuery *query;
+    VMSVGA3DDxvkQueryIssue issue = NULL;
+    int32_t result;
+
+    query = vmsvga3d_dxvk_d3d9_gb_query_find_active(
+        dxvk, cid, query_type, &link);
+    if (query == NULL) {
+        query = vmsvga3d_dxvk_d3d9_gb_query_create(dxvk, cid, query_type);
+        if (query == NULL) {
+            return false;
+        }
+        link = &dxvk->d3d9_gb_queries;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(query->query,
+                                   VMSVGA3D_DXVK_IDIRECT3DQUERY9_ISSUE,
+                                   &issue, sizeof(issue))) {
+        vmsvga3d_dxvk_d3d9_gb_query_delete_link(link);
+        return false;
+    }
+
+    result = issue(query->query, issue_flags);
+    if (result == 0) {
+        return true;
+    }
+
+    vmsvga3d_dxvk_d3d9_gb_query_delete_link(link);
+    return false;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)query_type;
+    (void)issue_flags;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d9_gb_query_end(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_type,
+    uint32_t issue_flags, uint64_t *token)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D9GBQuery **link = NULL;
+    VMSVGA3DDxvkD3D9GBQuery *query;
+    VMSVGA3DDxvkQueryIssue issue = NULL;
+    int32_t result;
+
+    if (token == NULL) {
+        return false;
+    }
+    *token = 0;
+
+    query = vmsvga3d_dxvk_d3d9_gb_query_find_active(
+        dxvk, cid, query_type, &link);
+    if (query == NULL) {
+        /* D3D9 accepts END on a fresh query.  DXVK implements that by
+         * implicitly beginning and ending the query, which is also required
+         * for the edge cases exercised by the native D3D9 tests. */
+        query = vmsvga3d_dxvk_d3d9_gb_query_create(dxvk, cid, query_type);
+        if (query == NULL) {
+            return false;
+        }
+        link = &dxvk->d3d9_gb_queries;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(query->query,
+                                   VMSVGA3D_DXVK_IDIRECT3DQUERY9_ISSUE,
+                                   &issue, sizeof(issue))) {
+        vmsvga3d_dxvk_d3d9_gb_query_delete_link(link);
+        return false;
+    }
+
+    result = issue(query->query, issue_flags);
+    if (result != 0) {
+        vmsvga3d_dxvk_d3d9_gb_query_delete_link(link);
+        return false;
+    }
+
+    query->ended = true;
+    query->token = ++dxvk->d3d9_gb_query_next_token;
+    if (query->token == 0) {
+        query->token = ++dxvk->d3d9_gb_query_next_token;
+    }
+    *token = query->token;
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)query_type;
+    (void)issue_flags;
+    if (token != NULL) {
+        *token = 0;
+    }
+    return false;
+#endif
+}
+
+VMSVGA3DD3D9GBQueryPollResult vmsvga3d_dxvk_d3d9_gb_query_poll(
+    VMSVGA3DDxvk *dxvk, uint64_t token, uint32_t data_size,
+    uint32_t flags, bool wait, uint32_t *value)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D9GBQuery **link = NULL;
+    VMSVGA3DDxvkD3D9GBQuery *query;
+    VMSVGA3DDxvkQueryGetData get_data = NULL;
+    uint32_t data = 0;
+    int32_t result;
+
+    if (value == NULL || data_size != sizeof(data)) {
+        return VMSVGA3D_D3D9_GB_QUERY_POLL_FAILED;
+    }
+
+    query = vmsvga3d_dxvk_d3d9_gb_query_find_token(dxvk, token, &link);
+    if (query == NULL || query->query == NULL ||
+        !vmsvga3d_dxvk_get_method(query->query,
+                                   VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+                                   &get_data, sizeof(get_data))) {
+        if (query != NULL) {
+            vmsvga3d_dxvk_d3d9_gb_query_delete_link(link);
+        }
+        return VMSVGA3D_D3D9_GB_QUERY_POLL_FAILED;
+    }
+
+    do {
+        result = get_data(query->query, &data, data_size, flags);
+        if (result == VMSVGA3D_DXVK_D3D_S_FALSE && wait) {
+            g_thread_yield();
+        }
+    } while (result == VMSVGA3D_DXVK_D3D_S_FALSE && wait);
+
+    if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+        return VMSVGA3D_D3D9_GB_QUERY_POLL_PENDING;
+    }
+
+    if (result != 0) {
+        vmsvga3d_dxvk_d3d9_gb_query_delete_link(link);
+        return VMSVGA3D_D3D9_GB_QUERY_POLL_FAILED;
+    }
+
+    *value = data;
+    vmsvga3d_dxvk_d3d9_gb_query_delete_link(link);
+    return VMSVGA3D_D3D9_GB_QUERY_POLL_READY;
+#else
+    (void)dxvk;
+    (void)token;
+    (void)data_size;
+    (void)flags;
+    (void)wait;
+    (void)value;
+    return VMSVGA3D_D3D9_GB_QUERY_POLL_FAILED;
+#endif
+}
+
+void vmsvga3d_dxvk_d3d9_gb_query_cancel(
+    VMSVGA3DDxvk *dxvk, uint64_t token)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D9GBQuery **link = NULL;
+
+    if (vmsvga3d_dxvk_d3d9_gb_query_find_token(dxvk, token, &link) != NULL) {
+        vmsvga3d_dxvk_d3d9_gb_query_delete_link(link);
+    }
+#else
+    (void)dxvk;
+    (void)token;
+#endif
+}
+
 void vmsvga3d_dxvk_d3d9_query_context_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D9Query **link = NULL;
+    VMSVGA3DDxvkD3D9GBQuery **gb_link;
 
     if (vmsvga3d_dxvk_d3d9_query_find(dxvk, cid, &link) != NULL) {
         vmsvga3d_dxvk_d3d9_query_delete_link(link);
+    }
+
+    if (dxvk == NULL) {
+        return;
+    }
+
+    gb_link = &dxvk->d3d9_gb_queries;
+    while (*gb_link != NULL) {
+        if ((*gb_link)->cid != cid) {
+            gb_link = &(*gb_link)->next;
+            continue;
+        }
+        vmsvga3d_dxvk_d3d9_gb_query_delete_link(gb_link);
     }
 #else
     (void)dxvk;

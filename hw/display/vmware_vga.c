@@ -8282,10 +8282,16 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         }
         if (s->svga3d_dx_capable) {
             caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
-                    SVGA_CAP_GBOBJECTS | SVGA_CAP_DX | SVGA_CAP_CAP2_REGISTER;
+                    SVGA_CAP_GBOBJECTS | SVGA_CAP_DX;
         } else {
             caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
-                      SVGA_CAP_GBOBJECTS | SVGA_CAP_DX | SVGA_CAP_CAP2_REGISTER);
+                      SVGA_CAP_GBOBJECTS | SVGA_CAP_DX);
+        }
+        if (s->svga3d_dx_capable ||
+            s->vgpu_generation == VMSVGA_VGPU_9) {
+            caps |= SVGA_CAP_CAP2_REGISTER;
+        } else {
+            caps &= ~SVGA_CAP_CAP2_REGISTER;
         }
         ret = caps;
         VPRINT("SVGA_REG_CAPABILITIES register %u with the return of %u\n",
@@ -8293,15 +8299,21 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         break;
     case SVGA_REG_CAP2:
 #ifdef EXPCAPS
-        ret = s->svga3d_dx_capable ? 0xffffffff : SVGA_CAP2_NONE;
+        ret = s->svga3d_dx_capable
+                  ? 0xffffffff
+                  : (s->vgpu_generation == VMSVGA_VGPU_9
+                         ? SVGA_CAP2_SCREENDMA_REG
+                         : SVGA_CAP2_NONE);
         if (s->vgpu_generation != VMSVGA_VGPU_11) {
             ret &= ~SVGA_CAP2_DX3;
         }
 #else
         ret = s->svga3d_dx_capable
                   ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2 |
-                     SVGA_CAP2_GB_MEMSIZE_2)
-                  : SVGA_CAP2_NONE;
+                     SVGA_CAP2_GB_MEMSIZE_2 | SVGA_CAP2_SCREENDMA_REG)
+                  : (s->vgpu_generation == VMSVGA_VGPU_9
+                         ? SVGA_CAP2_SCREENDMA_REG
+                         : SVGA_CAP2_NONE);
         if (s->svga3d_dx_capable &&
             s->vgpu_generation == VMSVGA_VGPU_11) {
             ret |= SVGA_CAP2_DX3;

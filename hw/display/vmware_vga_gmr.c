@@ -89,9 +89,9 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
         (uint64_t)descriptor_ppn << VMSVGA_GMR_PAGE_SHIFT;
     uint32_t page_offset = 0;
     uint32_t descriptors_read;
+    uint32_t ppn = 0;
+    uint32_t pages = 0;
     const char *failure = "descriptor-limit";
-    uint32_t failure_ppn = 0;
-    uint32_t failure_pages = 0;
 
     *out_gmr = NULL;
 
@@ -99,8 +99,6 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
          descriptors_read < VMSVGA_GMR_MAX_DESCRIPTOR_LENGTH;
          descriptors_read++) {
         SVGAGuestMemDescriptor raw_desc;
-        uint32_t ppn;
-        uint32_t pages;
 
         if (page_offset > VMSVGA_GMR_PAGE_SIZE - sizeof(raw_desc)) {
             failure = "descriptor-crosses-page";
@@ -115,8 +113,6 @@ static bool vmsvga_gmr_parse(struct vmsvga_state_s *s, uint32_t descriptor_ppn,
 
         ppn = le32_to_cpu(raw_desc.ppn);
         pages = le32_to_cpu(raw_desc.numPages);
-        failure_ppn = ppn;
-        failure_pages = pages;
 
         if (pages != 0) {
             /*
@@ -185,8 +181,8 @@ invalid:
                 "ppn=0x%08x pages=%u runs=%u total_pages=%" PRIu64 " "
                 "max_pages=%u\n",
                 s->gmrid, descriptor_ppn, failure, descriptors_read,
-                descriptor_page, page_offset, failure_ppn, failure_pages,
-                num_runs, num_pages, max_pages);
+                descriptor_page, page_offset, ppn, pages, num_runs,
+                num_pages, max_pages);
     }
     g_free(runs);
 
@@ -2208,7 +2204,8 @@ static bool vmsvga_screen_gmrfb_rect_is_zero(
 static bool vmsvga_screen_blit_one_from_gmrfb(
     struct vmsvga_state_s *s, int32_t src_x, int32_t src_y,
     int32_t dst_left, int32_t dst_top, int32_t dst_right,
-    int32_t dst_bottom, bool *preserved_handoff_present)
+    int32_t dst_bottom, bool trace_flight,
+    bool *preserved_handoff_present)
 {
     uint32_t bpp, depth, bypp;
     int64_t left = dst_left;
@@ -2366,7 +2363,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         }
     }
 
-    trace_blit = vmsvga_trace_flight_enabled() &&
+    trace_blit = trace_flight &&
                  (s->trace_now.gmrfb_to_screen < 16 ||
                   ((s->trace_now.gmrfb_to_screen + 1) & 63) == 0);
 
@@ -2504,7 +2501,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,
                                  width, height);
     }
-    if (vmsvga_trace_flight_enabled()) {
+    if (trace_flight) {
         DisplaySurface *surface = qemu_console_surface(s->vga.con);
         uint8_t *scanout_base = NULL;
         size_t scanout_size = 0;
@@ -2557,6 +2554,7 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
     bool ok;
     bool full_present;
     bool preserved_handoff_present;
+    bool trace_flight;
 
     if (!s->screen_defined || src_origin == NULL || dest_rect == NULL) {
         VMSVGA_SCREEN_REJECT(
@@ -2607,7 +2605,9 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
         return false;
     }
 
-    if (vmsvga_trace_flight_enabled() && s->trace_now.gmrfb_to_screen < 12) {
+    trace_flight = vmsvga_trace_flight_enabled();
+
+    if (trace_flight && s->trace_now.gmrfb_to_screen < 12) {
         fprintf(stderr,
                 "VMVGA-GMR-DIAG g2s seq=%" PRIu64 " source=%s gmr=%u "
                 "base=0x%08x pitch=%u format=0x%08x src=%d,%d "
@@ -2628,7 +2628,7 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
 
     ok = vmsvga_screen_blit_one_from_gmrfb(
         s, src_origin->x, src_origin->y, local_left, local_top,
-        local_right, local_bottom, &preserved_handoff_present);
+        local_right, local_bottom, trace_flight, &preserved_handoff_present);
 
     if (ok && preserved_handoff_present && full_present) {
         s->screen_handoff_skipped_same_backing_full = true;
@@ -2641,7 +2641,7 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
         s->screen_handoff_skipped_same_backing_full = false;
         s->svga_surface_bound = false;
         vmsvga_invalidate(s, "screen-handoff-complete");
-        if (vmsvga_trace_flight_enabled()) {
+        if (trace_flight) {
             fprintf(stderr,
                     "VMVGA-SCREEN-HANDOFF phase=complete seq=%" PRIu64
                     " size=%ux%u pitch=%u backing=%u:0x%08x\n",
@@ -2654,7 +2654,7 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
 
     s->screen_annotation_type = VMSVGA_ANNOTATION_NONE;
 
-    if (vmsvga_trace_flight_enabled()) {
+    if (trace_flight) {
         uint64_t seq = s->trace_now.gmrfb_to_screen + 1;
         if (ok) {
             vmsvga_screen_trace_present_snapshot(s, seq, "g2s");

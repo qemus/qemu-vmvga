@@ -7277,6 +7277,7 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
     VMSVGA3DDxvkD3D11InputElementDesc *native = NULL;
     VMSVGA3DDxvkD3D11CreateInputLayout create_input_layout = NULL;
     VMSVGA3DDxvkShader *shader;
+    bool trace_3d;
     VMSVGA3DDxvkInputLayout *layout;
     void *native_layout = NULL;
     uint32_t i;
@@ -7292,12 +7293,14 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
         return true;
     }
 
+    trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
+
     shader = vmsvga3d_dxvk_d3d11_shader_find(
         dxvk, cid, shader_id, NULL);
     if (shader == NULL || shader->shader_type != SVGA3D_SHADERTYPE_VS ||
         shader->bytecode == NULL || shader->bytecode_size == 0) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-LAYOUT-REALIZE cid=%u layout=%u vs=%u result=FAIL "
             "reason=missing-vs-dxbc",
             cid, layout_id, shader_id);
@@ -7306,8 +7309,8 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
     if (!vmsvga3d_dxvk_get_method(
             dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_INPUT_LAYOUT,
             &create_input_layout, sizeof(create_input_layout))) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-LAYOUT-REALIZE cid=%u layout=%u vs=%u result=FAIL "
             "reason=missing-method",
             cid, layout_id, shader_id);
@@ -7328,8 +7331,8 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
             native[i].input_slot_class = translated[i].input_slot_class;
             native[i].instance_data_step_rate =
                 translated[i].instance_data_step_rate;
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
+            VMVGA_TRACE_LOCAL_CACHED(
+                trace_3d,
                 "DX-LAYOUT-ELEM cid=%u layout=%u elem=%u semantic=%s%u "
                 "format=%u slot=%u offset=%u class=%u step=%u",
                 cid, layout_id, i, VMSVGA3D_D3D10_INPUT_SEMANTIC,
@@ -7343,8 +7346,8 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
         dxvk->d3d11_device, native, element_count, shader->bytecode,
         shader->bytecode_size, &native_layout);
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-LAYOUT-REALIZE cid=%u layout=%u vs=%u elements=%u dxbc=%u "
         "hr=0x%08x native=%u result=%s",
         cid, layout_id, shader_id, element_count, shader->bytecode_size,

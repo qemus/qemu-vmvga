@@ -10402,8 +10402,8 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
     bool trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
 
     if (s == NULL || s->svga3d == NULL || !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-POLL source=%s cid=%u query=%u result=FAIL reason=not-ready",
             source != NULL ? source : "?", cid, query_id);
         return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
@@ -10413,15 +10413,15 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
         s, cid, SVGA_COTABLE_DXQUERY, query_id);
 
     if (entry == NULL) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-POLL source=%s cid=%u query=%u result=FAIL reason=no-entry",
             source != NULL ? source : "?", cid, query_id);
         return VMSVGA3D_D3D10_QUERY_POLL_FAILED;
     }
     if (!vmsvga3d_dxvk_d3d11_query_pending(s->dxvk, cid, query_id)) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-POLL source=%s cid=%u query=%u qdstate=%u result=FAIL "
             "reason=native-not-pending",
             source != NULL ? source : "?", cid, query_id, entry[3]);
@@ -10433,8 +10433,8 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
     mobid = query_read_u32(entry + 8);
     offset = query_read_u32(entry + 12);
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-POLL source=%s cid=%u query=%u type=%u(%s) qdstate=%u "
         "flags=0x%08x mobid=%u offset=%u native-pending=1 action=GETDATA",
         source != NULL ? source : "?", cid, query_id, (unsigned)type,
@@ -10445,8 +10445,8 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
             VMSVGA3D_D3D10_LEVEL_INVALID ||
         !plan.get_data_after_end ||
         plan.d3d_result_size > sizeof(d3d_result)) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-POLL source=%s cid=%u query=%u type=%u(%s) result=FAIL "
             "reason=invalid-plan",
             source != NULL ? source : "?", cid, query_id, (unsigned)type,
@@ -10458,8 +10458,8 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
         s->dxvk, cid, query_id, d3d_result, plan.d3d_result_size,
         plan.getdata_flags, &ready);
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-POLL-RESULT source=%s cid=%u query=%u type=%u(%s) "
         "call=%s ready=%u d3d-size=%u",
         source != NULL ? source : "?", cid, query_id, (unsigned)type,
@@ -10498,8 +10498,8 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
 
     }
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-WRITE source=%s cid=%u query=%u type=%u(%s) mobid=%u "
         "offset=%u state=%u state-write=%s data-size=%u data-write=%s "
         "mob=%s",
@@ -10530,8 +10530,8 @@ vmsvga3d_d3d10_query_poll_live(struct vmsvga_state_s *s, uint32_t cid,
             }
         }
 
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-VERIFY source=%s cid=%u query=%u mobid=%u offset=%u "
             "read=%s state=0x%08x expected=0x%08x state-match=%u data-match=%u",
             source != NULL ? source : "?", cid, query_id, mobid, offset,
@@ -10601,8 +10601,8 @@ static bool vmsvga3d_d3d10_query_publish_cached_live(
     if (!vmsvga3d_dxvk_d3d11_query_cached_result(
             s->dxvk, cid, query_id, &d3d_result, &d3d_result_size,
             &cached_failed)) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-CACHE-REPLAY source=%s cid=%u query=%u type=%u(%s) "
             "result=FAIL reason=no-cache",
             source != NULL ? source : "?", cid, query_id, (unsigned)type,
@@ -10612,8 +10612,8 @@ static bool vmsvga3d_d3d10_query_publish_cached_live(
 
     if (!cached_failed) {
         if (d3d_result == NULL || d3d_result_size != plan.d3d_result_size) {
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
+            VMVGA_TRACE_LOCAL_CACHED(
+                trace_3d,
                 "DX-QUERY-CACHE-REPLAY source=%s cid=%u query=%u type=%u(%s) "
                 "result=FAIL reason=size cached=%u expected=%u",
                 source != NULL ? source : "?", cid, query_id, (unsigned)type,
@@ -10642,8 +10642,8 @@ static bool vmsvga3d_d3d10_query_publish_cached_live(
     if (mob == NULL ||
         (uint64_t)offset + sizeof(uint32_t) +
             (cached_failed ? 0u : svga_result_size) > mob->gbo.size) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-CACHE-REPLAY source=%s cid=%u query=%u type=%u(%s) "
             "mobid=%u offset=%u result=FAIL reason=destination",
             source != NULL ? source : "?", cid, query_id, (unsigned)type,
@@ -10692,8 +10692,8 @@ static bool vmsvga3d_d3d10_query_publish_cached_live(
             }
         }
 
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-CACHE-REPLAY source=%s cid=%u query=%u type=%u(%s) "
             "mobid=%u offset=%u state=%u cached=%s data-size=%u "
             "state-write=OK data-write=%s verify=%s state-match=%u data-match=%u "
@@ -10724,6 +10724,7 @@ static bool vmsvga3d_d3d10_query_end_live(
     uint8_t *entry;
     SVGA3dQueryType type;
     uint32_t flags;
+    bool trace_3d;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
@@ -10754,6 +10755,8 @@ static bool vmsvga3d_d3d10_query_end_live(
         return false;
     }
 
+    trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
+
     /* Timestamp queries have no BEGIN, so END is the first operation that
      * exposes the pending state to the guest result MOB.  VirtualBox writes
      * that state before issuing the native End call. */
@@ -10768,13 +10771,13 @@ static bool vmsvga3d_d3d10_query_end_live(
 
             state_write_ok = vmsvga3d_mob_write(
                 s, mob, offset, &query_state, sizeof(query_state));
-            if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+            if (trace_3d) {
                 uint32_t verify_state = UINT32_MAX;
                 bool verify_ok = vmsvga3d_mob_read(
                     s, mob, offset, &verify_state, sizeof(verify_state));
 
-                VMVGA_TRACE_LOCAL(
-                    VMVGA_TRACE_3D,
+                VMVGA_TRACE_LOCAL_CACHED(
+                    trace_3d,
                     "DX-QUERY-GUEST-STATE stage=TIMESTAMP-END cid=%u query=%u "
                     "mobid=%u offset=%u write=%s verify=%s state=0x%08x "
                     "expected=0x%08x match=%u",
@@ -10786,8 +10789,8 @@ static bool vmsvga3d_d3d10_query_end_live(
         }
     }
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-END cid=%u query=%u type=%u(%s) qdstate=%u flags=0x%08x "
         "mobid=%u offset=%u issue=%u",
         cid, command->queryId, (unsigned)type, vmsvga3d_dx_query_type_name(type),
@@ -10798,15 +10801,15 @@ static bool vmsvga3d_d3d10_query_end_live(
 
     if (!vmsvga3d_dxvk_d3d11_query_end(
             s->dxvk, cid, command->queryId, plan.issue_end)) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-END cid=%u query=%u type=%u(%s) result=FAIL",
             cid, command->queryId, (unsigned)type,
             vmsvga3d_dx_query_type_name(type));
         return false;
     }
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-END cid=%u query=%u type=%u(%s) result=OK native-pending=%u",
         cid, command->queryId, (unsigned)type, vmsvga3d_dx_query_type_name(type),
         vmsvga3d_dxvk_d3d11_query_pending(s->dxvk, cid, command->queryId) ? 1u : 0u);
@@ -10895,6 +10898,7 @@ static bool vmsvga3d_d3d10_move_query_live(
     uint32_t old_state;
     uint32_t pending_state = SVGA3D_QUERYSTATE_PENDING;
     bool state_write_ok = true;
+    bool trace_3d;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -10917,12 +10921,14 @@ static bool vmsvga3d_d3d10_move_query_live(
         return false;
     }
 
+    trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
+
     mob = vmsvga3d_mob_get(s, command->mobid);
     if (mob == NULL ||
         (uint64_t)command->mobOffset + sizeof(uint32_t) +
             plan.svga_result_size > mob->gbo.size) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-MOVE cid=%u query=%u type=%u(%s) payload-mobid=%u "
             "payload-offset=%u result=FAIL reason=destination",
             cid, command->queryId, (unsigned)type,
@@ -10935,8 +10941,8 @@ static bool vmsvga3d_d3d10_move_query_live(
     old_offset = query_read_u32(entry + 12);
     old_state = entry[3];
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-MOVE cid=%u query=%u type=%u(%s) payload-mobid=%u "
         "payload-offset=%u entry-mobid=%u entry-offset=%u qdstate=%u "
         "native-pending=%u action=RELOCATE",
@@ -10984,8 +10990,8 @@ static bool vmsvga3d_d3d10_move_query_live(
         return false;
     }
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-MOVE cid=%u query=%u type=%u(%s) old=%u/%u new=%u/%u "
         "qdstate=%u pending-write=%s result=OK",
         cid, command->queryId, (unsigned)type,
@@ -11024,6 +11030,7 @@ static bool vmsvga3d_d3d10_query_begin_live(
     uint32_t mobid;
     uint32_t offset;
     uint32_t query_state;
+    bool trace_3d;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
@@ -11069,12 +11076,13 @@ static bool vmsvga3d_d3d10_query_begin_live(
         return false;
     }
 
+    trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
     mobid = query_read_u32(entry + 8);
     offset = query_read_u32(entry + 12);
     mob = vmsvga3d_mob_get(s, mobid);
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-BEGIN cid=%u query=%u type=%u(%s) qdstate=%u flags=0x%08x "
         "mobid=%u offset=%u issue=1",
         cid, command->queryId, (unsigned)type, vmsvga3d_dx_query_type_name(type),
@@ -11089,8 +11097,8 @@ static bool vmsvga3d_d3d10_query_begin_live(
             state_write_ok = vmsvga3d_mob_write(
                 s, mob, offset, &query_state, sizeof(query_state));
         }
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-BEGIN cid=%u query=%u type=%u(%s) result=FAIL "
             "state-write=%s",
             cid, command->queryId, (unsigned)type,
@@ -11106,13 +11114,13 @@ static bool vmsvga3d_d3d10_query_begin_live(
         query_state = SVGA3D_QUERYSTATE_PENDING;
         state_write_ok = vmsvga3d_mob_write(
             s, mob, offset, &query_state, sizeof(query_state));
-        if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        if (trace_3d) {
             uint32_t verify_state = UINT32_MAX;
             bool verify_ok = vmsvga3d_mob_read(
                 s, mob, offset, &verify_state, sizeof(verify_state));
 
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
+            VMVGA_TRACE_LOCAL_CACHED(
+                trace_3d,
                 "DX-QUERY-GUEST-STATE stage=BEGIN cid=%u query=%u mobid=%u "
                 "offset=%u write=%s verify=%s state=0x%08x expected=0x%08x "
                 "match=%u",
@@ -11122,15 +11130,15 @@ static bool vmsvga3d_d3d10_query_begin_live(
                 verify_ok && verify_state == query_state ? 1u : 0u);
         }
     } else {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
+        VMVGA_TRACE_LOCAL_CACHED(
+            trace_3d,
             "DX-QUERY-GUEST-STATE stage=BEGIN cid=%u query=%u mobid=%u "
             "offset=%u write=SKIP reason=missing-mob",
             cid, command->queryId, mobid, offset);
     }
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
+    VMVGA_TRACE_LOCAL_CACHED(
+        trace_3d,
         "DX-QUERY-BEGIN cid=%u query=%u type=%u(%s) result=OK qdstate=%u",
         cid, command->queryId, (unsigned)type, vmsvga3d_dx_query_type_name(type),
         entry[3]);
@@ -11145,6 +11153,7 @@ static bool vmsvga3d_d3d10_bind_all_query_live(
     VMSVGA3DDXCOTable *binding;
     SVGACOTableDXQueryEntry *entries;
     uint32_t i;
+    bool trace_3d;
 
     if (s == NULL || command == NULL) {
         return false;
@@ -11168,9 +11177,9 @@ static bool vmsvga3d_d3d10_bind_all_query_live(
     }
 
     entries = (SVGACOTableDXQueryEntry *)binding->host;
+    trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
 
     for (i = 0; i < binding->capacity_entries; i++) {
-        uint32_t old_mobid;
 
         /* The COTable host shadow is zero-filled beyond bytes supplied by the
          * guest.  Query type 0 is OCCLUSION, so using only entry->type would
@@ -11183,17 +11192,22 @@ static bool vmsvga3d_d3d10_bind_all_query_live(
             continue;
         }
 
-        old_mobid = entries[i].mobid;
-        entries[i].mobid = command->mobid;
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-QUERY-BIND-ALL cid=%u query=%u type=%u(%s) old-mobid=%u "
-            "new-mobid=%u offset=%u qdstate=%u native-pending=%u",
-            command->cid, i, (unsigned)entries[i].type,
-            vmsvga3d_dx_query_type_name(entries[i].type), old_mobid,
-            command->mobid, entries[i].offset, entries[i].state,
-            vmsvga3d_dxvk_d3d11_query_pending(
-                s->dxvk, command->cid, i) ? 1u : 0u);
+        if (trace_3d) {
+            uint32_t old_mobid = entries[i].mobid;
+
+            entries[i].mobid = command->mobid;
+            VMVGA_TRACE_LOCAL_CACHED(
+                trace_3d,
+                "DX-QUERY-BIND-ALL cid=%u query=%u type=%u(%s) old-mobid=%u "
+                "new-mobid=%u offset=%u qdstate=%u native-pending=%u",
+                command->cid, i, (unsigned)entries[i].type,
+                vmsvga3d_dx_query_type_name(entries[i].type), old_mobid,
+                command->mobid, entries[i].offset, entries[i].state,
+                vmsvga3d_dxvk_d3d11_query_pending(
+                    s->dxvk, command->cid, i) ? 1u : 0u);
+        } else {
+            entries[i].mobid = command->mobid;
+        }
     }
 
     return true;

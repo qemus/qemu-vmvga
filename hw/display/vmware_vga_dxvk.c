@@ -6981,7 +6981,14 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     }
 
     if (shader->shader != NULL) {
-        return true;
+        if (shader->shader_type != SVGA3D_SHADERTYPE_GS ||
+            shader->stream_output_id == stream_output_id) {
+            return true;
+        }
+
+        vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        shader->shader = NULL;
+        shader->stream_output_id = SVGA3D_INVALID_ID;
     }
 
     switch (shader->shader_type) {

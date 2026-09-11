@@ -4648,8 +4648,8 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_legacy_entry(
     memcpy(dst->streamOutputStrideInBytes, src->streamOutputStrideInBytes,
            sizeof(dst->streamOutputStrideInBytes));
 
-    dst->rasterizedStream = 0;
-    dst->numOutputStreamStrides = 0;
+    dst->rasterizedStream = SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
+    dst->numOutputStreamStrides = 1;
     dst->mobid = SVGA3D_INVALID_ID;
     dst->usesMob = 0;
 
@@ -11680,6 +11680,7 @@ static bool vmsvga3d_d3d10_command_allows_invalid_context(uint32_t cmd)
     case SVGA_3D_CMD_DX_UPDATE_SUBRESOURCE:
     case SVGA_3D_CMD_DX_READBACK_SUBRESOURCE:
     case SVGA_3D_CMD_DX_INVALIDATE_SUBRESOURCE:
+    case SVGA_3D_CMD_DX_RESOLVE_COPY:
     case SVGA_3D_CMD_DX_TRANSFER_FROM_BUFFER:
     case SVGA_3D_CMD_DX_PRED_TRANSFER_FROM_BUFFER:
     case SVGA_3D_CMD_DX_MOB_FENCE_64:

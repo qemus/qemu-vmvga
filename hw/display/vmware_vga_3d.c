@@ -1761,8 +1761,29 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s)
         s->svga3d_capable = true;
         s->svga3d_dx_capable = vmsvga3d_dxvk_d3d11_ready(s->dxvk);
     } else {
+        VMSVGA3DDxvk *diagnostic_dxvk = NULL;
+        Error *diagnostic_err = NULL;
+
         vmsvga3d_dxvk_destroy(s->dxvk);
         s->dxvk = NULL;
+
+        fprintf(stderr,
+                "VMVGA: warning: 3D acceleration was requested, but DXVK "
+                "initialization failed: %s\n",
+                local_err != NULL ? error_get_pretty(local_err) :
+                                    "unknown error");
+
+        if (!s->debug) {
+            fprintf(stderr,
+                    "VMVGA: retrying DXVK initialization with diagnostics "
+                    "enabled:\n");
+            diagnostic_dxvk = vmsvga3d_dxvk_create(
+                s->active_valid ? s->active_width : 0,
+                s->active_valid ? s->active_height : 0, true,
+                &diagnostic_err);
+            vmsvga3d_dxvk_destroy(diagnostic_dxvk);
+            error_free(diagnostic_err);
+        }
     }
 
     error_free(local_err);

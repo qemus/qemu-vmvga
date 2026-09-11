@@ -3454,16 +3454,15 @@ bool vmsvga3d_dxvk_surface_materialize(
     }
 
     if (resource_plan->use == VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET) {
-        const char *depth_plan =
-            surface->d3d9_resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
-                    resource_plan->stencil_as_texture
-                ? "intz"
-                : "surface";
-
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "D3D9-DEPTH sid=%u format=%u plan=%s fallback=%u bounce=%u",
-            surface->sid, resource_plan->requested_format, depth_plan,
+            surface->sid, resource_plan->requested_format,
+            surface->d3d9_resource_type ==
+                        VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+                    resource_plan->stencil_as_texture
+                ? "intz"
+                : "surface",
             used_surface_fallback ? 1u : 0u,
             surface->d3d9_has_bounce ? 1u : 0u);
     }
@@ -8407,18 +8406,14 @@ bool vmsvga3d_dxvk_d3d11_query_get_data(
         return false;
     }
 
-    {
-        bool pending_before = query->pending;
-
-        result = get_data(dxvk->d3d11_context, query->query, data, data_size,
-                          getdata_flags);
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-QUERY-NATIVE-GETDATA cid=%u query=%u d3d=%u size=%u "
-            "flags=0x%08x hr=0x%08x pending-before=%u",
-            cid, query_id, query->d3d_query, data_size, getdata_flags,
-            (uint32_t)result, pending_before ? 1u : 0u);
-    }
+    result = get_data(dxvk->d3d11_context, query->query, data, data_size,
+                      getdata_flags);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-QUERY-NATIVE-GETDATA cid=%u query=%u d3d=%u size=%u "
+        "flags=0x%08x hr=0x%08x pending-before=%u",
+        cid, query_id, query->d3d_query, data_size, getdata_flags,
+        (uint32_t)result, query->pending ? 1u : 0u);
     if (result == 0) { /* S_OK */
         bool cache_ok = vmsvga3d_dxvk_d3d11_query_completion_store(
             query, data, data_size);
@@ -10789,20 +10784,22 @@ bool vmsvga3d_dxvk_set_render_state(VMSVGA3DDxvk *dxvk, uint32_t state,
         !vmsvga3d_dxvk_get_method(
             dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_RENDER_STATE,
             &set_state, sizeof(set_state))) {
-        fprintf(stderr,
-                "VMVGA-D3D9-SETRENDERSTATE fail stage=method state=%u "
-                "value=0x%08x\n",
-                state, value);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-SETRENDERSTATE fail stage=method state=%u "
+            "value=0x%08x",
+            state, value);
         return false;
     }
 
     result = set_state(dxvk->d3d9_device, state, value);
 
     if (!vmsvga3d_dxvk_succeeded(result)) {
-        fprintf(stderr,
-                "VMVGA-D3D9-SETRENDERSTATE fail stage=call state=%u "
-                "value=0x%08x hr=0x%08x\n",
-                state, value, (uint32_t)result);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-SETRENDERSTATE fail stage=call state=%u "
+            "value=0x%08x hr=0x%08x",
+            state, value, (uint32_t)result);
         return false;
     }
 

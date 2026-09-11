@@ -327,6 +327,7 @@ typedef struct vmsvga3d_d3d9_transfer_surface_s {
     VMSVGA3DD3D9HostResourceType resource_type;
     SVGA3dSurface1Flags surface_flags;
     uint32_t usage;
+    uint32_t format;
     uint32_t block_width;
     uint32_t block_height;
     uint32_t block_depth;

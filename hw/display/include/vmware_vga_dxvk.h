@@ -91,6 +91,8 @@ void vmsvga3d_dxvk_d3d11_flush(VMSVGA3DDxvk *dxvk);
 /* Intersect a legacy VMware format-op mask with the live D3D9 adapter. */
 uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
     const VMSVGA3DDxvk *dxvk, uint32_t format, uint32_t caps);
+/* True when the live D3D9 adapter supports the INTZ depth texture format. */
+bool vmsvga3d_dxvk_d3d9_supports_intz(const VMSVGA3DDxvk *dxvk);
 /* Keep a canonical VMware DXFMT mask only if the live D3D11 adapter can use it. */
 uint32_t vmsvga3d_dxvk_d3d11_qualify_format_caps(
     const VMSVGA3DDxvk *dxvk, uint32_t format, bool buffer, uint32_t caps);

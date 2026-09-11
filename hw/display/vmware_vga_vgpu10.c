@@ -8281,16 +8281,36 @@ static bool vmsvga3d_d3d10_mob_subresource_layout_live(
 
     if (entry == NULL || surface == NULL || surface->mips == NULL ||
         layout == NULL || subresource >= surface->mip_count) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-MOB-LAYOUT sid=%u sub=%u stage=arguments mip_count=%u "
+            "entry=%u mips=%u layout=%u result=REJECT",
+            surface != NULL ? surface->sid : SVGA3D_INVALID_ID,
+            subresource, surface != NULL ? surface->mip_count : 0,
+            entry != NULL ? 1u : 0u,
+            surface != NULL && surface->mips != NULL ? 1u : 0u,
+            layout != NULL ? 1u : 0u);
         return false;
     }
 
     desc = svga3dsurface_get_desc(surface->format);
     if (desc->format != surface->format) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-MOB-LAYOUT sid=%u sub=%u stage=format surface_format=%u "
+            "desc_format=%u result=REJECT",
+            surface->sid, subresource, (uint32_t)surface->format,
+            (uint32_t)desc->format);
         return false;
     }
 
     levels = le32_to_cpu(entry->numMipLevels);
     if (levels == 0) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-MOB-LAYOUT sid=%u sub=%u stage=levels levels=0 "
+            "result=REJECT",
+            surface->sid, subresource);
         return false;
     }
 
@@ -8316,6 +8336,12 @@ static bool vmsvga3d_d3d10_mob_subresource_layout_live(
         if (image->pitch == 0 || image->plane_size == 0 ||
             image->data_size == 0 || image->plane_size % image->pitch != 0 ||
             image->data_size % image->plane_size != 0) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-MOB-LAYOUT sid=%u sub=%u image=%u stage=image-layout "
+                "pitch=%u plane=%u data=%u result=REJECT",
+                surface->sid, subresource, i, image->pitch,
+                image->plane_size, image->data_size);
             return false;
         }
 
@@ -8327,6 +8353,13 @@ static bool vmsvga3d_d3d10_mob_subresource_layout_live(
             row_pitch = mob_pitch;
         }
         if (row_pitch < image->pitch) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-MOB-LAYOUT sid=%u sub=%u image=%u stage=row-pitch "
+                "mob_pitch=%u row_pitch=%u image_pitch=%u flags=0x%08x "
+                "levels=%u result=REJECT",
+                surface->sid, subresource, i, mob_pitch, row_pitch,
+                image->pitch, surface_flags, levels);
             return false;
         }
 
@@ -8336,6 +8369,13 @@ static bool vmsvga3d_d3d10_mob_subresource_layout_live(
         data_size = plane_size * depth_count;
         if (plane_size > UINT32_MAX || data_size > UINT32_MAX ||
             offset > UINT32_MAX) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-MOB-LAYOUT sid=%u sub=%u image=%u stage=overflow "
+                "row_pitch=%u rows=%u depth=%u plane=%" PRIu64 " "
+                "data=%" PRIu64 " offset=%" PRIu64 " result=REJECT",
+                surface->sid, subresource, i, row_pitch, row_count,
+                depth_count, plane_size, data_size, offset);
             return false;
         }
 
@@ -8349,6 +8389,11 @@ static bool vmsvga3d_d3d10_mob_subresource_layout_live(
         offset += data_size;
     }
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "GB-MOB-LAYOUT sid=%u sub=%u stage=not-found mip_count=%u "
+        "result=REJECT",
+        surface->sid, subresource, surface->mip_count);
     return false;
 }
 
@@ -8806,6 +8851,14 @@ static bool vmsvga3d_d3d10_update_subresource_live(
     guest_x_offset = layout.box_offset % image->pitch;
     if (guest_x_offset > mob_layout.row_pitch ||
         layout.row_bytes > mob_layout.row_pitch - guest_x_offset) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-MOB-LAYOUT sid=%u sub=%u stage=update-box-row "
+            "guest_x=%u row_bytes=%u mob_row_pitch=%u host_pitch=%u "
+            "rows=%u depth=%u result=REJECT",
+            command->sid, command->subResource, guest_x_offset,
+            layout.row_bytes, mob_layout.row_pitch, image->pitch,
+            layout.row_count, layout.depth_count);
         return false;
     }
 
@@ -9385,6 +9438,14 @@ static bool vmsvga3d_gb_readback_image_partial_live(
         guest_x_offset = layout.box_offset % image->pitch;
         if (guest_x_offset > mob_layout.row_pitch ||
             layout.row_bytes > mob_layout.row_pitch - guest_x_offset) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-MOB-LAYOUT sid=%u sub=%u stage=readback-box-row "
+                "guest_x=%u row_bytes=%u mob_row_pitch=%u host_pitch=%u "
+                "rows=%u depth=%u result=REJECT",
+                image_id->sid, subresource, guest_x_offset,
+                layout.row_bytes, mob_layout.row_pitch, image->pitch,
+                layout.row_count, layout.depth_count);
             return false;
         }
 

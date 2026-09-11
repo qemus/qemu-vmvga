@@ -3088,7 +3088,7 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
 }
 
 static bool vmsvga3d_dxvk_apply_context_textures(
-    struct vmsvga_state_s *s, VMSVGA3DContext *context)
+    struct vmsvga_state_s *s, VMSVGA3DContext *context, bool trace_3d)
 {
     uint32_t stage;
     uint32_t name;
@@ -3121,17 +3121,87 @@ static bool vmsvga3d_dxvk_apply_context_textures(
             case VMSVGA3D_D3D9_TEXTURE_ACTION_BIND:
                 if (plan.value == SVGA3D_INVALID_ID) {
                     if (!vmsvga3d_dxvk_set_texture(s->dxvk, plan.stage, NULL)) {
+                        VMVGA_TRACE_LOCAL_CACHED(
+                            trace_3d,
+                            "D3D9-TEXTURE stage=unbind sampler=%u result=FAIL",
+                            plan.stage);
                         return false;
                     }
+                    VMVGA_TRACE_LOCAL_CACHED(
+                        trace_3d,
+                        "D3D9-TEXTURE stage=unbind sampler=%u result=OK",
+                        plan.stage);
                 } else {
                     VMSVGA3DSurface *surface;
 
-                    if (s->svga3d == NULL || plan.value >= SVGA3D_MAX_SURFACE_IDS ||
-                        (surface = s->svga3d->surfaces[plan.value]) == NULL ||
-                        !vmsvga3d_dxvk_materialize_texture(s, surface) ||
-                        !vmsvga3d_dxvk_set_texture(s->dxvk, plan.stage,
-                                                    surface->dxvk_surface)) {
+                    if (s->svga3d == NULL ||
+                        plan.value >= SVGA3D_MAX_SURFACE_IDS) {
+                        VMVGA_TRACE_LOCAL_CACHED(
+                            trace_3d,
+                            "D3D9-TEXTURE stage=lookup sampler=%u sid=%u "
+                            "result=FAIL",
+                            plan.stage, plan.value);
                         return false;
+                    }
+
+                    surface = s->svga3d->surfaces[plan.value];
+                    if (surface == NULL) {
+                        VMVGA_TRACE_LOCAL_CACHED(
+                            trace_3d,
+                            "D3D9-TEXTURE stage=lookup sampler=%u sid=%u "
+                            "result=FAIL",
+                            plan.stage, plan.value);
+                        return false;
+                    }
+
+                    if (!vmsvga3d_dxvk_materialize_texture(s, surface)) {
+                        VMVGA_TRACE_LOCAL_CACHED(
+                            trace_3d,
+                            "D3D9-TEXTURE stage=materialize sampler=%u sid=%u "
+                            "format=%u result=FAIL",
+                            plan.stage, surface->sid, (uint32_t)surface->format);
+                        return false;
+                    }
+
+                    if (!vmsvga3d_dxvk_set_texture(
+                            s->dxvk, plan.stage, surface->dxvk_surface)) {
+                        VMVGA_TRACE_LOCAL_CACHED(
+                            trace_3d,
+                            "D3D9-TEXTURE stage=bind sampler=%u sid=%u "
+                            "format=%u result=FAIL",
+                            plan.stage, surface->sid, (uint32_t)surface->format);
+                        return false;
+                    }
+
+                    if (trace_3d) {
+                        VMSVGA3DD3D9TransferSurface trace_info = { 0 };
+                        const VMSVGA3DSurfaceImage *trace_image =
+                            surface->mip_count != 0 && surface->mips != NULL
+                                ? &surface->mips[0]
+                                : NULL;
+                        bool trace_info_ok =
+                            vmsvga3d_d3d9_transfer_surface_info(
+                                s, surface, &trace_info);
+
+                        VMVGA_TRACE_LOCAL_CACHED(
+                            true,
+                            "D3D9-TEXTURE stage=bind sampler=%u sid=%u "
+                            "format=%u size=%ux%ux%u pitch=%u data=%u "
+                            "mips=%u storage=%llu resident=%u host_type=%u "
+                            "host_format=%u result=OK",
+                            plan.stage, surface->sid, (uint32_t)surface->format,
+                            trace_image != NULL ? trace_image->size.width : 0,
+                            trace_image != NULL ? trace_image->size.height : 0,
+                            trace_image != NULL ? trace_image->size.depth : 0,
+                            trace_image != NULL ? trace_image->pitch : 0,
+                            trace_image != NULL ? trace_image->data_size : 0,
+                            surface->mip_count,
+                            (unsigned long long)surface->storage_bytes,
+                            (trace_info_ok && trace_info.resident) ? 1u : 0u,
+                            trace_info_ok
+                                ? (uint32_t)trace_info.resource_type
+                                : 0u,
+                            trace_info_ok ? trace_info.format : 0);
                     }
                 }
                 break;
@@ -3245,7 +3315,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     uint32_t i;
     bool scene_started = false;
     bool success = false;
-    bool trace = vmsvga_trace_flight_enabled();
+    bool trace = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
     const char *failure_stage = NULL;
     uint32_t failure_range = UINT32_MAX;
 
@@ -3375,7 +3445,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         failure_stage = "apply-fixed-state";
         goto out;
     }
-    if (!vmsvga3d_dxvk_apply_context_textures(s, context)) {
+    if (!vmsvga3d_dxvk_apply_context_textures(s, context, trace)) {
         failure_stage = "apply-textures";
         goto out;
     }
@@ -3406,7 +3476,25 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
             failure_stage = "stream-surface-missing";
             goto out;
         }
+        if (!vmsvga3d_dxvk_materialize_buffer(
+                s, surface, VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER, 0)) {
+            failure_stage = "materialize-vertex-buffer";
+            goto out;
+        }
         if (trace) {
+            const uint8_t *bytes = surface->mips[0].data;
+            uint32_t byte_count = (uint32_t)surface->storage_bytes;
+            uint32_t checksum = UINT32_C(2166136261);
+            uint32_t j;
+
+            /* This byte walk is deliberately inside the exact runtime trace
+             * guard.  The baseline already had this per-stream trace branch,
+             * so disabled tracing gains no extra hot-path branch here. */
+            for (j = 0; j < byte_count; j++) {
+                checksum ^= bytes[j];
+                checksum *= UINT32_C(16777619);
+            }
+
             fprintf(stderr,
                     "VMVGA-D3D9-DRAW stream-bind[%u] sid=%u storage=%llu "
                     "dxvk=%p offset=%u stride=%u frequency=0x%08x\n",
@@ -3414,11 +3502,10 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                     (unsigned long long)surface->storage_bytes,
                     surface->dxvk_surface, streams[i].source_offset,
                     streams[i].stride, streams[i].frequency);
-        }
-        if (!vmsvga3d_dxvk_materialize_buffer(
-                s, surface, VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER, 0)) {
-            failure_stage = "materialize-vertex-buffer";
-            goto out;
+            fprintf(stderr,
+                    "VMVGA-D3D9-BUFFER sid=%u role=vertex bytes=%u "
+                    "checksum=fnv1a32:%08x result=OK\n",
+                    surface->sid, byte_count, checksum);
         }
         if (!vmsvga3d_dxvk_set_stream_source(
                 s->dxvk, i, surface->dxvk_surface, streams[i].source_offset,
@@ -3525,14 +3612,6 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                 failure_stage = "index-surface-missing";
                 goto out;
             }
-            if (trace) {
-                fprintf(stderr,
-                        "VMVGA-D3D9-DRAW index-bind[%u] sid=%u storage=%llu "
-                        "dxvk=%p width=%u\n",
-                        i, plan.index_surface_id,
-                        (unsigned long long)index_surface->storage_bytes,
-                        index_surface->dxvk_surface, ranges[i].indexWidth);
-            }
             if (!vmsvga3d_dxvk_materialize_buffer(
                     s, index_surface,
                     VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER,
@@ -3540,6 +3619,31 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                 failure_range = i;
                 failure_stage = "materialize-index-buffer";
                 goto out;
+            }
+            if (trace) {
+                const uint8_t *bytes = index_surface->mips[0].data;
+                uint32_t byte_count = (uint32_t)index_surface->storage_bytes;
+                uint32_t checksum = UINT32_C(2166136261);
+                uint32_t j;
+
+                /* As above, checksum preparation is trace-only and remains
+                 * behind the pre-existing per-index-buffer trace branch. */
+                for (j = 0; j < byte_count; j++) {
+                    checksum ^= bytes[j];
+                    checksum *= UINT32_C(16777619);
+                }
+
+                fprintf(stderr,
+                        "VMVGA-D3D9-DRAW index-bind[%u] sid=%u storage=%llu "
+                        "dxvk=%p width=%u\n",
+                        i, plan.index_surface_id,
+                        (unsigned long long)index_surface->storage_bytes,
+                        index_surface->dxvk_surface, ranges[i].indexWidth);
+                fprintf(stderr,
+                        "VMVGA-D3D9-BUFFER sid=%u role=index bytes=%u "
+                        "index_width=%u checksum=fnv1a32:%08x result=OK\n",
+                        index_surface->sid, byte_count, ranges[i].indexWidth,
+                        checksum);
             }
             if (!vmsvga3d_dxvk_set_indices(s->dxvk,
                                            index_surface->dxvk_surface)) {

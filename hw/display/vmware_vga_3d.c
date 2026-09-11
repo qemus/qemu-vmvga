@@ -3755,38 +3755,55 @@ static void vmsvga3d_d3d9_process_pending_gb_queries_filtered(
         poll = vmsvga3d_dxvk_d3d9_gb_query_poll(
             s->dxvk, query->token, sizeof(result), flags, wait, &result);
         if (poll == VMSVGA3D_D3D9_GB_QUERY_POLL_PENDING) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-QUERY phase=poll cid=%u type=%u token=%" PRIu64
+                " mobid=%u offset=0x%08x state=PENDING source=%s",
+                query->cid, (uint32_t)query->type, query->token,
+                query->mobid, query->offset,
+                source != NULL ? source : "unknown");
             link = &query->next;
             continue;
         }
 
         if (poll == VMSVGA3D_D3D9_GB_QUERY_POLL_READY) {
-            bool published = vmsvga3d_gb_query_publish(
-                s, query, SVGA3D_QUERYSTATE_SUCCEEDED, result);
+            if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+                bool published = vmsvga3d_gb_query_publish(
+                    s, query, SVGA3D_QUERYSTATE_SUCCEEDED, result);
 
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
-                "GB-QUERY phase=complete cid=%u type=%u token=%" PRIu64
-                " mobid=%u offset=0x%08x result=%u state=%s source=%s",
-                query->cid, (uint32_t)query->type, query->token,
-                query->mobid, query->offset, result,
-                published ? "SUCCEEDED" : "STALE",
-                source != NULL ? source : "unknown");
+                VMVGA_TRACE_LOCAL_CACHED(
+                    true,
+                    "GB-QUERY phase=complete cid=%u type=%u token=%" PRIu64
+                    " mobid=%u offset=0x%08x poll=READY result=%u "
+                    "publish=%s source=%s",
+                    query->cid, (uint32_t)query->type, query->token,
+                    query->mobid, query->offset, result,
+                    published ? "SUCCEEDED" : "STALE",
+                    source != NULL ? source : "unknown");
+            } else {
+                (void)vmsvga3d_gb_query_publish(
+                    s, query, SVGA3D_QUERYSTATE_SUCCEEDED, result);
+            }
             vmsvga3d_gb_query_unlink(s, link, false, "complete");
             continue;
         }
 
-        {
+        if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
             bool published = vmsvga3d_gb_query_publish(
                 s, query, SVGA3D_QUERYSTATE_FAILED, 0);
 
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
+            VMVGA_TRACE_LOCAL_CACHED(
+                true,
                 "GB-QUERY phase=complete cid=%u type=%u token=%" PRIu64
-                " mobid=%u offset=0x%08x result=0 state=%s source=%s",
+                " mobid=%u offset=0x%08x poll=FAILED result=0 "
+                "publish=%s source=%s",
                 query->cid, (uint32_t)query->type, query->token,
                 query->mobid, query->offset,
                 published ? "FAILED" : "STALE",
                 source != NULL ? source : "unknown");
+        } else {
+            (void)vmsvga3d_gb_query_publish(
+                s, query, SVGA3D_QUERYSTATE_FAILED, 0);
         }
         vmsvga3d_gb_query_unlink(s, link, false, "renderer-failed");
     }
@@ -3932,10 +3949,12 @@ static bool vmsvga3d_handle_gb_query(struct vmsvga_state_s *s,
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "GB-QUERY phase=end cid=%u type=%u token=%" PRIu64
-            " mobid=%u offset=0x%08x cookie=0x%08x target=%u queued=%u result=%s",
+            " mobid=%u offset=0x%08x cookie=0x%08x target=%u queued=%u "
+            "state=%s result=%s",
             body->cid, (uint32_t)body->type, token, body->mobid, body->offset,
             target_ok ? guest_result.queryCookie : 0u,
             target_ok ? 1u : 0u, queued ? 1u : 0u,
+            queued ? "PENDING" : "FAILED",
             end_ok ? "OK" : "FAIL");
 
         if (queued) {

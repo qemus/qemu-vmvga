@@ -3321,7 +3321,7 @@ static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
     body = payload;
     states = (SVGA3dRenderState *)(body + 1);
     count = (size - sizeof(*body)) / sizeof(*states);
-    {
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
         uint32_t i;
 
         for (i = 0; i < count; i++) {
@@ -4794,7 +4794,7 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     body = payload;
     rects = (SVGA3dRect *)(body + 1);
     rect_count = rect_bytes / sizeof(SVGA3dRect);
-    {
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
         VMSVGA3DContext *context = vmsvga3d_context(s, body->cid);
         uint32_t color_sid = SVGA3D_INVALID_ID;
         uint32_t depth_sid = SVGA3D_INVALID_ID;
@@ -8280,7 +8280,9 @@ static bool vmsvga3d_gb_context_snapshot(struct vmsvga_state_s *s,
     out->occQueryActive = context->occlusion.defined &&
                           context->occlusion.state == VMSVGA3D_QUERY_BUILDING;
     out->occQueryValue = context->occlusion.result;
-    vmsvga3d_trace_gb_context_render_states("snapshot", cid, context, out);
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        vmsvga3d_trace_gb_context_render_states("snapshot", cid, context, out);
+    }
     return true;
 }
 
@@ -8428,7 +8430,9 @@ static bool vmsvga3d_gb_context_restore(struct vmsvga_state_s *s,
         context->vertex_divisors[i] = in->divisors[i];
     }
 
-    vmsvga3d_trace_gb_context_render_states("restore", cid, context, in);
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        vmsvga3d_trace_gb_context_render_states("restore", cid, context, in);
+    }
     return true;
 }
 
@@ -10192,14 +10196,20 @@ static bool vmsvga3d_handle_gb_context(struct vmsvga_state_s *s,
                 vmsvga3d_gb_context_snapshot(s, body->cid, &contents)) {
                 mob = vmsvga3d_mob_get(s, entry.mobid);
                 if (mob != NULL) {
-                    bool write_ok = vmsvga3d_mob_write(
-                        s, mob, 0, &contents, sizeof(contents));
+                    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+                        bool write_ok = vmsvga3d_mob_write(
+                            s, mob, 0, &contents, sizeof(contents));
 
-                    VMVGA_TRACE_LOCAL(
-                        VMVGA_TRACE_3D,
-                        "GB-CONTEXT phase=snapshot-write cid=%u mob=%u "
-                        "result=%s",
-                        body->cid, entry.mobid, write_ok ? "OK" : "FAIL");
+                        VMVGA_TRACE_LOCAL(
+                            VMVGA_TRACE_3D,
+                            "GB-CONTEXT phase=snapshot-write cid=%u mob=%u "
+                            "result=%s",
+                            body->cid, entry.mobid,
+                            write_ok ? "OK" : "FAIL");
+                    } else {
+                        (void)vmsvga3d_mob_write(s, mob, 0, &contents,
+                                                 sizeof(contents));
+                    }
                 }
             }
 
@@ -10208,14 +10218,20 @@ static bool vmsvga3d_handle_gb_context(struct vmsvga_state_s *s,
                 if (mob != NULL &&
                     vmsvga3d_mob_read(s, mob, 0, &contents,
                                       sizeof(contents))) {
-                    bool restore_ok =
-                        vmsvga3d_gb_context_restore(s, body->cid, &contents);
+                    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+                        bool restore_ok = vmsvga3d_gb_context_restore(
+                            s, body->cid, &contents);
 
-                    VMVGA_TRACE_LOCAL(
-                        VMVGA_TRACE_3D,
-                        "GB-CONTEXT phase=restore-read cid=%u mob=%u "
-                        "result=%s",
-                        body->cid, body->mobid, restore_ok ? "OK" : "FAIL");
+                        VMVGA_TRACE_LOCAL(
+                            VMVGA_TRACE_3D,
+                            "GB-CONTEXT phase=restore-read cid=%u mob=%u "
+                            "result=%s",
+                            body->cid, body->mobid,
+                            restore_ok ? "OK" : "FAIL");
+                    } else {
+                        (void)vmsvga3d_gb_context_restore(
+                            s, body->cid, &contents);
+                    }
                 }
             }
             entry.mobid = body->mobid;

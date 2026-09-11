@@ -7651,6 +7651,10 @@ static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s)
             SVGA_FIFO_CAP_RESERVE | SVGA_FIFO_CAP_SCREEN_OBJECT |
             SVGA_FIFO_CAP_GMR2;
 #endif
+
+    if (s->vgpu_generation == VMSVGA_VGPU_9 && s->enable_3d) {
+        s->fc &= ~SVGA_FIFO_CAP_FENCE;
+    }
 }
 
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,

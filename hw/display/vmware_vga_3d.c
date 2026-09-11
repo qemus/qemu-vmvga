@@ -7828,7 +7828,8 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
     if (header.status != SVGA_CB_STATUS_NONE ||
         (header.flags & ~(SVGA_CB_FLAG_NO_IRQ | SVGA_CB_FLAG_DX_CONTEXT |
                           SVGA_CB_FLAG_MOB)) != 0 ||
-        ((header.flags & SVGA_CB_FLAG_MOB) != 0 && !s->svga3d_dx_capable) ||
+        ((header.flags & SVGA_CB_FLAG_MOB) != 0 &&
+         !vmsvga_guest_backed_objects_capable(s)) ||
         header.length > SVGA_CB_MAX_SIZE || header.offset > header.length ||
         reserved_nonzero) {
         VMVGA_TRACE_LOCAL(

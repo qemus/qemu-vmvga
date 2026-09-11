@@ -587,6 +587,28 @@ struct vmsvga_state_s {
     uint32_t legacy_vga_size;
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMVGA, "vmvga")
+
+static inline bool vmsvga_vgpu9_modern_3d_capable(
+    const struct vmsvga_state_s *s)
+{
+    return s != NULL && s->vgpu_generation == VMSVGA_VGPU_9 &&
+           s->svga3d_capable;
+}
+
+static inline bool vmsvga_command_buffers_capable(
+    const struct vmsvga_state_s *s)
+{
+    return s != NULL &&
+           (s->svga3d_dx_capable || vmsvga_vgpu9_modern_3d_capable(s));
+}
+
+static inline bool vmsvga_guest_backed_objects_capable(
+    const struct vmsvga_state_s *s)
+{
+    return s != NULL &&
+           (s->svga3d_dx_capable || vmsvga_vgpu9_modern_3d_capable(s));
+}
+
 struct pci_vmsvga_state_s {
     PCIDevice parent_obj;
     struct vmsvga_state_s chip;
@@ -8299,6 +8321,13 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         if (s->svga3d_dx_capable) {
             caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
                     SVGA_CAP_GBOBJECTS | SVGA_CAP_DX;
+        } else if (vmsvga_vgpu9_modern_3d_capable(s)) {
+            /* Keep the legacy SVGA3D/D3D9 command set, but expose the
+             * guest-backed resource model and modern command-buffer
+             * transport independently from SVGA_CAP_DX. */
+            caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
+                    SVGA_CAP_GBOBJECTS;
+            caps &= ~SVGA_CAP_DX;
         } else {
             caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
                       SVGA_CAP_GBOBJECTS | SVGA_CAP_DX);
@@ -8317,9 +8346,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
 #ifdef EXPCAPS
         ret = s->svga3d_dx_capable
                   ? 0xffffffff
-                  : (s->vgpu_generation == VMSVGA_VGPU_9
-                         ? SVGA_CAP2_SCREENDMA_REG
-                         : SVGA_CAP2_NONE);
+                  : SVGA_CAP2_NONE;
         if (s->vgpu_generation != VMSVGA_VGPU_11) {
             ret &= ~SVGA_CAP2_DX3;
         }
@@ -8327,8 +8354,9 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         ret = s->svga3d_dx_capable
                   ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2 |
                      SVGA_CAP2_GB_MEMSIZE_2 | SVGA_CAP2_SCREENDMA_REG)
-                  : (s->vgpu_generation == VMSVGA_VGPU_9
-                         ? SVGA_CAP2_SCREENDMA_REG
+                  : (vmsvga_vgpu9_modern_3d_capable(s)
+                         ? (SVGA_CAP2_GROW_OTABLE |
+                            SVGA_CAP2_GB_MEMSIZE_2)
                          : SVGA_CAP2_NONE);
         if (s->svga3d_dx_capable &&
             s->vgpu_generation == VMSVGA_VGPU_11) {
@@ -8915,7 +8943,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       s->cmd_low = value;
       VPRINT("SVGA_REG_COMMAND_LOW register %u with the value of %u\n", s->index,
              value);
-      if (s->svga3d_dx_capable) {
+      if (vmsvga_command_buffers_capable(s)) {
           vmsvga3d_command_buffer_submit(s, s->cmd_low, s->cmd_high, false);
       }
       break;
@@ -8928,7 +8956,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       s->cmd_prepend_low = value;
       VPRINT("SVGA_REG_CMD_PREPEND_LOW register %u with the value of %u\n",
              s->index, value);
-      if (s->svga3d_dx_capable) {
+      if (vmsvga_command_buffers_capable(s)) {
           vmsvga3d_command_buffer_submit(s, s->cmd_prepend_low,
                                          s->cmd_prepend_high, true);
       }

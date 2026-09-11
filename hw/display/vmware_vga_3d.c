@@ -3273,6 +3273,8 @@ static bool vmsvga3d_handle_set_light_enabled(struct vmsvga_state_s *s,
     return true;
 }
 
+static const char *vmsvga3d_trace_render_state_name(uint32_t state);
+
 static bool vmsvga3d_handle_set_clip_plane(struct vmsvga_state_s *s,
                                             uint32_t cmd, int32_t *len,
                                             uint32_t fifo_start)
@@ -3319,6 +3321,20 @@ static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
     body = payload;
     states = (SVGA3dRenderState *)(body + 1);
     count = (size - sizeof(*body)) / sizeof(*states);
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        uint32_t i;
+
+        for (i = 0; i < count; i++) {
+            const char *name = vmsvga3d_trace_render_state_name(states[i].state);
+
+            if (name != NULL) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "D3D9-STATE phase=set cid=%u state=%s(%u) value=0x%08x",
+                    body->cid, name, states[i].state, states[i].uintValue);
+            }
+        }
+    }
     (void)vmsvga3d_state_set_render_state(s, body->cid, count, states);
     g_free(payload);
 
@@ -4778,6 +4794,24 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     body = payload;
     rects = (SVGA3dRect *)(body + 1);
     rect_count = rect_bytes / sizeof(SVGA3dRect);
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        VMSVGA3DContext *context = vmsvga3d_context(s, body->cid);
+        uint32_t color_sid = SVGA3D_INVALID_ID;
+        uint32_t depth_sid = SVGA3D_INVALID_ID;
+        uint32_t stencil_sid = SVGA3D_INVALID_ID;
+
+        if (context != NULL) {
+            color_sid = context->render_targets[SVGA3D_RT_COLOR0].sid;
+            depth_sid = context->render_targets[SVGA3D_RT_DEPTH].sid;
+            stencil_sid = context->render_targets[SVGA3D_RT_STENCIL].sid;
+        }
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-CLEAR cid=%u flags=0x%08x color=0x%08x depth=%g "
+            "stencil=0x%08x rects=%u rt0=%u depth-sid=%u stencil-sid=%u",
+            body->cid, body->clearFlag, body->color, (double)body->depth,
+            body->stencil, rect_count, color_sid, depth_sid, stencil_sid);
+    }
 
     /* The VirtualBox D3D11 VGPU9 clear callback is a successful no-op.
      * Once one of the requested render targets is D3D11-resident, running our
@@ -4810,6 +4844,10 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
             s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR);
     }
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "D3D9-CLEAR result cid=%u accel=%u wrote=%u",
+        body->cid, (uint32_t)accel, wrote ? 1u : 0u);
     g_free(payload);
     return true;
 }
@@ -8037,6 +8075,61 @@ static void vmsvga3d_gb_vertex_stream_decode(
     dst->offset = src->offset;
 }
 
+static const char *vmsvga3d_trace_render_state_name(uint32_t state)
+{
+    switch (state) {
+    case SVGA3D_RS_CLIPPING:
+        return "CLIPPING";
+    case SVGA3D_RS_ZENABLE:
+        return "ZENABLE";
+    case SVGA3D_RS_ZWRITEENABLE:
+        return "ZWRITEENABLE";
+    case SVGA3D_RS_LIGHTINGENABLE:
+        return "LIGHTINGENABLE";
+    case SVGA3D_RS_CULLMODE:
+        return "CULLMODE";
+    case SVGA3D_RS_ZFUNC:
+        return "ZFUNC";
+    case SVGA3D_RS_COLORWRITEENABLE:
+        return "COLORWRITEENABLE";
+    default:
+        return NULL;
+    }
+}
+
+static void vmsvga3d_trace_gb_context_render_states(
+    const char *phase, uint32_t cid, const VMSVGA3DContext *context,
+    const SVGAGBContextData *contents)
+{
+    static const uint32_t states[] = {
+        SVGA3D_RS_CLIPPING,
+        SVGA3D_RS_ZENABLE,
+        SVGA3D_RS_ZWRITEENABLE,
+        SVGA3D_RS_LIGHTINGENABLE,
+        SVGA3D_RS_CULLMODE,
+        SVGA3D_RS_ZFUNC,
+        SVGA3D_RS_COLORWRITEENABLE,
+    };
+    uint32_t i;
+
+    if (phase == NULL || contents == NULL) {
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(states); i++) {
+        uint32_t state = states[i];
+        bool valid = context != NULL && context->render_state[state].valid;
+        uint32_t cached = context != NULL ? context->render_state[state].value : 0;
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-CONTEXT phase=%s cid=%u state=%s(%u) cached-valid=%u "
+            "cached=0x%08x mob=0x%08x",
+            phase, cid, vmsvga3d_trace_render_state_name(state), state,
+            valid ? 1u : 0u, cached, contents->renderStates[state]);
+    }
+}
+
 static bool vmsvga3d_gb_context_snapshot(struct vmsvga_state_s *s,
                                           uint32_t cid,
                                           SVGAGBContextData *out)
@@ -8187,6 +8280,9 @@ static bool vmsvga3d_gb_context_snapshot(struct vmsvga_state_s *s,
     out->occQueryActive = context->occlusion.defined &&
                           context->occlusion.state == VMSVGA3D_QUERY_BUILDING;
     out->occQueryValue = context->occlusion.result;
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        vmsvga3d_trace_gb_context_render_states("snapshot", cid, context, out);
+    }
     return true;
 }
 
@@ -8334,6 +8430,9 @@ static bool vmsvga3d_gb_context_restore(struct vmsvga_state_s *s,
         context->vertex_divisors[i] = in->divisors[i];
     }
 
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        vmsvga3d_trace_gb_context_render_states("restore", cid, context, in);
+    }
     return true;
 }
 
@@ -10087,13 +10186,30 @@ static bool vmsvga3d_handle_gb_context(struct vmsvga_state_s *s,
         if (vmsvga3d_gb_context_entry_read(s, body->cid, &entry) &&
             (body->mobid == SVGA3D_INVALID_ID ||
              vmsvga3d_mob_get(s, body->mobid) != NULL)) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-CONTEXT phase=bind cid=%u old-mob=%u new-mob=%u "
+                "validContents=%u",
+                body->cid, entry.mobid, body->mobid, body->validContents);
             if (entry.mobid != SVGA3D_INVALID_ID &&
                 entry.mobid != body->mobid &&
                 vmsvga3d_gb_context_snapshot(s, body->cid, &contents)) {
                 mob = vmsvga3d_mob_get(s, entry.mobid);
                 if (mob != NULL) {
-                    (void)vmsvga3d_mob_write(s, mob, 0, &contents,
-                                             sizeof(contents));
+                    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+                        bool write_ok = vmsvga3d_mob_write(
+                            s, mob, 0, &contents, sizeof(contents));
+
+                        VMVGA_TRACE_LOCAL(
+                            VMVGA_TRACE_3D,
+                            "GB-CONTEXT phase=snapshot-write cid=%u mob=%u "
+                            "result=%s",
+                            body->cid, entry.mobid,
+                            write_ok ? "OK" : "FAIL");
+                    } else {
+                        (void)vmsvga3d_mob_write(s, mob, 0, &contents,
+                                                 sizeof(contents));
+                    }
                 }
             }
 
@@ -10102,7 +10218,20 @@ static bool vmsvga3d_handle_gb_context(struct vmsvga_state_s *s,
                 if (mob != NULL &&
                     vmsvga3d_mob_read(s, mob, 0, &contents,
                                       sizeof(contents))) {
-                    (void)vmsvga3d_gb_context_restore(s, body->cid, &contents);
+                    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+                        bool restore_ok = vmsvga3d_gb_context_restore(
+                            s, body->cid, &contents);
+
+                        VMVGA_TRACE_LOCAL(
+                            VMVGA_TRACE_3D,
+                            "GB-CONTEXT phase=restore-read cid=%u mob=%u "
+                            "result=%s",
+                            body->cid, body->mobid,
+                            restore_ok ? "OK" : "FAIL");
+                    } else {
+                        (void)vmsvga3d_gb_context_restore(
+                            s, body->cid, &contents);
+                    }
                 }
             }
             entry.mobid = body->mobid;

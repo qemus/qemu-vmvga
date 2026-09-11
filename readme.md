@@ -1,14 +1,21 @@
-# VMVGA 🖥️
+<h1 align="center"><br />
+<div align="center"><a href="https://github.com/qemus/qemu-vmvga"><img src="https://github.com/qemus/qemu-vmvga/raw/master/.github/logo.png" title="Logo" style="max-width:100%;" width="128" /></a>
+</div>
+<div align="center">
+
+</div></h1>
 
 VMVGA is a virtual graphics adapter for QEMU implementing the VMware SVGA/SVGA3D interfaces to provide GPU acceleration.
 
-## Purpose 🎯
+## Purpose 🖥️
 
 QEMU’s stock VMware SVGA II device (`vmware-svga`) provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, and VMware's 3D acceleration interfaces are not implemented.
 
 This fork provides a substantially more complete and compatible VMware SVGA II device, with both 2D and 3D graphics acceleration.
 
-The core device implementation has also been improved substantially, including:
+## Features ✨
+
+The core device implementation has been improved substantially, including:
 
 - PCI compatibility
 - Register and FIFO behavior

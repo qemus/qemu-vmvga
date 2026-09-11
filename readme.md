@@ -1,5 +1,8 @@
 <div align="center"><a href="https://github.com/qemus/qemu-vmvga"><img src="https://github.com/qemus/qemu-vmvga/raw/master/.github/logo.png" title="Logo" style="max-width:100%;" width="256" /></a>
 </div>
+<div align="center">
+<br/>
+</div>
 
 VMVGA is a virtual graphics adapter for QEMU implementing the VMware SVGA/SVGA3D interfaces to provide GPU acceleration.
 

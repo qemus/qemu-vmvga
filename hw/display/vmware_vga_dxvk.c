@@ -7604,35 +7604,6 @@ bool vmsvga3d_dxvk_d3d9_query_get_data(
 #endif
 }
 
-bool vmsvga3d_dxvk_d3d9_finish(VMSVGA3DDxvk *dxvk)
-{
-    /*
-     * A D3D9 event query is the normal completion primitive for waiting until
-     * all commands submitted before Issue(END) have actually finished on the
-     * host GPU.  Keep it on a synthetic query id which cannot collide with a
-     * guest SVGA3D context/query.
-     */
-    static const uint32_t fence_query_cid = UINT32_MAX;
-    static const uint32_t d3dquerytype_event = 8;
-    static const uint32_t d3dissue_end = 1;
-    static const uint32_t d3dgetdata_flush = 1;
-    uint32_t completed = 0;
-
-    if (!vmsvga3d_dxvk_ready(dxvk)) {
-        return false;
-    }
-
-    if (!vmsvga3d_dxvk_d3d9_query_begin(dxvk, fence_query_cid,
-                                          d3dquerytype_event,
-                                          d3dissue_end)) {
-        return false;
-    }
-
-    return vmsvga3d_dxvk_d3d9_query_get_data(
-        dxvk, fence_query_cid, sizeof(completed), d3dgetdata_flush,
-        &completed);
-}
-
 void vmsvga3d_dxvk_d3d9_query_context_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid)
 {

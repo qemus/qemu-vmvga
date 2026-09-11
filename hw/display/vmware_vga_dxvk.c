@@ -9973,6 +9973,49 @@ bool vmsvga3d_dxvk_surface_upload_buffer(
 #endif
 }
 
+bool vmsvga3d_dxvk_surface_upload_buffer_range(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t offset,
+    const void *data, uint32_t size)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkBufferLock lock = NULL;
+    VMSVGA3DDxvkBufferUnlock unlock = NULL;
+    void *destination = NULL;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL || !surface->d3d9_resident ||
+        surface->d3d9_resource == NULL || data == NULL || size == 0 ||
+        offset > surface->d3d9_length || size > surface->d3d9_length - offset ||
+        (surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_VERTEX_BUFFER &&
+         surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_INDEX_BUFFER) ||
+        !vmsvga3d_dxvk_get_method(
+            surface->d3d9_resource, VMSVGA3D_DXVK_IDIRECT3DBUFFER9_LOCK,
+            &lock, sizeof(lock)) ||
+        !vmsvga3d_dxvk_get_method(
+            surface->d3d9_resource, VMSVGA3D_DXVK_IDIRECT3DBUFFER9_UNLOCK,
+            &unlock, sizeof(unlock))) {
+        return false;
+    }
+
+    result = lock(surface->d3d9_resource, offset, size, &destination, 0);
+    if (!vmsvga3d_dxvk_succeeded(result) || destination == NULL) {
+        return false;
+    }
+
+    memcpy(destination, data, size);
+    result = unlock(surface->d3d9_resource);
+
+    return vmsvga3d_dxvk_succeeded(result);
+#else
+    (void)dxvk;
+    (void)surface;
+    (void)offset;
+    (void)data;
+    (void)size;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_surface_stretch_rect(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *source,
     uint32_t source_level, const struct vmsvga3d_d3d9_rect_s *source_rect,

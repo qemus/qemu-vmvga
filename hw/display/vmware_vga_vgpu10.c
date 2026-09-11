@@ -7594,6 +7594,44 @@ static bool vmsvga3d_dx_resource_plan_live(
     return true;
 }
 
+static bool vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface)
+{
+    VMSVGA3DD3D9TransferSurface info = { 0 };
+    VMSVGA3DD3D9AccelResult result;
+    uint32_t subresource;
+
+    if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
+        !vmsvga3d_d3d9_runtime_surface_info(s, surface, &info) ||
+        !info.resident) {
+        return true;
+    }
+
+    if (vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface) ||
+        surface->mips == NULL) {
+        return false;
+    }
+
+    for (subresource = 0; subresource < surface->mip_count; subresource++) {
+        result = vmsvga3d_d3d9_runtime_readback_surface_image(
+            s, surface, &surface->mips[subresource], subresource);
+        if (result != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "COHERENCE op=handoff sid=%u from=d3d9 to=d3d11 sub=%u result=FAIL",
+                surface->sid, subresource);
+            return false;
+        }
+    }
+
+    vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "COHERENCE op=handoff sid=%u from=d3d9 to=d3d11 subresources=%u result=OK",
+        surface->sid, surface->mip_count);
+    return true;
+}
+
 static bool vmsvga3d_d3d10_buffer_materialize_live(
     struct vmsvga_state_s *s, SVGA3dSurfaceId sid)
 {
@@ -7616,6 +7654,7 @@ static bool vmsvga3d_d3d10_buffer_materialize_live(
         !vmsvga3d_dx_resource_plan_live(
             s, &surface_info, VMSVGA3D_D3D10_RESOURCE_USE_BUFFER,
             &resource_plan) ||
+        !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface) ||
         !vmsvga3d_d3d10_initial_subresources_live(
             surface, &resource_plan.primary, &initial_data,
             &initial_data_count)) {
@@ -7657,6 +7696,8 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
         VMSVGA3DSurface *surface;
         VMSVGA3DD3D10SurfaceInfo surface_info;
         VMSVGA3DD3D10ResourcePlan resource_plan;
+        VMSVGA3DDxvkSubresourceData *initial_data = NULL;
+        uint32_t initial_data_count = 0;
 
         if (!binding->active) {
             continue;
@@ -7674,10 +7715,17 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
                 s, &surface_info,
                 VMSVGA3D_D3D10_RESOURCE_USE_STREAM_OUTPUT_BUFFER,
                 &resource_plan) ||
+            !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface) ||
+            !vmsvga3d_d3d10_initial_subresources_live(
+                surface, &resource_plan.primary, &initial_data,
+                &initial_data_count) ||
             !vmsvga3d_dxvk_d3d11_surface_materialize(
-                s->dxvk, surface->dxvk_surface, &resource_plan.primary, NULL, 0)) {
+                s->dxvk, surface->dxvk_surface, &resource_plan.primary,
+                initial_data, initial_data_count)) {
+            g_free(initial_data);
             return false;
         }
+        g_free(initial_data);
         surfaces[i] = surface->dxvk_surface;
         offsets[i] = binding->offset;
     }
@@ -7959,7 +8007,8 @@ static bool vmsvga3d_d3d10_rtv_realize_live(
                        : VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE;
 
     if (!vmsvga3d_dx_resource_plan_live(
-            s, &surface_info, resource_use, &resource_plan)) {
+            s, &surface_info, resource_use, &resource_plan) ||
+        !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface)) {
         return false;
     }
 
@@ -8039,7 +8088,8 @@ static bool vmsvga3d_d3d10_dsv_realize_live(
 
     if (!vmsvga3d_dx_resource_plan_live(
             s, &surface_info, VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE,
-            &resource_plan)) {
+            &resource_plan) ||
+        !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface)) {
         return false;
     }
 
@@ -8117,7 +8167,8 @@ static bool vmsvga3d_d3d10_srv_realize_live(
                        ? VMSVGA3D_D3D10_RESOURCE_USE_GENERIC_BUFFER
                        : VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE;
     if (!vmsvga3d_dx_resource_plan_live(
-            s, &surface_info, resource_use, &resource_plan)) {
+            s, &surface_info, resource_use, &resource_plan) ||
+        !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface)) {
         return false;
     }
 
@@ -8187,6 +8238,7 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
 
     if (!vmsvga3d_dx_resource_plan_live(
             s, &surface_info, resource_use, &resource_plan) ||
+        !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface) ||
         !vmsvga3d_d3d10_initial_subresources_live(
             surface, &resource_plan.primary, &initial_data,
             &initial_data_count)) {
@@ -9434,9 +9486,16 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
         image->data_size == 0 || image->plane_size % image->pitch != 0 ||
         image->data_size % image->plane_size != 0 ||
         !vmsvga3d_d3d10_mob_subresource_layout_live(
-            &entry, surface, command->subResource, &mob_layout) ||
-        !vmsvga3d_d3d10_readback_image_live(
-            s, surface, command->subResource)) {
+            &entry, surface, command->subResource, &mob_layout)) {
+        return false;
+    }
+
+    if (!vmsvga3d_surface_readback_to_shadow(
+            s, surface, image, command->subResource)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-READBACK sid=%u sub=%u result=FAIL",
+            command->sid, command->subResource);
         return false;
     }
 
@@ -9460,6 +9519,10 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
         }
     }
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "GB-READBACK sid=%u sub=%u result=OK",
+        command->sid, command->subResource);
     return true;
 }
 

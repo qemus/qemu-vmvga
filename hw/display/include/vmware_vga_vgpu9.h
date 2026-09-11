@@ -603,6 +603,10 @@ bool vmsvga3d_d3d9_runtime_surface_info(
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_image(
     struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
     struct vmsvga3d_surface_image_s *image, uint32_t level);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_upload_surface_image(
+    struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
+    struct vmsvga3d_surface_image_s *image, uint32_t level, uint32_t offset,
+    uint32_t size);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_rects(
     struct vmsvga_state_s *s, struct vmsvga3d_surface_s *surface,
     struct vmsvga3d_surface_image_s *image, uint32_t level,

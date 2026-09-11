@@ -300,8 +300,6 @@ static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
     uint32_t total_pages;
     uint64_t *page_gpas;
     uint32_t i;
-    uint32_t mapped = 0;
-    uint32_t invalid = 0;
 
     if (gmr_id >= ARRAY_SIZE(s->gmrs) ||
         (flags & ~(SVGA_REMAP_GMR2_VIA_GMR | SVGA_REMAP_GMR2_PPN64 |
@@ -367,7 +365,6 @@ static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
             if (ppn == UINT64_MAX ||
                 ppn > (UINT64_MAX >> VMSVGA_GMR_PAGE_SHIFT)) {
                 page_gpas[offset_pages + i] = UINT64_MAX;
-                invalid++;
                 continue;
             }
         } else {
@@ -389,13 +386,11 @@ static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
             ppn = le32_to_cpu(raw);
             if (ppn == UINT32_MAX) {
                 page_gpas[offset_pages + i] = UINT64_MAX;
-                invalid++;
                 continue;
             }
         }
 
         page_gpas[offset_pages + i] = ppn << VMSVGA_GMR_PAGE_SHIFT;
-        mapped++;
     }
 
     /* Commit only after the complete remap has been decoded successfully. */
@@ -408,6 +403,16 @@ static bool vmsvga_gmr_remap2(struct vmsvga_state_s *s, uint32_t gmr_id,
     gmr->num_pages = total_pages;
 
     if (vmsvga_trace_flight_enabled()) {
+        uint32_t mapped = 0;
+        uint32_t invalid = 0;
+
+        for (i = 0; i < num_pages; i++) {
+            if (page_gpas[offset_pages + i] == UINT64_MAX) {
+                invalid++;
+            } else {
+                mapped++;
+            }
+        }
         fprintf(stderr,
                 "VMVGA-GMR2-STATE remap id=%u flags=0x%08x offset=%u pages=%u "
                 "total-pages=%u mapped=%u invalid=%u via-gmr=%u "
@@ -2499,7 +2504,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         vmsvga_screen_mark_dirty(s, (uint32_t)left, (uint32_t)top,
                                  width, height);
     }
-    {
+    if (vmsvga_trace_flight_enabled()) {
         DisplaySurface *surface = qemu_console_surface(s->vga.con);
         uint8_t *scanout_base = NULL;
         size_t scanout_size = 0;
@@ -2513,7 +2518,7 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         (void)scanout_size;
         (void)scanout_stride;
 
-        if (scanout_bound && vmsvga_trace_flight_enabled()) {
+        if (scanout_bound) {
             uint64_t seq = s->trace_now.gmrfb_to_screen + 1;
 
             s->trace_now.damage_rects++;
@@ -2531,10 +2536,10 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
                         bottom, s->screen_handoff_active, s->svga_surface_bound);
             }
         }
-
-        /* Keep vmsvga_update_display() as the single frontend refresh point. */
-        vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
     }
+
+    /* Keep vmsvga_update_display() as the single frontend refresh point. */
+    vmsvga_damage_add(s, (uint32_t)left, (uint32_t)top, width, height);
 
     return true;
 }

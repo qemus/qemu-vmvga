@@ -8660,6 +8660,11 @@ static bool vmsvga3d_d3d10_update_subresource_live(
     VMSVGA3DD3D10UpdateLayout layout;
     VMSVGA3DD3D10MobLayout mob_layout;
     VMSVGA3DD3D10Box native_box;
+    VMSVGA3DD3D9TransferSurface d3d9_info = {0};
+    VMSVGA3DD3D9AccelResult d3d9_result;
+    bool d3d9_resident;
+    bool d3d11_resident;
+    bool full_image_update;
     uint64_t subresource_offset;
     uint64_t guest_box_offset;
     uint32_t guest_x_offset;
@@ -8699,6 +8704,48 @@ static bool vmsvga3d_d3d10_update_subresource_live(
         image->pitch == 0 || image->plane_size == 0 ||
         image->plane_size % image->pitch != 0) {
         return false;
+    }
+
+    d3d9_resident =
+        vmsvga3d_d3d9_runtime_surface_info(s, surface, &d3d9_info) &&
+        d3d9_info.resident;
+    d3d11_resident =
+        surface->dxvk_surface != NULL &&
+        vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+    if (d3d9_resident && d3d11_resident) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-UPDATE sid=%u sub=%u box=%u,%u,%u/%ux%ux%u "
+            "backend=conflict result=REJECT",
+            command->sid, command->subResource, layout.box.x, layout.box.y,
+            layout.box.z, layout.box.w, layout.box.h, layout.box.d);
+        return false;
+    }
+
+    full_image_update =
+        layout.box.x == 0 && layout.box.y == 0 && layout.box.z == 0 &&
+        layout.box.w == image->size.width &&
+        layout.box.h == image->size.height &&
+        layout.box.d == image->size.depth;
+
+    /* A partial guest update must not overwrite newer D3D9-rendered pixels
+     * outside the box with stale CPU-shadow contents.  Preserve the complete
+     * GPU image first, then overlay the requested MOB region below. */
+    if (d3d9_resident && !full_image_update &&
+        (d3d9_info.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE ||
+         d3d9_info.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE)) {
+        d3d9_result = vmsvga3d_d3d9_runtime_readback_surface_image(
+            s, surface, image, command->subResource);
+        if (d3d9_result != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-UPDATE sid=%u sub=%u box=%u,%u,%u/%ux%ux%u "
+                "backend=d3d9 stage=preserve result=FAIL",
+                command->sid, command->subResource, layout.box.x,
+                layout.box.y, layout.box.z, layout.box.w, layout.box.h,
+                layout.box.d);
+            return false;
+        }
     }
 
     guest_z = layout.box_offset / image->plane_size;
@@ -8759,11 +8806,48 @@ static bool vmsvga3d_d3d10_update_subresource_live(
     native_box.bottom = layout.box.y + layout.box.h;
     native_box.back = layout.box.z + layout.box.d;
 
-    if (!vmsvga3d_dxvk_d3d11_update_subresource(
-            s->dxvk, surface->dxvk_surface, command->subResource, &native_box,
-            image->data + layout.box_offset, image->pitch, image->plane_size)) {
+    if (d3d9_resident) {
+        if ((d3d9_info.resource_type ==
+                 VMSVGA3D_D3D9_HOST_RESOURCE_VERTEX_BUFFER ||
+             d3d9_info.resource_type ==
+                 VMSVGA3D_D3D9_HOST_RESOURCE_INDEX_BUFFER) &&
+            (layout.depth_count != 1 || layout.row_count != 1)) {
+            return false;
+        }
+        d3d9_result = vmsvga3d_d3d9_runtime_upload_surface_image(
+            s, surface, image, command->subResource, layout.box_offset,
+            layout.row_bytes);
+        if (d3d9_result != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "GB-UPDATE sid=%u sub=%u box=%u,%u,%u/%ux%ux%u "
+                "backend=d3d9 stage=upload result=FAIL",
+                command->sid, command->subResource, layout.box.x,
+                layout.box.y, layout.box.z, layout.box.w, layout.box.h,
+                layout.box.d);
+            return false;
+        }
+    } else if (d3d11_resident &&
+               !vmsvga3d_dxvk_d3d11_update_subresource(
+                   s->dxvk, surface->dxvk_surface, command->subResource,
+                   &native_box, image->data + layout.box_offset, image->pitch,
+                   image->plane_size)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-UPDATE sid=%u sub=%u box=%u,%u,%u/%ux%ux%u "
+            "backend=d3d11 stage=upload result=FAIL",
+            command->sid, command->subResource, layout.box.x, layout.box.y,
+            layout.box.z, layout.box.w, layout.box.h, layout.box.d);
         return false;
     }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "GB-UPDATE sid=%u sub=%u box=%u,%u,%u/%ux%ux%u backend=%s "
+        "result=OK",
+        command->sid, command->subResource, layout.box.x, layout.box.y,
+        layout.box.z, layout.box.w, layout.box.h, layout.box.d,
+        d3d9_resident ? "d3d9" : (d3d11_resident ? "d3d11" : "cpu"));
 
     (void)vmsvga3d_surface_changed_live(
         s, command->sid, command->subResource, &layout.box);

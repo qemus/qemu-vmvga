@@ -2317,6 +2317,49 @@ static bool vmsvga3d_dxvk_readback_image(
         dxvk, dxvk_surface, level, image->data, image->pitch, rows);
 }
 
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_upload_surface_image(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, uint32_t level, uint32_t offset,
+    uint32_t size)
+{
+    VMSVGA3DD3D9TransferSurface info;
+
+    if (s == NULL || surface == NULL || image == NULL ||
+        !vmsvga3d_dxvk_ready(s->dxvk) ||
+        !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
+        !info.resident) {
+        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
+
+    if (surface->dxvk_surface == NULL || level >= surface->mip_count ||
+        image->data == NULL || offset > image->data_size ||
+        size > image->data_size - offset) {
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
+    }
+
+    if (vmsvga3d_d3d9_transfer_buffer(&info)) {
+        if (level != 0 || size == 0 ||
+            !vmsvga3d_dxvk_surface_upload_buffer_range(
+                s->dxvk, surface->dxvk_surface, offset, image->data + offset,
+                size)) {
+            return VMSVGA3D_D3D9_ACCEL_FAILED;
+        }
+        return VMSVGA3D_D3D9_ACCEL_COMPLETE;
+    }
+
+    if (info.resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+        info.resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE) {
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
+    }
+
+    if (!vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, level,
+                                    image)) {
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
+    }
+
+    return VMSVGA3D_D3D9_ACCEL_COMPLETE;
+}
+
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_image(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DSurfaceImage *image, uint32_t level)

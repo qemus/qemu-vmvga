@@ -2659,9 +2659,13 @@ static bool vmsvga3d_dxvk_materialize_surface(
     case VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET:
         if (plan.primary.resource_type == D3D9_RTYPE_TEXTURE) {
             compatible =
-                before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
-                before.format == plan.primary.format && before.has_bounce &&
-                (before.usage & D3D9_USAGE_DEPTHSTENCIL) != 0;
+                (before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+                 before.format == plan.primary.format && before.has_bounce &&
+                 (before.usage & D3D9_USAGE_DEPTHSTENCIL) != 0) ||
+                (plan.has_surface_fallback && plan.surface_fallback.valid &&
+                 before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&
+                 before.format == plan.surface_fallback.format &&
+                 (before.usage & D3D9_USAGE_DEPTHSTENCIL) != 0);
         } else {
             compatible =
                 before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&
@@ -2681,6 +2685,16 @@ static bool vmsvga3d_dxvk_materialize_surface(
     }
 
     if (upload_cpu && (!before.resident || !compatible)) {
+        bool native_depth_fallback =
+            use == VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET &&
+            plan.has_surface_fallback && plan.surface_fallback.valid &&
+            info.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&
+            info.format == plan.surface_fallback.format &&
+            (info.usage & D3D9_USAGE_DEPTHSTENCIL) != 0;
+
+        if (native_depth_fallback) {
+            return true;
+        }
         if (surface->multisample_count > 1 &&
             use == VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET &&
             !info.has_bounce) {

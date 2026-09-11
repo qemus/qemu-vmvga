@@ -3107,9 +3107,18 @@ static bool vmsvga3d_dxvk_surface_plan_compatible(
                (surface->d3d9_usage & VMSVGA3D_DXVK_D3DUSAGE_RENDERTARGET) != 0;
     case VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET:
         if (plan->primary.resource_type == VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE) {
-            return surface->d3d9_resource_type ==
-                       VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
-                   surface->d3d9_format == plan->primary.format &&
+            if (surface->d3d9_resource_type ==
+                    VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+                surface->d3d9_format == plan->primary.format &&
+                (surface->d3d9_usage &
+                 VMSVGA3D_DXVK_D3DUSAGE_DEPTHSTENCIL) != 0) {
+                return true;
+            }
+            return plan->has_surface_fallback &&
+                   plan->surface_fallback.valid &&
+                   surface->d3d9_resource_type ==
+                       VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&
+                   surface->d3d9_format == plan->surface_fallback.format &&
                    (surface->d3d9_usage &
                     VMSVGA3D_DXVK_D3DUSAGE_DEPTHSTENCIL) != 0;
         }

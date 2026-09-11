@@ -40,7 +40,6 @@
 #include "include/vmware_vga_vgpu10.h"
 #include "include/vmware_vga_dxvk.h"
 #include "hw/pci/pci_device.h"
-#include "qemu/timer.h"
 #include "system/address-spaces.h"
 
 _Static_assert(sizeof(SVGA3dCmdDefineGBSurface) == 36,
@@ -76,12 +75,10 @@ typedef struct {
 
 static void vmsvga3d_surface_destroy_view_live(
     void *opaque, VMSVGA3DDxvkViewKind kind, uint32_t cid, uint32_t view_id);
-static void vmsvga3d_d3d9_gb_query_timer_cb(void *opaque);
 
 /* D3D9 has 8 fixed-function stages but 21 addressable sampler slots. */
 #define VMSVGA3D_MAX_TEXTURE_STAGES VMSVGA3D_D3D9_MAX_TEXTURE_STAGES
 #define VMSVGA3D_MAX_SAMPLERS VMSVGA3D_D3D9_MAX_SAMPLERS
-#define VMSVGA3D_GB_QUERY_POLL_INTERVAL_MS 1
 
 typedef struct vmsvga3d_state_value_s {
     uint32_t value;
@@ -364,7 +361,6 @@ struct vmsvga3d_state_s {
     VMSVGA3DGBO otables[SVGA_OTABLE_MAX];
     GHashTable *mobs;
     VMSVGA3DGBQuery *gb_queries;
-    QEMUTimer *gb_query_timer;
     VMSVGA3DGARTPage *gart_pages;
     SVGAMobId gart_mobid;
     uint32_t gart_page_count;
@@ -554,11 +550,6 @@ static void vmsvga3d_gb_query_unlink(
             reason != NULL ? reason : "unknown");
     }
     g_free(query);
-
-    if (s->svga3d->gb_queries == NULL &&
-        s->svga3d->gb_query_timer != NULL) {
-        timer_del(s->svga3d->gb_query_timer);
-    }
 }
 
 static void vmsvga3d_gb_query_cancel_context(
@@ -1821,11 +1812,6 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s)
     }
 
     vmsvga3d_gb_query_cancel_all(s, "reset");
-    if (state->gb_query_timer != NULL) {
-        timer_del(state->gb_query_timer);
-        timer_free(state->gb_query_timer);
-        state->gb_query_timer = NULL;
-    }
 
     /* VirtualBox destroys each legacy context's D3D9 device during reset,
      * which drops all native state references before guest resources are freed.
@@ -3825,39 +3811,6 @@ static void vmsvga3d_d3d9_process_pending_gb_queries(
         plan.getdata_flags, false, source);
 }
 
-static void vmsvga3d_d3d9_schedule_gb_query_poll(
-    struct vmsvga_state_s *s)
-{
-    struct vmsvga3d_state_s *state;
-
-    if (s == NULL || (state = s->svga3d) == NULL ||
-        state->gb_queries == NULL) {
-        return;
-    }
-
-    if (state->gb_query_timer == NULL) {
-        state->gb_query_timer = timer_new_ms(
-            QEMU_CLOCK_VIRTUAL, vmsvga3d_d3d9_gb_query_timer_cb, s);
-    }
-
-    timer_mod(state->gb_query_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
-              VMSVGA3D_GB_QUERY_POLL_INTERVAL_MS);
-}
-
-static void vmsvga3d_d3d9_gb_query_timer_cb(void *opaque)
-{
-    struct vmsvga_state_s *s = opaque;
-
-    if (s == NULL || s->svga3d == NULL ||
-        s->svga3d->gb_queries == NULL) {
-        return;
-    }
-
-    vmsvga3d_d3d9_process_pending_gb_queries(s, "TIMER");
-    vmsvga3d_d3d9_schedule_gb_query_poll(s);
-}
-
 static bool vmsvga3d_handle_gb_query(struct vmsvga_state_s *s,
                                      uint32_t cmd, int32_t *len,
                                      uint32_t fifo_start)
@@ -3893,17 +3846,22 @@ static bool vmsvga3d_handle_gb_query(struct vmsvga_state_s *s,
         uint64_t token = 0;
         bool target_ok = mob != NULL &&
                          vmsvga3d_mob_read(s, mob, body->offset,
-                                           &guest_result, sizeof(guest_result)) &&
-                         guest_result.totalSize >= sizeof(guest_result) &&
-                         guest_result.state == SVGA3D_QUERYSTATE_PENDING;
+                                           &guest_result, sizeof(guest_result));
         bool end_ok = false;
         bool queued = false;
 
         if (target_ok) {
             /* A newly issued generation supersedes any older result which
-             * named the same guest slot, even if the guest reused a cookie. */
+             * named the same guest slot, even if the guest reused a cookie.
+             * END owns the host-visible result lifecycle: preserve the guest
+             * cookie but canonicalize the host-managed header instead of
+             * rejecting drivers which have not prewritten PENDING here. */
             vmsvga3d_gb_query_cancel_target(
                 s, body->mobid, body->offset, "target-reissued");
+            guest_result.totalSize = sizeof(guest_result);
+            guest_result.state = SVGA3D_QUERYSTATE_PENDING;
+            target_ok = vmsvga3d_mob_write(
+                s, mob, body->offset, &guest_result, sizeof(guest_result));
         }
 
         if (vmsvga3d_context(s, body->cid) != NULL &&
@@ -3961,7 +3919,6 @@ static bool vmsvga3d_handle_gb_query(struct vmsvga_state_s *s,
             /* Cheap probe only; do not force a submit from every END. */
             vmsvga3d_d3d9_process_pending_gb_queries_filtered(
                 s, true, body->cid, body->type, 0, false, "END");
-            vmsvga3d_d3d9_schedule_gb_query_poll(s);
         }
     } else if (cmd == SVGA_3D_CMD_WAIT_FOR_GB_QUERY &&
                size >= sizeof(SVGA3dCmdWaitForGBQuery)) {
@@ -10647,11 +10604,9 @@ static bool vmsvga3d_handle_gb_mob_fence(struct vmsvga_state_s *s,
 
         /* VMware normally places this fence immediately after ended GB
          * queries.  Give pending D3D9 queries a flushed, nonblocking poll
-         * before publishing command-stream progress to the guest.  A query
-         * which is still pending remains armed on the query-only timer. */
+         * before publishing command-stream progress to the guest. */
         if (s->svga3d != NULL && s->svga3d->gb_queries != NULL) {
             vmsvga3d_d3d9_process_pending_gb_queries(s, "GB_MOB_FENCE");
-            vmsvga3d_d3d9_schedule_gb_query_poll(s);
         }
 
         mob = vmsvga3d_mob_get(s, body->mobId);

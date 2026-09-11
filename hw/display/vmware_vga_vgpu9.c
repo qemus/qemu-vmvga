@@ -2813,35 +2813,43 @@ static bool vmsvga3d_dxvk_bind_context_target(
     }
 
     surface = s->svga3d->surfaces[target->sid];
-    fprintf(stderr, "VMVGA-D3D9-TARGET bind sid=%u face=%u mip=%u use=%u depth=%u surface=%p\n",
-            target->sid, target->face, target->mipmap, use, depth_stencil, surface);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "D3D9-TARGET bind sid=%u face=%u mip=%u use=%u depth=%u surface=%p",
+        target->sid, target->face, target->mipmap, use, depth_stencil, surface);
 
     if (!vmsvga3d_dxvk_surface_level_index(surface, target, &image, &level)) {
-        fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=surface-level-index\n", target->sid);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-TARGET fail sid=%u stage=surface-level-index", target->sid);
         return false;
     }
 
-    fprintf(stderr, "VMVGA-D3D9-TARGET image sid=%u level=%u image=%p\n",
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "D3D9-TARGET image sid=%u level=%u image=%p",
             target->sid, level, image);
 
     if (!vmsvga3d_dxvk_materialize_surface(s, surface, use, true)) {
-        fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=materialize\n", target->sid);
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "D3D9-TARGET fail sid=%u stage=materialize", target->sid);
         return false;
     }
 
-    fprintf(stderr, "VMVGA-D3D9-TARGET materialized sid=%u dxvk_surface=%p\n",
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "D3D9-TARGET materialized sid=%u dxvk_surface=%p",
             target->sid, surface->dxvk_surface);
 
     if (depth_stencil) {
         if (!vmsvga3d_dxvk_set_depth_stencil(s->dxvk,
                                              surface->dxvk_surface, level)) {
-            fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=set-depth\n", target->sid);
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                               "D3D9-TARGET fail sid=%u stage=set-depth",
+                               target->sid);
             return false;
         }
     } else {
         if (!vmsvga3d_dxvk_set_render_target(s->dxvk, color_index,
                                              surface->dxvk_surface, level)) {
-            fprintf(stderr, "VMVGA-D3D9-TARGET fail sid=%u stage=set-color\n", target->sid);
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                               "D3D9-TARGET fail sid=%u stage=set-color",
+                               target->sid);
             return false;
         }
     }
@@ -2931,7 +2939,7 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
     uint32_t i;
 
     if (!vmsvga3d_dxvk_apply_context_viewport(s, context)) {
-        fprintf(stderr, "VMVGA-D3D9-FIXED fail stage=viewport\n");
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "D3D9-FIXED fail stage=viewport");
         return false;
     }
 
@@ -2940,8 +2948,8 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
 
         vmsvga3d_d3d9_rect(&context->scissor, &rect);
         if (!vmsvga3d_dxvk_set_scissor(s->dxvk, &rect)) {
-            fprintf(stderr,
-                    "VMVGA-D3D9-FIXED fail stage=scissor rect=%d,%d-%d,%d\n",
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                    "D3D9-FIXED fail stage=scissor rect=%d,%d-%d,%d",
                     rect.left, rect.top, rect.right, rect.bottom);
             return false;
         }
@@ -2956,17 +2964,17 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
 
         if (!vmsvga3d_d3d9_transform_type((SVGA3dTransformType)i,
                                           &d3d_transform)) {
-            fprintf(stderr,
-                    "VMVGA-D3D9-FIXED fail stage=transform-translate svga_transform=%u\n",
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                    "D3D9-FIXED fail stage=transform-translate svga_transform=%u",
                     i);
             return false;
         }
 
         if (!vmsvga3d_dxvk_set_transform(s->dxvk, d3d_transform,
                                          context->transform[i].matrix)) {
-            fprintf(stderr,
-                    "VMVGA-D3D9-FIXED fail stage=transform-set svga_transform=%u "
-                    "d3d_transform=%u\n",
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                    "D3D9-FIXED fail stage=transform-set svga_transform=%u "
+                    "d3d_transform=%u",
                     i, d3d_transform);
             return false;
         }
@@ -2987,9 +2995,9 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
         translated = vmsvga3d_d3d9_render_state(&state, &plan);
 
         if (translated == VMSVGA3D_D3D9_TRANSLATE_INVALID) {
-            fprintf(stderr,
-                    "VMVGA-D3D9-FIXED fail stage=render-translate svga_state=%u "
-                    "value=0x%08x\n",
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                    "D3D9-FIXED fail stage=render-translate svga_state=%u "
+                    "value=0x%08x",
                     i, state.uintValue);
             return false;
         }
@@ -3001,10 +3009,10 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
         for (op = 0; op < plan.count; op++) {
             if (!vmsvga3d_dxvk_set_render_state(s->dxvk, plan.ops[op].state,
                                                 plan.ops[op].value)) {
-                fprintf(stderr,
-                        "VMVGA-D3D9-FIXED fail stage=render-set svga_state=%u "
+                VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                        "D3D9-FIXED fail stage=render-set svga_state=%u "
                         "svga_value=0x%08x d3d_state=%u d3d_value=0x%08x "
-                        "op=%u/%u\n",
+                        "op=%u/%u",
                         i, state.uintValue, plan.ops[op].state,
                         plan.ops[op].value, op, plan.count);
                 return false;
@@ -3024,15 +3032,15 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
 
         if (!vmsvga3d_d3d9_material(face, &context->material[face].material,
                                      &material)) {
-            fprintf(stderr,
-                    "VMVGA-D3D9-FIXED fail stage=material-translate face=%u\n",
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                    "D3D9-FIXED fail stage=material-translate face=%u",
                     face);
             return false;
         }
 
         if (!vmsvga3d_dxvk_set_material(s->dxvk, &material)) {
-            fprintf(stderr,
-                    "VMVGA-D3D9-FIXED fail stage=material-set face=%u\n",
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                    "D3D9-FIXED fail stage=material-set face=%u",
                     face);
             return false;
         }
@@ -3043,15 +3051,15 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
             VMSVGA3DD3D9Light light;
 
             if (!vmsvga3d_d3d9_light(&context->light[i].data, &light)) {
-                fprintf(stderr,
-                        "VMVGA-D3D9-FIXED fail stage=light-translate index=%u\n",
+                VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                        "D3D9-FIXED fail stage=light-translate index=%u",
                         i);
                 return false;
             }
 
             if (!vmsvga3d_dxvk_set_light(s->dxvk, i, &light)) {
-                fprintf(stderr,
-                        "VMVGA-D3D9-FIXED fail stage=light-set index=%u\n", i);
+                VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                        "D3D9-FIXED fail stage=light-set index=%u", i);
                 return false;
             }
         }
@@ -3059,8 +3067,8 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
         if (context->light[i].enabled_valid &&
             !vmsvga3d_dxvk_light_enable(s->dxvk, i,
                                         context->light[i].enabled != 0)) {
-            fprintf(stderr,
-                    "VMVGA-D3D9-FIXED fail stage=light-enable index=%u enabled=%u\n",
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                    "D3D9-FIXED fail stage=light-enable index=%u enabled=%u",
                     i, context->light[i].enabled != 0);
             return false;
         }
@@ -3070,8 +3078,8 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
         if (context->clip_plane[i].valid &&
             !vmsvga3d_dxvk_set_clip_plane(s->dxvk, i,
                                           context->clip_plane[i].plane)) {
-            fprintf(stderr,
-                    "VMVGA-D3D9-FIXED fail stage=clip-plane index=%u\n", i);
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                    "D3D9-FIXED fail stage=clip-plane index=%u", i);
             return false;
         }
     }

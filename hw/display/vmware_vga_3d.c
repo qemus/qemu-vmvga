@@ -4270,8 +4270,10 @@ static bool vmsvga3d_handle_draw(struct vmsvga_state_s *s,
                         context->num_vertex_divisors,
                         context->vertex_divisors) ==
                     VMSVGA3D_D3D9_ACCEL_COMPLETE) {
-                    vmsvga3d_trace_vgpu9_render_target_write(
-                        s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+                    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+                        vmsvga3d_trace_vgpu9_render_target_write(
+                            s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+                    }
                 }
             }
         }
@@ -4322,8 +4324,10 @@ static bool vmsvga3d_handle_draw_indexed(struct vmsvga_state_s *s,
                         context->num_vertex_divisors,
                         context->vertex_divisors) ==
                     VMSVGA3D_D3D9_ACCEL_COMPLETE) {
-                    vmsvga3d_trace_vgpu9_render_target_write(
-                        s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+                    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+                        vmsvga3d_trace_vgpu9_render_target_write(
+                            s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+                    }
                 }
             }
         }
@@ -4393,8 +4397,10 @@ static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
                 s, body->cid, body->numVertexDecls, decls, body->numRanges,
                 ranges, divisor_count, divisors) ==
             VMSVGA3D_D3D9_ACCEL_COMPLETE) {
-            vmsvga3d_trace_vgpu9_render_target_write(
-                s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+            if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+                vmsvga3d_trace_vgpu9_render_target_write(
+                    s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
+            }
         }
     }
 
@@ -4840,8 +4846,10 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     }
 
     if (wrote && (body->clearFlag & SVGA3D_CLEAR_COLOR)) {
-        vmsvga3d_trace_vgpu9_render_target_write(
-            s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR);
+        if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+            vmsvga3d_trace_vgpu9_render_target_write(
+                s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR);
+        }
     }
 
     VMVGA_TRACE_LOCAL(
@@ -5415,6 +5423,7 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
     size_t scratch_size = 0;
     uint8_t *scratch = NULL;
     bool d3d11_copy = false;
+    bool trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
     bool valid = true;
 
     (void)cmd;
@@ -5461,7 +5470,7 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         valid = false;
     }
 
-    if (valid && d3d11_copy) {
+    if (trace_3d && valid && d3d11_copy) {
         fprintf(stderr,
                 "VMVGA-D3D9-COPY src=%u:%u:%u dst=%u:%u:%u boxes=%u "
                 "src-active=%u dst-active=%u path=d3d11 "
@@ -5471,7 +5480,7 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
                 src_surface->legacy_active, dst_surface->legacy_active,
                 vmsvga3d_dxvk_d3d11_surface_resident(src_surface->dxvk_surface),
                 vmsvga3d_dxvk_d3d11_surface_resident(dst_surface->dxvk_surface));
-    } else if (valid) {
+    } else if (trace_3d && valid) {
         fprintf(stderr,
                 "VMVGA-D3D9-COPY src=%u:%u:%u dst=%u:%u:%u boxes=%u "
                 "src-active=%u dst-active=%u "
@@ -5500,12 +5509,14 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
     if (valid && !d3d11_copy) {
         accel = vmsvga3d_d3d9_try_surface_copy(s, body, boxes, box_count,
                                                 &transfer_plan);
-        fprintf(stderr,
-                "VMVGA-D3D9-COPY result src=%u dst=%u accel=%s "
-                "fallback=%s\n",
-                body->src.sid, body->dest.sid,
-                vmsvga3d_d3d9_accel_result_name(accel),
-                accel == VMSVGA3D_D3D9_ACCEL_COMPLETE ? "none" : "cpu-shadow");
+        if (trace_3d) {
+            fprintf(stderr,
+                    "VMVGA-D3D9-COPY result src=%u dst=%u accel=%s "
+                    "fallback=%s\n",
+                    body->src.sid, body->dest.sid,
+                    vmsvga3d_d3d9_accel_result_name(accel),
+                    accel == VMSVGA3D_D3D9_ACCEL_COMPLETE ? "none" : "cpu-shadow");
+        }
         if (accel == VMSVGA3D_D3D9_ACCEL_FAILED) {
             valid = false;
         }
@@ -5607,7 +5618,8 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, dst_surface);
     }
 
-    if (valid && dst_image != NULL) {
+    if (valid && dst_image != NULL &&
+        VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
         bool full_copy = box_count == 1 && boxes[0].x == 0 && boxes[0].y == 0 &&
                          boxes[0].z == 0 &&
                          boxes[0].w == dst_image->size.width &&
@@ -5962,9 +5974,11 @@ static bool vmsvga3d_handle_surface_stretchblt(struct vmsvga_state_s *s,
     }
 
     if (valid && !d3d11_stretch) {
-        vmsvga3d_trace_vgpu9_surface_write(
-            s, body->dest.sid, VMSVGA3D_TRACE_VGPU9_WRITE_STRETCH,
-            SVGA3D_INVALID_ID, false);
+        if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+            vmsvga3d_trace_vgpu9_surface_write(
+                s, body->dest.sid, VMSVGA3D_TRACE_VGPU9_WRITE_STRETCH,
+                SVGA3D_INVALID_ID, false);
+        }
     }
 
     g_free(scratch);
@@ -6515,11 +6529,11 @@ static void vmsvga3d_screen_blit_trace_capture(
     uint64_t required;
     uint32_t row;
 
-    memset(trace, 0, sizeof(*trace));
     if (!VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
         return;
     }
 
+    memset(trace, 0, sizeof(*trace));
     trace->enabled = true;
     trace->damage_before = s != NULL ? s->damage_count : 0;
     if (image != NULL && image->data != NULL && image->data_size != 0) {
@@ -6572,23 +6586,35 @@ static void vmsvga3d_screen_blit_trace_report(
     uint8_t *screen_base;
     size_t screen_size;
     uint32_t screen_stride;
-    uint32_t screen_after_hash = 2166136261u;
-    uint32_t region_before_hash = 2166136261u;
-    uint32_t region_after_hash = 2166136261u;
-    uint32_t min_x = UINT32_MAX;
-    uint32_t min_y = UINT32_MAX;
-    uint32_t max_x = 0;
-    uint32_t max_y = 0;
-    uint32_t changed_rows = 0;
-    uint64_t raw_changed_pixels = 0;
-    uint64_t rgb_changed_pixels = 0;
+    uint32_t screen_after_hash;
+    uint32_t region_before_hash;
+    uint32_t region_after_hash;
+    uint32_t min_x;
+    uint32_t min_y;
+    uint32_t max_x;
+    uint32_t max_y;
+    uint32_t changed_rows;
+    uint64_t raw_changed_pixels;
+    uint64_t rgb_changed_pixels;
     uint64_t required;
     uint32_t row;
-    bool bbox_valid = false;
+    bool bbox_valid;
 
     if (!trace->enabled) {
         return;
     }
+
+    screen_after_hash = 2166136261u;
+    region_before_hash = 2166136261u;
+    region_after_hash = 2166136261u;
+    min_x = UINT32_MAX;
+    min_y = UINT32_MAX;
+    max_x = 0;
+    max_y = 0;
+    changed_rows = 0;
+    raw_changed_pixels = 0;
+    rgb_changed_pixels = 0;
+    bbox_valid = false;
 
     if (!trace->captured || s == NULL || s->screen_width != trace->width ||
         s->screen_height != trace->height ||
@@ -6720,8 +6746,13 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
     uint32_t clip_count;
     uint32_t copy_count;
     uint32_t i;
-    VMSVGA3DScreenBlitTrace trace_diff = { 0 };
+    VMSVGA3DScreenBlitTrace trace_diff;
+    bool trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
     bool valid = true;
+
+    if (trace_3d) {
+        memset(&trace_diff, 0, sizeof(trace_diff));
+    }
 
     (void)cmd;
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
@@ -6747,34 +6778,39 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
 
     surface = valid ? state->surfaces[body->srcImage.sid] : NULL;
     if (valid && surface != NULL) {
-        VMSVGA3DD3D9TransferSurface surface_info;
-        bool d3d9_info =
-            vmsvga3d_d3d9_runtime_surface_info(s, surface, &surface_info);
-        bool d3d11_resident =
-            vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+        if (trace_3d) {
+            VMSVGA3DD3D9TransferSurface surface_info;
+            bool d3d9_info =
+                vmsvga3d_d3d9_runtime_surface_info(s, surface, &surface_info);
+            bool d3d11_resident =
+                vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
 
-        fprintf(stderr,
-                "VMVGA-SCREEN-BLIT3D sid=%u face=%u mip=%u "
-                "src=%d,%d-%d,%d dst-screen=%u dst=%d,%d-%d,%d clips=%u "
-                "screen-defined=%u surface-active=%u d3d9-info=%u "
-                "d3d9-resident=%u d3d9-bounce=%u d3d11-resident=%u\n",
-                body->srcImage.sid, body->srcImage.face, body->srcImage.mipmap,
-                body->srcRect.left, body->srcRect.top, body->srcRect.right,
-                body->srcRect.bottom, body->destScreenId, body->destRect.left,
-                body->destRect.top, body->destRect.right, body->destRect.bottom,
-                clip_count, s->screen_defined, surface->legacy_active, d3d9_info,
-                d3d9_info ? surface_info.resident : 0,
-                d3d9_info ? surface_info.has_bounce : 0, d3d11_resident);
-        for (i = 0; i < clip_count; i++) {
             fprintf(stderr,
-                    "VMVGA-SCREEN-BLIT3D clip[%u]=%d,%d-%d,%d\n", i,
-                    clips[i].left, clips[i].top, clips[i].right,
-                    clips[i].bottom);
+                    "VMVGA-SCREEN-BLIT3D sid=%u face=%u mip=%u "
+                    "src=%d,%d-%d,%d dst-screen=%u dst=%d,%d-%d,%d clips=%u "
+                    "screen-defined=%u surface-active=%u d3d9-info=%u "
+                    "d3d9-resident=%u d3d9-bounce=%u d3d11-resident=%u\n",
+                    body->srcImage.sid, body->srcImage.face,
+                    body->srcImage.mipmap, body->srcRect.left, body->srcRect.top,
+                    body->srcRect.right, body->srcRect.bottom, body->destScreenId,
+                    body->destRect.left, body->destRect.top, body->destRect.right,
+                    body->destRect.bottom, clip_count, s->screen_defined,
+                    surface->legacy_active, d3d9_info,
+                    d3d9_info ? surface_info.resident : 0,
+                    d3d9_info ? surface_info.has_bounce : 0, d3d11_resident);
+            for (i = 0; i < clip_count; i++) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-BLIT3D clip[%u]=%d,%d-%d,%d\n", i,
+                        clips[i].left, clips[i].top, clips[i].right,
+                        clips[i].bottom);
+            }
         }
 
         accel = vmsvga3d_d3d9_try_screen_blit(s, body, clips, clip_count);
-        fprintf(stderr, "VMVGA-SCREEN-BLIT3D accel=%s\n",
-                vmsvga3d_d3d9_accel_result_name(accel));
+        if (trace_3d) {
+            fprintf(stderr, "VMVGA-SCREEN-BLIT3D accel=%s\n",
+                    vmsvga3d_d3d9_accel_result_name(accel));
+        }
         if (accel == VMSVGA3D_D3D9_ACCEL_FAILED) {
             valid = false;
         }
@@ -6809,10 +6845,12 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
         if (valid) {
             valid = vmsvga3d_surface_readback_to_shadow(
                 s, surface, image, 0);
-            fprintf(stderr,
-                    "VMVGA-SCREEN-BLIT3D readback sid=%u result=%s\n",
-                    body->srcImage.sid, valid ? "complete" : "failed");
-            if (valid) {
+            if (trace_3d) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-BLIT3D readback sid=%u result=%s\n",
+                        body->srcImage.sid, valid ? "complete" : "failed");
+            }
+            if (trace_3d && valid) {
                 vmsvga3d_screen_blit_trace_capture(s, image, &trace_diff);
             }
         }
@@ -6833,7 +6871,7 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
                     copies[i].w = 0;
                     copies[i].h = 0;
                 }
-                if (valid) {
+                if (trace_3d && valid) {
                     fprintf(stderr,
                             "VMVGA-SCREEN-BLIT3D copy[%u] src=%u,%u "
                             "dst=%u,%u size=%ux%u empty=%u\n",
@@ -6871,15 +6909,17 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
         copy_count = 0;
     }
 
-    vmsvga3d_screen_blit_trace_report(s, body->srcImage.sid, &trace_diff);
-    vmsvga3d_screen_blit_trace_cleanup(&trace_diff);
+    if (trace_3d) {
+        vmsvga3d_screen_blit_trace_report(s, body->srcImage.sid, &trace_diff);
+        vmsvga3d_screen_blit_trace_cleanup(&trace_diff);
 
-    fprintf(stderr,
-            "VMVGA-SCREEN-BLIT3D result sid=%u valid=%u accel=%s copies=%u\n",
-            body->srcImage.sid, valid,
-            vmsvga3d_d3d9_accel_result_name(accel), copy_count);
+        fprintf(stderr,
+                "VMVGA-SCREEN-BLIT3D result sid=%u valid=%u accel=%s copies=%u\n",
+                body->srcImage.sid, valid,
+                vmsvga3d_d3d9_accel_result_name(accel), copy_count);
+    }
 
-    if (valid) {
+    if (trace_3d && valid) {
         vmsvga3d_trace_vgpu9_present(s, body->srcImage.sid, "screen-blit");
     }
 
@@ -6987,7 +7027,9 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
     }
 
     if (valid) {
-        vmsvga3d_trace_vgpu9_present(s, body->sid, "present");
+        if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+            vmsvga3d_trace_vgpu9_present(s, body->sid, "present");
+        }
     }
 
     g_free(payload);
@@ -7352,9 +7394,11 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
     }
 
     if (valid && box_count != 0 && body->transfer == SVGA3D_WRITE_HOST_VRAM) {
-        vmsvga3d_trace_vgpu9_surface_write(
-            s, body->host.sid, VMSVGA3D_TRACE_VGPU9_WRITE_DMA,
-            SVGA3D_INVALID_ID, false);
+        if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+            vmsvga3d_trace_vgpu9_surface_write(
+                s, body->host.sid, VMSVGA3D_TRACE_VGPU9_WRITE_DMA,
+                SVGA3D_INVALID_ID, false);
+        }
     }
 
     g_free(payload);
@@ -7654,11 +7698,14 @@ static void vmsvga3d_command_buffer_write_status(
 static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
                                                uint32_t flags)
 {
+    bool trace_flight;
+
     if (s == NULL || flags == 0) {
         return;
     }
 
-    if (vmsvga_trace_flight_enabled()) {
+    trace_flight = vmsvga_trace_flight_enabled();
+    if (trace_flight) {
         fprintf(stderr,
                 "VMVGA-IRQ event=cb-request flags=0x%08x mask=0x%08x "
                 "status=0x%08x enabled=%u\n",
@@ -7669,7 +7716,7 @@ static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
     }
 
     s->irq_status |= flags;
-    if (vmsvga_trace_flight_enabled()) {
+    if (trace_flight) {
         fprintf(stderr,
                 "VMVGA-IRQ event=raise reason=command-buffer "
                 "flags=0x%08x mask=0x%08x status=0x%08x line=1\n",
@@ -10842,17 +10889,19 @@ static bool vmsvga3d_handle_surface_activation(
     uint32_t size;
     uint32_t sid;
     bool activate;
-    bool previous = false;
+    bool trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
 
     if (!vmsvga3d_fifo_read_payload(s, len, fifo_start, &payload, &size)) {
         return true;
     }
 
     if (size < sizeof(SVGA3dCmdActivateSurface)) {
-        fprintf(stderr,
-                "VMVGA-SURFACE-ACTIVE cmd=%s result=short bytes=%u expected=%zu\n",
-                cmd == SVGA_3D_CMD_ACTIVATE_SURFACE ? "activate" : "deactivate",
-                size, sizeof(SVGA3dCmdActivateSurface));
+        if (trace_3d) {
+            fprintf(stderr,
+                    "VMVGA-SURFACE-ACTIVE cmd=%s result=short bytes=%u expected=%zu\n",
+                    cmd == SVGA_3D_CMD_ACTIVATE_SURFACE ? "activate" : "deactivate",
+                    size, sizeof(SVGA3dCmdActivateSurface));
+        }
         g_free(payload);
         return true;
     }
@@ -10864,23 +10913,25 @@ static bool vmsvga3d_handle_surface_activation(
     }
 
     if (surface != NULL) {
-        VMSVGA3DD3D9TransferSurface info;
-        bool d3d9_info =
-            vmsvga3d_d3d9_runtime_surface_info(s, surface, &info);
-        bool d3d11_resident =
-            vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+        if (trace_3d) {
+            VMSVGA3DD3D9TransferSurface info;
+            bool d3d9_info =
+                vmsvga3d_d3d9_runtime_surface_info(s, surface, &info);
+            bool d3d11_resident =
+                vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+            bool previous = surface->legacy_active;
 
-        previous = surface->legacy_active;
+            fprintf(stderr,
+                    "VMVGA-SURFACE-ACTIVE cmd=%s sid=%u present=1 old=%u new=%u "
+                    "flags=0x%016" PRIx64 " d3d9-info=%u d3d9-resident=%u "
+                    "d3d9-bounce=%u d3d11-resident=%u\n",
+                    activate ? "activate" : "deactivate", sid, previous,
+                    activate, (uint64_t)surface->surface_flags, d3d9_info,
+                    d3d9_info ? info.resident : 0,
+                    d3d9_info ? info.has_bounce : 0, d3d11_resident);
+        }
         surface->legacy_active = activate;
-        fprintf(stderr,
-                "VMVGA-SURFACE-ACTIVE cmd=%s sid=%u present=1 old=%u new=%u "
-                "flags=0x%016" PRIx64 " d3d9-info=%u d3d9-resident=%u "
-                "d3d9-bounce=%u d3d11-resident=%u\n",
-                activate ? "activate" : "deactivate", sid, previous,
-                surface->legacy_active, (uint64_t)surface->surface_flags,
-                d3d9_info, d3d9_info ? info.resident : 0,
-                d3d9_info ? info.has_bounce : 0, d3d11_resident);
-    } else {
+    } else if (trace_3d) {
         fprintf(stderr,
                 "VMVGA-SURFACE-ACTIVE cmd=%s sid=%u present=0 old=0 new=%u\n",
                 activate ? "activate" : "deactivate", sid, activate);
@@ -11300,6 +11351,7 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
 {
     const VMSVGA3DCommandInfo *info;
     uint32_t payload_size = UINT32_MAX;
+    bool trace_3d;
 
     if (!s->svga3d_capable) {
         return false;
@@ -11310,8 +11362,9 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
     }
 
     info = vmsvga3d_command_info(cmd);
+    trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
 
-    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+    if (trace_3d) {
         if (*len >= 2) {
             uint32_t raw_size = 0;
 
@@ -11333,13 +11386,11 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
         return false;
     }
 
-    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D) &&
-        vmsvga3d_trace_fifo_command(cmd)) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "3D-CMD path=%s name=%s id=%u action=%s fifo=0x%08x",
-            vmsvga3d_trace_command_path(cmd), info->name, cmd,
-            vmsvga3d_trace_command_action(cmd, info), fifo_start);
+    if (trace_3d && vmsvga3d_trace_fifo_command(cmd)) {
+        fprintf(stderr,
+                "VMVGA-3D-CMD path=%s name=%s id=%u action=%s fifo=0x%08x\n",
+                vmsvga3d_trace_command_path(cmd), info->name, cmd,
+                vmsvga3d_trace_command_action(cmd, info), fifo_start);
     }
 
     if (info->handler != NULL) {
@@ -11351,10 +11402,11 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
     }
 
     if (info->action == VMSVGA3D_COMMAND_STALL) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "3D-STALL path=%s name=%s id=%u fifo=0x%08x",
-            vmsvga3d_trace_command_path(cmd), info->name, cmd, fifo_start);
+        if (trace_3d) {
+            fprintf(stderr,
+                    "VMVGA-3D-STALL path=%s name=%s id=%u fifo=0x%08x\n",
+                    vmsvga3d_trace_command_path(cmd), info->name, cmd, fifo_start);
+        }
         vmsvga3d_fifo_rewind(s, len, fifo_start);
         VPRINT("%s command %u in SVGA command FIFO\n", info->name, cmd);
         return true;

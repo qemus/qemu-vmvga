@@ -618,6 +618,10 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceCopy *command,
     const SVGA3dCopyBox *boxes, uint32_t box_count,
     const VMSVGA3DD3D9SurfaceCopyPlan *plan);
+VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_resolve_copy(
+    struct vmsvga_state_s *s, uint32_t destination_sid,
+    uint32_t destination_subresource, uint32_t source_sid,
+    uint32_t source_subresource, SVGA3dSurfaceFormat copy_format);
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceStretchBlt *command,
     const VMSVGA3DD3D9StretchBltPlan *plan);

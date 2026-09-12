@@ -1301,6 +1301,7 @@ static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s)
 
     s->vga.vram_ptr = svga_ptr;
     s->svga_surface_bound = false;
+    s->legacy_vga_size = 0;
 
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW leave size=%zu",
                        backup_size);
@@ -1389,7 +1390,7 @@ static uint64_t vmsvga_legacy_vga_read(void *opaque, hwaddr addr,
 
     (void)size;
 
-    if (s->enable) {
+    if (s->legacy_vga_size != 0) {
         s->vga.vram_ptr = s->legacy_vga_ptr;
     }
 
@@ -1406,7 +1407,7 @@ static void vmsvga_legacy_vga_write(void *opaque, hwaddr addr, uint64_t data,
     uint8_t *vram_ptr = s->vga.vram_ptr;
     (void)size;
 
-    if (s->enable) {
+    if (s->legacy_vga_size != 0) {
         s->vga.vram_ptr = s->legacy_vga_ptr;
     }
 
@@ -8761,6 +8762,14 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         bool was_config = s->config;
         s->config = !!value;
         if (s->config) {
+            /*
+             * Windows can stop and later restart the miniport without
+             * toggling SVGA_REG_ENABLE. Re-enter the isolated legacy VGA
+             * shadow when CONFIG_DONE makes SVGA operational again.
+             */
+            if (!was_config && s->enable && s->legacy_vga_size == 0) {
+                vmsvga_legacy_vga_enter(s);
+            }
             vmsvga_publish_fifo_registers(s);
             if (!was_config) {
                 vmsvga_fifo_set_busy(s, false);
@@ -8773,6 +8782,16 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
             s->sync = 0;
             vmsvga_fifo_upload_reset(s);
             vmsvga_fifo_set_busy(s, false);
+
+            /*
+             * Device Manager unloads the VMware miniport by clearing
+             * CONFIG_DONE while leaving ENABLE set. At that point Windows
+             * falls back to the basic/VGA display path, so release the shadow
+             * and let the generic VGA frontend interpret subsequent writes.
+             */
+            if (s->enable && s->legacy_vga_size != 0) {
+                vmsvga_legacy_vga_leave(s);
+            }
         }
         vmsvga_update_dirty_log(s);
         vmsvga_trace_resource_snapshot(s, "config-done");
@@ -9165,9 +9184,16 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     vmsvga3d_d3d9_process_pending_gb_queries(s, "DISPLAY");
     vmsvga3d_d3d10_process_pending_queries(s, "DISPLAY");
 
-    if (!s->enable) {
+    if (!s->enable || !s->config) {
+        /*
+         * CONFIG_DONE=0 is also a VGA/basic-display handoff. Windows leaves
+         * ENABLE set when unloading the VMware miniport, so keying this only
+         * on ENABLE keeps a stale SVGA scanout bound and corrupts the fallback
+         * display.
+         */
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
         s->svga_surface_bound = false;
+        s->damage_count = 0;
         VMVGA_GFX_UPDATE_FALLBACK(s);
         goto done;
     }
@@ -9430,7 +9456,7 @@ static void vmsvga_text_update(void *opaque, uint32_t *chardata)
     uint8_t *vram_ptr = s->vga.vram_ptr;
 
     if (s->vga.hw_ops->text_update) {
-        if (s->enable && s->legacy_vga_size != 0) {
+        if (s->legacy_vga_size != 0) {
             s->vga.vram_ptr = s->legacy_vga_ptr;
         }
         s->vga.hw_ops->text_update(&s->vga, chardata);

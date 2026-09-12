@@ -8906,6 +8906,12 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
             vmsvga_fifo_upload_reset(s);
             vmsvga_fifo_set_busy(s, false);
             vmsvga_trace_vga_state(s, "config-done-cleared");
+            /*
+             * SVGA changed the QEMU console surface behind VGACommonState,
+             * while the VGA renderer itself still caches the pre-SVGA mode.
+             * Force VGA to rebuild its surface on the next refresh.
+             */
+            s->vga.hw_ops->invalidate(&s->vga);
         }
         vmsvga_update_dirty_log(s);
         vmsvga_trace_resource_snapshot(s, "config-done");
@@ -9298,7 +9304,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     vmsvga3d_d3d9_process_pending_gb_queries(s, "DISPLAY");
     vmsvga3d_d3d10_process_pending_queries(s, "DISPLAY");
 
-    if (!s->enable) {
+    if (!s->enable || !s->config) {
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
         s->svga_surface_bound = false;
         VMVGA_GFX_UPDATE_FALLBACK(s);
@@ -9544,7 +9550,8 @@ static void vmsvga_invalidate_display(void *opaque)
 
     struct vmsvga_state_s *s = opaque;
 
-    if (!s->enable || (!s->active_valid && !s->hidden)) {
+    if (!s->enable || !s->config ||
+        (!s->active_valid && !s->hidden)) {
         s->vga.hw_ops->invalidate(&s->vga);
         return;
     }

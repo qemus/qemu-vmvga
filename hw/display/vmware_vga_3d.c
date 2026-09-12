@@ -7747,6 +7747,7 @@ static void vmsvga3d_command_buffer_write_status(
     /* Some guests read back `SVGACBHeader.offset` on completion to determine
      * how far the synchronous parser progressed.  Publish the processed offset
      * before writing the terminal status value. */
+    value = cpu_to_le32(processed_offset);
     (void)vmsvga3d_guest_memory_write(
         s, header_gpa + offsetof(SVGACBHeader, offset), &value, sizeof(value));
 

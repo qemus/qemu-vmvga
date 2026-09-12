@@ -8375,7 +8375,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
 #else
         ret = s->svga3d_dx_capable
                   ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2 |
-                     SVGA_CAP2_GB_MEMSIZE_2 | SVGA_CAP2_SCREENDMA_REG)
+                     SVGA_CAP2_GB_MEMSIZE_2)
                   : (vmsvga_vgpu9_modern_3d_capable(s)
                          ? (SVGA_CAP2_GROW_OTABLE |
                             SVGA_CAP2_GB_MEMSIZE_2)

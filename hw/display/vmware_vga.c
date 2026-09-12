@@ -1436,18 +1436,28 @@ static inline void vmsvga_cursor_apply(struct vmsvga_state_s *s)
     if (!s->cursor_dirty) {
         return;
     }
+
+    /*
+     * The SVGA cursor belongs to the SVGA display path. Hide it as soon as
+     * that path no longer owns the console, even if no valid cursor position
+     * has been committed yet; otherwise the frontend can retain a stale
+     * hardware cursor over the VGA fallback surface.
+     */
+    if (!s->enable || !s->config || s->hidden ||
+        s->active_cursor_on == SVGA_CURSOR_ON_HIDE) {
+        vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
+                                s->active_cursor_y, SVGA_CURSOR_ON_HIDE);
+        s->cursor_dirty = false;
+        return;
+    }
+
     if (!s->active_cursor_position_valid) {
         s->cursor_dirty = false;
         return;
     }
-    if (s->enable && !s->hidden &&
-        s->active_cursor_on != SVGA_CURSOR_ON_HIDE) {
-        vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
-                                s->active_cursor_y, SVGA_CURSOR_ON_SHOW);
-    } else {
-        vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
-                                s->active_cursor_y, SVGA_CURSOR_ON_HIDE);
-    }
+
+    vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
+                            s->active_cursor_y, SVGA_CURSOR_ON_SHOW);
     s->cursor_dirty = false;
 }
 
@@ -8912,6 +8922,10 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
              * Force VGA to rebuild its surface on the next refresh.
              */
             s->vga.hw_ops->invalidate(&s->vga);
+        }
+        if (was_config != s->config) {
+            s->cursor_dirty = true;
+            vmsvga_cursor_apply(s);
         }
         vmsvga_update_dirty_log(s);
         vmsvga_trace_resource_snapshot(s, "config-done");

@@ -1256,101 +1256,6 @@ static void vmsvga3d_gart_page_install_alias(
     page->alias_active = true;
 }
 
-static bool vmsvga3d_gart_write_pte(struct vmsvga_state_s *s,
-                                     VMSVGA3DMob *gart_mob,
-                                     uint32_t page, uint64_t gpa)
-{
-    uint64_t ppn;
-
-    if (gart_mob == NULL || (gpa & (VMSVGA3D_GBO_PAGE_SIZE - 1u)) != 0 ||
-        page >= gart_mob->gbo.size / VMSVGA3D_GART_ENTRY_SIZE) {
-        return false;
-    }
-
-    ppn = cpu_to_le64(gpa >> VMSVGA3D_GBO_PAGE_SHIFT);
-    return vmsvga3d_mob_write(s, gart_mob,
-                              page * VMSVGA3D_GART_ENTRY_SIZE,
-                              &ppn, sizeof(ppn));
-}
-
-static bool vmsvga3d_gart_read_pte(struct vmsvga_state_s *s,
-                                    VMSVGA3DMob *gart_mob,
-                                    uint32_t page, uint64_t *gpa)
-{
-    uint64_t ppn;
-
-    if (gart_mob == NULL || gpa == NULL ||
-        page >= gart_mob->gbo.size / VMSVGA3D_GART_ENTRY_SIZE ||
-        !vmsvga3d_mob_read(s, gart_mob,
-                           page * VMSVGA3D_GART_ENTRY_SIZE,
-                           &ppn, sizeof(ppn))) {
-        return false;
-    }
-
-    ppn = le64_to_cpu(ppn);
-    if (ppn > (VMSVGA3D_GBO_GPA_MASK >> VMSVGA3D_GBO_PAGE_SHIFT)) {
-        return false;
-    }
-
-    *gpa = ppn << VMSVGA3D_GBO_PAGE_SHIFT;
-    return true;
-}
-
-static bool vmsvga3d_gart_restore_from_mob(struct vmsvga_state_s *s,
-                                            VMSVGA3DMob *gart_mob)
-{
-    struct vmsvga3d_state_s *state = s != NULL ? s->svga3d : NULL;
-    MemoryRegionSection section;
-    uint32_t page;
-
-    if (state == NULL || state->gart_pages == NULL || gart_mob == NULL) {
-        return false;
-    }
-
-    memory_region_transaction_begin();
-    for (page = 0; page < state->gart_page_count; page++) {
-        VMSVGA3DGARTPage *entry = &state->gart_pages[page];
-        uint64_t gpa;
-
-        if (!vmsvga3d_gart_read_pte(s, gart_mob, page, &gpa)) {
-            memory_region_transaction_commit();
-            return false;
-        }
-        if (gpa == 0) {
-            continue;
-        }
-        if (!vmsvga3d_gart_resolve_page(gpa, &section)) {
-            memory_region_transaction_commit();
-            return false;
-        }
-
-        vmsvga3d_gart_page_install_alias(s, entry, page, &section);
-        entry->gpa = gpa;
-        entry->mobid = SVGA3D_INVALID_ID;
-        entry->mob_page = 0;
-        memory_region_unref(section.mr);
-    }
-    memory_region_transaction_commit();
-    return true;
-}
-
-static bool vmsvga3d_gart_zero_mob(struct vmsvga_state_s *s,
-                                    VMSVGA3DMob *gart_mob,
-                                    uint32_t page_count)
-{
-    uint64_t zero = 0;
-    uint32_t page;
-
-    for (page = 0; page < page_count; page++) {
-        if (!vmsvga3d_mob_write(s, gart_mob,
-                                page * VMSVGA3D_GART_ENTRY_SIZE,
-                                &zero, sizeof(zero))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static void vmsvga3d_gart_clear_pages(struct vmsvga3d_state_s *state)
 {
     uint32_t page;
@@ -1448,25 +1353,6 @@ static bool vmsvga3d_gart_enable_live(struct vmsvga_state_s *s,
     state->gart_mobid = mobid;
     state->gart_enabled = true;
 
-    /*
-     * The GART MOB is the guest-visible page table, not merely storage whose
-     * size describes the aperture.  Keep it authoritative and use
-     * gart_pages only as the host translation cache used to overlay BAR1.
-     * A fresh GART starts with all PTEs unmapped; an initialized GART restores
-     * those PTEs so device reset/resume does not silently lose mappings.
-     */
-    if (!preserve) {
-        if (initialized == 0) {
-            if (!vmsvga3d_gart_zero_mob(s, mob, page_count)) {
-                vmsvga3d_gart_disable_live(s);
-                return false;
-            }
-        } else if (!vmsvga3d_gart_restore_from_mob(s, mob)) {
-            vmsvga3d_gart_disable_live(s);
-            return false;
-        }
-    }
-
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "GART enable mobid=%u pages=%u max-pages=%u initialized=%u preserve=%u result=OK",
@@ -1520,16 +1406,16 @@ static bool vmsvga3d_gart_map_mob_live(struct vmsvga_state_s *s,
     }
 
     /*
-     * Resolve the complete mapping before updating the guest-visible GART MOB
-     * and the corresponding BAR1 aliases.  The GART MOB stores one PPN64 entry
-     * per 4 KiB aperture page; gart_pages is a host-side cache of the same
-     * translation.  Snapshot GPAs at MAP time so
-     * DESTROY_GB_MOB followed by UNMAP_GART_RANGE, as used by the Win7 KMD,
-     * remains valid.
+     * The VMware host owns the serialized 64-bit GART PTE format.  The guest
+     * command supplies only a MOB id and aperture offset, so keep the
+     * equivalent translation as host-side shadow state rather than inventing
+     * guest-visible PTE bits.  Snapshot GPAs at MAP time so DESTROY_GB_MOB
+     * followed by UNMAP_GART_RANGE, as used by the Win7 KMD, remains valid.
      *
-     * Each alias points at the actual system-memory leaf for the MOB page,
-     * keeping CPU aperture accesses coherent with MOB reads/writes without a
-     * software shadow copy.
+     * Resolve the complete mapping before changing BAR1 so MAP is atomic from
+     * the guest's point of view.  Each alias points at the actual system-memory
+     * leaf for the MOB page, keeping CPU aperture accesses coherent with MOB
+     * reads/writes without a software shadow copy.
      */
     for (run_index = 0; run_index < mob->gbo.run_count; run_index++) {
         const VMSVGA3DGBORun *run = &mob->gbo.runs[run_index];
@@ -1549,20 +1435,6 @@ static bool vmsvga3d_gart_map_mob_live(struct vmsvga_state_s *s,
 
     if (mob_page != mob->gbo.page_count) {
         goto out;
-    }
-
-    {
-        VMSVGA3DMob *gart_mob = vmsvga3d_mob_get(s, state->gart_mobid);
-
-        if (gart_mob == NULL) {
-            goto out;
-        }
-        for (page = 0; page < mob->gbo.page_count; page++) {
-            if (!vmsvga3d_gart_write_pte(s, gart_mob, first_page + page,
-                                         gpas[page])) {
-                goto out;
-            }
-        }
     }
 
     memory_region_transaction_begin();
@@ -1615,19 +1487,6 @@ static bool vmsvga3d_gart_unmap_live(struct vmsvga_state_s *s,
     if (first_page > state->gart_page_count ||
         num_pages > state->gart_page_count - first_page) {
         return false;
-    }
-
-    {
-        VMSVGA3DMob *gart_mob = vmsvga3d_mob_get(s, state->gart_mobid);
-
-        if (gart_mob == NULL) {
-            return false;
-        }
-        for (page = 0; page < num_pages; page++) {
-            if (!vmsvga3d_gart_write_pte(s, gart_mob, first_page + page, 0)) {
-                return false;
-            }
-        }
     }
 
     memory_region_transaction_begin();

@@ -9524,7 +9524,8 @@ static void vmsvga_invalidate_display(void *opaque)
 
     struct vmsvga_state_s *s = opaque;
 
-    if (!s->enable || (!s->active_valid && !s->hidden)) {
+    if (!s->enable || !s->config ||
+        (!s->active_valid && !s->hidden)) {
         s->vga.hw_ops->invalidate(&s->vga);
         return;
     }

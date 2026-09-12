@@ -10,7 +10,7 @@ VMVGA is a virtual graphics adapter for QEMU implementing the VMware SVGA/SVGA3D
 
 QEMU’s stock VMware SVGA II device (`vmware-svga`) provides only a minimal implementation of the hardware. Most legacy 2D FIFO commands are missing, and VMware's 3D acceleration interfaces are not implemented.
 
-This fork provides a substantially more complete and compatible VMware SVGA II device, with both 2D and 3D graphics acceleration.
+This fork provides a substantially improved VMware SVGA II device, with both 2D and 3D graphics acceleration.
 
 ## Features ✨
 

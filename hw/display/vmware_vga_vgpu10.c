@@ -6097,8 +6097,19 @@ static void vmsvga3d_d3d10_pipeline_index_buffer_live(
      * setup instead of being rejected by DX_SET_INDEX_BUFFER.
      */
     (void)bytes_per_index;
-    (void)vmsvga3d_dxvk_d3d11_set_index_buffer(
-        s->dxvk, surface_binding, dxgi_format, offset);
+    {
+        bool bind_ok = vmsvga3d_dxvk_d3d11_set_index_buffer(
+            s->dxvk, surface_binding, dxgi_format, offset);
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-IA-INDEX-BIND cid=%u sid=%u svga-format=%u dxgi=%u "
+            "offset=%u native=%u result=%s",
+            cid, context->shadow.inputAssembly.indexBufferSid,
+            context->shadow.inputAssembly.indexBufferFormat, dxgi_format,
+            offset, surface_binding != NULL ? 1u : 0u,
+            bind_ok ? "OK" : "FAIL");
+    }
 }
 
 /*
@@ -8748,6 +8759,89 @@ static void vmsvga3d_d3d10_bound_rtvs_changed_live(
     }
 }
 
+static bool vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
+    struct vmsvga_state_s *s, SVGA3dSurfaceId sid)
+{
+    VMSVGA3DSurface *surface;
+    uint32_t stage_count;
+    uint32_t cid;
+    uint32_t stage;
+    uint32_t slot;
+
+    if (s == NULL || s->svga3d == NULL || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[sid];
+    if (surface == NULL || surface->format != SVGA3D_BUFFER ||
+        (surface->surface_flags & SVGA3D_SURFACE_BIND_CONSTANT_BUFFER) == 0 ||
+        surface->mips == NULL || surface->mip_count == 0 ||
+        surface->mips[0].data == NULL) {
+        return true;
+    }
+
+    stage_count = vmsvga3d_dx_shader_stage_count(s);
+    for (cid = 0; cid < SVGA3D_MAX_CONTEXT_IDS; cid++) {
+        VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+        if (context == NULL) {
+            continue;
+        }
+
+        for (stage = 0; stage < stage_count; stage++) {
+            for (slot = 0; slot < SVGA3D_DX_MAX_CONSTBUFFERS; slot++) {
+                const SVGA3dConstantBufferBinding *binding =
+                    &context->shadow.shaderState[stage].constantBuffers[slot];
+                uint32_t aligned_size;
+                uint32_t copy_size;
+                bool success;
+
+                if (binding->sid != sid) {
+                    continue;
+                }
+
+                aligned_size = (binding->sizeInBytes + 255u) & ~255u;
+                if (aligned_size > 4096u * 16u) {
+                    aligned_size = 4096u * 16u;
+                }
+                if (aligned_size == 0) {
+                    continue;
+                }
+
+                copy_size = MIN(binding->sizeInBytes, aligned_size);
+                if (binding->offsetInBytes >= surface->mips[0].data_size ||
+                    copy_size >
+                        surface->mips[0].data_size - binding->offsetInBytes) {
+                    VMVGA_TRACE_LOCAL(
+                        VMVGA_TRACE_3D,
+                        "DX-CB-REFRESH cid=%u stage=%u slot=%u sid=%u "
+                        "offset=%u size=%u result=FAIL reason=range",
+                        cid, stage, slot, sid, binding->offsetInBytes,
+                        binding->sizeInBytes);
+                    return false;
+                }
+
+                success = vmsvga3d_dxvk_d3d11_constant_buffer_update(
+                    s->dxvk, cid, stage, slot,
+                    surface->mips[0].data + binding->offsetInBytes,
+                    copy_size, aligned_size);
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "DX-CB-REFRESH cid=%u stage=%u slot=%u sid=%u "
+                    "offset=%u size=%u backend=%u result=%s",
+                    cid, stage, slot, sid, binding->offsetInBytes,
+                    binding->sizeInBytes, aligned_size,
+                    success ? "OK" : "FAIL");
+                if (!success) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
 static bool vmsvga3d_d3d10_update_subresource_live(
     struct vmsvga_state_s *s, const SVGA3dCmdDXUpdateSubResource *command)
 {
@@ -8944,6 +9038,17 @@ static bool vmsvga3d_d3d10_update_subresource_live(
             "backend=d3d11 stage=upload result=FAIL",
             command->sid, command->subResource, layout.box.x, layout.box.y,
             layout.box.z, layout.box.w, layout.box.h, layout.box.d);
+        return false;
+    }
+
+    if (command->subResource == 0 &&
+        !vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
+            s, command->sid)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-UPDATE sid=%u sub=%u stage=constant-buffer-refresh "
+            "result=FAIL",
+            command->sid, command->subResource);
         return false;
     }
 
@@ -12135,6 +12240,100 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                  vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan);
       }
 
+    case SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS_V2: {
+          SVGA3dCmdDXSetVertexBuffers_v2 command;
+          SVGA3dVertexBuffer_v2 buffers_v2[SVGA3D_DX_MAX_VERTEXBUFFERS];
+          SVGA3dVertexBuffer buffers[SVGA3D_DX_MAX_VERTEXBUFFERS];
+          VMSVGA3DD3D10VertexBufferSetPlan plan;
+          VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+          const uint32_t header_size = sizeof(command);
+          uint32_t count;
+          uint32_t i;
+
+          if (context == NULL || size < header_size ||
+              (size - header_size) % sizeof(buffers_v2[0]) != 0) {
+              return false;
+          }
+
+          memcpy(&command, payload, sizeof(command));
+          count = (size - header_size) / sizeof(buffers_v2[0]);
+          if (count > SVGA3D_DX_MAX_VERTEXBUFFERS ||
+              command.startBuffer > SVGA3D_DX_MAX_VERTEXBUFFERS - count) {
+              return false;
+          }
+
+          if (count != 0) {
+              memcpy(buffers_v2, (const uint8_t *)payload + header_size,
+                     count * sizeof(buffers_v2[0]));
+          }
+
+          for (i = 0; i < count; i++) {
+              buffers[i].sid = buffers_v2[i].sid;
+              buffers[i].stride = buffers_v2[i].stride;
+              buffers[i].offset = buffers_v2[i].offset;
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-IA-VB-CMD cid=%u kind=v2 slot=%u sid=%u stride=%u "
+                  "offset=%u size=%u",
+                  cid, command.startBuffer + i, buffers_v2[i].sid,
+                  buffers_v2[i].stride, buffers_v2[i].offset,
+                  buffers_v2[i].sizeInBytes);
+          }
+
+          return vmsvga3d_d3d10_vertex_buffers_set_plan(
+                     command.startBuffer, count, count != 0 ? buffers : NULL,
+                     &plan) != VMSVGA3D_D3D10_LEVEL_INVALID &&
+                 vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan);
+      }
+
+    case SVGA_3D_CMD_DX_SET_VERTEX_BUFFERS_OFFSET_AND_SIZE: {
+          SVGA3dCmdDXSetVertexBuffersOffsetAndSize command;
+          SVGA3dVertexBufferOffsetAndSize updates[SVGA3D_DX_MAX_VERTEXBUFFERS];
+          SVGA3dVertexBuffer buffers[SVGA3D_DX_MAX_VERTEXBUFFERS];
+          VMSVGA3DD3D10VertexBufferSetPlan plan;
+          VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+          const uint32_t header_size = sizeof(command);
+          uint32_t count;
+          uint32_t i;
+
+          if (context == NULL || size < header_size ||
+              (size - header_size) % sizeof(updates[0]) != 0) {
+              return false;
+          }
+
+          memcpy(&command, payload, sizeof(command));
+          count = (size - header_size) / sizeof(updates[0]);
+          if (count > SVGA3D_DX_MAX_VERTEXBUFFERS ||
+              command.startBuffer > SVGA3D_DX_MAX_VERTEXBUFFERS - count) {
+              return false;
+          }
+
+          if (count != 0) {
+              memcpy(updates, (const uint8_t *)payload + header_size,
+                     count * sizeof(updates[0]));
+          }
+
+          for (i = 0; i < count; i++) {
+              uint32_t slot = command.startBuffer + i;
+
+              buffers[i].sid =
+                  context->shadow.inputAssembly.vertexBuffers[slot].bufferId;
+              buffers[i].stride = updates[i].stride;
+              buffers[i].offset = updates[i].offset;
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-IA-VB-CMD cid=%u kind=offset-size slot=%u sid=%u "
+                  "stride=%u offset=%u size=%u",
+                  cid, slot, buffers[i].sid, updates[i].stride,
+                  updates[i].offset, updates[i].sizeInBytes);
+          }
+
+          return vmsvga3d_d3d10_vertex_buffers_set_plan(
+                     command.startBuffer, count, count != 0 ? buffers : NULL,
+                     &plan) != VMSVGA3D_D3D10_LEVEL_INVALID &&
+                 vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan);
+      }
+
     case SVGA_3D_CMD_DX_SET_INDEX_BUFFER: {
           SVGA3dCmdDXSetIndexBuffer command;
           VMSVGA3DD3D10IndexBufferSetPlan plan;
@@ -12145,9 +12344,61 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-IA-INDEX-CMD cid=%u kind=legacy sid=%u format=%u "
+              "offset=%u",
+              cid, command.sid, command.format, command.offset);
 
           return vmsvga3d_d3d10_index_buffer_set_plan(
                      command.sid, command.format, command.offset, &plan) !=
+                     VMSVGA3D_D3D10_LEVEL_INVALID &&
+                 vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan);
+      }
+
+    case SVGA_3D_CMD_DX_SET_INDEX_BUFFER_V2: {
+          SVGA3dCmdDXSetIndexBuffer_v2 command;
+          VMSVGA3DD3D10IndexBufferSetPlan plan;
+          VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+
+          if (context == NULL || size < sizeof(command)) {
+              return false;
+          }
+
+          memcpy(&command, payload, sizeof(command));
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-IA-INDEX-CMD cid=%u kind=v2 sid=%u format=%u offset=%u "
+              "size=%u",
+              cid, command.sid, command.format, command.offset,
+              command.sizeInBytes);
+
+          return vmsvga3d_d3d10_index_buffer_set_plan(
+                     command.sid, command.format, command.offset, &plan) !=
+                     VMSVGA3D_D3D10_LEVEL_INVALID &&
+                 vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan);
+      }
+
+    case SVGA_3D_CMD_DX_SET_INDEX_BUFFER_OFFSET_AND_SIZE: {
+          SVGA3dCmdDXSetIndexBufferOffsetAndSize command;
+          VMSVGA3DD3D10IndexBufferSetPlan plan;
+          VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+          SVGA3dSurfaceId sid;
+
+          if (context == NULL || size < sizeof(command)) {
+              return false;
+          }
+
+          memcpy(&command, payload, sizeof(command));
+          sid = context->shadow.inputAssembly.indexBufferSid;
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-IA-INDEX-CMD cid=%u kind=offset-size sid=%u format=%u "
+              "offset=%u size=%u",
+              cid, sid, command.format, command.offset, command.sizeInBytes);
+
+          return vmsvga3d_d3d10_index_buffer_set_plan(
+                     sid, command.format, command.offset, &plan) !=
                      VMSVGA3D_D3D10_LEVEL_INVALID &&
                  vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan);
       }
@@ -12273,6 +12524,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           VMSVGA3DD3D10SOTargetsPlan plan;
           const uint32_t header_size = sizeof(SVGA3dCmdDXSetSOTargets);
           uint32_t count;
+          uint32_t i;
 
           if (size < header_size) {
               return false;
@@ -12286,6 +12538,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           if (count != 0) {
               memcpy(targets, (const uint8_t *)payload + header_size,
                      count * sizeof(targets[0]));
+          }
+
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-SO-TARGETS cid=%u count=%u", cid, count);
+          for (i = 0; i < count; i++) {
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-SO-TARGET cid=%u slot=%u sid=%u offset=%u size=%u",
+                  cid, i, targets[i].sid, targets[i].offset,
+                  targets[i].sizeInBytes);
           }
 
           if (vmsvga3d_d3d10_so_targets_plan(
@@ -12312,6 +12575,9 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-SO-SET cid=%u soid=%u", cid, command.soid);
 
           if (vmsvga3d_d3d10_stream_output_set_plan(
                   command.soid,
@@ -13271,12 +13537,33 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
     case SVGA_3D_CMD_DX_DEFINE_STREAMOUTPUT: {
           SVGA3dCmdDXDefineStreamOutput command;
           SVGACOTableDXStreamOutputEntry *entry;
+          uint32_t i;
 
           if (size < sizeof(command)) {
               return false;
           }
 
           memcpy(&command, payload, sizeof(command));
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-SO-DEFINE cid=%u kind=legacy soid=%u decls=%u "
+              "strides=%u,%u,%u,%u rasterized=%u",
+              cid, command.soid, command.numOutputStreamEntries,
+              command.streamOutputStrideInBytes[0],
+              command.streamOutputStrideInBytes[1],
+              command.streamOutputStrideInBytes[2],
+              command.streamOutputStrideInBytes[3],
+              command.rasterizedStream);
+          for (i = 0; i < command.numOutputStreamEntries &&
+                      i < SVGA3D_MAX_DX10_STREAMOUT_DECLS; i++) {
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-SO-DEFINE-DECL cid=%u soid=%u index=%u stream=%u "
+                  "slot=%u reg=%u mask=0x%x",
+                  cid, command.soid, i, command.decl[i].stream,
+                  command.decl[i].outputSlot, command.decl[i].registerIndex,
+                  command.decl[i].registerMask);
+          }
 
           entry = vmsvga3d_dx_cotable_entry_ptr(
               s, cid, SVGA_COTABLE_STREAMOUTPUT, command.soid);
@@ -13301,6 +13588,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-SO-DEFINE cid=%u kind=mob soid=%u decls=%u stride-count=%u "
+              "strides=%u,%u,%u,%u rasterized=%u",
+              cid, command.soid, command.numOutputStreamEntries,
+              command.numOutputStreamStrides,
+              command.streamOutputStrideInBytes[0],
+              command.streamOutputStrideInBytes[1],
+              command.streamOutputStrideInBytes[2],
+              command.streamOutputStrideInBytes[3],
+              command.rasterizedStream);
 
           entry = vmsvga3d_dx_cotable_entry_ptr(
               s, cid, SVGA_COTABLE_STREAMOUTPUT, command.soid);
@@ -13325,6 +13623,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-SO-BIND cid=%u soid=%u mobid=%u offset=%u size=%u",
+              cid, command.soid, command.mobid, command.offsetInBytes,
+              command.sizeInBytes);
 
           entry = vmsvga3d_dx_cotable_entry_ptr(
               s, cid, SVGA_COTABLE_STREAMOUTPUT, command.soid);

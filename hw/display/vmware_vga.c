@@ -9209,7 +9209,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
      */
     if (s->screen_frontend_hold_frames != 0) {
         bool trace_flight = vmsvga_trace_flight_enabled();
-        uint32_t held_damage;
+        uint32_t held_damage = 0;
 
         if (trace_flight) {
             held_damage = s->damage_count;

@@ -3969,6 +3969,57 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_snapshot(
     return success;
 }
 
+bool vmsvga3d_dxvk_d3d11_constant_buffer_update(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
+    uint32_t slot, const void *data, uint32_t copy_size, uint32_t size)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11UpdateSubresource update = NULL;
+    VMSVGA3DDxvkConstantBuffer *buffer;
+    uint8_t *upload;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        stage_index >= SVGA3D_NUM_SHADERTYPE ||
+        slot >= SVGA3D_DX_MAX_CONSTBUFFERS || size == 0 ||
+        copy_size > size || (copy_size != 0 && data == NULL)) {
+        return false;
+    }
+
+    buffer = vmsvga3d_dxvk_d3d11_constant_buffer_find(
+        dxvk, cid, stage_index, slot, NULL);
+    if (buffer == NULL || buffer->buffer == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UPDATE_SUBRESOURCE,
+            &update, sizeof(update))) {
+        return false;
+    }
+
+    upload = g_try_malloc0(size);
+    if (upload == NULL) {
+        return false;
+    }
+
+    if (copy_size != 0) {
+        memcpy(upload, data, copy_size);
+    }
+
+    update(dxvk->d3d11_context, buffer->buffer, 0, NULL, upload, size, size);
+    g_free(upload);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)stage_index;
+    (void)slot;
+    (void)data;
+    (void)copy_size;
+    (void)size;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_constant_buffer_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index,
     uint32_t slot)
@@ -6966,6 +7017,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     VMSVGA3DD3D10ShaderDXBC dxbc;
     VMSVGA3DD3D10Level level;
     uint32_t method;
+    uint32_t i;
     void *native_shader = NULL;
     int32_t result;
 
@@ -7051,6 +7103,33 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
                 &create_gs_so, sizeof(create_gs_so))) {
             return false;
         }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SO-REALIZE cid=%u shid=%u guest-type=%u program-type=%u "
+            "soid=%u decls=%u stride-count=%u explicit=%u rasterized=%u "
+            "resolved=%u",
+            cid, shader_id, shader->shader_type, shader->info.program_type,
+            stream_output_id, stream_output->declaration_count,
+            stream_output->stride_count,
+            stream_output->use_explicit_strides ? 1u : 0u,
+            stream_output->rasterized_stream,
+            stream_output->all_semantics_resolved ? 1u : 0u);
+        for (i = 0; i < stream_output->declaration_count; i++) {
+            const VMSVGA3DD3D10StreamOutputDecl *decl =
+                &stream_output->declarations[i];
+
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SO-REALIZE-DECL cid=%u shid=%u soid=%u index=%u "
+                "stream=%u semantic=%s semantic-index=%u start=%u count=%u "
+                "slot=%u",
+                cid, shader_id, stream_output_id, i, decl->stream,
+                decl->semantic_name != NULL ? decl->semantic_name : "<null>",
+                decl->semantic_index, decl->start_component,
+                decl->component_count, decl->output_slot);
+        }
+
         result = create_gs_so(
             dxvk->d3d11_device, shader->bytecode, shader->bytecode_size,
             stream_output->declarations, stream_output->declaration_count,

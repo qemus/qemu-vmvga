@@ -59,9 +59,9 @@ Once included in QEMU, a new display device will be available:
 -device vmvga
 ```
 
-3D acceleration requires the official VMware SVGA display drivers to be installed in the guest.
+3D acceleration requires the official VMware SVGA display drivers to be installed in the guest, on modern Windows versions they will be automatically retrieved via Windows Update.
 
-KVM raises a general protection exception when the user-mode component of these drivers tries to access the VMware backdoor I/O port, causing the driver to disable 3D acceleration.
+Unfortunately KVM raises a general protection exception when the user-mode component of these drivers tries to access the VMware backdoor I/O port, causing the driver to disable 3D acceleration.
 
 To work around this problem, add the following setting to your host KVM module configuration:
 

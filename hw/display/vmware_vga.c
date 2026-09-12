@@ -597,8 +597,6 @@ struct vmsvga_state_s {
     MemoryRegion legacy_vga_mem;
     uint8_t *legacy_vga_ptr;
     uint32_t legacy_vga_size;
-    uint8_t *pre_svga_fb_ptr;
-    uint32_t pre_svga_fb_size;
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMVGA, "vmvga")
 
@@ -1264,86 +1262,10 @@ static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s)
     return memory_region_get_ram_ptr(&s->vga.vram);
 }
 
-static void vmsvga_pre_svga_fb_clear(struct vmsvga_state_s *s)
-{
-    g_clear_pointer(&s->pre_svga_fb_ptr, g_free);
-    s->pre_svga_fb_size = 0;
-}
-
-static void vmsvga_pre_svga_fb_save(struct vmsvga_state_s *s)
-{
-    DisplaySurface *surface = qemu_console_surface(s->vga.con);
-    const uint8_t *data;
-    uint64_t size;
-    uint32_t width;
-    uint32_t height;
-    uint32_t stride;
-    uint32_t bpp;
-
-    vmsvga_pre_svga_fb_clear(s);
-
-    if (surface == NULL || surface_data(surface) == NULL ||
-        surface_width(surface) <= 0 || surface_height(surface) <= 0 ||
-        surface_stride(surface) <= 0 || surface_bits_per_pixel(surface) <= 0) {
-        return;
-    }
-
-    width = (uint32_t)surface_width(surface);
-    height = (uint32_t)surface_height(surface);
-    stride = (uint32_t)surface_stride(surface);
-    bpp = (uint32_t)surface_bits_per_pixel(surface);
-    size = (uint64_t)stride * height;
-
-    /*
-     * This snapshot is the complete framebuffer that generic VGA/GOP was
-     * presenting before SVGA took over.  Keep it separate from the 512 KiB
-     * legacy VGA aperture shadow below: the two buffers serve different
-     * purposes.
-     */
-    if (size == 0 || size > s->vga.vram_size || size > UINT32_MAX) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
-                          "VGA_FB save skipped size=%" PRIu64
-                          " vram=%u surface=%ux%u/%u/%u",
-                          size, s->vga.vram_size, width, height, bpp, stride);
-        return;
-    }
-
-    data = surface_data(surface);
-    s->pre_svga_fb_ptr = g_malloc((size_t)size);
-    memcpy(s->pre_svga_fb_ptr, data, (size_t)size);
-    s->pre_svga_fb_size = (uint32_t)size;
-
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
-                      "VGA_FB save size=%u surface=%ux%u/%u/%u",
-                      s->pre_svga_fb_size, width, height, bpp, stride);
-}
-
-static void vmsvga_pre_svga_fb_restore(struct vmsvga_state_s *s)
-{
-    uint8_t *svga_ptr;
-    uint32_t restore_size;
-
-    if (s->pre_svga_fb_ptr == NULL || s->pre_svga_fb_size == 0) {
-        return;
-    }
-
-    svga_ptr = vmsvga_svga_vram_ptr(s);
-    restore_size = MIN(s->pre_svga_fb_size, s->vga.vram_size);
-    memcpy(svga_ptr, s->pre_svga_fb_ptr, restore_size);
-    memory_region_set_dirty(&s->vga.vram, 0, restore_size);
-
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
-                      "VGA_FB restore size=%u", restore_size);
-
-    vmsvga_pre_svga_fb_clear(s);
-}
-
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s)
 {
     size_t backup_size = vmsvga_legacy_vga_backup_size(s);
     uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
-
-    vmsvga_pre_svga_fb_save(s);
 
     /*
      * Refresh the isolated legacy VGA framebuffer on every VGA -> SVGA
@@ -1377,17 +1299,8 @@ static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s)
         memory_region_set_dirty(&s->vga.vram, 0, restore_size);
     }
 
-    /*
-     * Finally restore the complete pre-SVGA linear framebuffer.  It must win
-     * over the smaller legacy aperture copy above; otherwise the first 512 KiB
-     * can come from one framebuffer layout while the rest comes from another,
-     * which produces the striped fallback image seen on device disable.
-     */
-    vmsvga_pre_svga_fb_restore(s);
-
     s->vga.vram_ptr = svga_ptr;
     s->svga_surface_bound = false;
-    s->legacy_vga_size = 0;
 
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW leave size=%zu",
                        backup_size);
@@ -1476,7 +1389,7 @@ static uint64_t vmsvga_legacy_vga_read(void *opaque, hwaddr addr,
 
     (void)size;
 
-    if (s->legacy_vga_size != 0) {
+    if (s->enable) {
         s->vga.vram_ptr = s->legacy_vga_ptr;
     }
 
@@ -1493,7 +1406,7 @@ static void vmsvga_legacy_vga_write(void *opaque, hwaddr addr, uint64_t data,
     uint8_t *vram_ptr = s->vga.vram_ptr;
     (void)size;
 
-    if (s->legacy_vga_size != 0) {
+    if (s->enable) {
         s->vga.vram_ptr = s->legacy_vga_ptr;
     }
 
@@ -5034,6 +4947,135 @@ static void vmsvga_trace_frontend_snapshot(struct vmsvga_state_s *s,
             phase, (const void *)data, width, height, bypp * 8, stride, hash,
             hash_valid, nonzero_rows, s->invalidated, s->screen_defined,
             s->svga_surface_bound, s->screen_frontend_deferred);
+    s->trace_activity_seq++;
+}
+
+static void vmsvga_trace_vga_state(struct vmsvga_state_s *s,
+                                    const char *reason)
+{
+    DisplaySurface *surface;
+    VGADisplayParams params = { 0 };
+    uint8_t *real_vram;
+    const uint8_t *surface_ptr;
+    int render_width = -1;
+    int render_height = -1;
+    int render_bpp = -1;
+    int64_t surface_vram_offset = -1;
+    uint32_t surface_width_px = 0;
+    uint32_t surface_height_px = 0;
+    uint32_t surface_bpp = 0;
+    uint32_t surface_stride_bytes = 0;
+
+    if (!vmsvga_trace_flight_enabled()) {
+        return;
+    }
+
+    surface = qemu_console_surface(s->vga.con);
+    surface_ptr = surface != NULL ? surface_data(surface) : NULL;
+    real_vram = vmsvga_svga_vram_ptr(s);
+
+    if (surface != NULL) {
+        if (surface_width(surface) > 0) {
+            surface_width_px = surface_width(surface);
+        }
+        if (surface_height(surface) > 0) {
+            surface_height_px = surface_height(surface);
+        }
+        if (surface_bits_per_pixel(surface) > 0) {
+            surface_bpp = surface_bits_per_pixel(surface);
+        }
+        if (surface_stride(surface) > 0) {
+            surface_stride_bytes = surface_stride(surface);
+        }
+    }
+
+    if (surface_ptr != NULL && real_vram != NULL) {
+        uintptr_t surface_addr = (uintptr_t)surface_ptr;
+        uintptr_t vram_addr = (uintptr_t)real_vram;
+
+        if (surface_addr >= vram_addr &&
+            surface_addr - vram_addr < s->vga.vram_size) {
+            surface_vram_offset = surface_addr - vram_addr;
+        }
+    }
+
+    if (s->vga.get_resolution != NULL) {
+        s->vga.get_resolution(&s->vga, &render_width, &render_height);
+    }
+    if (s->vga.get_bpp != NULL) {
+        render_bpp = s->vga.get_bpp(&s->vga);
+    }
+    if (s->vga.get_params != NULL) {
+        s->vga.get_params(&s->vga, &params);
+    }
+
+    fprintf(stderr,
+            "VMVGA-VGA-STATE reason=%s enable=%u config=%u hidden=%u "
+            "surface=%p surface-vram-off=%" PRId64
+            " surface-mode=%ux%u/%u/%u vram-ptr=%p real-vram=%p "
+            "vram-size=0x%x legacy-ptr=%p legacy-size=%u "
+            "render-mode=%dx%d/%d render-line=%u render-start=0x%08x "
+            "render-compare=0x%08x render-hpel=%u render-hpel-split=%u "
+            "cached-line=%u cached-start=0x%08x cached-compare=0x%08x "
+            "cached-hpel=%u cached-hpel-split=%u last=%ux%u/%u/%u "
+            "graphic=%d shift=%u double-scan=%u bank-offset=%d\n",
+            reason, s->enable, s->config, s->hidden,
+            (const void *)surface_ptr, surface_vram_offset, surface_width_px,
+            surface_height_px, surface_bpp, surface_stride_bytes,
+            (void *)s->vga.vram_ptr, (void *)real_vram, s->vga.vram_size,
+            (void *)s->legacy_vga_ptr, s->legacy_vga_size, render_width,
+            render_height, render_bpp, params.line_offset, params.start_addr,
+            params.line_compare, params.hpel, params.hpel_split,
+            s->vga.params.line_offset, s->vga.params.start_addr,
+            s->vga.params.line_compare, s->vga.params.hpel,
+            s->vga.params.hpel_split, s->vga.last_width, s->vga.last_height,
+            s->vga.last_depth, s->vga.last_line_offset, s->vga.graphic_mode,
+            s->vga.shift_control, s->vga.double_scan, s->vga.bank_offset);
+
+    fprintf(stderr,
+            "VMVGA-VGA-VBE reason=%s index=0x%04x id=0x%04x "
+            "xres=%u yres=%u bpp=%u enable=0x%04x bank=%u "
+            "virt=%ux%u offset=%u,%u line=%u start=0x%08x "
+            "bank-mask=0x%08x\n",
+            reason, s->vga.vbe_index,
+            s->vga.vbe_regs[VBE_DISPI_INDEX_ID],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_XRES],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_YRES],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_BPP],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_BANK],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_VIRT_WIDTH],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_VIRT_HEIGHT],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_X_OFFSET],
+            s->vga.vbe_regs[VBE_DISPI_INDEX_Y_OFFSET],
+            s->vga.vbe_line_offset, s->vga.vbe_start_addr,
+            s->vga.vbe_bank_mask);
+
+    fprintf(stderr,
+            "VMVGA-VGA-REGS reason=%s msr=%02x fcr=%02x st00=%02x st01=%02x "
+            "sr-idx=%02x sr=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x "
+            "srvbe=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x "
+            "gr-idx=%02x gr=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x "
+            "ar-idx=%02x ar10=%02x ar12=%02x ar13=%02x ar14=%02x "
+            "cr-idx=%02x cr00=%02x cr01=%02x cr06=%02x cr07=%02x "
+            "cr09=%02x cr0c=%02x cr0d=%02x cr12=%02x cr13=%02x "
+            "cr17=%02x cr18=%02x\n",
+            reason, s->vga.msr, s->vga.fcr, s->vga.st00, s->vga.st01,
+            s->vga.sr_index, s->vga.sr[0], s->vga.sr[1], s->vga.sr[2],
+            s->vga.sr[3], s->vga.sr[4], s->vga.sr[5], s->vga.sr[6],
+            s->vga.sr[7], s->vga.sr_vbe[0], s->vga.sr_vbe[1],
+            s->vga.sr_vbe[2], s->vga.sr_vbe[3], s->vga.sr_vbe[4],
+            s->vga.sr_vbe[5], s->vga.sr_vbe[6], s->vga.sr_vbe[7],
+            s->vga.gr_index, s->vga.gr[0], s->vga.gr[1], s->vga.gr[2],
+            s->vga.gr[3], s->vga.gr[4], s->vga.gr[5], s->vga.gr[6],
+            s->vga.gr[7], s->vga.gr[8], s->vga.ar_index, s->vga.ar[0x10],
+            s->vga.ar[0x12], s->vga.ar[0x13], s->vga.ar[0x14],
+            s->vga.cr_index, s->vga.cr[0x00], s->vga.cr[0x01],
+            s->vga.cr[0x06], s->vga.cr[0x07], s->vga.cr[0x09],
+            s->vga.cr[0x0c], s->vga.cr[0x0d], s->vga.cr[0x12],
+            s->vga.cr[0x13], s->vga.cr[0x17], s->vga.cr[0x18]);
+
+    vmsvga_trace_frontend_snapshot(s, reason);
     s->trace_activity_seq++;
 }
 
@@ -8780,8 +8822,10 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           bool was_hidden = s->hidden;
           bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
           if (!was_enabled && enabled) {
+              vmsvga_trace_vga_state(s, "svga-enable-before");
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {
+              vmsvga_trace_vga_state(s, "svga-disable-before");
               /*
                * The SVGA cursor belongs to this display mode. Hide it before
                * falling back to VGA even if its last position was never made
@@ -8797,6 +8841,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
               }
               vmsvga_fifo_discard_pending(s);
               vmsvga_legacy_vga_leave(s);
+              vmsvga_trace_vga_state(s, "svga-disable-after");
           }
           s->enable = enabled;
           s->hidden = s->enable && !!(value & SVGA_REG_ENABLE_HIDE);
@@ -8848,14 +8893,6 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
         bool was_config = s->config;
         s->config = !!value;
         if (s->config) {
-            /*
-             * Windows can stop and later restart the miniport without
-             * toggling SVGA_REG_ENABLE. Re-enter the isolated legacy VGA
-             * shadow when CONFIG_DONE makes SVGA operational again.
-             */
-            if (!was_config && s->enable && s->legacy_vga_size == 0) {
-                vmsvga_legacy_vga_enter(s);
-            }
             vmsvga_publish_fifo_registers(s);
             if (!was_config) {
                 vmsvga_fifo_set_busy(s, false);
@@ -8868,16 +8905,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
             s->sync = 0;
             vmsvga_fifo_upload_reset(s);
             vmsvga_fifo_set_busy(s, false);
-
-            /*
-             * Device Manager unloads the VMware miniport by clearing
-             * CONFIG_DONE while leaving ENABLE set. At that point Windows
-             * falls back to the basic/VGA display path, so release the shadow
-             * and let the generic VGA frontend interpret subsequent writes.
-             */
-            if (s->enable && s->legacy_vga_size != 0) {
-                vmsvga_legacy_vga_leave(s);
-            }
+            vmsvga_trace_vga_state(s, "config-done-cleared");
         }
         vmsvga_update_dirty_log(s);
         vmsvga_trace_resource_snapshot(s, "config-done");
@@ -9270,16 +9298,9 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     vmsvga3d_d3d9_process_pending_gb_queries(s, "DISPLAY");
     vmsvga3d_d3d10_process_pending_queries(s, "DISPLAY");
 
-    if (!s->enable || !s->config) {
-        /*
-         * CONFIG_DONE=0 is also a VGA/basic-display handoff. Windows leaves
-         * ENABLE set when unloading the VMware miniport, so keying this only
-         * on ENABLE keeps a stale SVGA scanout bound and corrupts the fallback
-         * display.
-         */
+    if (!s->enable) {
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
         s->svga_surface_bound = false;
-        s->damage_count = 0;
         VMVGA_GFX_UPDATE_FALLBACK(s);
         goto done;
     }
@@ -9492,7 +9513,6 @@ static void vmsvga_reset(DeviceState *dev)
 
     vmsvga_trace_display_path_reset(s);
     s->legacy_vga_size = 0;
-    vmsvga_pre_svga_fb_clear(s);
 
     memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));
     memset(s->legacy_vga_ptr, 0, VMSVGA_VGA_FB_BACKUP_SIZE);
@@ -9524,8 +9544,7 @@ static void vmsvga_invalidate_display(void *opaque)
 
     struct vmsvga_state_s *s = opaque;
 
-    if (!s->enable || !s->config ||
-        (!s->active_valid && !s->hidden)) {
+    if (!s->enable || (!s->active_valid && !s->hidden)) {
         s->vga.hw_ops->invalidate(&s->vga);
         return;
     }
@@ -9544,7 +9563,7 @@ static void vmsvga_text_update(void *opaque, uint32_t *chardata)
     uint8_t *vram_ptr = s->vga.vram_ptr;
 
     if (s->vga.hw_ops->text_update) {
-        if (s->legacy_vga_size != 0) {
+        if (s->enable && s->legacy_vga_size != 0) {
             s->vga.vram_ptr = s->legacy_vga_ptr;
         }
         s->vga.hw_ops->text_update(&s->vga, chardata);
@@ -10257,8 +10276,6 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->dirty_log_enabled = true;
     s->legacy_vga_ptr = g_malloc0(VMSVGA_VGA_FB_BACKUP_SIZE);
     s->legacy_vga_size = 0;
-    s->pre_svga_fb_ptr = NULL;
-    s->pre_svga_fb_size = 0;
 
     memory_region_init_io(&s->legacy_vga_mem, OBJECT(dev),
                           &vmsvga_legacy_vga_ops, s, "vmsvga.vga-lowmem",
@@ -10509,7 +10526,6 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     vmsvga_objects_clear(&s->chip);
 
     g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
-    vmsvga_pre_svga_fb_clear(&s->chip);
 
     if (s->chip.debug) {
         assert(vmvga_trace_debug_devices > 0);

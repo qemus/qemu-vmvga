@@ -597,6 +597,8 @@ struct vmsvga_state_s {
     MemoryRegion legacy_vga_mem;
     uint8_t *legacy_vga_ptr;
     uint32_t legacy_vga_size;
+    uint8_t *pre_svga_fb_ptr;
+    uint32_t pre_svga_fb_size;
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMVGA, "vmvga")
 
@@ -1262,10 +1264,86 @@ static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s)
     return memory_region_get_ram_ptr(&s->vga.vram);
 }
 
+static void vmsvga_pre_svga_fb_clear(struct vmsvga_state_s *s)
+{
+    g_clear_pointer(&s->pre_svga_fb_ptr, g_free);
+    s->pre_svga_fb_size = 0;
+}
+
+static void vmsvga_pre_svga_fb_save(struct vmsvga_state_s *s)
+{
+    DisplaySurface *surface = qemu_console_surface(s->vga.con);
+    const uint8_t *data;
+    uint64_t size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t bpp;
+
+    vmsvga_pre_svga_fb_clear(s);
+
+    if (surface == NULL || surface_data(surface) == NULL ||
+        surface_width(surface) <= 0 || surface_height(surface) <= 0 ||
+        surface_stride(surface) <= 0 || surface_bits_per_pixel(surface) <= 0) {
+        return;
+    }
+
+    width = (uint32_t)surface_width(surface);
+    height = (uint32_t)surface_height(surface);
+    stride = (uint32_t)surface_stride(surface);
+    bpp = (uint32_t)surface_bits_per_pixel(surface);
+    size = (uint64_t)stride * height;
+
+    /*
+     * This snapshot is the complete framebuffer that generic VGA/GOP was
+     * presenting before SVGA took over.  Keep it separate from the 512 KiB
+     * legacy VGA aperture shadow below: the two buffers serve different
+     * purposes.
+     */
+    if (size == 0 || size > s->vga.vram_size || size > UINT32_MAX) {
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                          "VGA_FB save skipped size=%" PRIu64
+                          " vram=%u surface=%ux%u/%u/%u",
+                          size, s->vga.vram_size, width, height, bpp, stride);
+        return;
+    }
+
+    data = surface_data(surface);
+    s->pre_svga_fb_ptr = g_malloc((size_t)size);
+    memcpy(s->pre_svga_fb_ptr, data, (size_t)size);
+    s->pre_svga_fb_size = (uint32_t)size;
+
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                      "VGA_FB save size=%u surface=%ux%u/%u/%u",
+                      s->pre_svga_fb_size, width, height, bpp, stride);
+}
+
+static void vmsvga_pre_svga_fb_restore(struct vmsvga_state_s *s)
+{
+    uint8_t *svga_ptr;
+    uint32_t restore_size;
+
+    if (s->pre_svga_fb_ptr == NULL || s->pre_svga_fb_size == 0) {
+        return;
+    }
+
+    svga_ptr = vmsvga_svga_vram_ptr(s);
+    restore_size = MIN(s->pre_svga_fb_size, s->vga.vram_size);
+    memcpy(svga_ptr, s->pre_svga_fb_ptr, restore_size);
+    memory_region_set_dirty(&s->vga.vram, 0, restore_size);
+
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                      "VGA_FB restore size=%u", restore_size);
+
+    vmsvga_pre_svga_fb_clear(s);
+}
+
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s)
 {
     size_t backup_size = vmsvga_legacy_vga_backup_size(s);
     uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
+
+    vmsvga_pre_svga_fb_save(s);
 
     /*
      * Refresh the isolated legacy VGA framebuffer on every VGA -> SVGA
@@ -1298,6 +1376,14 @@ static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s)
         memcpy(svga_ptr, s->legacy_vga_ptr, restore_size);
         memory_region_set_dirty(&s->vga.vram, 0, restore_size);
     }
+
+    /*
+     * Finally restore the complete pre-SVGA linear framebuffer.  It must win
+     * over the smaller legacy aperture copy above; otherwise the first 512 KiB
+     * can come from one framebuffer layout while the rest comes from another,
+     * which produces the striped fallback image seen on device disable.
+     */
+    vmsvga_pre_svga_fb_restore(s);
 
     s->vga.vram_ptr = svga_ptr;
     s->svga_surface_bound = false;
@@ -9406,6 +9492,7 @@ static void vmsvga_reset(DeviceState *dev)
 
     vmsvga_trace_display_path_reset(s);
     s->legacy_vga_size = 0;
+    vmsvga_pre_svga_fb_clear(s);
 
     memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));
     memset(s->legacy_vga_ptr, 0, VMSVGA_VGA_FB_BACKUP_SIZE);
@@ -10169,6 +10256,8 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->dirty_log_enabled = true;
     s->legacy_vga_ptr = g_malloc0(VMSVGA_VGA_FB_BACKUP_SIZE);
     s->legacy_vga_size = 0;
+    s->pre_svga_fb_ptr = NULL;
+    s->pre_svga_fb_size = 0;
 
     memory_region_init_io(&s->legacy_vga_mem, OBJECT(dev),
                           &vmsvga_legacy_vga_ops, s, "vmsvga.vga-lowmem",
@@ -10419,6 +10508,7 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     vmsvga_objects_clear(&s->chip);
 
     g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
+    vmsvga_pre_svga_fb_clear(&s->chip);
 
     if (s->chip.debug) {
         assert(vmvga_trace_debug_devices > 0);

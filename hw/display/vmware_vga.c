@@ -8242,6 +8242,73 @@ static inline uint32_t vmsvga_read_height(struct vmsvga_state_s *s)
     return surface && surface_height(surface) > 0 ? surface_height(surface) : 768;
 }
 
+/*
+ * Diagnostic experiment: a successful Windows runtime re-enable starts with
+ * an already-established 1024x768 Screen Object backed by BAR1, whereas the
+ * failing cold-start path has no Screen Object at all.  Seed only that retained
+ * display metadata on the first pristine ENABLE=0 write so we can isolate this
+ * state from FIFO/GMR/fence/IRQ/3D history.
+ *
+ * This is deliberately restricted to debug + 3D-off runs.  It is not intended
+ * as the final device initialization policy; it is a controlled A/B test.
+ */
+static bool vmsvga_seed_cold_runtime_screen_state(struct vmsvga_state_s *s)
+{
+    const uint32_t width = 1024;
+    const uint32_t height = 768;
+    const uint32_t stride = width * 4;
+
+    if (!s->debug || s->enable_3d || s->enable || s->config ||
+        s->active_valid || s->screen_defined || s->new_width != 0 ||
+        s->new_height != 0) {
+        return false;
+    }
+
+    s->new_width = width;
+    s->new_height = height;
+    s->new_depth = 32;
+
+    s->active_valid = true;
+    s->active_width = width;
+    s->active_height = height;
+    s->active_depth = 32;
+    s->active_stride = stride;
+
+    s->screen_defined = true;
+    s->screen_flags = SVGA_SCREEN_MUST_BE_SET | SVGA_SCREEN_IS_PRIMARY;
+    s->screen_width = width;
+    s->screen_height = height;
+    s->screen_root_x = 0;
+    s->screen_root_y = 0;
+    s->screen_stride = stride;
+    s->screen_backing_valid = true;
+    s->screen_backing_gmr_id = SVGA_GMR_FRAMEBUFFER;
+    s->screen_backing_offset = 0;
+    s->screen_backing_pitch = stride;
+    s->screen_clone_count = 0;
+    s->screen_handoff_active = false;
+    s->screen_handoff_same_backing = false;
+    s->screen_handoff_skipped_same_backing_full = false;
+    s->screen_frontend_deferred = false;
+    s->screen_frontend_hold_frames = 0;
+    s->screen_destroyed_reuse_valid = false;
+    s->svga_surface_bound = false;
+    s->damage_count = 0;
+
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-COLD-SCREEN-SEED active=%ux%u/32/%u screen=1 "
+                "backing=%u:0x%08x/%u fifo=untouched gmr=untouched "
+                "fence=%u irq-mask=0x%08x irq-status=0x%08x\n",
+                width, height, stride, s->screen_backing_gmr_id,
+                s->screen_backing_offset, s->screen_backing_pitch,
+                s->fence, s->irq_mask, s->irq_status);
+        s->trace_activity_seq++;
+    }
+
+    return true;
+}
+
 static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
 {
     VPRINT("vmsvga_value_read was just executed\n");
@@ -8831,6 +8898,13 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           bool was_enabled = s->enable;
           bool was_hidden = s->hidden;
           bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
+
+          /* Match the retained Screen Object state seen before a successful
+           * runtime re-enable, but only for this controlled cold-start test. */
+          if (!was_enabled && !enabled) {
+              (void)vmsvga_seed_cold_runtime_screen_state(s);
+          }
+
           if (!was_enabled && enabled) {
               /*
                * Firmware/GOP can leave QEMU's console surface stale even

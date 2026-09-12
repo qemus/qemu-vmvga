@@ -8832,6 +8832,18 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           bool was_hidden = s->hidden;
           bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
           if (!was_enabled && enabled) {
+              /*
+               * Firmware/GOP can leave QEMU's console surface stale even
+               * though the VGA/VBE registers already describe the final boot
+               * mode.  Several SVGA registers fall back to the console surface
+               * before an SVGA mode is committed, so make generic VGA realize
+               * its current VBE state before SVGA takes display ownership.
+               *
+               * This is intentionally synchronous: the guest can read those
+               * SVGA registers immediately after setting ENABLE.
+               */
+              s->vga.hw_ops->invalidate(&s->vga);
+              s->vga.hw_ops->gfx_update(&s->vga);
               vmsvga_trace_vga_state(s, "svga-enable-before");
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {

@@ -299,7 +299,7 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_STATE   1
 #define VMVGA_TRACE_DRAW    1
 #define VMVGA_TRACE_DIRTY   1
-#define VMVGA_TRACE_ROP     0
+#define VMVGA_TRACE_ROP     1
 #define VMVGA_TRACE_OBJECT  1
 #define VMVGA_TRACE_STREAM  1
 #define VMVGA_TRACE_FIFO    1

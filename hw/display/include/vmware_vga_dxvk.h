@@ -390,6 +390,10 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
     uint32_t stream_output_id,
     const struct vmsvga3d_d3d10_stream_output_plan_s *stream_output);
+bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t source_shader_id,
+    uint32_t stream_output_id,
+    const struct vmsvga3d_d3d10_stream_output_plan_s *stream_output);
 bool vmsvga3d_dxvk_d3d11_shader_set(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
     uint32_t shader_type);

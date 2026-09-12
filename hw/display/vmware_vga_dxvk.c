@@ -160,9 +160,11 @@ struct vmsvga3d_dxvk_shader_s {
     VMSVGA3DD3D10ShaderInfo info;
     bool info_valid;
     void *shader;
+    void *stream_output_proxy;
     uint8_t *bytecode;
     uint32_t bytecode_size;
     uint32_t stream_output_id;
+    uint32_t stream_output_proxy_id;
     VMSVGA3DDxvkShader *next;
 };
 
@@ -6738,6 +6740,23 @@ static VMSVGA3DDxvkShader *vmsvga3d_dxvk_d3d11_shader_find(
     return NULL;
 }
 
+static void vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(
+    VMSVGA3DDxvkShader *shader)
+{
+    if (shader == NULL) {
+        return;
+    }
+
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    if (shader->stream_output_proxy != NULL) {
+        vmsvga3d_dxvk_release(
+            shader->stream_output_proxy, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        shader->stream_output_proxy = NULL;
+    }
+#endif
+    shader->stream_output_proxy_id = SVGA3D_INVALID_ID;
+}
+
 static void vmsvga3d_dxvk_d3d11_shader_free(VMSVGA3DDxvkShader *shader)
 {
     if (shader == NULL) {
@@ -6749,6 +6768,7 @@ static void vmsvga3d_dxvk_d3d11_shader_free(VMSVGA3DDxvkShader *shader)
         vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
     }
 #endif
+    vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
 
     if (shader->info_valid) {
         vmsvga3d_d3d10_shader_release(&shader->info);
@@ -6779,6 +6799,7 @@ bool vmsvga3d_dxvk_d3d11_shader_object_define(
     shader->shader_id = shader_id;
     shader->shader_type = shader_type;
     shader->stream_output_id = SVGA3D_INVALID_ID;
+    shader->stream_output_proxy_id = SVGA3D_INVALID_ID;
     shader->next = dxvk->d3d11_shaders;
     dxvk->d3d11_shaders = shader;
 
@@ -6825,6 +6846,7 @@ bool vmsvga3d_dxvk_d3d11_shader_bind_info(
     /* VirtualBox drops generated DXBC/native code on a successful rebind, but
      * retains the backend shader record itself.
      */
+    vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
     if (shader->bytecode != NULL) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
         if (shader->shader != NULL) {
@@ -7000,6 +7022,18 @@ bool vmsvga3d_dxvk_d3d11_stream_output_destroy(
     if (stream_output != NULL) {
         *link = stream_output->next;
         g_free(stream_output);
+    }
+
+    {
+        VMSVGA3DDxvkShader *shader;
+
+        for (shader = dxvk->d3d11_shaders; shader != NULL;
+             shader = shader->next) {
+            if (shader->cid == cid &&
+                shader->stream_output_proxy_id == stream_output_id) {
+                vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
+            }
+        }
     }
 
     return true;
@@ -7180,6 +7214,119 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t source_shader_id,
+    uint32_t stream_output_id,
+    const VMSVGA3DD3D10StreamOutputPlan *stream_output)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CreateGeometryShaderWithSO create_gs_so = NULL;
+    VMSVGA3DDxvkD3D11SetShader set_shader = NULL;
+    VMSVGA3DDxvkShader *shader;
+    void *native_shader = NULL;
+    uint32_t i;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+        dxvk->d3d11_context == NULL || stream_output == NULL ||
+        stream_output_id == SVGA3D_INVALID_ID) {
+        return false;
+    }
+
+    shader = vmsvga3d_dxvk_d3d11_shader_find(
+        dxvk, cid, source_shader_id, NULL);
+    if (shader == NULL || shader->shader_type != SVGA3D_SHADERTYPE_VS ||
+        shader->bytecode == NULL || shader->bytecode_size == 0) {
+        return false;
+    }
+
+    if (shader->stream_output_proxy == NULL ||
+        shader->stream_output_proxy_id != stream_output_id) {
+        vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
+
+        if (!vmsvga3d_dxvk_get_method(
+                dxvk->d3d11_device,
+                VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO,
+                &create_gs_so, sizeof(create_gs_so))) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SO-PROXY-REALIZE cid=%u source-shid=%u source-type=%u "
+            "program-type=%u soid=%u decls=%u stride-count=%u explicit=%u "
+            "rasterized=%u resolved=%u",
+            cid, source_shader_id, shader->shader_type,
+            shader->info.program_type, stream_output_id,
+            stream_output->declaration_count, stream_output->stride_count,
+            stream_output->use_explicit_strides ? 1u : 0u,
+            stream_output->rasterized_stream,
+            stream_output->all_semantics_resolved ? 1u : 0u);
+        for (i = 0; i < stream_output->declaration_count; i++) {
+            const VMSVGA3DD3D10StreamOutputDecl *decl =
+                &stream_output->declarations[i];
+
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SO-PROXY-DECL cid=%u source-shid=%u soid=%u index=%u "
+                "stream=%u semantic=%s semantic-index=%u start=%u count=%u "
+                "slot=%u",
+                cid, source_shader_id, stream_output_id, i, decl->stream,
+                decl->semantic_name != NULL ? decl->semantic_name : "<null>",
+                decl->semantic_index, decl->start_component,
+                decl->component_count, decl->output_slot);
+        }
+
+        result = create_gs_so(
+            dxvk->d3d11_device, shader->bytecode, shader->bytecode_size,
+            stream_output->declarations, stream_output->declaration_count,
+            stream_output->use_explicit_strides ? stream_output->strides : NULL,
+            stream_output->stride_count, stream_output->rasterized_stream,
+            NULL, &native_shader);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SO-PROXY-REALIZE-RESULT cid=%u source-shid=%u soid=%u "
+            "dxbc=%u hr=0x%08x native=%u result=%s",
+            cid, source_shader_id, stream_output_id, shader->bytecode_size,
+            (uint32_t)result, native_shader != NULL ? 1u : 0u,
+            vmsvga3d_dxvk_succeeded(result) && native_shader != NULL ?
+                "OK" : "FAIL");
+        if (!vmsvga3d_dxvk_succeeded(result) || native_shader == NULL) {
+            if (native_shader != NULL) {
+                vmsvga3d_dxvk_release(
+                    native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+            }
+            return false;
+        }
+
+        shader->stream_output_proxy = native_shader;
+        shader->stream_output_proxy_id = stream_output_id;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER,
+            &set_shader, sizeof(set_shader))) {
+        return false;
+    }
+
+    set_shader(dxvk->d3d11_context, shader->stream_output_proxy, NULL, 0);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-SO-PROXY-BIND cid=%u source-shid=%u soid=%u native=1 result=OK",
+        cid, source_shader_id, stream_output_id);
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)source_shader_id;
+    (void)stream_output_id;
+    (void)stream_output;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_shader_set(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
     uint32_t shader_type)
@@ -7267,6 +7414,7 @@ bool vmsvga3d_dxvk_d3d11_shader_invalidate(
         shader->shader = NULL;
     }
 #endif
+    vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
 
     shader->stream_output_id = SVGA3D_INVALID_ID;
 

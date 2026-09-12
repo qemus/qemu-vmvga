@@ -88,6 +88,7 @@
 #define VMSVGA_SCRATCH_SIZE 256
 #define VMSVGA_DEFAULT_VRAM_SIZE 32
 #define VMSVGA_SURFACE_MEMORY_SIZE (512U * 1024U * 1024U)
+#define VMSVGA_MAX_PRIMARY_MEM_SIZE (256U * 1024U * 1024U)
 #define VMSVGA_GBOBJECT_MEM_SIZE_KB (1024U * 1024U)
 #define VMSVGA_GMR_MAX_IDS 8192U
 #define VMSVGA_GMR_MAX_DESCRIPTOR_LENGTH 0x100000U
@@ -8315,7 +8316,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
                ret);
         break;
     case SVGA_REG_MAX_PRIMARY_BOUNDING_BOX_MEM:
-        ret = s->vga.vram_size;
+        /* Modern guest-backed primaries are not constrained by BAR1 VRAM. */
+        ret = VMSVGA_MAX_PRIMARY_MEM_SIZE;
         VPRINT("SVGA_REG_MAX_PRIMARY_BOUNDING_BOX_MEM register %u with the return "
                "of %u\n",
                s->index, ret);

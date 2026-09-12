@@ -3713,7 +3713,8 @@ static bool vmsvga3d_gb_query_publish(
 
 static void vmsvga3d_d3d9_process_pending_gb_queries_filtered(
     struct vmsvga_state_s *s, bool filter, uint32_t cid,
-    SVGA3dQueryType type, uint32_t flags, bool wait, const char *source)
+    SVGA3dQueryType type, uint64_t token, uint32_t flags, bool wait,
+    const char *source)
 {
     VMSVGA3DGBQuery **link;
 
@@ -3728,7 +3729,8 @@ static void vmsvga3d_d3d9_process_pending_gb_queries_filtered(
         SVGA3dQueryResult guest_result;
         uint32_t result = 0;
 
-        if (filter && (query->cid != cid || query->type != type)) {
+        if ((filter && (query->cid != cid || query->type != type)) ||
+            (token != 0 && query->token != token)) {
             link = &query->next;
             continue;
         }
@@ -3748,6 +3750,9 @@ static void vmsvga3d_d3d9_process_pending_gb_queries_filtered(
                 query->cid, (uint32_t)query->type, query->token,
                 query->mobid, query->offset,
                 source != NULL ? source : "unknown");
+            if (token != 0) {
+                return;
+            }
             link = &query->next;
             continue;
         }
@@ -3771,6 +3776,9 @@ static void vmsvga3d_d3d9_process_pending_gb_queries_filtered(
                     s, query, SVGA3D_QUERYSTATE_SUCCEEDED, result);
             }
             vmsvga3d_gb_query_unlink(s, link, false, "complete");
+            if (token != 0) {
+                return;
+            }
             continue;
         }
 
@@ -3792,6 +3800,9 @@ static void vmsvga3d_d3d9_process_pending_gb_queries_filtered(
                 s, query, SVGA3D_QUERYSTATE_FAILED, 0);
         }
         vmsvga3d_gb_query_unlink(s, link, false, "renderer-failed");
+        if (token != 0) {
+            return;
+        }
     }
 }
 
@@ -3807,7 +3818,7 @@ static void vmsvga3d_d3d9_process_pending_gb_queries(
     /* D3DGETDATA_FLUSH asks D3D9 to submit outstanding work but remains
      * nonblocking: S_FALSE leaves the query on our pending list. */
     vmsvga3d_d3d9_process_pending_gb_queries_filtered(
-        s, false, 0, SVGA3D_QUERYTYPE_OCCLUSION,
+        s, false, 0, SVGA3D_QUERYTYPE_OCCLUSION, 0,
         plan.getdata_flags, false, source);
 }
 
@@ -3916,9 +3927,12 @@ static bool vmsvga3d_handle_gb_query(struct vmsvga_state_s *s,
             end_ok ? "OK" : "FAIL");
 
         if (queued) {
-            /* Cheap probe only; do not force a submit from every END. */
+            /* Probe only the generation ended by this command.  Older
+             * pending queries are serviced by the normal display/fence/WAIT
+             * paths; rescanning all queries here turns a burst of ENDs into
+             * O(N^2) host GetData calls. */
             vmsvga3d_d3d9_process_pending_gb_queries_filtered(
-                s, true, body->cid, body->type, 0, false, "END");
+                s, true, body->cid, body->type, token, 0, false, "END");
         }
     } else if (cmd == SVGA_3D_CMD_WAIT_FOR_GB_QUERY &&
                size >= sizeof(SVGA3dCmdWaitForGBQuery)) {
@@ -3936,7 +3950,7 @@ static bool vmsvga3d_handle_gb_query(struct vmsvga_state_s *s,
             /* WAIT is a barrier for every ended query of this cid/type, not
              * only for the explicitly named result record. */
             vmsvga3d_d3d9_process_pending_gb_queries_filtered(
-                s, true, body->cid, body->type,
+                s, true, body->cid, body->type, 0,
                 plan.getdata_flags, true, "WAIT");
         }
         VMVGA_TRACE_LOCAL(

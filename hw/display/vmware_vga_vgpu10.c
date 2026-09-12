@@ -6366,7 +6366,7 @@ vmsvga3d_d3d10_bound_shader_info_live(
 
 static bool vmsvga3d_d3d10_stream_output_prepare_live(
     struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid,
-    VMSVGA3DD3D10ShaderInfo *gs_info, uint32_t *stream_output_id,
+    const VMSVGA3DD3D10ShaderInfo *gs_info, uint32_t *stream_output_id,
     VMSVGA3DD3D10StreamOutputPlan *stream_output)
 {
     SVGACOTableDXStreamOutputEntry *entry;
@@ -6468,6 +6468,39 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
         memset(&stream_output, 0, sizeof(stream_output));
 
         if (shader_id == SVGA3D_INVALID_ID) {
+            if (shader_type == SVGA3D_SHADERTYPE_GS &&
+                context->shadow.streamOut.soid != SVGA3D_INVALID_ID) {
+                uint32_t vs_stage =
+                    SVGA3D_SHADERTYPE_VS - SVGA3D_SHADERTYPE_MIN;
+                uint32_t vs_id = context->shadow.shaderState[vs_stage].shaderId;
+                const VMSVGA3DD3D10ShaderInfo *vs_info = NULL;
+                bool proxy_bound = false;
+
+                if (vs_id != SVGA3D_INVALID_ID &&
+                    vmsvga3d_dxvk_d3d11_shader_info(
+                        s->dxvk, cid, vs_id, SVGA3D_SHADERTYPE_VS, &vs_info) &&
+                    vs_info != NULL &&
+                    vmsvga3d_d3d10_stream_output_prepare_live(
+                        s, context, cid, vs_info, &stream_output_id,
+                        &stream_output) &&
+                    stream_output_id != SVGA3D_INVALID_ID) {
+                    proxy_bound = vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
+                        s->dxvk, cid, vs_id, stream_output_id, &stream_output);
+                }
+
+                if (!proxy_bound) {
+                    (void)vmsvga3d_dxvk_d3d11_shader_set(
+                        s->dxvk, cid, SVGA3D_INVALID_ID,
+                        SVGA3D_SHADERTYPE_GS);
+                    VMVGA_TRACE_LOCAL(
+                        VMVGA_TRACE_3D,
+                        "DX-SO-PROXY-PIPELINE cid=%u source-shid=%u soid=%u "
+                        "bound=0",
+                        cid, vs_id, context->shadow.streamOut.soid);
+                }
+                continue;
+            }
+
             /* dxShaderSet explicitly unbinds inactive stages on every setup. */
             (void)vmsvga3d_dxvk_d3d11_shader_set(
                 s->dxvk, cid, shader_id, shader_type);

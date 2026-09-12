@@ -2963,6 +2963,16 @@ bool vmsvga3d_dxvk_d3d11_surface_resident(
     return surface != NULL && surface->d3d11_resident;
 }
 
+uint32_t vmsvga3d_dxvk_d3d11_surface_native_format(
+    const VMSVGA3DDxvkSurface *surface)
+{
+    if (surface == NULL || !surface->d3d11_resident) {
+        return 0;
+    }
+
+    return surface->d3d11_desc.format;
+}
+
 VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,
                                                     uint32_t sid)
 {

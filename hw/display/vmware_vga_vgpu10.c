@@ -494,11 +494,11 @@ VMSVGA3DD3D10Format vmsvga3d_d3d10_surface_format(SVGA3dSurfaceFormat format)
     case SVGA3D_B8G8R8A8_UNORM_SRGB:
         return fmt(DXGI_B8G8R8A8_UNORM_SRGB, VMSVGA3D_D3D10_LEVEL_10_1);
     case SVGA3D_B8G8R8X8_TYPELESS:
-        return fmt(DXGI_B8G8R8A8_TYPELESS, VMSVGA3D_D3D10_LEVEL_10_1);
+        return fmt(DXGI_B8G8R8X8_TYPELESS, VMSVGA3D_D3D10_LEVEL_10_1);
     case SVGA3D_B8G8R8X8_UNORM:
-        return fmt(DXGI_B8G8R8A8_UNORM, VMSVGA3D_D3D10_LEVEL_10_1);
+        return fmt(DXGI_B8G8R8X8_UNORM, VMSVGA3D_D3D10_LEVEL_10_1);
     case SVGA3D_B8G8R8X8_UNORM_SRGB:
-        return fmt(DXGI_B8G8R8A8_UNORM_SRGB, VMSVGA3D_D3D10_LEVEL_10_1);
+        return fmt(DXGI_B8G8R8X8_UNORM_SRGB, VMSVGA3D_D3D10_LEVEL_10_1);
     case SVGA3D_BC6H_TYPELESS:
         return fmt(DXGI_BC6H_TYPELESS, VMSVGA3D_D3D10_LEVEL_11_0);
     case SVGA3D_BC6H_UF16:
@@ -2292,26 +2292,33 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_blend_state(
     memset(dst, 0, sizeof(*dst));
 
     dst->alpha_to_coverage_enable = !!src->alphaToCoverageEnable;
-    dst->independent_blend_enable = !!src->independentBlendEnable;
+    /* D3D10 has per-render-target BlendEnable[] and write masks even though
+     * blend factors and operations are shared.  D3D11 only honors slots 1..7
+     * when IndependentBlendEnable is true, so use native independent blending
+     * to preserve the D3D10 arrays.  A true guest independentBlendEnable is
+     * still treated as the 10.1 form with per-target factors/operations. */
+    dst->independent_blend_enable = true;
 
-    if (dst->independent_blend_enable) {
+    if (src->independentBlendEnable) {
         level = VMSVGA3D_D3D10_LEVEL_10_1;
     }
 
     for (i = 0; i < SVGA3D_DX_MAX_RENDER_TARGETS; ++i) {
-        const SVGA3dDXBlendStatePerRT *s = &src->perRT[i];
+        const SVGA3dDXBlendStatePerRT *slot = &src->perRT[i];
+        const SVGA3dDXBlendStatePerRT *shared =
+            src->independentBlendEnable ? slot : &src->perRT[0];
         VMSVGA3DD3D10RTBlend *d = &dst->render_target[i];
 
-        d->blend_enable = !!s->blendEnable;
-        d->src_blend = blend_color(s->srcBlend);
-        d->dest_blend = blend_color(s->destBlend);
-        d->blend_op = s->blendOp;
-        d->src_blend_alpha = blend_alpha(s->srcBlendAlpha);
-        d->dest_blend_alpha = blend_alpha(s->destBlendAlpha);
-        d->blend_op_alpha = s->blendOpAlpha;
-        d->write_mask = s->renderTargetWriteMask;
+        d->blend_enable = !!slot->blendEnable;
+        d->src_blend = blend_color(shared->srcBlend);
+        d->dest_blend = blend_color(shared->destBlend);
+        d->blend_op = shared->blendOp;
+        d->src_blend_alpha = blend_alpha(shared->srcBlendAlpha);
+        d->dest_blend_alpha = blend_alpha(shared->destBlendAlpha);
+        d->blend_op_alpha = shared->blendOpAlpha;
+        d->write_mask = slot->renderTargetWriteMask;
 
-        if (s->logicOpEnable) {
+        if (slot->logicOpEnable) {
             level = max_level(level, VMSVGA3D_D3D10_LEVEL_11_1);
         }
     }
@@ -8777,6 +8784,53 @@ static bool vmsvga3d_d3d10_rtv_changed_live(
         s, entry->sid, subresource);
 }
 
+static bool vmsvga3d_d3d10_dsv_changed_live(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dDepthStencilViewId view_id)
+{
+    SVGACOTableDXDSViewEntry *entry;
+    VMSVGA3DSurface *surface;
+    uint32_t subresource = 0;
+    uint32_t levels;
+
+    if (view_id == SVGA3D_INVALID_ID) {
+        return true;
+    }
+    if (s == NULL || s->svga3d == NULL) {
+        return false;
+    }
+
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DSVIEW, view_id);
+    if (entry == NULL || entry->sid == SVGA3D_INVALID_ID ||
+        entry->sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[entry->sid];
+    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
+        return false;
+    }
+
+    levels = surface->face[0].numMipLevels;
+    switch (entry->resourceDimension) {
+    case SVGA3D_RESOURCE_TEXTURE1D:
+    case SVGA3D_RESOURCE_TEXTURE2D:
+    case SVGA3D_RESOURCE_TEXTURECUBE:
+        if (levels == 0 ||
+            entry->firstArraySlice > (UINT32_MAX - entry->mipSlice) / levels) {
+            return false;
+        }
+        subresource = entry->firstArraySlice * levels + entry->mipSlice;
+        break;
+    default:
+        subresource = entry->mipSlice;
+        break;
+    }
+
+    return vmsvga3d_d3d10_surface_changed_full_live(
+        s, entry->sid, subresource);
+}
+
 static void vmsvga3d_d3d10_bound_rtvs_changed_live(
     struct vmsvga_state_s *s, uint32_t cid, VMSVGA3DDXContext *context)
 {
@@ -8790,6 +8844,9 @@ static void vmsvga3d_d3d10_bound_rtvs_changed_live(
         (void)vmsvga3d_d3d10_rtv_changed_live(
             s, cid, context->shadow.renderState.renderTargetViewIds[slot]);
     }
+
+    (void)vmsvga3d_d3d10_dsv_changed_live(
+        s, cid, context->shadow.renderState.depthStencilViewId);
 }
 
 static bool vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
@@ -9947,6 +10004,16 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         return false;
     }
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-COPY-FORMAT kind=region cid=%u src=%u:%u guest=%u native=%u "
+        "dst=%u:%u guest=%u native=%u src-kind=%u dst-kind=%u",
+        cid, command->srcSid, plan.source_subresource, source->format,
+        vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
+        command->dstSid, plan.destination_subresource, destination->format,
+        vmsvga3d_dxvk_d3d11_surface_native_format(destination->dxvk_surface),
+        plan.source_create_kind, plan.destination_create_kind);
+
     if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
             s->dxvk, destination->dxvk_surface, plan.destination_subresource,
             plan.region.destination_x, plan.region.destination_y,
@@ -10005,6 +10072,16 @@ static bool vmsvga3d_d3d10_pred_copy_live(
             s, destination, plan.destination_create_kind)) {
         return false;
     }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-COPY-FORMAT kind=resource cid=%u src=%u guest=%u native=%u "
+        "dst=%u guest=%u native=%u src-kind=%u dst-kind=%u",
+        cid, command->srcSid, source->format,
+        vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
+        command->dstSid, destination->format,
+        vmsvga3d_dxvk_d3d11_surface_native_format(destination->dxvk_surface),
+        plan.source_create_kind, plan.destination_create_kind);
 
     if (!vmsvga3d_dxvk_d3d11_copy_resource(
             s->dxvk, destination->dxvk_surface, source->dxvk_surface)) {
@@ -10152,9 +10229,14 @@ static bool vmsvga3d_d3d10_clear_dsv_live(
         return false;
     }
 
-    return vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
-        s->dxvk, cid, clear_plan.view_id, clear_plan.d3d_clear_flags,
-        clear_plan.depth, clear_plan.stencil);
+    if (!vmsvga3d_dxvk_d3d11_clear_depth_stencil_view(
+            s->dxvk, cid, clear_plan.view_id, clear_plan.d3d_clear_flags,
+            clear_plan.depth, clear_plan.stencil)) {
+        return false;
+    }
+
+    (void)vmsvga3d_d3d10_dsv_changed_live(s, cid, clear_plan.view_id);
+    return true;
 }
 
 static void vmsvga3d_d3d10_present_blt_clip_box(

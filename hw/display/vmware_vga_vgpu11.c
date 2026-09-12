@@ -993,7 +993,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_blend_state(
     memset(dst, 0, sizeof(*dst));
 
     dst->alpha_to_coverage_enable = base.alpha_to_coverage_enable;
-    dst->independent_blend_enable = base.independent_blend_enable;
+    dst->independent_blend_enable = !!src->independentBlendEnable;
 
     for (i = 0; i < SVGA3D_DX_MAX_RENDER_TARGETS; i++) {
         dst->render_target[i].blend_enable = base.render_target[i].blend_enable;

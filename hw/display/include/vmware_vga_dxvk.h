@@ -195,6 +195,8 @@ void vmsvga3d_dxvk_d3d11_surface_visit_views(
     void *opaque);
 bool vmsvga3d_dxvk_d3d11_surface_resident(
     const VMSVGA3DDxvkSurface *surface);
+uint32_t vmsvga3d_dxvk_d3d11_surface_native_format(
+    const VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
     uint32_t destination_subresource, uint32_t destination_x,

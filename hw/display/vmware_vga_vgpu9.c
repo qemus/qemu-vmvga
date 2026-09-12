@@ -4108,6 +4108,109 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_generate_mipmaps(
                : VMSVGA3D_D3D9_ACCEL_FAILED;
 }
 
+static bool vmsvga3d_d3d9_clear_shadow_target(
+    struct vmsvga_state_s *s, VMSVGA3DContext *context,
+    SVGA3dRenderTargetType type, uint32_t color, float depth,
+    uint32_t stencil, const SVGA3dRect *rects, uint32_t rect_count,
+    bool execute, bool *skipped_multisample)
+{
+    SVGA3dSurfaceImageId *target;
+    VMSVGA3DSurface *surface;
+
+    if (s == NULL || s->svga3d == NULL || context == NULL ||
+        skipped_multisample == NULL || type >= SVGA3D_RT_MAX) {
+        return false;
+    }
+
+    target = &context->render_targets[type];
+    if (target->sid == SVGA3D_INVALID_ID) {
+        return true;
+    }
+    if (target->sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[target->sid];
+    if (surface == NULL) {
+        return false;
+    }
+
+    /* A single CPU shadow cannot represent per-sample MSAA contents.  The
+     * native D3D9 target is authoritative for these clears and explicit
+     * resolves move the result back to a single-sample surface. */
+    if (surface->multisample_count > 1) {
+        *skipped_multisample = true;
+        return true;
+    }
+
+    return vmsvga3d_clear_target(s, context, type, color, depth, stencil,
+                                 rects, rect_count, execute);
+}
+
+static bool vmsvga3d_d3d9_clear_shadow_non_msaa(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dClearFlag clear_flags,
+    uint32_t color, float depth, uint32_t stencil, uint32_t rect_count,
+    const SVGA3dRect *rects, bool *skipped_multisample)
+{
+    VMSVGA3DContext *context;
+    uint32_t type;
+    bool valid = true;
+
+    if (skipped_multisample == NULL ||
+        (rect_count != 0 && rects == NULL)) {
+        return false;
+    }
+
+    *skipped_multisample = false;
+    context = vmsvga3d_context(s, cid);
+    if (context == NULL) {
+        return false;
+    }
+
+    if (clear_flags & SVGA3D_CLEAR_COLOR) {
+        for (type = SVGA3D_RT_COLOR0;
+             type <= SVGA3D_RT_COLOR7 && valid; type++) {
+            valid = vmsvga3d_d3d9_clear_shadow_target(
+                s, context, type, color, depth, stencil, rects, rect_count,
+                false, skipped_multisample);
+        }
+    }
+    if (valid && (clear_flags & SVGA3D_CLEAR_DEPTH)) {
+        valid = vmsvga3d_d3d9_clear_shadow_target(
+            s, context, SVGA3D_RT_DEPTH, color, depth, stencil, rects,
+            rect_count, false, skipped_multisample);
+    }
+    if (valid && (clear_flags & SVGA3D_CLEAR_STENCIL)) {
+        valid = vmsvga3d_d3d9_clear_shadow_target(
+            s, context, SVGA3D_RT_STENCIL, color, depth, stencil, rects,
+            rect_count, false, skipped_multisample);
+    }
+    if (!valid) {
+        return false;
+    }
+
+    if (clear_flags & SVGA3D_CLEAR_COLOR) {
+        for (type = SVGA3D_RT_COLOR0;
+             type <= SVGA3D_RT_COLOR7 && valid; type++) {
+            valid = vmsvga3d_d3d9_clear_shadow_target(
+                s, context, type, color, depth, stencil, rects, rect_count,
+                true, skipped_multisample);
+        }
+    }
+    if (valid && (clear_flags & SVGA3D_CLEAR_DEPTH)) {
+        valid = vmsvga3d_d3d9_clear_shadow_target(
+            s, context, SVGA3D_RT_DEPTH, color, depth, stencil, rects,
+            rect_count, true, skipped_multisample);
+    }
+    if (valid && (clear_flags & SVGA3D_CLEAR_STENCIL)) {
+        valid = vmsvga3d_d3d9_clear_shadow_target(
+            s, context, SVGA3D_RT_STENCIL, color, depth, stencil, rects,
+            rect_count, true, skipped_multisample);
+    }
+
+    return valid;
+}
+
 VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     struct vmsvga_state_s *s, const SVGA3dCmdClear *command,
     const SVGA3dRect *rects, uint32_t rect_count,
@@ -4132,6 +4235,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     uint32_t d3d_flags;
     uint32_t i;
     bool full_replace;
+    bool skipped_multisample_shadow;
 
     if (s == NULL || command == NULL || plan == NULL ||
         (rect_count != 0 && rects == NULL) ||
@@ -4271,9 +4375,10 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
         }
     }
 
-    if (!vmsvga3d_state_clear(s, command->cid, command->clearFlag,
-                               command->color, command->depth,
-                               command->stencil, rect_count, rects)) {
+    if (!vmsvga3d_d3d9_clear_shadow_non_msaa(
+            s, command->cid, command->clearFlag, command->color,
+            command->depth, command->stencil, rect_count, rects,
+            &skipped_multisample_shadow)) {
         g_free(d3d_rects);
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
@@ -4284,6 +4389,10 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
             s->dxvk, color_targets, color_levels, depth_stencil,
             depth_stencil_level, d3d_rects, rect_count, &plan->clear_scissor,
             d3d_flags, plan->color, plan->depth, plan->stencil)) {
+        if (skipped_multisample_shadow) {
+            g_free(d3d_rects);
+            return VMSVGA3D_D3D9_ACCEL_FAILED;
+        }
         vmsvga3d_dxvk_sync_clear_targets_from_cpu(s, command->cid,
                                                   command->clearFlag);
         g_free(d3d_rects);

@@ -34,7 +34,7 @@
 #include "qemu/main-loop.h"
 #include "exec/target_page.h"
 #include "trace.h"
-#if defined(TARGET_I386) || defined(TARGET_X86_64)
+#ifdef CONFIG_I386
 #include "hw/i386/vmport.h"
 #include "target/i386/cpu.h"
 #endif

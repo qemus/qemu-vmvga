@@ -335,6 +335,7 @@ static bool vmport_guestrpc_debug_enabled(VMPortState *s)
 }
 
 static const bool vmport_guestrpc_trace_rpc = true;
+static const bool vmport_guestrpc_enable_vm3d_logging = true;
 
 static GString *vmport_guestrpc_format_line(const char *prefix,
                                              const uint8_t *message,
@@ -425,6 +426,11 @@ static void vmport_guestrpc_set_reply(VMPortGuestRPCChannel *channel,
 
 static const char *vmport_guestrpc_guestinfo_override(const char *key)
 {
+    if (vmport_guestrpc_enable_vm3d_logging &&
+        g_str_has_prefix(key, "guestinfo.loglevel.vm3d.")) {
+        return "9";
+    }
+
     if (!strcmp(key, "guestinfo.svga.wddm.buildType")) {
         return "release";
     }

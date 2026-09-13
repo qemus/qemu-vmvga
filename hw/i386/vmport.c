@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2007 Hervé Poussineau
  *
+ * Copyright (c) 2026 QEMU VMVGA (https://github.com/qemus/qemu-vmvga)
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
@@ -178,6 +180,7 @@ static uint64_t vmport_ioport_read(void *opaque, hwaddr addr,
     if (qtest_enabled()) {
         return -1;
     }
+
     env = &cpu->env;
     cpu_synchronize_state(cs);
 
@@ -226,6 +229,7 @@ static void vmport_ioport_write(void *opaque, hwaddr addr,
     if (qtest_enabled()) {
         return;
     }
+
     cpu->env.regs[R_EAX] = vmport_ioport_read(opaque, addr, 4);
 }
 
@@ -242,6 +246,7 @@ static void vmport_guestrpc_reset_channel(VMPortGuestRPCChannel *channel)
 {
     g_free(channel->request);
     g_free(channel->reply);
+
     memset(channel, 0, sizeof(*channel));
 }
 
@@ -325,6 +330,7 @@ static bool vmport_guestrpc_debug_enabled(VMPortState *s)
     s->guestrpc_runtime.debug_enabled =
         object_property_get_bool(vmvga, "debug", NULL);
     s->guestrpc_runtime.debug_resolved = true;
+
     return s->guestrpc_runtime.debug_enabled;
 }
 
@@ -525,6 +531,7 @@ static uint32_t vmport_cmd_message(void *opaque, uint32_t addr)
 
     switch (type) {
     case VMPORT_GUESTRPC_OPEN:
+
         value = env->regs[R_EBX];
         if ((value & ~VMPORT_GUESTRPC_COOKIE_FLAG) !=
             VMPORT_GUESTRPC_PROTOCOL) {
@@ -553,6 +560,7 @@ static uint32_t vmport_cmd_message(void *opaque, uint32_t addr)
         return vmport_guestrpc_status(cpu, 0);
 
     case VMPORT_GUESTRPC_SENDSIZE:
+
         channel = vmport_guestrpc_channel(s, id, cookie, now);
         if (!channel) {
             return vmport_guestrpc_status(cpu, 0);
@@ -584,6 +592,7 @@ static uint32_t vmport_cmd_message(void *opaque, uint32_t addr)
         return vmport_guestrpc_status(cpu, VMPORT_GUESTRPC_SUCCESS);
 
     case VMPORT_GUESTRPC_SENDPAYLOAD:
+
         channel = vmport_guestrpc_channel(s, id, cookie, now);
         if (!channel || !channel->request ||
             channel->state.request_pos >= channel->state.request_size) {
@@ -602,6 +611,7 @@ static uint32_t vmport_cmd_message(void *opaque, uint32_t addr)
         return vmport_guestrpc_status(cpu, VMPORT_GUESTRPC_SUCCESS);
 
     case VMPORT_GUESTRPC_RECVSIZE:
+
         channel = vmport_guestrpc_channel(s, id, cookie, now);
         if (!channel) {
             return vmport_guestrpc_status(cpu, 0);
@@ -618,6 +628,7 @@ static uint32_t vmport_cmd_message(void *opaque, uint32_t addr)
                                       VMPORT_GUESTRPC_DORECV);
 
     case VMPORT_GUESTRPC_RECVPAYLOAD:
+
         channel = vmport_guestrpc_channel(s, id, cookie, now);
         if (!channel || !channel->reply ||
             channel->state.reply_pos >= channel->state.reply_size) {
@@ -637,11 +648,13 @@ static uint32_t vmport_cmd_message(void *opaque, uint32_t addr)
         return vmport_guestrpc_status(cpu, VMPORT_GUESTRPC_SUCCESS);
 
     case VMPORT_GUESTRPC_RECVSTATUS:
+
         channel = vmport_guestrpc_channel(s, id, cookie, now);
         return vmport_guestrpc_status(cpu, channel ?
                                       VMPORT_GUESTRPC_SUCCESS : 0);
 
     case VMPORT_GUESTRPC_CLOSE:
+
         channel = vmport_guestrpc_channel(s, id, cookie, now);
         if (!channel) {
             return vmport_guestrpc_status(cpu, 0);
@@ -662,10 +675,12 @@ static uint32_t vmport_cmd_get_version(void *opaque, uint32_t addr)
     if (qtest_enabled()) {
         return -1;
     }
+
     cpu->env.regs[R_EBX] = VMPORT_MAGIC;
     if (port_state->compat_flags & VMPORT_COMPAT_REPORT_VMX_TYPE) {
         cpu->env.regs[R_ECX] = port_state->vmware_vmx_type;
     }
+
     return port_state->vmware_vmx_version;
 }
 
@@ -678,6 +693,7 @@ static uint32_t vmport_cmd_get_bios_uuid(void *opaque, uint32_t addr)
     cpu->env.regs[R_EBX] = le32_to_cpu(uuid_parts[1]);
     cpu->env.regs[R_ECX] = le32_to_cpu(uuid_parts[2]);
     cpu->env.regs[R_EDX] = le32_to_cpu(uuid_parts[3]);
+
     return cpu->env.regs[R_EAX];
 }
 
@@ -688,6 +704,7 @@ static uint32_t vmport_cmd_ram_size(void *opaque, uint32_t addr)
     if (qtest_enabled()) {
         return -1;
     }
+
     cpu->env.regs[R_EBX] = 0x1177;
     return current_machine->ram_size;
 }
@@ -809,6 +826,7 @@ static void vmport_class_initfn(ObjectClass *klass, VMPORT_CLASS_INIT_DATA data)
 #else
     device_class_set_legacy_reset(dc, vmport_reset);
 #endif
+
     /* Reason: realize sets global port_state */
     dc->user_creatable = false;
     device_class_set_props(dc, vmport_properties);

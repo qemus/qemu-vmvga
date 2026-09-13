@@ -8550,29 +8550,20 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     }
 
     /*
-     * A GB surface may have been populated before its initial ScreenTarget
-     * activation.  That lifetime-wide content-valid bit must not release a
-     * deferred vGPU10/vGPU11 frontend during the initial BIND itself: wait for
-     * a genuine presentation boundary after the target becomes active.  A
-     * valid-to-valid BIND is itself a flip, so it establishes readiness for the
-     * newly bound surface instead of discarding an already-rendered frame.
+     * Content validity belongs to actual surface writers, not ScreenTarget
+     * selection.  Preserve the per-surface bit across both the initial bind and
+     * later flips.  The GB ScreenTarget handler suppresses the initial deferred
+     * BIND as a presentation boundary, while valid-to-valid BINDs consume this
+     * writer-established state to decide whether the destination is safe to
+     * expose.
      */
-    if (s->screen_frontend_deferred && old_sid == SVGA3D_INVALID_ID) {
-        surface->screen_target_content_valid = false;
+    if (s->screen_frontend_deferred) {
         if (vmsvga_trace_flight_enabled()) {
             fprintf(stderr,
-                    "VMVGA-SCREEN-HANDOFF phase=target-arm sid=%u old-sid=%u "
-                    "content-valid=0\n",
-                    sid, old_sid);
-        }
-    } else if (old_sid != SVGA3D_INVALID_ID) {
-        surface->screen_target_content_valid = true;
-        if (s->screen_frontend_deferred &&
-            vmsvga_trace_flight_enabled()) {
-            fprintf(stderr,
-                    "VMVGA-SCREEN-HANDOFF phase=target-flip sid=%u old-sid=%u "
-                    "content-valid=1\n",
-                    sid, old_sid);
+                    "VMVGA-SCREEN-HANDOFF phase=%s sid=%u old-sid=%u "
+                    "content-valid=%u\n",
+                    old_sid == SVGA3D_INVALID_ID ? "target-arm" : "target-flip",
+                    sid, old_sid, surface->screen_target_content_valid ? 1u : 0u);
         }
     } else if (old_sid == SVGA3D_INVALID_ID &&
                s->screen_defined && s->svga_surface_bound &&

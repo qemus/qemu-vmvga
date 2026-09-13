@@ -8485,6 +8485,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         }
         s->svga3d->active_screen_target_sid = sid;
         s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+        s->svga3d->screen_target_full_present_pending = false;
         return true;
     }
 
@@ -8516,13 +8517,14 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         return false;
     }
 
-    /* A normal valid-to-valid ScreenTarget switch is a flip.  Pending
-     * presentation damage for the old target is superseded by the newer
-     * target, so do not turn every flip into a synchronous GPU-to-CPU
-     * readback.  Keep the quiesce barrier during the initial frontend
-     * takeover/handoff, where the old frame still participates in transition
-     * correctness.  Unbind, destroy, redefine, and migration retain their
-     * existing barriers elsewhere.
+    /* A normal valid-to-valid ScreenTarget switch is a flip.  Do not turn
+     * every flip into a synchronous GPU-to-CPU readback, but do preserve the
+     * fact that queued presentation damage was superseded: the newest target
+     * must still receive a complete presentation at the next guest
+     * presentation boundary.  Keep the quiesce barrier during the initial
+     * frontend takeover/handoff, where the old frame still participates in
+     * transition correctness.  Unbind, destroy, redefine, and migration
+     * retain their existing barriers elsewhere.
      */
     if (old_sid != SVGA3D_INVALID_ID &&
         !s->screen_frontend_deferred && !s->screen_handoff_active) {
@@ -8530,12 +8532,14 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
             s->svga3d->screen_target_dirty_sid != old_sid) {
             return false;
         }
-        if (vmsvga_trace_flight_enabled() &&
-            s->svga3d->screen_target_dirty_count != 0) {
-            fprintf(stderr,
-                    "VMVGA-SCREEN-TARGET phase=flip-coalesce old-sid=%u "
-                    "new-sid=%u dropped-rects=%u\n",
-                    old_sid, sid, s->svga3d->screen_target_dirty_count);
+        if (s->svga3d->screen_target_dirty_count != 0) {
+            s->svga3d->screen_target_full_present_pending = true;
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-TARGET phase=flip-coalesce old-sid=%u "
+                        "new-sid=%u dropped-rects=%u carry-full=1\n",
+                        old_sid, sid, s->svga3d->screen_target_dirty_count);
+            }
         }
         s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
         s->svga3d->screen_target_dirty_count = 0;

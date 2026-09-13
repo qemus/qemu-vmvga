@@ -33,6 +33,7 @@
 #include "qemu/osdep.h"
 #include "hw/isa/isa.h"
 #include "hw/i386/vmport.h"
+#include "hw/i386/vmport-vmvga.h"
 
 #ifndef QEMU_VERSION_MAJOR
 #error "qemu-vmvga requires QEMU_VERSION_MAJOR from QEMU's build configuration"
@@ -69,6 +70,8 @@
 #endif
 
 #define VMPORT_MAGIC   0x564D5868
+#define VMPORT_CMD_GET_SVGA_CAPABILITIES 75
+#define VMPORT_COMMAND_COUNT (VMPORT_CMD_GET_SVGA_CAPABILITIES + 1)
 
 /* Low-bandwidth VMware GuestRPC protocol used by RPCI. */
 #define VMPORT_GUESTRPC_CMD_MESSAGE    ((VMPortCommand)30)
@@ -144,8 +147,11 @@ struct VMPortState {
     ISADevice parent_obj;
 
     MemoryRegion io;
-    VMPortReadFunc *func[VMPORT_ENTRIES];
-    void *opaque[VMPORT_ENTRIES];
+    VMPortReadFunc *func[VMPORT_COMMAND_COUNT];
+    void *opaque[VMPORT_COMMAND_COUNT];
+
+    VMPortSVGACapabilityFunc *svga_capability_func;
+    void *svga_capability_opaque;
 
     uint32_t vmware_vmx_version;
     uint8_t vmware_vmx_type;
@@ -163,7 +169,7 @@ static bool vmport_guestrpc_debug_enabled(VMPortState *s);
 
 void vmport_register(VMPortCommand command, VMPortReadFunc *func, void *opaque)
 {
-    assert(command < VMPORT_ENTRIES);
+    assert(command < VMPORT_COMMAND_COUNT);
     assert(port_state);
 
     trace_vmport_register(command, func, opaque);
@@ -171,14 +177,15 @@ void vmport_register(VMPortCommand command, VMPortReadFunc *func, void *opaque)
     port_state->opaque[command] = opaque;
 }
 
-bool vmport_register_if_available(VMPortCommand command, VMPortReadFunc *func,
-                                  void *opaque)
+bool vmport_register_svga_capability_provider(
+    VMPortSVGACapabilityFunc *func, void *opaque)
 {
-    if (command >= VMPORT_ENTRIES || port_state == NULL) {
+    if (port_state == NULL) {
         return false;
     }
 
-    vmport_register(command, func, opaque);
+    port_state->svga_capability_func = func;
+    port_state->svga_capability_opaque = opaque;
     return true;
 }
 
@@ -206,7 +213,7 @@ static uint64_t vmport_ioport_read(void *opaque, hwaddr addr,
 
     command = env->regs[R_ECX];
     trace_vmport_command(command);
-    if (command >= VMPORT_ENTRIES || !s->func[command]) {
+    if (command >= VMPORT_COMMAND_COUNT || !s->func[command]) {
         if (vmport_guestrpc_debug_enabled(s)) {
             fprintf(stderr,
                     "vmport-unimplemented: command=%u reason=%s "
@@ -214,7 +221,7 @@ static uint64_t vmport_ioport_read(void *opaque, hwaddr addr,
                     " ecx=0x%" PRIx64 " edx=0x%" PRIx64
                     " esi=0x%" PRIx64 " edi=0x%" PRIx64 "\n",
                     command,
-                    command >= VMPORT_ENTRIES ? "out-of-range" : "no-handler",
+                    command >= VMPORT_COMMAND_COUNT ? "out-of-range" : "no-handler",
                     (uint64_t)env->regs[R_EAX],
                     (uint64_t)env->regs[R_EBX],
                     (uint64_t)env->regs[R_ECX],
@@ -769,6 +776,32 @@ static uint32_t vmport_cmd_get_hz(void *opaque, uint32_t addr)
     return cpu->env.regs[R_EAX];
 }
 
+static uint32_t vmport_cmd_get_svga_capabilities(void *opaque, uint32_t addr)
+{
+    VMPortState *s = opaque;
+    X86CPU *cpu = X86_CPU(current_cpu);
+    uint32_t type = ((uint32_t)cpu->env.regs[R_ECX] >> 16) & 0xffff;
+    uint32_t value;
+
+    if (s->svga_capability_func == NULL ||
+        !s->svga_capability_func(s->svga_capability_opaque, type, &value)) {
+        if (vmport_guestrpc_debug_enabled(s)) {
+            fprintf(stderr,
+                    "vmport-svga-caps: type=%u result=unsupported\n",
+                    type);
+        }
+        return UINT32_MAX;
+    }
+
+    cpu->env.regs[R_EBX] = VMPORT_MAGIC;
+    if (vmport_guestrpc_debug_enabled(s)) {
+        fprintf(stderr,
+                "vmport-svga-caps: type=%u value=0x%08x\n",
+                type, value);
+    }
+    return value;
+}
+
 static uint32_t vmport_cmd_get_vcpu_info(void *opaque, uint32_t addr)
 {
     X86CPU *cpu = X86_CPU(current_cpu);
@@ -806,6 +839,8 @@ static void vmport_realizefn(DeviceState *dev, Error **errp)
     vmport_register(VMPORT_CMD_GETVERSION, vmport_cmd_get_version, NULL);
     vmport_register(VMPORT_CMD_GETRAMSIZE, vmport_cmd_ram_size, NULL);
     vmport_register(VMPORT_GUESTRPC_CMD_MESSAGE, vmport_cmd_message, s);
+    vmport_register((VMPortCommand)VMPORT_CMD_GET_SVGA_CAPABILITIES,
+                    vmport_cmd_get_svga_capabilities, s);
     if (s->compat_flags & VMPORT_COMPAT_CMDS_V2) {
         vmport_register(VMPORT_CMD_GETBIOSUUID, vmport_cmd_get_bios_uuid, NULL);
         vmport_register(VMPORT_CMD_GETHZ, vmport_cmd_get_hz, NULL);

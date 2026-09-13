@@ -34,8 +34,7 @@
 #include "qemu/main-loop.h"
 #include "exec/target_page.h"
 #include "trace.h"
-#include "hw/i386/vmport.h"
-#include "target/i386/cpu.h"
+#include "hw/i386/vmport-vmvga.h"
 #include "include/vmware_vga_compat.h"
 #include "include/vmware_vga_gmr.h"
 #include "include/includeCheck.h"
@@ -112,7 +111,6 @@
 #define VMSVGA_PSEUDOCOLOR_ENTRIES 256
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
 #define VMSVGA_SCREEN_REBUILD_HOLD_FRAMES 1U
-#define VMSVGA_VMPORT_MAGIC 0x564D5868U
 
 /* #define ANY_FENCE_OFF */
 /* #define EXPCAPS */
@@ -7949,16 +7947,13 @@ static uint32_t vmsvga_get_capabilities(struct vmsvga_state_s *s)
 }
 
 /* VMware backdoor command 75 mirrors SVGA capabilities before the guest has
- * initialized the SVGA device. Keep it sourced from the same live state as
- * the ordinary SVGA registers and FIFO capability publication. */
-static uint32_t vmsvga_vmport_get_capabilities(void *opaque, uint32_t address)
+ * initialized the SVGA device. VMPort owns the x86 register protocol; this
+ * callback only supplies VMVGA's live capability values. */
+static bool vmsvga_vmport_get_capabilities(void *opaque, uint32_t type,
+                                           uint32_t *value)
 {
     struct vmsvga_state_s *s = opaque;
-    X86CPU *cpu = X86_CPU(current_cpu);
-    uint32_t type = cpu->env.regs[R_ECX] >> 16;
     uint32_t ret;
-
-    (void)address;
 
     switch ((SVGABackdoorCapType)type) {
     case SVGABackdoorCapDeviceCaps:
@@ -7973,13 +7968,13 @@ static uint32_t vmsvga_vmport_get_capabilities(void *opaque, uint32_t address)
     default:
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
                           "VMPORT-CAPS type=%u result=unsupported", type);
-        return UINT32_MAX;
+        return false;
     }
 
-    cpu->env.regs[R_EBX] = VMSVGA_VMPORT_MAGIC;
+    *value = ret;
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
                       "VMPORT-CAPS type=%u value=0x%08x", type, ret);
-    return ret;
+    return true;
 }
 
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
@@ -10649,9 +10644,8 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
                 pci_address_space_io(dev));
     vmsvga3d_renderer_realize(&s->chip);
     vmsvga_vgpu_apply(&s->chip);
-    if (!vmport_register_if_available(VMPORT_CMD_GET_SVGA_CAPABILITIES,
-                                      vmsvga_vmport_get_capabilities,
-                                      &s->chip)) {
+    if (!vmport_register_svga_capability_provider(
+            vmsvga_vmport_get_capabilities, &s->chip)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
                           "VMPORT-CAPS registration unavailable");
     }

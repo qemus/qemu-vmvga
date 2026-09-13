@@ -12861,16 +12861,18 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                      count * sizeof(viewports[0]));
           }
 
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-VIEWPORTS-CMD cid=%u count=%u", cid, count);
-          for (i = 0; i < count; i++) {
+          if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
               VMVGA_TRACE_LOCAL(
                   VMVGA_TRACE_3D,
-                  "DX-VIEWPORT-CMD cid=%u slot=%u x=%g y=%g w=%g h=%g min=%g max=%g",
-                  cid, i, (double)viewports[i].x, (double)viewports[i].y,
-                  (double)viewports[i].width, (double)viewports[i].height,
-                  (double)viewports[i].minDepth, (double)viewports[i].maxDepth);
+                  "DX-VIEWPORTS-CMD cid=%u count=%u", cid, count);
+              for (i = 0; i < count; i++) {
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "DX-VIEWPORT-CMD cid=%u slot=%u x=%g y=%g w=%g h=%g min=%g max=%g",
+                      cid, i, (double)viewports[i].x, (double)viewports[i].y,
+                      (double)viewports[i].width, (double)viewports[i].height,
+                      (double)viewports[i].minDepth, (double)viewports[i].maxDepth);
+              }
           }
 
           return vmsvga3d_d3d10_viewports_set_plan(
@@ -12932,14 +12934,16 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                      count * sizeof(ids[0]));
           }
 
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-RT-CMD cid=%u dsv=%u count=%u", cid,
-              command.depthStencilViewId, count);
-          for (i = 0; i < count; i++) {
+          if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
               VMVGA_TRACE_LOCAL(
                   VMVGA_TRACE_3D,
-                  "DX-RT-CMD-ID cid=%u slot=%u rtv=%u", cid, i, ids[i]);
+                  "DX-RT-CMD cid=%u dsv=%u count=%u", cid,
+                  command.depthStencilViewId, count);
+              for (i = 0; i < count; i++) {
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "DX-RT-CMD-ID cid=%u slot=%u rtv=%u", cid, i, ids[i]);
+              }
           }
 
           return vmsvga3d_d3d10_render_targets_set_plan(
@@ -13320,22 +13324,24 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
           memcpy(&command, payload, sizeof(command));
 
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-BLEND-DEFINE cid=%u id=%u atc=%u independent=%u",
-              cid, command.blendId, command.alphaToCoverageEnable,
-              command.independentBlendEnable);
-          for (i = 0; i < SVGA3D_DX_MAX_RENDER_TARGETS; i++) {
-              const SVGA3dDXBlendStatePerRT *rt = &command.perRT[i];
-
+          if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
               VMVGA_TRACE_LOCAL(
                   VMVGA_TRACE_3D,
-                  "DX-BLEND-DEFINE-RT cid=%u id=%u slot=%u enable=%u "
-                  "src=%u dst=%u op=%u asrc=%u adst=%u aop=%u mask=0x%02x logic=%u/%u",
-                  cid, command.blendId, i, rt->blendEnable,
-                  rt->srcBlend, rt->destBlend, rt->blendOp,
-                  rt->srcBlendAlpha, rt->destBlendAlpha, rt->blendOpAlpha,
-                  rt->renderTargetWriteMask, rt->logicOpEnable, rt->logicOp);
+                  "DX-BLEND-DEFINE cid=%u id=%u atc=%u independent=%u",
+                  cid, command.blendId, command.alphaToCoverageEnable,
+                  command.independentBlendEnable);
+              for (i = 0; i < SVGA3D_DX_MAX_RENDER_TARGETS; i++) {
+                  const SVGA3dDXBlendStatePerRT *rt = &command.perRT[i];
+
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "DX-BLEND-DEFINE-RT cid=%u id=%u slot=%u enable=%u "
+                      "src=%u dst=%u op=%u asrc=%u adst=%u aop=%u mask=0x%02x logic=%u/%u",
+                      cid, command.blendId, i, rt->blendEnable,
+                      rt->srcBlend, rt->destBlend, rt->blendOp,
+                      rt->srcBlendAlpha, rt->destBlendAlpha, rt->blendOpAlpha,
+                      rt->renderTargetWriteMask, rt->logicOpEnable, rt->logicOp);
+              }
           }
 
           entry = vmsvga3d_dx_cotable_entry_ptr(

@@ -409,6 +409,14 @@ static void vmsvga3d_screen_target_note_d3d9_clear_live(
 static void vmsvga3d_screen_target_write_tracking_add_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dRect *rect);
+static void vmsvga3d_screen_handoff_coverage_reset_live(
+    struct vmsvga_state_s *s, uint32_t sid, bool valid);
+static void vmsvga3d_screen_handoff_coverage_add_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dRect *rect, const char *source);
+static bool vmsvga3d_screen_handoff_coverage_full_live(
+    struct vmsvga_state_s *s, uint32_t sid, const VMSVGA3DSurface *surface,
+    uint64_t *covered_out, uint64_t *total_out);
 static bool vmsvga3d_surface_changed_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dBox *box);
@@ -435,6 +443,11 @@ struct vmsvga3d_state_s {
     uint32_t screen_target_write_count;
     SVGA3dRect screen_target_write_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
     bool screen_target_write_tracking_valid;
+    uint32_t screen_handoff_write_sid;
+    uint32_t screen_handoff_write_count;
+    SVGA3dRect screen_handoff_write_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    bool screen_handoff_write_tracking_valid;
+    bool screen_handoff_write_overflow;
     bool dx_context_ever_defined;
     uint64_t trace_vgpu9_present_seq;
     uint32_t trace_vgpu9_last_present_sid;
@@ -10358,6 +10371,251 @@ static void vmsvga3d_screen_target_write_tracking_reset_live(
         valid && state->active_screen_target_sid != SVGA3D_INVALID_ID;
 }
 
+static void vmsvga3d_screen_handoff_coverage_reset_live(
+    struct vmsvga_state_s *s, uint32_t sid, bool valid)
+{
+    struct vmsvga3d_state_s *state;
+
+    if (s == NULL || s->svga3d == NULL) {
+        return;
+    }
+
+    state = s->svga3d;
+    state->screen_handoff_write_sid = valid ? sid : SVGA3D_INVALID_ID;
+    state->screen_handoff_write_count = 0;
+    memset(state->screen_handoff_write_rects, 0,
+           sizeof(state->screen_handoff_write_rects));
+    state->screen_handoff_write_tracking_valid =
+        valid && sid != SVGA3D_INVALID_ID;
+    state->screen_handoff_write_overflow = false;
+
+    if (s->screen_frontend_deferred && vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-SCREEN-HANDOFF phase=coverage-%s sid=%u\n",
+                state->screen_handoff_write_tracking_valid ? "arm" : "reset",
+                sid);
+    }
+}
+
+static void vmsvga3d_screen_handoff_coverage_add_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dRect *rect, const char *source)
+{
+    struct vmsvga3d_state_s *state;
+    VMSVGA3DSurface *surface;
+    SVGA3dRect dirty;
+    uint32_t i;
+
+    if (s == NULL || rect == NULL || s->svga3d == NULL ||
+        !s->screen_frontend_deferred) {
+        return;
+    }
+
+    state = s->svga3d;
+    if (!state->screen_handoff_write_tracking_valid ||
+        sid != state->active_screen_target_sid ||
+        sid != state->screen_handoff_write_sid || subresource != 0 ||
+        rect->w == 0 || rect->h == 0 || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return;
+    }
+
+    surface = state->surfaces[sid];
+    if (surface == NULL) {
+        vmsvga3d_screen_handoff_coverage_reset_live(
+            s, SVGA3D_INVALID_ID, false);
+        return;
+    }
+
+    dirty = *rect;
+    if (!vmsvga3d_screen_target_clip_rect(surface, &dirty)) {
+        return;
+    }
+
+    if (vmsvga3d_screen_target_rect_is_full(surface, &dirty)) {
+        state->screen_handoff_write_overflow = false;
+        state->screen_handoff_write_count = 1;
+        state->screen_handoff_write_rects[0] = dirty;
+        memset(&state->screen_handoff_write_rects[1], 0,
+               sizeof(state->screen_handoff_write_rects) -
+                   sizeof(state->screen_handoff_write_rects[0]));
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=coverage-write sid=%u "
+                    "source=%s rect=%u,%u/%ux%u rects=1 full=1\n",
+                    sid, source != NULL ? source : "unknown",
+                    dirty.x, dirty.y, dirty.w, dirty.h);
+        }
+        return;
+    }
+
+    if (state->screen_handoff_write_overflow) {
+        return;
+    }
+
+retry_containment:
+    for (i = 0; i < state->screen_handoff_write_count; i++) {
+        if (vmsvga3d_screen_target_rect_contains(
+                &state->screen_handoff_write_rects[i], &dirty)) {
+            return;
+        }
+        if (vmsvga3d_screen_target_rect_contains(
+                &dirty, &state->screen_handoff_write_rects[i])) {
+            state->screen_handoff_write_count--;
+            if (i != state->screen_handoff_write_count) {
+                state->screen_handoff_write_rects[i] =
+                    state->screen_handoff_write_rects[
+                        state->screen_handoff_write_count];
+            }
+            goto retry_containment;
+        }
+    }
+
+    if (state->screen_handoff_write_count ==
+        VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS) {
+        state->screen_handoff_write_overflow = true;
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=coverage-overflow sid=%u "
+                    "rects=%u source=%s\n",
+                    sid, state->screen_handoff_write_count,
+                    source != NULL ? source : "unknown");
+        }
+        return;
+    }
+
+    state->screen_handoff_write_rects[state->screen_handoff_write_count++] =
+        dirty;
+    if (vmsvga_trace_flight_enabled() &&
+        state->screen_handoff_write_count <= 8) {
+        fprintf(stderr,
+                "VMVGA-SCREEN-HANDOFF phase=coverage-write sid=%u "
+                "source=%s rect=%u,%u/%ux%u rects=%u full=0\n",
+                sid, source != NULL ? source : "unknown",
+                dirty.x, dirty.y, dirty.w, dirty.h,
+                state->screen_handoff_write_count);
+    }
+}
+
+static uint64_t vmsvga3d_screen_handoff_rect_union_area(
+    const SVGA3dRect *rects, uint32_t rect_count)
+{
+    uint32_t x_edges[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS * 2];
+    uint32_t y_top[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    uint32_t y_bottom[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    uint32_t x_count = 0;
+    uint64_t area = 0;
+    uint32_t i;
+    uint32_t j;
+
+    for (i = 0; i < rect_count; i++) {
+        x_edges[x_count++] = rects[i].x;
+        x_edges[x_count++] = rects[i].x + rects[i].w;
+    }
+
+    for (i = 1; i < x_count; i++) {
+        uint32_t value = x_edges[i];
+        j = i;
+        while (j != 0 && x_edges[j - 1] > value) {
+            x_edges[j] = x_edges[j - 1];
+            j--;
+        }
+        x_edges[j] = value;
+    }
+
+    for (i = 0; i + 1 < x_count; i++) {
+        uint32_t left = x_edges[i];
+        uint32_t right = x_edges[i + 1];
+        uint32_t y_count = 0;
+        uint64_t covered_y = 0;
+        uint32_t current_top = 0;
+        uint32_t current_bottom = 0;
+
+        if (right <= left) {
+            continue;
+        }
+
+        for (j = 0; j < rect_count; j++) {
+            uint32_t rect_right = rects[j].x + rects[j].w;
+
+            if (rects[j].x <= left && rect_right >= right) {
+                uint32_t k = y_count;
+                uint32_t top = rects[j].y;
+                uint32_t bottom = rects[j].y + rects[j].h;
+
+                while (k != 0 && y_top[k - 1] > top) {
+                    y_top[k] = y_top[k - 1];
+                    y_bottom[k] = y_bottom[k - 1];
+                    k--;
+                }
+                y_top[k] = top;
+                y_bottom[k] = bottom;
+                y_count++;
+            }
+        }
+
+        for (j = 0; j < y_count; j++) {
+            if (j == 0 || y_top[j] > current_bottom) {
+                if (j != 0) {
+                    covered_y += (uint64_t)current_bottom - current_top;
+                }
+                current_top = y_top[j];
+                current_bottom = y_bottom[j];
+            } else if (y_bottom[j] > current_bottom) {
+                current_bottom = y_bottom[j];
+            }
+        }
+        if (y_count != 0) {
+            covered_y += (uint64_t)current_bottom - current_top;
+        }
+
+        area += (uint64_t)(right - left) * covered_y;
+    }
+
+    return area;
+}
+
+static bool vmsvga3d_screen_handoff_coverage_full_live(
+    struct vmsvga_state_s *s, uint32_t sid, const VMSVGA3DSurface *surface,
+    uint64_t *covered_out, uint64_t *total_out)
+{
+    struct vmsvga3d_state_s *state;
+    uint64_t covered = 0;
+    uint64_t total = 0;
+
+    if (covered_out != NULL) {
+        *covered_out = 0;
+    }
+    if (total_out != NULL) {
+        *total_out = 0;
+    }
+
+    if (s == NULL || s->svga3d == NULL || surface == NULL ||
+        surface->mips == NULL || surface->mip_count == 0) {
+        return false;
+    }
+
+    state = s->svga3d;
+    total = (uint64_t)surface->mips[0].size.width *
+            surface->mips[0].size.height;
+    if (state->screen_handoff_write_tracking_valid &&
+        !state->screen_handoff_write_overflow &&
+        state->screen_handoff_write_sid == sid &&
+        state->screen_handoff_write_count != 0) {
+        covered = vmsvga3d_screen_handoff_rect_union_area(
+            state->screen_handoff_write_rects,
+            state->screen_handoff_write_count);
+    }
+
+    if (covered_out != NULL) {
+        *covered_out = covered;
+    }
+    if (total_out != NULL) {
+        *total_out = total;
+    }
+
+    return total != 0 && covered == total;
+}
+
 static void vmsvga3d_screen_target_write_tracking_invalidate_live(
     struct vmsvga_state_s *s, uint32_t sid)
 {
@@ -10847,6 +11105,10 @@ static bool vmsvga3d_surface_changed_live(
         surface->screen_target_content_valid = true;
     }
 
+    if (s->screen_frontend_deferred) {
+        vmsvga3d_screen_handoff_coverage_add_live(
+            s, sid, subresource, &rect, "write");
+    }
     vmsvga3d_screen_target_write_tracking_add_live(
         s, sid, subresource, &rect);
     return vmsvga3d_screen_target_mark_dirty_live(
@@ -10881,6 +11143,10 @@ static bool vmsvga3d_surface_presented_live(
         surface->screen_target_content_valid = true;
     }
 
+    if (s->screen_frontend_deferred) {
+        vmsvga3d_screen_handoff_coverage_add_live(
+            s, sid, subresource, &rect, "presentblt");
+    }
     return vmsvga3d_screen_target_mark_dirty_live(
         s, sid, subresource, &rect, true);
 }
@@ -10933,6 +11199,9 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     bool narrowed_by_write_damage = false;
     bool batch_readback = false;
     bool direct_screen_readback = false;
+    bool handoff_coverage_full = false;
+    uint64_t handoff_covered = 0;
+    uint64_t handoff_total = 0;
     VMSVGA3DSurface *cpu_direct_surface = NULL;
 
     if (s == NULL || s->svga3d == NULL) {
@@ -10998,6 +11267,30 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
             full_refresh = rect_count == 1 &&
                            vmsvga3d_screen_target_rect_is_full(
                                surface, &rects[0]);
+            if (s->screen_frontend_deferred && full_refresh) {
+                handoff_coverage_full =
+                    vmsvga3d_screen_handoff_coverage_full_live(
+                        s, sid, surface, &handoff_covered, &handoff_total);
+                if (vmsvga_trace_flight_enabled()) {
+                    uint32_t coverage_pct_x100 = 0;
+
+                    if (handoff_total != 0) {
+                        coverage_pct_x100 = (uint32_t)MIN(
+                            (handoff_covered * 10000u) / handoff_total,
+                            (uint64_t)10000u);
+                    }
+                    fprintf(stderr,
+                            "VMVGA-SCREEN-HANDOFF phase=coverage-check "
+                            "sid=%u writes=%u overflow=%u "
+                            "covered=%" PRIu64 "/%" PRIu64 " pct=%u.%02u "
+                            "full=%u\n",
+                            sid, state->screen_handoff_write_count,
+                            state->screen_handoff_write_overflow ? 1u : 0u,
+                            handoff_covered, handoff_total,
+                            coverage_pct_x100 / 100, coverage_pct_x100 % 100,
+                            handoff_coverage_full ? 1u : 0u);
+                }
+            }
             if (full_refresh && d3d9_resident && !d3d11_resident &&
                 state->screen_target_write_tracking_valid &&
                 state->screen_target_write_sid == sid &&
@@ -11117,13 +11410,27 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
                         "reason=partial-presentation rects=%u\n",
                         sid, rect_count);
             }
+        } else if (!handoff_coverage_full) {
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-HANDOFF phase=frontend-wait sid=%u "
+                        "reason=incomplete-content covered=%" PRIu64
+                        "/%" PRIu64 " writes=%u overflow=%u\n",
+                        sid, handoff_covered, handoff_total,
+                        state->screen_handoff_write_count,
+                        state->screen_handoff_write_overflow ? 1u : 0u);
+            }
         } else {
             s->screen_frontend_deferred = false;
+            vmsvga3d_screen_handoff_coverage_reset_live(
+                s, SVGA3D_INVALID_ID, false);
             if (vmsvga_trace_flight_enabled()) {
                 fprintf(stderr,
                         "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
-                        "size=%ux%u rects=%u\n",
-                        sid, s->screen_width, s->screen_height, rect_count);
+                        "size=%ux%u rects=%u coverage=%" PRIu64 "/%" PRIu64
+                        "\n",
+                        sid, s->screen_width, s->screen_height, rect_count,
+                        handoff_covered, handoff_total);
             }
         }
     }
@@ -11257,6 +11564,8 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_full_present_pending = false;
             vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+            vmsvga3d_screen_handoff_coverage_reset_live(
+                s, SVGA3D_INVALID_ID, false);
             /*
              * Do not destroy the currently visible Screen Object before a
              * redefine. vmsvga_screen_define() deliberately seeds its handoff
@@ -11295,6 +11604,8 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                     s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
                     s->svga3d->screen_target_full_present_pending = false;
                     vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+                    vmsvga3d_screen_handoff_coverage_reset_live(
+                        s, SVGA3D_INVALID_ID, false);
                 }
                 (void)vmsvga_screen_destroy(s, body->stid);
             }
@@ -11339,6 +11650,10 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             }
             if (body->image.sid != old_sid) {
                 vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+                vmsvga3d_screen_handoff_coverage_reset_live(
+                    s, body->image.sid,
+                    s->screen_frontend_deferred &&
+                    body->image.sid != SVGA3D_INVALID_ID);
             }
             if (update_screen &&
                 !(s->screen_frontend_deferred &&
@@ -13460,7 +13775,7 @@ static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
     value = vmsvga3d_devcap[index];
 
     if (index == SVGA3D_DEVCAP_SM5) {
-        return 0;
+        return s != NULL && s->vgpu_generation == VMSVGA_VGPU_11 ? 1 : 0;
     }
 
     if (index == SVGA3D_DEVCAP_MULTISAMPLE_2X ||

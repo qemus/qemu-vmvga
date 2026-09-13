@@ -1338,13 +1338,111 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
                                       uint32_t cid, uint32_t cmd,
                                       const void *payload, uint32_t size)
 {
-    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    VMSVGA3DDXContext *context;
 
+    if (s == NULL || payload == NULL) {
+        return false;
+    }
+
+    /* BIND_SHADER_IFACE is submitted without SVGA_CB_FLAG_DX_CONTEXT by the
+     * VMware Windows driver.  The packet therefore carries the authoritative
+     * context id rather than the command-buffer metadata. */
+    if (cmd == SVGA_3D_CMD_DX_BIND_SHADER_IFACE) {
+        SVGA3dCmdDXBindShaderIface command;
+        VMSVGA3DMob *mob;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        context = vmsvga3d_dx_context(s, command.cid);
+        if (context == NULL) {
+            return false;
+        }
+
+        if (command.mobid == SVGA3D_INVALID_ID) {
+            context->shadow.shaderIfaceMobid = SVGA3D_INVALID_ID;
+            context->shadow.shaderIfaceOffset = 0;
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SHADER-IFACE-BIND cid=%u mobid=%u offset=0 result=UNBOUND",
+                command.cid, command.mobid);
+            return true;
+        }
+
+        mob = vmsvga3d_mob_get(s, command.mobid);
+        if (mob == NULL || command.offsetInBytes > mob->gbo.size ||
+            sizeof(SVGADXShaderIfaceMobFormat) >
+                mob->gbo.size - command.offsetInBytes) {
+            return false;
+        }
+
+        context->shadow.shaderIfaceMobid = command.mobid;
+        context->shadow.shaderIfaceOffset = command.offsetInBytes;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SHADER-IFACE-BIND cid=%u mobid=%u offset=%u bytes=%zu result=OK",
+            command.cid, command.mobid, command.offsetInBytes,
+            sizeof(SVGADXShaderIfaceMobFormat));
+        return true;
+    }
+
+    context = vmsvga3d_dx_context(s, cid);
     if (context == NULL) {
         return false;
     }
 
     switch (cmd) {
+    case SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION: {
+        SVGA3dCmdDXPredStagingCopyRegion command;
+        SVGA3dCmdDXPredCopyRegion copy;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (command.mustBeZero[0] != 0 || command.mustBeZero[1] != 0) {
+            return false;
+        }
+
+        copy.dstSid = command.dstSid;
+        copy.dstSubResource = command.dstSubResource;
+        copy.srcSid = command.srcSid;
+        copy.srcSubResource = command.srcSubResource;
+        copy.box = command.box;
+
+        if (!vmsvga3d_d3d10_pred_copy_region_live(s, cid, &copy)) {
+            return false;
+        }
+
+        /* A staging readback makes the destination's guest backing coherent
+         * after the GPU copy.  The existing readback path performs the
+         * required synchronization while mapping the staging resource.
+         * Without readback, normal D3D11 command ordering is sufficient; the
+         * unsynchronized hint therefore needs no additional host operation. */
+        if (command.readback != 0) {
+            SVGA3dCmdDXReadbackSubResource readback = {
+                .sid = command.dstSid,
+                .subResource = command.dstSubResource,
+            };
+
+            if (!vmsvga3d_d3d10_readback_subresource_live(s, &readback)) {
+                return false;
+            }
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-STAGING-COPY-REGION cid=%u src=%u:%u dst=%u:%u "
+            "readback=%u unsynchronized=%u result=OK",
+            cid, command.srcSid, command.srcSubResource, command.dstSid,
+            command.dstSubResource, command.readback != 0,
+            command.unsynchronized != 0);
+        return true;
+    }
+
     case SVGA_3D_CMD_DX_DEFINE_RASTERIZER_STATE_V2: {
         SVGA3dCmdDXDefineRasterizerState_v2 command;
         SVGACOTableDXRasterizerStateEntry *entry;

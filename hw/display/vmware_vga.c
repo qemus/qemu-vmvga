@@ -485,6 +485,14 @@ struct vmsvga_state_s {
     uint8_t *screen_retired_base;
     uint32_t screen_stride;
     uint32_t screen_base_migration_size;
+    /* Host-only zero-copy scanout state.  When active, the QEMU frontend
+     * consumes the canonical CPU shadow of the active ScreenTarget directly.
+     * These fields are intentionally not migrated. */
+    uint8_t *screen_direct_base;
+    size_t screen_direct_size;
+    uint32_t screen_direct_stride;
+    uint32_t screen_direct_sid;
+    bool screen_direct_active;
     bool screen_defined;
     uint32_t screen_flags;
     uint32_t screen_width;
@@ -8172,7 +8180,8 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
         size_t scanout_size;
         uint32_t screen_stride;
 
-        if (!vmsvga_screen_storage(s, &scanout, &scanout_size, &screen_stride) ||
+        if (!vmsvga_screen_scanout_storage(
+                s, &scanout, &scanout_size, &screen_stride) ||
             screen_stride != s->active_stride) {
             return;
         }
@@ -9531,6 +9540,9 @@ static void vmsvga_reset(DeviceState *dev)
     vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
                             s->active_cursor_y, SVGA_CURSOR_ON_HIDE);
 
+    if (s->screen_direct_active) {
+        (void)vmsvga_screen_direct_detach(s, "device-reset");
+    }
     vmsvga3d_reset(s);
     vmsvga_gmr_reset(s);
     vmsvga_screen_reset(s);
@@ -9683,6 +9695,13 @@ static int vmsvga_pre_load(void *opaque)
 
     vmsvga_set_dirty_log(s, true);
 
+    if (s->screen_direct_active) {
+        if (!vmsvga_screen_direct_detach(s, "pre-load")) {
+            return -EINVAL;
+        }
+        vmsvga_screen_direct_clear(s);
+    }
+
     s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
     s->svga_surface_bound = false;
     s->hidden = false;
@@ -9712,6 +9731,13 @@ static int vmsvga_pre_save(void *opaque)
     struct vmsvga_state_s *s = opaque;
     uint32_t id;
     s->screen_base_migration_size = 0;
+
+    if (s->screen_direct_active) {
+        if (!vmsvga3d_screen_target_quiesce_live(s) ||
+            !vmsvga_screen_direct_materialize(s, "pre-save")) {
+            return -EINVAL;
+        }
+    }
 
     if (s->enable || s->legacy_vga_size != 0) {
         s->legacy_vga_size = (uint32_t)vmsvga_legacy_vga_backup_size(s);
@@ -10612,6 +10638,9 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
         s->chip.fifo_bh = NULL;
     }
 
+    if (s->chip.screen_direct_active) {
+        (void)vmsvga_screen_direct_detach(&s->chip, "unrealize");
+    }
     vmsvga3d_reset(&s->chip);
     vmsvga3d_renderer_unrealize(&s->chip);
     vmsvga_screen_reset(&s->chip);

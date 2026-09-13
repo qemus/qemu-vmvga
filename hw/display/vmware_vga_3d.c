@@ -194,6 +194,11 @@ typedef struct vmsvga3d_gbo_s {
     bool host_backed;
 } VMSVGA3DGBO;
 
+typedef struct vmsvga3d_gbo_cursor_s {
+    uint32_t run_index;
+    bool valid;
+} VMSVGA3DGBOCursor;
+
 typedef struct vmsvga3d_mob_s {
     SVGAMobId mobid;
     VMSVGA3DGBO gbo;
@@ -1006,10 +1011,44 @@ static bool vmsvga3d_gbo_create(struct vmsvga_state_s *s,
     return vmsvga3d_gbo_finalize(gbo);
 }
 
-static bool vmsvga3d_gbo_transfer(struct vmsvga_state_s *s,
-                                  VMSVGA3DGBO *gbo, uint32_t offset,
-                                  const void *src, void *dst, size_t size,
-                                  bool write_guest)
+static uint32_t vmsvga3d_gbo_cursor_find_run(const VMSVGA3DGBO *gbo,
+                                             VMSVGA3DGBOCursor *cursor,
+                                             uint32_t offset)
+{
+    uint32_t run_index;
+
+    if (gbo == NULL) {
+        return 0;
+    }
+
+    if (cursor != NULL && cursor->valid &&
+        cursor->run_index < gbo->run_count) {
+        run_index = cursor->run_index;
+        while (run_index < gbo->run_count) {
+            const VMSVGA3DGBORun *run = &gbo->runs[run_index];
+            uint64_t run_end = (uint64_t)run->logical_offset +
+                               (uint64_t)run->pages *
+                                   VMSVGA3D_GBO_PAGE_SIZE;
+
+            if (offset < run->logical_offset) {
+                break;
+            }
+            if ((uint64_t)offset < run_end) {
+                return run_index;
+            }
+            run_index++;
+        }
+    }
+
+    return vmsvga3d_gbo_find_run(gbo, offset);
+}
+
+static bool vmsvga3d_gbo_transfer_cursor(struct vmsvga_state_s *s,
+                                         VMSVGA3DGBO *gbo,
+                                         VMSVGA3DGBOCursor *cursor,
+                                         uint32_t offset,
+                                         const void *src, void *dst,
+                                         size_t size, bool write_guest)
 {
     uint64_t current = offset;
     uint32_t run_index;
@@ -1024,8 +1063,8 @@ static bool vmsvga3d_gbo_transfer(struct vmsvga_state_s *s,
         return true;
     }
 
-    run_index = vmsvga3d_gbo_find_run(gbo, offset);
-    for (; size != 0 && run_index < gbo->run_count; run_index++) {
+    run_index = vmsvga3d_gbo_cursor_find_run(gbo, cursor, offset);
+    while (size != 0 && run_index < gbo->run_count) {
         VMSVGA3DGBORun *run = &gbo->runs[run_index];
         uint64_t run_size =
             (uint64_t)run->pages * VMSVGA3D_GBO_PAGE_SIZE;
@@ -1071,11 +1110,28 @@ static bool vmsvga3d_gbo_transfer(struct vmsvga_state_s *s,
         if (!ok) {
             return false;
         }
+
+        if (cursor != NULL) {
+            cursor->run_index = run_index;
+            cursor->valid = true;
+        }
         current += chunk;
         size -= chunk;
+        if (size != 0) {
+            run_index++;
+        }
     }
 
     return size == 0;
+}
+
+static bool vmsvga3d_gbo_transfer(struct vmsvga_state_s *s,
+                                  VMSVGA3DGBO *gbo, uint32_t offset,
+                                  const void *src, void *dst, size_t size,
+                                  bool write_guest)
+{
+    return vmsvga3d_gbo_transfer_cursor(s, gbo, NULL, offset, src, dst,
+                                        size, write_guest);
 }
 
 static bool vmsvga3d_gbo_read(struct vmsvga_state_s *s, VMSVGA3DGBO *gbo,
@@ -1319,6 +1375,17 @@ static bool vmsvga3d_mob_read(struct vmsvga_state_s *s, VMSVGA3DMob *mob,
 {
     return mob != NULL &&
            vmsvga3d_gbo_read(s, &mob->gbo, offset, data, size);
+}
+
+static bool vmsvga3d_mob_read_cursor(struct vmsvga_state_s *s,
+                                     VMSVGA3DMob *mob,
+                                     VMSVGA3DGBOCursor *cursor,
+                                     uint32_t offset, void *data,
+                                     uint32_t size)
+{
+    return mob != NULL &&
+           vmsvga3d_gbo_transfer_cursor(s, &mob->gbo, cursor, offset,
+                                        NULL, data, size, false);
 }
 
 static bool vmsvga3d_mob_write(struct vmsvga_state_s *s, VMSVGA3DMob *mob,
@@ -2533,6 +2600,11 @@ static void vmsvga3d_surface_install(
         return;
     }
     if (old_surface != NULL && sid == state->active_screen_target_sid) {
+        if (s->screen_direct_active && s->screen_direct_sid == sid &&
+            !vmsvga_screen_direct_detach(s, "surface-redefine")) {
+            vmsvga3d_surface_free(surface);
+            return;
+        }
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
@@ -2781,6 +2853,13 @@ static void vmsvga3d_surface_destroy_live(struct vmsvga_state_s *s,
         return;
     }
     if (sid == state->active_screen_target_sid) {
+        if (s->screen_direct_active && s->screen_direct_sid == sid &&
+            !vmsvga_screen_direct_detach(s, "surface-destroy")) {
+            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
+                              "SURFACE_DESTROY result=REJECT "
+                              "reason=DIRECT_DETACH sid=%u", sid);
+            return;
+        }
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
@@ -6527,6 +6606,11 @@ static bool vmsvga3d_present_rect(
         vmsvga_active_depth(s), vmsvga_stride(s), 0, true, execute);
 }
 
+static bool vmsvga3d_present_screen_rect_damage_only(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, const struct svga3d_surface_desc *desc,
+    const SVGA3dCopyRect *rect);
+
 static bool vmsvga3d_present_screen_rect(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DSurfaceImage *image, const struct svga3d_surface_desc *desc,
@@ -6538,8 +6622,25 @@ static bool vmsvga3d_present_screen_rect(
     uint64_t dirty_base = 0;
     bool mark_dirty;
 
-    if (s == NULL ||
-        !vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride)) {
+    if (s == NULL) {
+        return false;
+    }
+
+    if (s->screen_direct_active && !s->screen_backing_valid &&
+        s->screen_direct_base == image->data &&
+        s->screen_direct_stride == image->pitch &&
+        s->screen_width == image->size.width &&
+        s->screen_height == image->size.height) {
+        return vmsvga3d_present_screen_rect_damage_only(
+            s, surface, image, desc, rect);
+    }
+
+    if (s->screen_direct_active &&
+        !vmsvga_screen_direct_detach(s, "3d-present")) {
+        return false;
+    }
+
+    if (!vmsvga_screen_storage(s, &screen_base, &screen_size, &screen_stride)) {
         return false;
     }
 
@@ -6616,8 +6717,14 @@ static bool vmsvga3d_present_scaled_screen_rect(
     size_t screen_size;
 
     if (s == NULL || surface == NULL || image == NULL || desc == NULL ||
-        source == NULL || destination == NULL ||
-        !vmsvga_screen_storage(s, &screen_base, &screen_size, &dst_pitch)) {
+        source == NULL || destination == NULL) {
+        return false;
+    }
+    if (s->screen_direct_active &&
+        !vmsvga_screen_direct_detach(s, "3d-scaled-present")) {
+        return false;
+    }
+    if (!vmsvga_screen_storage(s, &screen_base, &screen_size, &dst_pitch)) {
         return false;
     }
 
@@ -10456,6 +10563,43 @@ static bool vmsvga3d_surface_presented_live(
         s, sid, subresource, &rect, true);
 }
 
+static bool vmsvga3d_screen_direct_attach_cpu_shadow(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface, uint32_t sid)
+{
+    VMSVGA3DSurfaceImage *image;
+    uint64_t required;
+
+    if (s == NULL || s->svga3d == NULL || surface == NULL ||
+        sid != s->svga3d->active_screen_target_sid || !s->screen_defined ||
+        s->screen_backing_valid || s->screen_handoff_active ||
+        s->screen_frontend_deferred || !surface->screen_target_content_valid ||
+        surface->mips == NULL || surface->mip_count == 0 ||
+        (surface->surface_flags & SVGA3D_SURFACE_SCREENTARGET) == 0 ||
+        surface->format == SVGA3D_BUFFER ||
+        (surface->surface_flags &
+         (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) != 0 ||
+        (surface->format != SVGA3D_X8R8G8B8 &&
+         surface->format != SVGA3D_A8R8G8B8)) {
+        return false;
+    }
+
+    image = &surface->mips[0];
+    if (image->data == NULL || image->size.depth != 1 ||
+        image->size.width != s->screen_width ||
+        image->size.height != s->screen_height ||
+        image->pitch != (uint64_t)s->screen_width * 4u) {
+        return false;
+    }
+
+    required = (uint64_t)image->pitch * image->size.height;
+    if (required == 0 || required > image->data_size) {
+        return false;
+    }
+
+    return vmsvga_screen_direct_attach(s, sid, image->data,
+                                       image->data_size, image->pitch);
+}
+
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
 {
     struct vmsvga3d_state_s *state;
@@ -10467,6 +10611,7 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     bool narrowed_by_write_damage = false;
     bool batch_readback = false;
     bool direct_screen_readback = false;
+    VMSVGA3DSurface *cpu_direct_surface = NULL;
 
     if (s == NULL || s->svga3d == NULL) {
         return true;
@@ -10519,6 +10664,12 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
              * renderer that actually owns the surface instead of assuming a
              * vGPU10 ScreenTarget must be D3D11-resident. */
             if (d3d9_resident && d3d11_resident) {
+                return false;
+            }
+
+            if (s->screen_direct_active &&
+                (d3d9_resident || d3d11_resident) &&
+                !vmsvga_screen_direct_detach(s, "renderer-resident")) {
                 return false;
             }
 
@@ -10587,6 +10738,7 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
                 /* No accelerated backend owns newer contents; the canonical
                  * CPU shadow is already authoritative. */
                 batch_readback = true;
+                cpu_direct_surface = surface;
             }
 
             if (d3d11_resident && (rect_count > 1 || direct_candidate)) {
@@ -10643,6 +10795,16 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
                     "size=%ux%u rects=%u\n",
                     sid, s->screen_width, s->screen_height, rect_count);
         }
+    }
+
+    /* The first successful CPU-backed presentation establishes the canonical
+     * shadow as a safe frontend source.  Rebinding here keeps the legacy
+     * handoff frame intact, then eliminates the extra shadow -> screen copy on
+     * subsequent presentations.  Failure is only an optimization miss. */
+    if (cpu_direct_surface != NULL && !s->screen_handoff_active &&
+        !s->screen_frontend_deferred) {
+        (void)vmsvga3d_screen_direct_attach_cpu_shadow(
+            s, cpu_direct_surface, sid);
     }
 
     return true;

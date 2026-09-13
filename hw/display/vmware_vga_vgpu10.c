@@ -8531,7 +8531,6 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         }
         s->svga3d->active_screen_target_sid = sid;
         s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
-        s->svga3d->screen_target_full_present_pending = false;
         return true;
     }
 
@@ -8563,32 +8562,18 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         return false;
     }
 
-    /* A normal valid-to-valid ScreenTarget switch is a flip.  Pending
-     * presentation damage for the old target is superseded by the newer
-     * target, so do not turn every flip into a synchronous GPU-to-CPU
-     * readback.  Keep the quiesce barrier during the initial frontend
-     * takeover/handoff, where the old frame still participates in transition
-     * correctness.  Unbind, destroy, redefine, and migration retain their
-     * existing barriers elsewhere.
+    /* A ScreenTarget switch is a presentation-ordering barrier.  Pending
+     * damage belongs to the old SID and must be consumed before the new SID
+     * becomes active; dropping it can skip a guest-requested DWM frame.
+     *
+     * The quiesce path is already selective: it is an O(1) no-op when no
+     * presentation damage is queued, reads back only queued rectangles,
+     * narrows a full D3D9 presentation to tracked writer damage when possible,
+     * and performs no GPU readback when the CPU shadow is authoritative.
+     * Preserve that optimized barrier instead of speculatively coalescing
+     * across guest flips.
      */
-    if (old_sid != SVGA3D_INVALID_ID &&
-        !s->screen_frontend_deferred && !s->screen_handoff_active) {
-        if (s->svga3d->screen_target_dirty_count != 0 &&
-            s->svga3d->screen_target_dirty_sid != old_sid) {
-            return false;
-        }
-        if (vmsvga_trace_flight_enabled() &&
-            s->svga3d->screen_target_dirty_count != 0) {
-            fprintf(stderr,
-                    "VMVGA-SCREEN-TARGET phase=flip-coalesce old-sid=%u "
-                    "new-sid=%u dropped-rects=%u\n",
-                    old_sid, sid, s->svga3d->screen_target_dirty_count);
-        }
-        s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
-        s->svga3d->screen_target_dirty_count = 0;
-        memset(s->svga3d->screen_target_dirty_rects, 0,
-               sizeof(s->svga3d->screen_target_dirty_rects));
-    } else if (!vmsvga3d_screen_target_quiesce_live(s)) {
+    if (!vmsvga3d_screen_target_quiesce_live(s)) {
         return false;
     }
     if (s->screen_direct_active &&

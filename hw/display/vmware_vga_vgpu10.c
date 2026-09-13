@@ -8467,6 +8467,10 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         if (!vmsvga3d_screen_target_quiesce_live(s)) {
             return false;
         }
+        if (s->screen_direct_active &&
+            !vmsvga_screen_direct_detach(s, "target-unbind")) {
+            return false;
+        }
         s->svga3d->active_screen_target_sid = sid;
         s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
         return true;
@@ -8505,6 +8509,10 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
      * otherwise a later bind/unbind could silently reinterpret or discard it.
      */
     if (!vmsvga3d_screen_target_quiesce_live(s)) {
+        return false;
+    }
+    if (s->screen_direct_active &&
+        !vmsvga_screen_direct_detach(s, "target-switch")) {
         return false;
     }
 
@@ -9069,6 +9077,11 @@ static bool vmsvga3d_d3d10_update_subresource_live(
             return false;
         }
     } else {
+        VMSVGA3DGBOCursor read_cursor = { 0 };
+
+        /* Rows in an update box advance monotonically through the MOB.  Keep
+         * the current physical run between rows instead of binary-searching
+         * the run table again for every row. */
         for (z = 0; z < layout.depth_count; z++) {
             for (y = 0; y < layout.row_count; y++) {
                 uint64_t offset = subresource_offset +
@@ -9080,9 +9093,9 @@ static bool vmsvga3d_d3d10_update_subresource_live(
 
                 if (offset > UINT32_MAX || host_offset > image->data_size ||
                     layout.row_bytes > image->data_size - host_offset ||
-                    !vmsvga3d_mob_read(s, mob, (uint32_t)offset,
-                                       image->data + host_offset,
-                                       layout.row_bytes)) {
+                    !vmsvga3d_mob_read_cursor(
+                        s, mob, &read_cursor, (uint32_t)offset,
+                        image->data + host_offset, layout.row_bytes)) {
                     return false;
                 }
             }

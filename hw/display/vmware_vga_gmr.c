@@ -990,6 +990,140 @@ static bool vmsvga_screen_base_resize(struct vmsvga_state_s *s,
     return true;
 }
 
+static void vmsvga_screen_direct_clear(struct vmsvga_state_s *s)
+{
+    if (s == NULL) {
+        return;
+    }
+
+    s->screen_direct_base = NULL;
+    s->screen_direct_size = 0;
+    s->screen_direct_stride = 0;
+    s->screen_direct_sid = SVGA_ID_INVALID;
+    s->screen_direct_active = false;
+}
+
+static bool vmsvga_screen_direct_materialize(struct vmsvga_state_s *s,
+                                             const char *reason)
+{
+    uint32_t row;
+    size_t row_bytes;
+
+    if (s == NULL || !s->screen_direct_active) {
+        return true;
+    }
+    if (!s->screen_defined || s->screen_backing_valid ||
+        s->screen_direct_base == NULL || s->screen_width == 0 ||
+        s->screen_height == 0 ||
+        s->screen_direct_stride < (uint64_t)s->screen_width * 4u ||
+        (uint64_t)s->screen_direct_stride * s->screen_height >
+            s->screen_direct_size) {
+        return false;
+    }
+
+    if (!vmsvga_screen_base_resize(s, s->screen_width, s->screen_height,
+                                   s->screen_direct_stride)) {
+        return false;
+    }
+
+    row_bytes = (size_t)s->screen_width * 4u;
+    if (s->screen_base != s->screen_direct_base) {
+        for (row = 0; row < s->screen_height; row++) {
+            memcpy(s->screen_base + (size_t)row * s->screen_stride,
+                   s->screen_direct_base +
+                       (size_t)row * s->screen_direct_stride,
+                   row_bytes);
+        }
+    }
+
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-DIRECT-SCANOUT phase=materialize reason=%s sid=%u "
+                "source=%p mirror=%p size=%ux%u stride=%u\n",
+                reason != NULL ? reason : "unknown", s->screen_direct_sid,
+                (void *)s->screen_direct_base, (void *)s->screen_base,
+                s->screen_width, s->screen_height, s->screen_direct_stride);
+    }
+
+    return true;
+}
+
+static bool vmsvga_screen_direct_detach(struct vmsvga_state_s *s,
+                                        const char *reason)
+{
+    if (s == NULL || !s->screen_direct_active) {
+        return true;
+    }
+    if (!vmsvga_screen_direct_materialize(s, reason)) {
+        return false;
+    }
+
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-DIRECT-SCANOUT phase=detach reason=%s sid=%u "
+                "source=%p\n",
+                reason != NULL ? reason : "unknown", s->screen_direct_sid,
+                (void *)s->screen_direct_base);
+    }
+
+    vmsvga_screen_direct_clear(s);
+    s->svga_surface_bound = false;
+    vmsvga_check_size(s);
+    return true;
+}
+
+static bool vmsvga_screen_direct_attach(struct vmsvga_state_s *s,
+                                        uint32_t sid, uint8_t *base,
+                                        size_t size, uint32_t stride)
+{
+    uint64_t required;
+
+    if (s == NULL || base == NULL || !s->screen_defined ||
+        s->screen_backing_valid || s->screen_handoff_active ||
+        s->screen_frontend_deferred || s->screen_frontend_hold_frames != 0 ||
+        !s->active_valid || s->screen_width == 0 || s->screen_height == 0 ||
+        s->active_width != s->screen_width ||
+        s->active_height != s->screen_height || s->active_depth != 32 ||
+        s->active_stride != stride ||
+        stride < (uint64_t)s->screen_width * 4u) {
+        return false;
+    }
+
+    required = (uint64_t)stride * s->screen_height;
+    if (required == 0 || required > size) {
+        return false;
+    }
+
+    if (s->screen_direct_active) {
+        if (s->screen_direct_sid == sid && s->screen_direct_base == base &&
+            s->screen_direct_size == size &&
+            s->screen_direct_stride == stride) {
+            return true;
+        }
+        if (!vmsvga_screen_direct_detach(s, "replace")) {
+            return false;
+        }
+    }
+
+    s->screen_direct_base = base;
+    s->screen_direct_size = size;
+    s->screen_direct_stride = stride;
+    s->screen_direct_sid = sid;
+    s->screen_direct_active = true;
+    s->svga_surface_bound = false;
+
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-DIRECT-SCANOUT phase=attach sid=%u source=%p "
+                "size=%ux%u stride=%u bytes=%zu\n",
+                sid, (void *)base, s->screen_width, s->screen_height, stride,
+                size);
+    }
+
+    vmsvga_check_size(s);
+    return true;
+}
+
 static bool vmsvga_screen_handoff_seed(struct vmsvga_state_s *s,
                                        DisplaySurface *surface,
                                        uint32_t width, uint32_t height,
@@ -1273,6 +1407,27 @@ static bool vmsvga_screen_storage(struct vmsvga_state_s *s,
     return vmsvga_screen_base_layer_storage(s, base, size, stride);
 }
 
+/* Only the frontend scanout may alias the active ScreenTarget CPU shadow.
+ * Generic Screen Object writes continue to target screen_storage(), so legacy
+ * GMRFB/Screen commands never mutate the 3D surface merely because it happens
+ * to be scanned out directly. */
+static bool vmsvga_screen_scanout_storage(struct vmsvga_state_s *s,
+                                          uint8_t **base, size_t *size,
+                                          uint32_t *stride)
+{
+    if (s != NULL && s->screen_direct_active &&
+        !s->screen_handoff_active && !s->screen_backing_valid &&
+        s->screen_direct_base != NULL && base != NULL && size != NULL &&
+        stride != NULL) {
+        *base = s->screen_direct_base;
+        *size = s->screen_direct_size;
+        *stride = s->screen_direct_stride;
+        return true;
+    }
+
+    return vmsvga_screen_storage(s, base, size, stride);
+}
+
 static inline void vmsvga_screen_mark_dirty(struct vmsvga_state_s *s,
                                             uint32_t x, uint32_t y,
                                             uint32_t width,
@@ -1288,6 +1443,7 @@ static inline void vmsvga_screen_mark_dirty(struct vmsvga_state_s *s,
 
 static void vmsvga_screen_reset(struct vmsvga_state_s *s)
 {
+    vmsvga_screen_direct_clear(s);
     vmsvga_screen_base_clear(s);
     vmsvga_screen_preseed_clear(s);
 
@@ -1407,6 +1563,13 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     }
 
     screen_stride = backing_present ? backing_pitch : (uint32_t)stride;
+
+    if (s->screen_direct_active &&
+        !vmsvga_screen_direct_detach(s, "screen-define")) {
+        VMSVGA_SCREEN_REJECT("define reason=direct-detach id=%u", id);
+        return false;
+    }
+
     surface = qemu_console_surface(s->vga.con);
 
     /*
@@ -1763,6 +1926,11 @@ static bool vmsvga_screen_update_from_legacy_gfb(
         return false;
     }
 
+    if (s->screen_direct_active &&
+        !vmsvga_screen_direct_detach(s, "legacy-update")) {
+        return false;
+    }
+
     if (!vmsvga_screen_base_layer_storage(s, &screen_base, &screen_size,
                                           &screen_stride) ||
         screen_stride != (uint64_t)s->screen_width * 4) {
@@ -1826,6 +1994,12 @@ static bool vmsvga_screen_destroy(struct vmsvga_state_s *s,
 
     if (screen_id != VMSVGA_SCREEN_V1_ID) {
         VMSVGA_SCREEN_REJECT("destroy reason=screen-id id=%u", screen_id);
+        return false;
+    }
+
+    if (s->screen_direct_active &&
+        !vmsvga_screen_direct_detach(s, "screen-destroy")) {
+        VMSVGA_SCREEN_REJECT("destroy reason=direct-detach id=%u", screen_id);
         return false;
     }
 
@@ -2508,8 +2682,8 @@ static bool vmsvga_screen_blit_one_from_gmrfb(
         uint32_t scanout_stride = 0;
         bool scanout_bound =
             s->svga_surface_bound && surface != NULL &&
-            vmsvga_screen_storage(s, &scanout_base, &scanout_size,
-                                  &scanout_stride) &&
+            vmsvga_screen_scanout_storage(s, &scanout_base, &scanout_size,
+                                          &scanout_stride) &&
             surface_data(surface) == scanout_base;
 
         (void)scanout_size;
@@ -2561,6 +2735,14 @@ static bool vmsvga_screen_blit_gmrfb_to_screen(
             "blit-gmrfb-to-screen reason=missing-state screen=%d src=%d rect=%d "
             "dest-id=%u",
             s->screen_defined, src_origin != NULL, dest_rect != NULL,
+            dest_screen_id);
+        return false;
+    }
+
+    if (s->screen_direct_active &&
+        !vmsvga_screen_direct_detach(s, "gmrfb-blit")) {
+        VMSVGA_SCREEN_REJECT(
+            "blit-gmrfb-to-screen reason=direct-detach dest-id=%u",
             dest_screen_id);
         return false;
     }
@@ -2677,7 +2859,7 @@ static bool vmsvga_screen_blit_screen_to_gmrfb(
     size_t screen_size;
     uint32_t screen_stride;
 
-    if (!vmsvga_screen_base_layer_storage(
+    if (!vmsvga_screen_scanout_storage(
             s, &screen_base, &screen_size, &screen_stride) ||
         !s->gmrfb_defined || dest_origin == NULL || src_rect == NULL ||
         src_screen_id != VMSVGA_SCREEN_V1_ID ||

@@ -84,6 +84,7 @@ static void vmsvga3d_surface_destroy_view_live(
 typedef struct vmsvga3d_state_value_s {
     uint32_t value;
     bool valid;
+    bool dirty;
 } VMSVGA3DStateValue;
 
 /* Matches the legacy SVGA3D_DEVCAP_MAX_CLIP_PLANES value we advertise. */
@@ -92,6 +93,7 @@ typedef struct vmsvga3d_state_value_s {
 typedef struct vmsvga3d_transform_state_s {
     float matrix[16];
     bool valid;
+    bool dirty;
 } VMSVGA3DTransformState;
 
 typedef struct vmsvga3d_material_state_s {
@@ -104,11 +106,14 @@ typedef struct vmsvga3d_light_state_s {
     uint32_t enabled;
     bool data_valid;
     bool enabled_valid;
+    bool data_dirty;
+    bool enabled_dirty;
 } VMSVGA3DLightState;
 
 typedef struct vmsvga3d_clip_plane_state_s {
     float plane[4];
     bool valid;
+    bool dirty;
 } VMSVGA3DClipPlaneState;
 
 typedef struct vmsvga3d_shader_s {
@@ -121,6 +126,7 @@ typedef struct vmsvga3d_shader_s {
 typedef struct vmsvga3d_shader_constant_s {
     uint32_t values[4];
     bool valid;
+    bool dirty;
 } VMSVGA3DShaderConstant;
 
 typedef enum vmsvga3d_query_state_e {
@@ -160,9 +166,20 @@ typedef struct vmsvga3d_context_s {
     VMSVGA3DShaderConstant shader_int[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTINTREG_MAX];
     VMSVGA3DShaderConstant shader_bool[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTBOOLREG_MAX];
     VMSVGA3DQuery occlusion;
+    bool render_target_dirty[SVGA3D_RT_MAX];
+    bool shader_binding_dirty[SVGA3D_NUM_SHADERTYPE_PREDX];
+    void *renderer_shader[SVGA3D_NUM_SHADERTYPE_PREDX];
+    uint32_t renderer_shader_id[SVGA3D_NUM_SHADERTYPE_PREDX];
+    void *renderer_vertex_declaration;
+    VMSVGA3DD3D9VertexElement
+        renderer_vertex_elements[SVGA3D_MAX_VERTEX_ARRAYS + 1];
+    uint32_t renderer_vertex_element_count;
     bool viewport_valid;
+    bool viewport_dirty;
     bool scissor_valid;
+    bool scissor_dirty;
     bool z_range_valid;
+    bool material_dirty;
 } VMSVGA3DContext;
 
 #define VMSVGA3D_GBO_PAGE_SHIFT 12u
@@ -390,6 +407,7 @@ struct vmsvga3d_state_s {
     SVGAMobId gart_mobid;
     uint32_t gart_page_count;
     bool gart_enabled;
+    uint32_t active_legacy_context_id;
     uint32_t active_dx_context_id;
     uint32_t active_screen_target_sid;
     uint32_t screen_target_dirty_sid;
@@ -445,6 +463,46 @@ static void vmsvga3d_shader_free(VMSVGA3DShader *shader)
     g_free(shader);
 }
 
+static void vmsvga3d_context_renderer_objects_release(
+    VMSVGA3DContext *context)
+{
+    uint32_t type;
+
+    if (context == NULL) {
+        return;
+    }
+
+    if (context->renderer_vertex_declaration != NULL) {
+        vmsvga3d_dxvk_vertex_declaration_destroy(
+            context->renderer_vertex_declaration);
+        context->renderer_vertex_declaration = NULL;
+    }
+    context->renderer_vertex_element_count = 0;
+
+    for (type = 0; type < SVGA3D_NUM_SHADERTYPE_PREDX; type++) {
+        if (context->renderer_shader[type] != NULL) {
+            vmsvga3d_dxvk_shader_destroy(context->renderer_shader[type]);
+            context->renderer_shader[type] = NULL;
+        }
+        context->renderer_shader_id[type] = SVGA3D_INVALID_ID;
+    }
+}
+
+static void vmsvga3d_context_renderer_objects_release_all(
+    struct vmsvga3d_state_s *state)
+{
+    uint32_t cid;
+
+    if (state == NULL) {
+        return;
+    }
+
+    for (cid = 0; cid < SVGA3D_MAX_CONTEXT_IDS; cid++) {
+        vmsvga3d_context_renderer_objects_release(state->contexts[cid]);
+    }
+    state->active_legacy_context_id = SVGA3D_INVALID_ID;
+}
+
 static void vmsvga3d_context_free(struct vmsvga3d_state_s *state,
                                   VMSVGA3DContext *context)
 {
@@ -454,6 +512,8 @@ static void vmsvga3d_context_free(struct vmsvga3d_state_s *state,
     if (context == NULL) {
         return;
     }
+
+    vmsvga3d_context_renderer_objects_release(context);
 
     for (type = 0; type < SVGA3D_NUM_SHADERTYPE_PREDX; type++) {
         for (shid = 0; shid < SVGA3D_MAX_SHADERIDS; shid++) {
@@ -531,12 +591,19 @@ static void vmsvga3d_surface_clear_legacy_bindings(
 
             if (binding->valid && binding->value == sid) {
                 binding->value = SVGA3D_INVALID_ID;
+                binding->dirty = true;
+                state->active_legacy_context_id = SVGA3D_INVALID_ID;
             }
         }
 
         for (i = 0; i < SVGA3D_RT_MAX; i++) {
             if (context->render_targets[i].sid == sid) {
                 context->render_targets[i].sid = SVGA3D_INVALID_ID;
+                context->render_target_dirty[i] = true;
+                if (i == SVGA3D_RT_COLOR0) {
+                    context->viewport_dirty = true;
+                }
+                state->active_legacy_context_id = SVGA3D_INVALID_ID;
             }
         }
     }
@@ -1904,6 +1971,7 @@ vmsvga3d_state_ensure(struct vmsvga_state_s *s)
         s->svga3d = g_try_new0(struct vmsvga3d_state_s, 1);
         if (s->svga3d != NULL) {
             s->svga3d->gart_mobid = SVGA3D_INVALID_ID;
+            s->svga3d->active_legacy_context_id = SVGA3D_INVALID_ID;
             s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
@@ -1950,6 +2018,7 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s)
     vmsvga3d_gb_query_cancel_all(s, "renderer-realize");
 
     if (s->svga3d != NULL) {
+        vmsvga3d_context_renderer_objects_release_all(s->svga3d);
         s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
         s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
         s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
@@ -2012,6 +2081,7 @@ static void vmsvga3d_renderer_unrealize(struct vmsvga_state_s *s)
     vmsvga3d_gb_query_cancel_all(s, "renderer-unrealize");
 
     if (s->svga3d != NULL) {
+        vmsvga3d_context_renderer_objects_release_all(s->svga3d);
         s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
         s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
         s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
@@ -2040,6 +2110,7 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s)
     }
 
     vmsvga3d_gb_query_cancel_all(s, "reset");
+    state->active_legacy_context_id = SVGA3D_INVALID_ID;
 
     /* VirtualBox destroys each legacy context's D3D9 device during reset,
      * which drops all native state references before guest resources are freed.

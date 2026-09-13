@@ -331,6 +331,10 @@ typedef struct vmsvga3d_surface_s {
     size_t storage_bytes;
     VMSVGA3DSurfaceImage *mips;
     VMSVGA3DDxvkSurface *dxvk_surface;
+    /* D3D9 and D3D11 use separate DXVK devices.  Keep the CPU-uploaded
+     * D3D11 presentation mirror with the guest surface so repeated legacy
+     * PRESENTBLT operations can refresh it instead of recreating it. */
+    VMSVGA3DDxvkSurface *present_d3d9_bridge;
     bool screen_target_content_valid;
     bool legacy_active;
     /* Diagnostic-only legacy presentation bookkeeping.  These fields are
@@ -497,6 +501,8 @@ static void vmsvga3d_surface_free(VMSVGA3DSurface *surface)
         return;
     }
 
+    vmsvga3d_dxvk_surface_destroy(surface->present_d3d9_bridge);
+    surface->present_d3d9_bridge = NULL;
     vmsvga3d_dxvk_surface_destroy(surface->dxvk_surface);
     surface->dxvk_surface = NULL;
 
@@ -1938,8 +1944,10 @@ static void vmsvga3d_renderer_surface_renderer_set(
         }
         if (evict) {
             vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+            vmsvga3d_dxvk_surface_evict(surface->present_d3d9_bridge);
         }
         vmsvga3d_dxvk_surface_set_renderer(surface->dxvk_surface, dxvk);
+        vmsvga3d_dxvk_surface_set_renderer(surface->present_d3d9_bridge, dxvk);
     }
 }
 

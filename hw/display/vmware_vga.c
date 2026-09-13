@@ -34,10 +34,8 @@
 #include "qemu/main-loop.h"
 #include "exec/target_page.h"
 #include "trace.h"
-#ifdef CONFIG_I386
 #include "hw/i386/vmport.h"
 #include "target/i386/cpu.h"
-#endif
 #include "include/vmware_vga_compat.h"
 #include "include/vmware_vga_gmr.h"
 #include "include/includeCheck.h"
@@ -7950,7 +7948,6 @@ static uint32_t vmsvga_get_capabilities(struct vmsvga_state_s *s)
     return caps;
 }
 
-#if defined(TARGET_I386) || defined(TARGET_X86_64)
 /* VMware backdoor command 75 mirrors SVGA capabilities before the guest has
  * initialized the SVGA device. Keep it sourced from the same live state as
  * the ordinary SVGA registers and FIFO capability publication. */
@@ -7984,7 +7981,6 @@ static uint32_t vmsvga_vmport_get_capabilities(void *opaque, uint32_t address)
                       "VMPORT-CAPS type=%u value=0x%08x", type, ret);
     return ret;
 }
-#endif
 
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
                                        uint32_t reg)
@@ -10653,14 +10649,12 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
                 pci_address_space_io(dev));
     vmsvga3d_renderer_realize(&s->chip);
     vmsvga_vgpu_apply(&s->chip);
-#if defined(TARGET_I386) || defined(TARGET_X86_64)
     if (!vmport_register_if_available(VMPORT_CMD_GET_SVGA_CAPABILITIES,
                                       vmsvga_vmport_get_capabilities,
                                       &s->chip)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
                           "VMPORT-CAPS registration unavailable");
     }
-#endif
 
     /*
      * BAR1 is the SVGA framebuffer/GART aperture.  Keep the ordinary VRAM

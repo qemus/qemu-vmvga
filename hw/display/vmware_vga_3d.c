@@ -13460,7 +13460,7 @@ static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
     value = vmsvga3d_devcap[index];
 
     if (index == SVGA3D_DEVCAP_SM5) {
-        return s != NULL && s->vgpu_generation == VMSVGA_VGPU_11 ? 1 : 0;
+        return 0;
     }
 
     if (index == SVGA3D_DEVCAP_MULTISAMPLE_2X ||

@@ -460,7 +460,8 @@ void vmsvga3d_dxvk_surface_set_renderer(VMSVGA3DDxvkSurface *surface,
                                         VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_surface_upload_level(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
-    const void *data, uint32_t row_bytes, uint32_t rows);
+    const void *data, uint32_t row_bytes, uint32_t rows,
+    uint32_t depth, uint32_t slice_bytes);
 bool vmsvga3d_dxvk_surface_readback_level(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
     void *data, uint32_t row_bytes, uint32_t rows);

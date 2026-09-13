@@ -725,14 +725,6 @@ static void vmsvga3d_d3d9_texture_plan(
         plan->primary.depth = 1;
         plan->primary.shared_handle = true;
         plan->stencil_as_texture = true;
-        if (plan->actual_format == D3D9_FMT_D24S8 ||
-            plan->actual_format == D3D9_FMT_D24X8) {
-            plan->bounce = plan->primary;
-            plan->bounce.usage = D3D9_USAGE_DYNAMIC;
-            plan->bounce.pool = D3D9_POOL_SYSTEMMEM;
-            plan->bounce.shared_handle = false;
-            plan->has_bounce = true;
-        }
     } else if ((plan->normalized_surface_flags & SVGA3D_SURFACE_VOLUME) != 0 ||
                surface->size.depth > 1) {
         vmsvga3d_d3d9_create_desc(&plan->primary, D3D9_RTYPE_VOLUME_TEXTURE,
@@ -2748,7 +2740,7 @@ static bool vmsvga3d_dxvk_materialize_surface(
         if (plan.primary.resource_type == D3D9_RTYPE_TEXTURE) {
             compatible =
                 (before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
-                 before.format == plan.primary.format && before.has_bounce &&
+                 before.format == plan.primary.format &&
                  (before.usage & D3D9_USAGE_DEPTHSTENCIL) != 0) ||
                 (plan.has_surface_fallback && plan.surface_fallback.valid &&
                  before.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&

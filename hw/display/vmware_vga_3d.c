@@ -1939,6 +1939,53 @@ static bool vmsvga3d_fifo_read_header(struct vmsvga_state_s *s,
     return true;
 }
 
+static void *vmsvga3d_fifo_acquire_payload(struct vmsvga_state_s *s,
+                                           uint32_t size)
+{
+    uint8_t *data;
+
+    /*
+     * Most SVGA3D packets are tiny and command buffers can carry thousands of
+     * them per second.  Keep one parser buffer around instead of allocating
+     * and freeing storage for every packet.  If parsing is ever re-entered,
+     * retain the old ownership rules by falling back to a temporary buffer.
+     */
+    if (!s->d3d_payload_scratch_in_use) {
+        if (s->d3d_payload_scratch_capacity < size) {
+            uint32_t new_capacity = QEMU_ALIGN_UP(size, 64u * 1024u);
+            uint8_t *new_scratch =
+                g_try_realloc(s->d3d_payload_scratch, new_capacity);
+
+            if (new_scratch == NULL) {
+                return NULL;
+            }
+            s->d3d_payload_scratch = new_scratch;
+            s->d3d_payload_scratch_capacity = new_capacity;
+        }
+        s->d3d_payload_scratch_in_use = true;
+        return s->d3d_payload_scratch;
+    }
+
+    data = g_try_malloc(size);
+    return data;
+}
+
+static void vmsvga3d_fifo_release_payload(struct vmsvga_state_s *s,
+                                           void *payload)
+{
+    if (payload == NULL) {
+        return;
+    }
+
+    if (payload == s->d3d_payload_scratch) {
+        assert(s->d3d_payload_scratch_in_use);
+        s->d3d_payload_scratch_in_use = false;
+        return;
+    }
+
+    g_free(payload);
+}
+
 static bool vmsvga3d_fifo_read_payload(struct vmsvga_state_s *s,
                                        int32_t *len, uint32_t fifo_start,
                                        void **payload, uint32_t *size)
@@ -1957,7 +2004,7 @@ static bool vmsvga3d_fifo_read_payload(struct vmsvga_state_s *s,
     }
 
     if (payload_size != 0) {
-        data = g_try_malloc(payload_size);
+        data = vmsvga3d_fifo_acquire_payload(s, payload_size);
         if (data == NULL) {
             vmsvga3d_fifo_rewind(s, len, fifo_start);
             return false;
@@ -2615,7 +2662,7 @@ static bool vmsvga3d_handle_surface_define(struct vmsvga_state_s *s,
                           "SURFACE result=REJECT reason=PACKET_SHORT "
                           "fifo=0x%08x bytes=%u expected=%zu",
                           fifo_start, size, sizeof(*body));
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -2625,7 +2672,7 @@ static bool vmsvga3d_handle_surface_define(struct vmsvga_state_s *s,
                           "SURFACE result=REJECT reason=MIP_PAYLOAD "
                           "fifo=0x%08x bytes=%u mip_bytes=%u",
                           fifo_start, size, mip_bytes);
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -2639,7 +2686,7 @@ static bool vmsvga3d_handle_surface_define(struct vmsvga_state_s *s,
                                  : 1u,
                              mip_sizes, mip_count);
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -2668,7 +2715,7 @@ static bool vmsvga3d_handle_surface_define_v2(struct vmsvga_state_s *s,
                           "SURFACE result=REJECT reason=PACKET_SHORT_V2 "
                           "fifo=0x%08x bytes=%u expected=%zu",
                           fifo_start, size, sizeof(*body));
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -2678,7 +2725,7 @@ static bool vmsvga3d_handle_surface_define_v2(struct vmsvga_state_s *s,
                           "SURFACE result=REJECT reason=MIP_PAYLOAD_V2 "
                           "fifo=0x%08x bytes=%u mip_bytes=%u",
                           fifo_start, size, mip_bytes);
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -2697,7 +2744,7 @@ static bool vmsvga3d_handle_surface_define_v2(struct vmsvga_state_s *s,
                                  : 1u,
                              mip_sizes, mip_count);
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -2719,7 +2766,7 @@ static bool vmsvga3d_handle_surface_destroy(struct vmsvga_state_s *s,
         vmsvga3d_surface_destroy_live(s, body->sid);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -2744,7 +2791,7 @@ static bool vmsvga3d_handle_context_define(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -2769,7 +2816,7 @@ static bool vmsvga3d_handle_context_destroy(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3107,7 +3154,7 @@ static bool vmsvga3d_handle_set_vertex_decls(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3145,7 +3192,7 @@ static bool vmsvga3d_handle_set_vertex_streams(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3181,7 +3228,7 @@ static bool vmsvga3d_handle_set_vertex_divisors(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3201,7 +3248,7 @@ static bool vmsvga3d_handle_set_transform(struct vmsvga_state_s *s,
         body = payload;
         (void)vmsvga3d_state_set_transform(s, body->cid, body->type, body->matrix);
     }
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3223,7 +3270,7 @@ static bool vmsvga3d_handle_set_z_range(struct vmsvga_state_s *s,
         (void)vmsvga3d_state_set_z_range(s, body->cid, &body->zRange);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3245,7 +3292,7 @@ static bool vmsvga3d_handle_set_material(struct vmsvga_state_s *s,
         (void)vmsvga3d_state_set_material(s, body->cid, body->face, &body->material);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3267,7 +3314,7 @@ static bool vmsvga3d_handle_set_light_data(struct vmsvga_state_s *s,
         (void)vmsvga3d_state_set_light_data(s, body->cid, body->index, &body->data);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3290,7 +3337,7 @@ static bool vmsvga3d_handle_set_light_enabled(struct vmsvga_state_s *s,
                                               body->enabled);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3314,7 +3361,7 @@ static bool vmsvga3d_handle_set_clip_plane(struct vmsvga_state_s *s,
         (void)vmsvga3d_state_set_clip_plane(s, body->cid, body->index, body->plane);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3335,7 +3382,7 @@ static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
 
     if (size < sizeof(*body) ||
         (size - sizeof(*body)) % sizeof(*states) != 0) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -3357,7 +3404,7 @@ static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
         }
     }
     (void)vmsvga3d_state_set_render_state(s, body->cid, count, states);
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
 
     return true;
 }
@@ -3379,7 +3426,7 @@ static bool vmsvga3d_handle_set_texture_state(struct vmsvga_state_s *s,
 
     if (size < sizeof(*body) ||
         (size - sizeof(*body)) % sizeof(*states) != 0) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -3389,7 +3436,7 @@ static bool vmsvga3d_handle_set_texture_state(struct vmsvga_state_s *s,
 
     (void)vmsvga3d_state_set_texture_state(s, body->cid, count, states);
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3412,7 +3459,7 @@ static bool vmsvga3d_handle_set_render_target(struct vmsvga_state_s *s,
                                              &body->target);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3434,7 +3481,7 @@ static bool vmsvga3d_handle_set_viewport(struct vmsvga_state_s *s,
         (void)vmsvga3d_state_set_viewport(s, body->cid, &body->rect);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3456,7 +3503,7 @@ static bool vmsvga3d_handle_set_scissor(struct vmsvga_state_s *s,
         (void)vmsvga3d_state_set_scissor(s, body->cid, &body->rect);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3485,7 +3532,7 @@ static bool vmsvga3d_handle_generate_mipmaps(struct vmsvga_state_s *s,
          * nothing.  Do not mutate our CPU/D3D9 shadow once D3D11 owns it. */
         if (surface != NULL &&
             vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
-            g_free(payload);
+            vmsvga3d_fifo_release_payload(s, payload);
             return true;
         }
 
@@ -3496,7 +3543,7 @@ static bool vmsvga3d_handle_generate_mipmaps(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3556,7 +3603,7 @@ static bool vmsvga3d_handle_begin_query(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3599,7 +3646,7 @@ static bool vmsvga3d_handle_end_query(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3659,7 +3706,7 @@ static bool vmsvga3d_handle_wait_for_query(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3960,7 +4007,7 @@ static bool vmsvga3d_handle_gb_query(struct vmsvga_state_s *s,
             pending ? 1u : 0u);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -3979,7 +4026,7 @@ static bool vmsvga3d_handle_shader_define(struct vmsvga_state_s *s,
     }
 
     if (size <= sizeof(*body)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -3989,7 +4036,7 @@ static bool vmsvga3d_handle_shader_define(struct vmsvga_state_s *s,
         s, body->cid, body->shid, body->type, bytecode_size,
         (const uint32_t *)(body + 1));
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -4011,7 +4058,7 @@ static bool vmsvga3d_handle_shader_destroy(struct vmsvga_state_s *s,
         (void)vmsvga3d_state_shader_destroy(s, body->cid, body->shid, body->type);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -4037,7 +4084,7 @@ static bool vmsvga3d_handle_set_shader(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -4087,13 +4134,13 @@ static bool vmsvga3d_handle_set_shader_const(struct vmsvga_state_s *s,
     }
 
     if (size < sizeof(*body)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
     trailing = size - sizeof(*body);
     if (trailing % sizeof(body->values) != 0) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -4104,7 +4151,7 @@ static bool vmsvga3d_handle_set_shader_const(struct vmsvga_state_s *s,
         s, body->cid, body->reg, body->type, body->ctype, count,
         (const uint32_t (*)[4])body->values);
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -4126,7 +4173,7 @@ static bool vmsvga3d_handle_set_gb_shader_consts_inline(
     }
 
     if (size < sizeof(*body)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -4174,7 +4221,7 @@ static bool vmsvga3d_handle_set_gb_shader_consts_inline(
         body->cid, body->regStart, body->shaderType, body->constType, count,
         applied ? "OK" : "IGNORED");
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -4338,7 +4385,7 @@ static bool vmsvga3d_handle_draw(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -4392,7 +4439,7 @@ static bool vmsvga3d_handle_draw_indexed(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -4416,14 +4463,14 @@ static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
     }
 
     if (size < sizeof(*body)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
     body = payload;
     if (body->numVertexDecls > SVGA3D_MAX_VERTEX_ARRAYS ||
         body->numRanges > SVGA3D_MAX_DRAW_PRIMITIVE_RANGES) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -4437,7 +4484,7 @@ static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
         (size != (uint32_t)base_size &&
          (base_size + divisor_size > UINT32_MAX ||
           size != (uint32_t)(base_size + divisor_size)))) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -4463,7 +4510,7 @@ static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -4847,13 +4894,13 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     }
 
     if (size < sizeof(*body)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
     rect_bytes = size - sizeof(*body);
     if (rect_bytes % sizeof(SVGA3dRect) != 0) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -4885,7 +4932,7 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
      * CPU fallback would create a shadow/native split that VBox never creates. */
     if (vmsvga3d_clear_hits_d3d11_resident_target(
             s, body->cid, body->clearFlag)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -4917,7 +4964,7 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
         trace_3d,
         "D3D9-CLEAR result cid=%u accel=%u wrote=%u",
         body->cid, (uint32_t)accel, wrote ? 1u : 0u);
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -5494,7 +5541,7 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
 
     if (size < sizeof(*body) ||
         (size - sizeof(*body)) % sizeof(SVGA3dCopyBox) != 0) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -5692,7 +5739,7 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
     }
 
     g_free(scratch);
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
 
     return true;
 }
@@ -5933,7 +5980,7 @@ static bool vmsvga3d_handle_surface_stretchblt(struct vmsvga_state_s *s,
     }
 
     if (size != sizeof(*body)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -6042,7 +6089,7 @@ static bool vmsvga3d_handle_surface_stretchblt(struct vmsvga_state_s *s,
     }
 
     g_free(scratch);
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
 
     return true;
 }
@@ -6821,7 +6868,7 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
 
     if (size < sizeof(*body) ||
         (size - sizeof(*body)) % sizeof(SVGASignedRect) != 0) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -6984,7 +7031,7 @@ static bool vmsvga3d_handle_blit_surface_to_screen(
     }
 
     g_free(copies);
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
 
     return true;
 }
@@ -7014,7 +7061,7 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
 
     if (size < sizeof(*body) ||
         (size - sizeof(*body)) % sizeof(SVGA3dCopyRect) != 0) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -7092,7 +7139,7 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -7361,7 +7408,7 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
     }
 
     if (size < sizeof(*body)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -7461,7 +7508,7 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -8988,7 +9035,7 @@ static bool vmsvga3d_handle_set_otable_base(struct vmsvga_state_s *s,
             result ? "OK" : "REJECT");
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -9013,7 +9060,7 @@ static bool vmsvga3d_handle_grow_otable(struct vmsvga_state_s *s,
             (SVGAMobFormat)ldl_le_p(body + 20), true);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -9335,7 +9382,7 @@ static bool vmsvga3d_handle_zero_surface(struct vmsvga_state_s *s,
             sid, success ? "OK" : "PARTIAL");
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -9409,7 +9456,7 @@ static bool vmsvga3d_handle_gb_surface_sync(struct vmsvga_state_s *s,
         break;
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10246,7 +10293,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
         break;
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10375,7 +10422,7 @@ static bool vmsvga3d_handle_gb_context(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10440,7 +10487,7 @@ static bool vmsvga3d_handle_gb_shader(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10496,7 +10543,7 @@ static bool vmsvga3d_handle_define_gb_surface(struct vmsvga_state_s *s,
             body->arraySize, body->bufferByteStride);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10519,7 +10566,7 @@ static bool vmsvga3d_handle_destroy_gb_surface(struct vmsvga_state_s *s,
         if (s != NULL && s->svga3d != NULL &&
             body->sid == s->svga3d->active_screen_target_sid &&
             !vmsvga3d_screen_target_quiesce_live(s)) {
-            g_free(payload);
+            vmsvga3d_fifo_release_payload(s, payload);
             return true;
         }
         memset(&entry, 0, sizeof(entry));
@@ -10529,7 +10576,7 @@ static bool vmsvga3d_handle_destroy_gb_surface(struct vmsvga_state_s *s,
         vmsvga3d_surface_destroy_live(s, body->sid);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10566,7 +10613,7 @@ static bool vmsvga3d_handle_define_gb_mob(struct vmsvga_state_s *s,
             ldq_le_p(body + 8), ldl_le_p(body + 16));
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10588,7 +10635,7 @@ static bool vmsvga3d_handle_destroy_gb_mob(struct vmsvga_state_s *s,
         (void)vmsvga3d_mob_destroy(s, body->mobid);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10640,7 +10687,7 @@ static bool vmsvga3d_handle_gb_mob_fence(struct vmsvga_state_s *s,
                           fifo_start, size, sizeof(*body));
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10731,7 +10778,7 @@ static bool vmsvga3d_handle_gart(struct vmsvga_state_s *s, uint32_t cmd,
                           cmd, size);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10758,7 +10805,7 @@ static bool vmsvga3d_handle_bind_gb_surface(struct vmsvga_state_s *s,
     pitched = cmd == SVGA_3D_CMD_BIND_GB_SURFACE_WITH_PITCH;
     if (pitched) {
         if (size < sizeof(*pitched_body)) {
-            g_free(payload);
+            vmsvga3d_fifo_release_payload(s, payload);
             return true;
         }
         pitched_body = payload;
@@ -10767,7 +10814,7 @@ static bool vmsvga3d_handle_bind_gb_surface(struct vmsvga_state_s *s,
         mob_pitch = pitched_body->baseLevelPitch;
     } else {
         if (size < sizeof(*body)) {
-            g_free(payload);
+            vmsvga3d_fifo_release_payload(s, payload);
             return true;
         }
         body = payload;
@@ -10803,7 +10850,7 @@ static bool vmsvga3d_handle_bind_gb_surface(struct vmsvga_state_s *s,
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10825,7 +10872,7 @@ static bool vmsvga3d_handle_cond_bind_gb_surface(
     }
 
     if (size < sizeof(*body)) {
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -10860,7 +10907,7 @@ static bool vmsvga3d_handle_cond_bind_gb_surface(
         }
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10903,7 +10950,7 @@ static bool vmsvga3d_handle_dx_context_lifecycle(
         break;
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10945,7 +10992,7 @@ static bool vmsvga3d_handle_dx_cotable(struct vmsvga_state_s *s,
         break;
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -10972,7 +11019,7 @@ static bool vmsvga3d_handle_surface_activation(
                     cmd == SVGA_3D_CMD_ACTIVATE_SURFACE ? "activate" : "deactivate",
                     size, sizeof(SVGA3dCmdActivateSurface));
         }
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
 
@@ -11007,7 +11054,7 @@ static bool vmsvga3d_handle_surface_activation(
                 activate ? "activate" : "deactivate", sid, activate);
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 
@@ -11406,12 +11453,12 @@ static bool vmsvga3d_fifo_dx_command(struct vmsvga_state_s *s,
                 ? vmsvga3d_command_info(cmd)->name
                 : "UNKNOWN",
             cmd, dx_context, fifo_start);
-        g_free(payload);
+        vmsvga3d_fifo_release_payload(s, payload);
         vmsvga3d_fifo_rewind(s, len, fifo_start);
         return true;
     }
 
-    g_free(payload);
+    vmsvga3d_fifo_release_payload(s, payload);
     return true;
 }
 

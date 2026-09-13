@@ -10693,6 +10693,198 @@ out:
 #endif
 }
 
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+#define VMSVGA3D_TRACE_PRESENT_BAND_ROWS 80u
+
+typedef struct VMSVGA3DDxvkTraceBandHash {
+    uint32_t hash;
+    uint32_t nonzero_rows;
+    uint32_t first_row;
+    uint32_t rows;
+    bool valid;
+} VMSVGA3DDxvkTraceBandHash;
+
+static bool vmsvga3d_dxvk_trace_hash_bottom_rows(
+    const void *data, uint32_t row_bytes, uint32_t row_pitch,
+    uint32_t total_rows, VMSVGA3DDxvkTraceBandHash *result)
+{
+    const uint8_t *bytes = data;
+    uint32_t first_row;
+    uint32_t row_count;
+    uint32_t hash = 2166136261u;
+    uint32_t nonzero_rows = 0;
+    uint32_t row;
+
+    if (data == NULL || result == NULL || row_bytes == 0 || row_pitch == 0 ||
+        row_bytes > row_pitch || total_rows == 0 ||
+        (uint64_t)(total_rows - 1) * row_pitch + row_bytes > SIZE_MAX) {
+        return false;
+    }
+
+    row_count = MIN(total_rows, VMSVGA3D_TRACE_PRESENT_BAND_ROWS);
+    first_row = total_rows - row_count;
+
+    for (row = 0; row < row_count; row++) {
+        const uint8_t *source =
+            bytes + (size_t)(first_row + row) * row_pitch;
+        size_t i;
+        bool row_nonzero = false;
+
+        for (i = 0; i < row_bytes; i++) {
+            uint8_t value = source[i];
+
+            hash ^= value;
+            hash *= 16777619u;
+            row_nonzero |= value != 0;
+        }
+        if (row_nonzero) {
+            nonzero_rows++;
+        }
+    }
+
+    result->hash = hash;
+    result->nonzero_rows = nonzero_rows;
+    result->first_row = first_row;
+    result->rows = row_count;
+    result->valid = true;
+    return true;
+}
+
+static bool vmsvga3d_dxvk_trace_d3d9_renderer_bottom_rows(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    void *source_surface, uint32_t source_width, uint32_t source_height,
+    uint32_t bytes_per_pixel, VMSVGA3DDxvkTraceBandHash *hash)
+{
+    VMSVGA3DDxvkCreateRenderTarget create_render_target = NULL;
+    VMSVGA3DDxvkCreateOffscreenPlainSurface create_offscreen = NULL;
+    VMSVGA3DDxvkGetRenderTargetData get_render_target_data = NULL;
+    VMSVGA3DDxvkStretchRect stretch_rect = NULL;
+    VMSVGA3DDxvkSurfaceLockRect lock_rect = NULL;
+    VMSVGA3DDxvkSurfaceUnlockRect unlock_rect = NULL;
+    VMSVGA3DDxvkLockedRect locked = { 0 };
+    VMSVGA3DD3D9Rect source_rect;
+    VMSVGA3DD3D9Rect destination_rect;
+    void *render_target = NULL;
+    void *staging = NULL;
+    uint32_t row_count;
+    uint64_t row_bytes64;
+    uint32_t row_bytes;
+    int32_t call_result;
+    bool locked_staging = false;
+    bool success = false;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
+        source_surface == NULL || source_width == 0 || source_height == 0 ||
+        source_width > INT32_MAX || source_height > INT32_MAX ||
+        bytes_per_pixel == 0 || hash == NULL) {
+        goto out;
+    }
+
+    row_bytes64 = (uint64_t)source_width * bytes_per_pixel;
+    if (row_bytes64 == 0 || row_bytes64 > UINT32_MAX) {
+        goto out;
+    }
+    row_bytes = (uint32_t)row_bytes64;
+    row_count = MIN(source_height, VMSVGA3D_TRACE_PRESENT_BAND_ROWS);
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device,
+            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_RENDER_TARGET,
+            &create_render_target, sizeof(create_render_target)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device,
+            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_OFFSCREEN_PLAIN_SURFACE,
+            &create_offscreen, sizeof(create_offscreen)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device,
+            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_RENDER_TARGET_DATA,
+            &get_render_target_data, sizeof(get_render_target_data)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device,
+            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_STRETCH_RECT,
+            &stretch_rect, sizeof(stretch_rect))) {
+        goto out;
+    }
+
+    call_result = create_render_target(
+        dxvk->d3d9_device, source_width, row_count, surface->d3d9_format,
+        0, 0, 0, &render_target, NULL);
+    if (!vmsvga3d_dxvk_succeeded(call_result) || render_target == NULL) {
+        goto out;
+    }
+
+    call_result = create_offscreen(
+        dxvk->d3d9_device, source_width, row_count, surface->d3d9_format,
+        VMSVGA3D_DXVK_D3DPOOL_SYSTEMMEM, &staging, NULL);
+    if (!vmsvga3d_dxvk_succeeded(call_result) || staging == NULL) {
+        goto out;
+    }
+
+    source_rect.left = 0;
+    source_rect.top = (int32_t)(source_height - row_count);
+    source_rect.right = (int32_t)source_width;
+    source_rect.bottom = (int32_t)source_height;
+    destination_rect.left = 0;
+    destination_rect.top = 0;
+    destination_rect.right = (int32_t)source_width;
+    destination_rect.bottom = (int32_t)row_count;
+
+    call_result = stretch_rect(
+        dxvk->d3d9_device, source_surface, &source_rect, render_target,
+        &destination_rect, VMSVGA3D_DXVK_D3DTEXF_NONE);
+    if (!vmsvga3d_dxvk_succeeded(call_result)) {
+        goto out;
+    }
+
+    call_result = get_render_target_data(dxvk->d3d9_device, render_target,
+                                         staging);
+    if (!vmsvga3d_dxvk_succeeded(call_result) ||
+        !vmsvga3d_dxvk_get_method(
+            staging, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_LOCK_RECT,
+            &lock_rect, sizeof(lock_rect)) ||
+        !vmsvga3d_dxvk_get_method(
+            staging, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_UNLOCK_RECT,
+            &unlock_rect, sizeof(unlock_rect))) {
+        goto out;
+    }
+
+    call_result = lock_rect(staging, &locked, NULL,
+                            VMSVGA3D_DXVK_D3DLOCK_READONLY);
+    if (!vmsvga3d_dxvk_succeeded(call_result) || locked.bits == NULL ||
+        locked.pitch < 0 || (uint32_t)locked.pitch < row_bytes) {
+        if (vmsvga3d_dxvk_succeeded(call_result)) {
+            unlock_rect(staging);
+        }
+        goto out;
+    }
+    locked_staging = true;
+
+    success = vmsvga3d_dxvk_trace_hash_bottom_rows(
+        locked.bits, row_bytes, (uint32_t)locked.pitch, row_count, hash);
+    if (success) {
+        hash->first_row = source_height - row_count;
+    }
+
+    call_result = unlock_rect(staging);
+    locked_staging = false;
+    success = success && vmsvga3d_dxvk_succeeded(call_result);
+
+out:
+    if (locked_staging && unlock_rect != NULL) {
+        unlock_rect(staging);
+    }
+    if (staging != NULL) {
+        vmsvga3d_dxvk_release(staging,
+                              VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+    }
+    if (render_target != NULL) {
+        vmsvga3d_dxvk_release(render_target,
+                              VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+    }
+    return success;
+}
+#endif
+
 bool vmsvga3d_dxvk_surface_readback_rects(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
     const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
@@ -10800,41 +10992,158 @@ bool vmsvga3d_dxvk_surface_readback_rects(
     if (batch_left == 0 && batch_top == 0 && batch_width == source_width &&
         batch_height == source_height &&
         (uint64_t)row_pitch * source_height <= data_size) {
-        if (!vmsvga3d_dxvk_surface_readback_level(
-                dxvk, surface, level, data, row_pitch, source_height)) {
-            goto out;
-        }
+        /* This path already has a runtime trace gate for D3D9-READBACK.  Keep
+         * the non-debug path behind exactly that one master check: no trace
+         * allocation, hashing, row scan, or extra GPU transfer is performed
+         * when debug tracing is disabled. */
+        if (!VMVGA_TRACE_LOCAL_MASTER_ENABLED()) {
+            if (!vmsvga3d_dxvk_surface_readback_level(
+                    dxvk, surface, level, data, row_pitch, source_height)) {
+                goto out;
+            }
 
-        if (secondary_data != NULL) {
-            for (i = 0; i < rect_count; i++) {
-                const VMSVGA3DD3D9Rect *rect = &rects[i];
-                uint32_t width = (uint32_t)(rect->right - rect->left);
-                uint32_t height = (uint32_t)(rect->bottom - rect->top);
-                size_t row_bytes = (size_t)width * bytes_per_pixel;
-                uint32_t y;
+            if (secondary_data != NULL) {
+                for (i = 0; i < rect_count; i++) {
+                    const VMSVGA3DD3D9Rect *rect = &rects[i];
+                    uint32_t width = (uint32_t)(rect->right - rect->left);
+                    uint32_t height = (uint32_t)(rect->bottom - rect->top);
+                    size_t row_bytes = (size_t)width * bytes_per_pixel;
+                    uint32_t y;
 
-                for (y = 0; y < height; y++) {
-                    const uint8_t *source =
-                        (const uint8_t *)data +
-                        (size_t)((uint32_t)rect->top + y) * row_pitch +
-                        (size_t)(uint32_t)rect->left * bytes_per_pixel;
-                    uint8_t *destination =
-                        (uint8_t *)secondary_data +
-                        (size_t)((uint32_t)rect->top + y) *
-                            secondary_row_pitch +
-                        (size_t)(uint32_t)rect->left * bytes_per_pixel;
+                    for (y = 0; y < height; y++) {
+                        const uint8_t *source =
+                            (const uint8_t *)data +
+                            (size_t)((uint32_t)rect->top + y) * row_pitch +
+                            (size_t)(uint32_t)rect->left * bytes_per_pixel;
+                        uint8_t *destination =
+                            (uint8_t *)secondary_data +
+                            (size_t)((uint32_t)rect->top + y) *
+                                secondary_row_pitch +
+                            (size_t)(uint32_t)rect->left * bytes_per_pixel;
 
-                    memcpy(destination, source, row_bytes);
+                        memcpy(destination, source, row_bytes);
+                    }
                 }
             }
+            success = true;
+            goto out;
+        } else {
+            VMSVGA3DDxvkTraceBandHash renderer_hash = { 0 };
+            VMSVGA3DDxvkTraceBandHash shadow_hash = { 0 };
+            VMSVGA3DDxvkTraceBandHash mirror_hash = { 0 };
+            uint64_t row_bytes64 =
+                (uint64_t)source_width * bytes_per_pixel;
+            uint32_t trace_row_bytes =
+                row_bytes64 <= UINT32_MAX ? (uint32_t)row_bytes64 : 0;
+
+            if (VMVGA_TRACE_FLIGHT && trace_row_bytes != 0) {
+                renderer_hash.valid =
+                    vmsvga3d_dxvk_trace_d3d9_renderer_bottom_rows(
+                        dxvk, surface, source_surface, source_width,
+                        source_height, bytes_per_pixel, &renderer_hash);
+                if (renderer_hash.valid) {
+                    fprintf(stderr,
+                            "VMVGA-D3D9-BAND phase=renderer-before-readback "
+                            "sid=%u y=%u rows=%u row-bytes=%u hash=0x%08x "
+                            "nonzero-rows=%u result=OK\n",
+                            surface->sid, renderer_hash.first_row,
+                            renderer_hash.rows, trace_row_bytes,
+                            renderer_hash.hash, renderer_hash.nonzero_rows);
+                } else {
+                    fprintf(stderr,
+                            "VMVGA-D3D9-BAND phase=renderer-before-readback "
+                            "sid=%u y=%u rows=%u row-bytes=%u result=FAILED\n",
+                            surface->sid,
+                            source_height > VMSVGA3D_TRACE_PRESENT_BAND_ROWS
+                                ? source_height -
+                                      VMSVGA3D_TRACE_PRESENT_BAND_ROWS
+                                : 0,
+                            MIN(source_height,
+                                VMSVGA3D_TRACE_PRESENT_BAND_ROWS),
+                            trace_row_bytes);
+                }
+            }
+
+            if (!vmsvga3d_dxvk_surface_readback_level(
+                    dxvk, surface, level, data, row_pitch, source_height)) {
+                goto out;
+            }
+
+            if (secondary_data != NULL) {
+                for (i = 0; i < rect_count; i++) {
+                    const VMSVGA3DD3D9Rect *rect = &rects[i];
+                    uint32_t width = (uint32_t)(rect->right - rect->left);
+                    uint32_t height = (uint32_t)(rect->bottom - rect->top);
+                    size_t row_bytes = (size_t)width * bytes_per_pixel;
+                    uint32_t y;
+
+                    for (y = 0; y < height; y++) {
+                        const uint8_t *source =
+                            (const uint8_t *)data +
+                            (size_t)((uint32_t)rect->top + y) * row_pitch +
+                            (size_t)(uint32_t)rect->left * bytes_per_pixel;
+                        uint8_t *destination =
+                            (uint8_t *)secondary_data +
+                            (size_t)((uint32_t)rect->top + y) *
+                                secondary_row_pitch +
+                            (size_t)(uint32_t)rect->left * bytes_per_pixel;
+
+                        memcpy(destination, source, row_bytes);
+                    }
+                }
+            }
+
+            if (VMVGA_TRACE_FLIGHT && trace_row_bytes != 0) {
+                shadow_hash.valid = vmsvga3d_dxvk_trace_hash_bottom_rows(
+                    data, trace_row_bytes, row_pitch, source_height,
+                    &shadow_hash);
+                if (secondary_data != NULL) {
+                    mirror_hash.valid = vmsvga3d_dxvk_trace_hash_bottom_rows(
+                        secondary_data, trace_row_bytes,
+                        secondary_row_pitch, source_height, &mirror_hash);
+                }
+
+                if (shadow_hash.valid) {
+                    fprintf(stderr,
+                            "VMVGA-D3D9-BAND phase=shadow-after-readback "
+                            "sid=%u y=%u rows=%u row-bytes=%u hash=0x%08x "
+                            "nonzero-rows=%u result=OK\n",
+                            surface->sid, shadow_hash.first_row,
+                            shadow_hash.rows, trace_row_bytes,
+                            shadow_hash.hash, shadow_hash.nonzero_rows);
+                }
+                if (secondary_data != NULL && mirror_hash.valid) {
+                    fprintf(stderr,
+                            "VMVGA-D3D9-BAND phase=mirror-after-readback "
+                            "sid=%u y=%u rows=%u row-bytes=%u hash=0x%08x "
+                            "nonzero-rows=%u result=OK\n",
+                            surface->sid, mirror_hash.first_row,
+                            mirror_hash.rows, trace_row_bytes,
+                            mirror_hash.hash, mirror_hash.nonzero_rows);
+                }
+                fprintf(stderr,
+                        "VMVGA-D3D9-BAND-COMPARE sid=%u "
+                        "renderer-shadow=%s shadow-mirror=%s mirror=%s\n",
+                        surface->sid,
+                        renderer_hash.valid && shadow_hash.valid
+                            ? (renderer_hash.hash == shadow_hash.hash ?
+                                   "MATCH" : "DIFF")
+                            : "UNKNOWN",
+                        shadow_hash.valid && mirror_hash.valid
+                            ? (shadow_hash.hash == mirror_hash.hash ?
+                                   "MATCH" : "DIFF")
+                            : "UNKNOWN",
+                        secondary_data != NULL ? "present" : "absent");
+            }
+
+            VMVGA_TRACE_LOCAL_CACHED(
+                VMVGA_TRACE_3D,
+                "D3D9-READBACK sid=%u mode=full rects=%u bbox=%u,%u/%ux%u",
+                surface->sid, rect_count, batch_left, batch_top, batch_width,
+                batch_height);
+            success = true;
+            goto out;
         }
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "D3D9-READBACK sid=%u mode=full rects=%u bbox=%u,%u/%ux%u",
-            surface->sid, rect_count, batch_left, batch_top, batch_width,
-            batch_height);
-        success = true;
-        goto out;
     }
 
     if (!vmsvga3d_dxvk_get_method(

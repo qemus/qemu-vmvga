@@ -41,6 +41,7 @@
 #include "include/vmware_vga_dxvk.h"
 #include "hw/pci/pci_device.h"
 #include "system/address-spaces.h"
+#include "system/memory_cached.h"
 
 _Static_assert(sizeof(SVGA3dCmdDefineGBSurface) == 36,
                "SVGA3dCmdDefineGBSurface wire size");
@@ -175,6 +176,9 @@ typedef struct vmsvga3d_context_s {
 typedef struct vmsvga3d_gbo_run_s {
     uint64_t gpa;
     uint32_t pages;
+    uint32_t logical_offset;
+    MemoryRegionCache cache;
+    bool cache_valid;
 } VMSVGA3DGBORun;
 
 typedef struct vmsvga3d_gbo_s {
@@ -184,6 +188,8 @@ typedef struct vmsvga3d_gbo_s {
     uint32_t page_count;
     VMSVGA3DGBORun *runs;
     uint32_t run_count;
+    uint32_t cached_run_count;
+    uint32_t direct_run_count;
     uint8_t *host;
     bool host_backed;
 } VMSVGA3DGBO;
@@ -650,10 +656,17 @@ static bool vmsvga3d_guest_memory_write(struct vmsvga_state_s *s,
 
 static void vmsvga3d_gbo_destroy(VMSVGA3DGBO *gbo)
 {
+    uint32_t run_index;
+
     if (gbo == NULL) {
         return;
     }
 
+    for (run_index = 0; run_index < gbo->run_count; run_index++) {
+        if (gbo->runs[run_index].cache_valid) {
+            address_space_cache_destroy(&gbo->runs[run_index].cache);
+        }
+    }
     g_free(gbo->host);
     g_free(gbo->runs);
     memset(gbo, 0, sizeof(*gbo));
@@ -681,6 +694,108 @@ static bool vmsvga3d_gbo_add_page(VMSVGA3DGBO *gbo, uint64_t gpa)
     run->pages = 1;
 
     return true;
+}
+
+static void vmsvga3d_gbo_cache_run(VMSVGA3DGBORun *run)
+{
+    uint64_t run_size;
+    int64_t cached_size;
+
+    if (run == NULL || run->pages == 0) {
+        return;
+    }
+
+    run_size = (uint64_t)run->pages * VMSVGA3D_GBO_PAGE_SIZE;
+    address_space_cache_init_empty(&run->cache);
+
+    /*
+     * A write-capable cache is also valid for reads, so one translation can
+     * serve both directions.  Normal guest RAM gets a direct host pointer;
+     * other mappings fall back to the cached MemoryRegion accessors.
+     */
+    cached_size = address_space_cache_init(&run->cache, &address_space_memory,
+                                           run->gpa, run_size, true);
+    if (cached_size < 0) {
+        return;
+    }
+    if ((uint64_t)cached_size != run_size) {
+        address_space_cache_destroy(&run->cache);
+        address_space_cache_init_empty(&run->cache);
+        return;
+    }
+
+    run->cache_valid = true;
+}
+
+static bool vmsvga3d_gbo_finalize(VMSVGA3DGBO *gbo)
+{
+    uint64_t logical = 0;
+    uint32_t run_index;
+
+    if (gbo == NULL) {
+        return false;
+    }
+
+    /* Build the logical run index before taking any persistent cache refs. */
+    for (run_index = 0; run_index < gbo->run_count; run_index++) {
+        VMSVGA3DGBORun *run = &gbo->runs[run_index];
+        uint64_t run_size =
+            (uint64_t)run->pages * VMSVGA3D_GBO_PAGE_SIZE;
+
+        if (logical > UINT32_MAX || run_size > UINT32_MAX - logical) {
+            return false;
+        }
+        run->logical_offset = logical;
+        logical += run_size;
+    }
+    if (logical < gbo->size) {
+        return false;
+    }
+
+    gbo->cached_run_count = 0;
+    gbo->direct_run_count = 0;
+    for (run_index = 0; run_index < gbo->run_count; run_index++) {
+        VMSVGA3DGBORun *run = &gbo->runs[run_index];
+
+        vmsvga3d_gbo_cache_run(run);
+        if (run->cache_valid) {
+            gbo->cached_run_count++;
+            if (run->cache.ptr != NULL) {
+                gbo->direct_run_count++;
+            }
+        }
+    }
+
+    return true;
+}
+
+static uint32_t vmsvga3d_gbo_find_run(const VMSVGA3DGBO *gbo,
+                                      uint32_t offset)
+{
+    uint32_t low = 0;
+    uint32_t high;
+
+    if (gbo == NULL) {
+        return 0;
+    }
+
+    high = gbo->run_count;
+    while (low < high) {
+        uint32_t mid = low + (high - low) / 2;
+        const VMSVGA3DGBORun *run = &gbo->runs[mid];
+        uint64_t end = (uint64_t)run->logical_offset +
+                       (uint64_t)run->pages * VMSVGA3D_GBO_PAGE_SIZE;
+
+        if (offset < run->logical_offset) {
+            high = mid;
+        } else if ((uint64_t)offset >= end) {
+            low = mid + 1;
+        } else {
+            return mid;
+        }
+    }
+
+    return gbo->run_count;
 }
 
 static bool vmsvga3d_gbo_read_ppn_page(struct vmsvga_state_s *s,
@@ -780,7 +895,7 @@ static bool vmsvga3d_gbo_create(struct vmsvga_state_s *s,
                            VMSVGA3D_GBO_GPA_MASK;
         gbo->runs[0].pages = gbo->page_count;
         gbo->run_count = 1;
-        return true;
+        return vmsvga3d_gbo_finalize(gbo);
     }
 
     if (format == SVGA3D_MOBFMT_PT_0 || format == SVGA3D_MOBFMT_PT64_0) {
@@ -794,7 +909,7 @@ static bool vmsvga3d_gbo_create(struct vmsvga_state_s *s,
             vmsvga3d_gbo_destroy(gbo);
             return false;
         }
-        return true;
+        return vmsvga3d_gbo_finalize(gbo);
     }
 
     ppns_per_page = VMSVGA3D_GBO_PAGE_SIZE /
@@ -820,7 +935,7 @@ static bool vmsvga3d_gbo_create(struct vmsvga_state_s *s,
             page_index++;
         }
 
-        return true;
+        return vmsvga3d_gbo_finalize(gbo);
     }
 
     if ((uint64_t)gbo->page_count >
@@ -867,7 +982,10 @@ static bool vmsvga3d_gbo_create(struct vmsvga_state_s *s,
         }
     }
 
-    return page_index == gbo->page_count;
+    if (page_index != gbo->page_count) {
+        return false;
+    }
+    return vmsvga3d_gbo_finalize(gbo);
 }
 
 static bool vmsvga3d_gbo_transfer(struct vmsvga_state_s *s,
@@ -875,7 +993,6 @@ static bool vmsvga3d_gbo_transfer(struct vmsvga_state_s *s,
                                   const void *src, void *dst, size_t size,
                                   bool write_guest)
 {
-    uint64_t logical = 0;
     uint64_t current = offset;
     uint32_t run_index;
 
@@ -885,37 +1002,59 @@ static bool vmsvga3d_gbo_transfer(struct vmsvga_state_s *s,
                        (!write_guest && dst == NULL)))) {
         return false;
     }
+    if (size == 0) {
+        return true;
+    }
 
-    for (run_index = 0; size != 0 && run_index < gbo->run_count; run_index++) {
+    run_index = vmsvga3d_gbo_find_run(gbo, offset);
+    for (; size != 0 && run_index < gbo->run_count; run_index++) {
+        VMSVGA3DGBORun *run = &gbo->runs[run_index];
         uint64_t run_size =
-            (uint64_t)gbo->runs[run_index].pages * VMSVGA3D_GBO_PAGE_SIZE;
+            (uint64_t)run->pages * VMSVGA3D_GBO_PAGE_SIZE;
+        uint64_t within;
+        size_t chunk;
+        bool ok;
 
-        if (current >= logical + run_size) {
-            logical += run_size;
-            continue;
+        if (current < run->logical_offset) {
+            return false;
         }
+        within = current - run->logical_offset;
+        if (within >= run_size) {
+            return false;
+        }
+        chunk = MIN(size, (size_t)(run_size - within));
 
-        while (size != 0 && current < logical + run_size) {
-            uint64_t within = current - logical;
-            size_t chunk = MIN(size, (size_t)(run_size - within));
-            bool ok;
+        if (run->cache_valid) {
+            MemTxResult result;
 
             if (write_guest) {
-                ok = vmsvga3d_guest_memory_write(
-                    s, gbo->runs[run_index].gpa + within, src, chunk);
+                result = address_space_write_cached(&run->cache, within,
+                                                    src, chunk);
+                if (result == MEMTX_OK) {
+                    address_space_cache_invalidate(&run->cache, within,
+                                                   chunk);
+                }
                 src = (const uint8_t *)src + chunk;
             } else {
-                ok = vmsvga3d_guest_memory_read(
-                    s, gbo->runs[run_index].gpa + within, dst, chunk);
+                result = address_space_read_cached(&run->cache, within,
+                                                   dst, chunk);
                 dst = (uint8_t *)dst + chunk;
             }
-            if (!ok) {
-                return false;
-            }
-            current += chunk;
-            size -= chunk;
+            ok = result == MEMTX_OK;
+        } else if (write_guest) {
+            ok = vmsvga3d_guest_memory_write(
+                s, run->gpa + within, src, chunk);
+            src = (const uint8_t *)src + chunk;
+        } else {
+            ok = vmsvga3d_guest_memory_read(
+                s, run->gpa + within, dst, chunk);
+            dst = (uint8_t *)dst + chunk;
         }
-        logical += run_size;
+        if (!ok) {
+            return false;
+        }
+        current += chunk;
+        size -= chunk;
     }
 
     return size == 0;
@@ -1123,9 +1262,10 @@ static bool vmsvga3d_mob_define(struct vmsvga_state_s *s, SVGAMobId mobid,
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "MOB define mobid=%u format=%u base=0x%016" PRIx64
-        " size=%u pages=%u runs=%u result=OK",
+        " size=%u pages=%u runs=%u cached-runs=%u direct-runs=%u result=OK",
         mobid, (unsigned)format, (uint64_t)base, size,
-        mob->gbo.page_count, mob->gbo.run_count);
+        mob->gbo.page_count, mob->gbo.run_count, mob->gbo.cached_run_count,
+        mob->gbo.direct_run_count);
     return true;
 }
 
@@ -1510,26 +1650,23 @@ static bool vmsvga3d_gart_unmap_live(struct vmsvga_state_s *s,
 static bool vmsvga3d_gbo_page_gpa(const VMSVGA3DGBO *gbo,
                                     uint32_t page_index, uint64_t *gpa)
 {
-    uint32_t logical_page = 0;
+    uint32_t logical_offset;
     uint32_t run_index;
+    const VMSVGA3DGBORun *run;
 
     if (gbo == NULL || gpa == NULL || page_index >= gbo->page_count) {
         return false;
     }
 
-    for (run_index = 0; run_index < gbo->run_count; run_index++) {
-        const VMSVGA3DGBORun *run = &gbo->runs[run_index];
-
-        if (page_index < logical_page + run->pages) {
-            *gpa = run->gpa +
-                   (uint64_t)(page_index - logical_page) *
-                       VMSVGA3D_GBO_PAGE_SIZE;
-            return true;
-        }
-        logical_page += run->pages;
+    logical_offset = page_index << VMSVGA3D_GBO_PAGE_SHIFT;
+    run_index = vmsvga3d_gbo_find_run(gbo, logical_offset);
+    if (run_index >= gbo->run_count) {
+        return false;
     }
 
-    return false;
+    run = &gbo->runs[run_index];
+    *gpa = run->gpa + (logical_offset - run->logical_offset);
+    return true;
 }
 
 static bool vmsvga3d_mob_redefine(struct vmsvga_state_s *s,
@@ -1664,9 +1801,12 @@ static bool vmsvga3d_mob_redefine(struct vmsvga_state_s *s,
         VMVGA_TRACE_3D,
         "MOB redefine mobid=%u old-format=%u old-base=0x%016" PRIx64
         " old-size=%u new-format=%u new-base=0x%016" PRIx64
-        " new-size=%u gart-refreshed=%u gart-invalidated=%u result=OK",
+        " new-size=%u new-runs=%u cached-runs=%u direct-runs=%u"
+        " gart-refreshed=%u gart-invalidated=%u result=OK",
         mobid, (unsigned)old.format, (uint64_t)old.base, old.size,
-        (unsigned)format, (uint64_t)base, size, refreshed, invalidated);
+        (unsigned)format, (uint64_t)base, size, mob->gbo.run_count,
+        mob->gbo.cached_run_count, mob->gbo.direct_run_count, refreshed,
+        invalidated);
 
     vmsvga3d_gbo_destroy(&old);
     return true;

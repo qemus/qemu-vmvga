@@ -8550,19 +8550,28 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     }
 
     /*
-     * A GB surface may have been populated before it becomes the active Screen
-     * Target.  That lifetime-wide content-valid bit must not release a deferred
-     * vGPU10/vGPU11 frontend during BIND itself: wait for a genuine writer
-     * after the target becomes active.  Restrict this reset to the deferred
-     * takeover so ordinary pre-rendered ScreenTarget flips retain their existing
-     * semantics.
+     * A GB surface may have been populated before its initial ScreenTarget
+     * activation.  That lifetime-wide content-valid bit must not release a
+     * deferred vGPU10/vGPU11 frontend during the initial BIND itself: wait for
+     * a genuine presentation boundary after the target becomes active.  A
+     * valid-to-valid BIND is itself a flip, so it establishes readiness for the
+     * newly bound surface instead of discarding an already-rendered frame.
      */
-    if (s->screen_frontend_deferred) {
+    if (s->screen_frontend_deferred && old_sid == SVGA3D_INVALID_ID) {
         surface->screen_target_content_valid = false;
         if (vmsvga_trace_flight_enabled()) {
             fprintf(stderr,
                     "VMVGA-SCREEN-HANDOFF phase=target-arm sid=%u old-sid=%u "
                     "content-valid=0\n",
+                    sid, old_sid);
+        }
+    } else if (old_sid != SVGA3D_INVALID_ID) {
+        surface->screen_target_content_valid = true;
+        if (s->screen_frontend_deferred &&
+            vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-HANDOFF phase=target-flip sid=%u old-sid=%u "
+                    "content-valid=1\n",
                     sid, old_sid);
         }
     } else if (old_sid == SVGA3D_INVALID_ID &&

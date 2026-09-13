@@ -10502,6 +10502,7 @@ static bool vmsvga3d_d3d10_present_d3d9_cpu_shadow_live(
 {
     VMSVGA3DD3D9TransferSurface destination_legacy = { 0 };
     VMSVGA3DDXContext *context = NULL;
+    const char *skip_reason = NULL;
     uint32_t rows;
     uint32_t active_cid;
     bool destination_d3d11_resident;
@@ -10511,44 +10512,101 @@ static bool vmsvga3d_d3d10_present_d3d9_cpu_shadow_live(
         destination_image == NULL || source_format == NULL ||
         destination_format == NULL || source_box == NULL ||
         destination_box == NULL || source_legacy == NULL ||
-        source->dxvk_surface == NULL || destination->dxvk_surface == NULL ||
-        !source_legacy->resident || command->mode != 0 ||
-        source->format != destination->format ||
-        source_format->dxgi_format != destination_format->dxgi_format ||
-        vmsvga3d_d3d10_is_srgb_format(source_format->dxgi_format) ||
-        source->multisample_count > 1 || destination->multisample_count > 1 ||
-        source->mip_count != 1 || destination->mip_count != 1 ||
-        source->array_elements != 1 || destination->array_elements != 1 ||
-        source_image->size.depth != 1 || destination_image->size.depth != 1 ||
-        source_image->size.width != destination_image->size.width ||
-        source_image->size.height != destination_image->size.height ||
-        source_box->x != 0 || source_box->y != 0 || source_box->z != 0 ||
-        source_box->w != source_image->size.width ||
-        source_box->h != source_image->size.height || source_box->d != 1 ||
-        destination_box->x != 0 || destination_box->y != 0 ||
-        destination_box->z != 0 ||
-        destination_box->w != destination_image->size.width ||
-        destination_box->h != destination_image->size.height ||
-        destination_box->d != 1 ||
-        (source->surface_flags & (SVGA3D_SURFACE_1D |
-                                  SVGA3D_SURFACE_VOLUME |
-                                  SVGA3D_SURFACE_CUBEMAP)) != 0 ||
-        (destination->surface_flags & (SVGA3D_SURFACE_1D |
-                                       SVGA3D_SURFACE_VOLUME |
-                                       SVGA3D_SURFACE_CUBEMAP)) != 0 ||
-        (source->surface_flags & SVGA3D_SURFACE_BIND_SHADER_RESOURCE) == 0 ||
-        (destination->surface_flags & SVGA3D_SURFACE_BIND_RENDER_TARGET) == 0 ||
-        source_image->data == NULL || destination_image->data == NULL ||
-        source_image->pitch == 0 ||
-        source_image->pitch != destination_image->pitch ||
-        source_image->plane_size == 0 ||
-        source_image->plane_size != destination_image->plane_size ||
-        source_image->data_size != source_image->plane_size ||
-        destination_image->data_size != destination_image->plane_size ||
-        destination_image->plane_size % destination_image->pitch != 0 ||
-        !vmsvga3d_dxvk_surface_info(
-            destination->dxvk_surface, &destination_legacy) ||
-        destination_legacy.resident) {
+        source->dxvk_surface == NULL || destination->dxvk_surface == NULL) {
+        return false;
+    }
+
+    if (!source_legacy->resident) {
+        skip_reason = "source-not-d3d9-resident";
+    } else if ((command->mode & ~(uint32_t)SVGADX_PRESENTBLT_LINEAR) != 0) {
+        skip_reason = "mode";
+    } else if (source->format != destination->format) {
+        skip_reason = "svga-format";
+    } else if (source_format->dxgi_format != destination_format->dxgi_format) {
+        skip_reason = "dxgi-format";
+    } else if (vmsvga3d_d3d10_is_srgb_format(source_format->dxgi_format)) {
+        skip_reason = "srgb-format";
+    } else if (source->multisample_count > 1 ||
+               destination->multisample_count > 1) {
+        skip_reason = "multisample";
+    } else if (source->mip_count != 1 || destination->mip_count != 1) {
+        skip_reason = "mip-count";
+    } else if (source->array_elements != 1 || destination->array_elements != 1) {
+        skip_reason = "array-elements";
+    } else if (source_image->size.depth != 1 ||
+               destination_image->size.depth != 1) {
+        skip_reason = "depth";
+    } else if (source_image->size.width != destination_image->size.width ||
+               source_image->size.height != destination_image->size.height) {
+        skip_reason = "surface-size";
+    } else if (source_box->x != 0 || source_box->y != 0 ||
+               source_box->z != 0 || source_box->w != source_image->size.width ||
+               source_box->h != source_image->size.height || source_box->d != 1) {
+        skip_reason = "source-box";
+    } else if (destination_box->x != 0 || destination_box->y != 0 ||
+               destination_box->z != 0 ||
+               destination_box->w != destination_image->size.width ||
+               destination_box->h != destination_image->size.height ||
+               destination_box->d != 1) {
+        skip_reason = "destination-box";
+    } else if ((source->surface_flags & (SVGA3D_SURFACE_1D |
+                                         SVGA3D_SURFACE_VOLUME |
+                                         SVGA3D_SURFACE_CUBEMAP)) != 0) {
+        skip_reason = "source-shape";
+    } else if ((destination->surface_flags & (SVGA3D_SURFACE_1D |
+                                              SVGA3D_SURFACE_VOLUME |
+                                              SVGA3D_SURFACE_CUBEMAP)) != 0) {
+        skip_reason = "destination-shape";
+    } else if ((source->surface_flags &
+                SVGA3D_SURFACE_BIND_SHADER_RESOURCE) == 0) {
+        skip_reason = "source-bind";
+    } else if ((destination->surface_flags &
+                SVGA3D_SURFACE_BIND_RENDER_TARGET) == 0) {
+        skip_reason = "destination-bind";
+    } else if (source_image->data == NULL || destination_image->data == NULL) {
+        skip_reason = "shadow-data";
+    } else if (source_image->pitch == 0) {
+        skip_reason = "source-pitch-zero";
+    } else if (source_image->pitch != destination_image->pitch) {
+        skip_reason = "pitch";
+    } else if (source_image->plane_size == 0) {
+        skip_reason = "source-plane-zero";
+    } else if (source_image->plane_size != destination_image->plane_size) {
+        skip_reason = "plane-size";
+    } else if (source_image->data_size != source_image->plane_size) {
+        skip_reason = "source-data-size";
+    } else if (destination_image->data_size != destination_image->plane_size) {
+        skip_reason = "destination-data-size";
+    } else if (destination_image->plane_size % destination_image->pitch != 0) {
+        skip_reason = "destination-pitch-layout";
+    } else if (!vmsvga3d_dxvk_surface_info(
+                   destination->dxvk_surface, &destination_legacy)) {
+        skip_reason = "destination-surface-info";
+    } else if (destination_legacy.resident) {
+        skip_reason = "destination-d3d9-resident";
+    }
+
+    if (skip_reason != NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "PRESENTBLT fast=d3d9-cpu-shadow skip=%s mode=0x%08x "
+            "src=%u/%u dst=%u/%u src-size=%ux%ux%u dst-size=%ux%ux%u "
+            "src-box=%u,%u,%u+%ux%ux%u dst-box=%u,%u,%u+%ux%ux%u "
+            "src-pitch=%u dst-pitch=%u src-mips=%u dst-mips=%u "
+            "src-arrays=%u dst-arrays=%u src-samples=%u dst-samples=%u",
+            skip_reason, command->mode, command->srcSid,
+            command->srcSubResource, command->dstSid,
+            command->destSubResource, source_image->size.width,
+            source_image->size.height, source_image->size.depth,
+            destination_image->size.width, destination_image->size.height,
+            destination_image->size.depth, source_box->x, source_box->y,
+            source_box->z, source_box->w, source_box->h, source_box->d,
+            destination_box->x, destination_box->y, destination_box->z,
+            destination_box->w, destination_box->h, destination_box->d,
+            source_image->pitch, destination_image->pitch, source->mip_count,
+            destination->mip_count, source->array_elements,
+            destination->array_elements, source->multisample_count,
+            destination->multisample_count);
         return false;
     }
 

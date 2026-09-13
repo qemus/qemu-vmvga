@@ -430,6 +430,7 @@ struct vmsvga3d_state_s {
     uint32_t screen_target_dirty_sid;
     uint32_t screen_target_dirty_count;
     SVGA3dRect screen_target_dirty_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    bool screen_target_full_present_pending;
     uint32_t screen_target_write_sid;
     uint32_t screen_target_write_count;
     SVGA3dRect screen_target_write_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
@@ -2003,6 +2004,7 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s)
         s->svga3d->screen_target_dirty_count = 0;
         memset(s->svga3d->screen_target_dirty_rects, 0,
                sizeof(s->svga3d->screen_target_dirty_rects));
+        s->svga3d->screen_target_full_present_pending = false;
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
@@ -2066,6 +2068,7 @@ static void vmsvga3d_renderer_unrealize(struct vmsvga_state_s *s)
         s->svga3d->screen_target_dirty_count = 0;
         memset(s->svga3d->screen_target_dirty_rects, 0,
                sizeof(s->svga3d->screen_target_dirty_rects));
+        s->svga3d->screen_target_full_present_pending = false;
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
@@ -10707,6 +10710,24 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
             return true;
         }
 
+        /* A rapid valid-to-valid target flip may supersede queued damage
+         * before the display refresh consumes it.  Carry that presentation
+         * obligation to the newest target.  The next guest presentation
+         * boundary is authoritative, so promote it to a complete target
+         * refresh rather than exposing a mixture of frames. */
+        if (state->screen_target_full_present_pending) {
+            dirty.x = 0;
+            dirty.y = 0;
+            dirty.w = width;
+            dirty.h = height;
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-TARGET phase=flip-full-present "
+                        "sid=%u trigger=%u,%u/%ux%u\n",
+                        sid, rect->x, rect->y, rect->w, rect->h);
+            }
+        }
+
         if (state->screen_target_dirty_count == 0) {
             state->screen_target_dirty_sid = sid;
         } else if (state->screen_target_dirty_sid != sid) {
@@ -10735,11 +10756,13 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
             if (state->screen_target_dirty_count == 1 &&
                 vmsvga3d_screen_target_rect_contains(
                     &state->screen_target_dirty_rects[0], &dirty)) {
+                state->screen_target_full_present_pending = false;
                 return true;
             }
 
             state->screen_target_dirty_count = 1;
             state->screen_target_dirty_rects[0] = dirty;
+            state->screen_target_full_present_pending = false;
             return true;
         }
     }
@@ -11087,12 +11110,21 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
            sizeof(state->screen_target_dirty_rects));
 
     if (s->screen_frontend_deferred) {
-        s->screen_frontend_deferred = false;
-        if (vmsvga_trace_flight_enabled()) {
-            fprintf(stderr,
-                    "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
-                    "size=%ux%u rects=%u\n",
-                    sid, s->screen_width, s->screen_height, rect_count);
+        if (!full_refresh) {
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-HANDOFF phase=frontend-wait sid=%u "
+                        "reason=partial-presentation rects=%u\n",
+                        sid, rect_count);
+            }
+        } else {
+            s->screen_frontend_deferred = false;
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
+                        "size=%ux%u rects=%u\n",
+                        sid, s->screen_width, s->screen_height, rect_count);
+            }
         }
     }
 
@@ -11223,6 +11255,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             }
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+            s->svga3d->screen_target_full_present_pending = false;
             vmsvga3d_screen_target_write_tracking_reset_live(s, false);
             /*
              * Do not destroy the currently visible Screen Object before a
@@ -11260,6 +11293,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 if (s->svga3d != NULL) {
                     s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
                     s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+                    s->svga3d->screen_target_full_present_pending = false;
                     vmsvga3d_screen_target_write_tracking_reset_live(s, false);
                 }
                 (void)vmsvga_screen_destroy(s, body->stid);

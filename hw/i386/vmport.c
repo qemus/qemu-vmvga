@@ -334,7 +334,7 @@ static bool vmport_guestrpc_debug_enabled(VMPortState *s)
     return s->guestrpc_runtime.debug_enabled;
 }
 
-static const bool vmport_guestrpc_trace_rpc = false;
+static const bool vmport_guestrpc_trace_rpc = true;
 
 static GString *vmport_guestrpc_format_line(const char *prefix,
                                              const uint8_t *message,

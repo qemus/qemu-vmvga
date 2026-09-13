@@ -10380,8 +10380,10 @@ vmsvga3d_d3d10_present_bridge_d3d9_source_live(
     VMSVGA3DD3D10ResourcePlan resource_plan;
     VMSVGA3DDxvkSubresourceData *initial_data = NULL;
     VMSVGA3DDxvkSurface *bridge = NULL;
+    const char *cache_action = "none";
     uint32_t initial_data_count = 0;
     uint32_t subresource;
+    uint64_t upload_bytes = 0;
     bool success = false;
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
@@ -10395,9 +10397,9 @@ vmsvga3d_d3d10_present_bridge_d3d9_source_live(
     /*
      * D3D9 and D3D11 are separate DXVK devices in this backend.  Never evict
      * the live D3D9 resource merely to satisfy PRESENTBLT: the guest may keep
-     * using the same surface through its legacy context afterwards.  Snapshot
-     * every 2D mip into the canonical CPU shadow and materialize a short-lived
-     * D3D11 copy solely for presentation.
+     * using the same surface through its legacy context afterwards.  Refresh
+     * every 2D mip in the canonical CPU shadow, then keep one D3D11 mirror
+     * attached to the guest surface and update it in place on later presents.
      */
     for (subresource = 0; subresource < surface->mip_count; subresource++) {
         VMSVGA3DSurfaceImage *image = &surface->mips[subresource];
@@ -10415,23 +10417,56 @@ vmsvga3d_d3d10_present_bridge_d3d9_source_live(
                              image->data, image->pitch, rows)) {
             goto out;
         }
+        upload_bytes += image->data_size;
     }
 
     if (!vmsvga3d_dx_resource_plan_live(
             s, &surface_info, VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE,
-            &resource_plan) ||
-        !vmsvga3d_d3d10_initial_subresources_live(
-            surface, &resource_plan.primary, &initial_data,
-            &initial_data_count)) {
+            &resource_plan)) {
         goto out;
     }
 
-    bridge = vmsvga3d_dxvk_surface_create(s->dxvk, surface->sid);
-    if (bridge == NULL ||
-        !vmsvga3d_dxvk_d3d11_surface_materialize(
-            s->dxvk, bridge, &resource_plan.primary,
-            initial_data, initial_data_count)) {
-        goto out;
+    bridge = surface->present_d3d9_bridge;
+    if (bridge == NULL) {
+        bridge = vmsvga3d_dxvk_surface_create(s->dxvk, surface->sid);
+        if (bridge == NULL) {
+            goto out;
+        }
+        surface->present_d3d9_bridge = bridge;
+        cache_action = "create";
+    } else if (vmsvga3d_dxvk_d3d11_surface_resident(bridge)) {
+        cache_action = "reuse";
+    } else {
+        cache_action = "rematerialize";
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_surface_resident(bridge)) {
+        if (!vmsvga3d_d3d10_initial_subresources_live(
+                surface, &resource_plan.primary, &initial_data,
+                &initial_data_count) ||
+            !vmsvga3d_dxvk_d3d11_surface_materialize(
+                s->dxvk, bridge, &resource_plan.primary,
+                initial_data, initial_data_count)) {
+            goto out;
+        }
+    } else {
+        for (subresource = 0; subresource < surface->mip_count; subresource++) {
+            VMSVGA3DSurfaceImage *image = &surface->mips[subresource];
+            VMSVGA3DD3D10Box upload_box = {
+                .left = 0,
+                .top = 0,
+                .front = 0,
+                .right = image->size.width,
+                .bottom = image->size.height,
+                .back = 1,
+            };
+
+            if (!vmsvga3d_dxvk_d3d11_update_subresource(
+                    s->dxvk, bridge, subresource, &upload_box,
+                    image->data, image->pitch, image->plane_size)) {
+                goto out;
+            }
+        }
     }
 
     success = true;
@@ -10439,12 +10474,16 @@ vmsvga3d_d3d10_present_bridge_d3d9_source_live(
 out:
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "PRESENTBLT bridge=d3d9-readback sid=%u subresources=%u result=%s",
+        "PRESENTBLT bridge=d3d9-readback sid=%u subresources=%u "
+        "cache=%s upload-bytes=%" PRIu64 " result=%s",
         surface != NULL ? surface->sid : SVGA3D_INVALID_ID,
-        surface != NULL ? surface->mip_count : 0u,
-        success ? "OK" : "FAIL");
+        surface != NULL ? surface->mip_count : 0u, cache_action,
+        upload_bytes, success ? "OK" : "FAIL");
     g_free(initial_data);
     if (!success && bridge != NULL) {
+        if (surface != NULL && surface->present_d3d9_bridge == bridge) {
+            surface->present_d3d9_bridge = NULL;
+        }
         vmsvga3d_dxvk_surface_destroy(bridge);
         bridge = NULL;
     }
@@ -10595,10 +10634,6 @@ static bool vmsvga3d_d3d10_present_blt_live(
             command->boxDest.x, command->boxDest.y,                     \
             command->boxDest.z, command->boxDest.w,                     \
             command->boxDest.h, command->boxDest.d, command->mode);    \
-        if (source_bridge != NULL) {                                    \
-            vmsvga3d_dxvk_surface_destroy(source_bridge);               \
-            source_bridge = NULL;                                       \
-        }                                                               \
         return false;                                                   \
     } while (0)
 
@@ -10806,11 +10841,6 @@ present_complete:
             s, command->dstSid, command->destSubResource, &destination_box)) {
         VMSVGA3D_PRESENTBLT_REJECT("dirty-mark");
     }
-    if (source_bridge != NULL) {
-        vmsvga3d_dxvk_surface_destroy(source_bridge);
-        source_bridge = NULL;
-    }
-
 #undef VMSVGA3D_PRESENTBLT_REJECT
     return true;
 }

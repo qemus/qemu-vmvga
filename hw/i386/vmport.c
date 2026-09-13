@@ -439,6 +439,11 @@ static const char *vmport_guestrpc_guestinfo_override(const char *key)
         }
     }
 
+    if (!strcmp(key, "guestinfo.svga.wddm.enableDX10") ||
+        !strcmp(key, "guestinfo.svga.enableGL3")) {
+        return "TRUE";
+    }
+
     if (!strcmp(key, "guestinfo.svga.wddm.buildType")) {
         return "release";
     }

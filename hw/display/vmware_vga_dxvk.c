@@ -53,6 +53,12 @@ struct vmsvga3d_dxvk_s {
     VMSVGA3DDxvkD3D9Query *d3d9_queries;
     VMSVGA3DDxvkD3D9GBQuery *d3d9_gb_queries;
     uint64_t d3d9_gb_query_next_token;
+    VMSVGA3DDxvkSurface *d3d9_bound_render_targets[SVGA3D_MAX_RENDER_TARGETS];
+    uint32_t d3d9_bound_render_target_levels[SVGA3D_MAX_RENDER_TARGETS];
+    bool d3d9_bound_render_target_valid[SVGA3D_MAX_RENDER_TARGETS];
+    VMSVGA3DDxvkSurface *d3d9_bound_depth_stencil;
+    uint32_t d3d9_bound_depth_stencil_level;
+    bool d3d9_bound_depth_stencil_valid;
     void *d3d11_device;
     void *d3d11_context;
     void *d3d11_context1;
@@ -2994,12 +3000,57 @@ VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,
     return surface;
 }
 
+static void vmsvga3d_dxvk_d3d9_target_cache_invalidate(
+    VMSVGA3DDxvk *dxvk)
+{
+    if (dxvk == NULL) {
+        return;
+    }
+
+    memset(dxvk->d3d9_bound_render_targets, 0,
+           sizeof(dxvk->d3d9_bound_render_targets));
+    memset(dxvk->d3d9_bound_render_target_levels, 0,
+           sizeof(dxvk->d3d9_bound_render_target_levels));
+    memset(dxvk->d3d9_bound_render_target_valid, 0,
+           sizeof(dxvk->d3d9_bound_render_target_valid));
+    dxvk->d3d9_bound_depth_stencil = NULL;
+    dxvk->d3d9_bound_depth_stencil_level = 0;
+    dxvk->d3d9_bound_depth_stencil_valid = false;
+}
+
+static void vmsvga3d_dxvk_d3d9_target_cache_invalidate_surface(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface)
+{
+    uint32_t i;
+
+    if (dxvk == NULL || surface == NULL) {
+        return;
+    }
+
+    for (i = 0; i < G_N_ELEMENTS(dxvk->d3d9_bound_render_targets); i++) {
+        if (dxvk->d3d9_bound_render_targets[i] == surface) {
+            dxvk->d3d9_bound_render_targets[i] = NULL;
+            dxvk->d3d9_bound_render_target_levels[i] = 0;
+            dxvk->d3d9_bound_render_target_valid[i] = false;
+        }
+    }
+
+    if (dxvk->d3d9_bound_depth_stencil == surface) {
+        dxvk->d3d9_bound_depth_stencil = NULL;
+        dxvk->d3d9_bound_depth_stencil_level = 0;
+        dxvk->d3d9_bound_depth_stencil_valid = false;
+    }
+}
+
 static void vmsvga3d_dxvk_surface_evict_d3d9(
     VMSVGA3DDxvkSurface *surface)
 {
     if (surface == NULL) {
         return;
     }
+
+    vmsvga3d_dxvk_d3d9_target_cache_invalidate_surface(
+        surface->owner, surface);
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     if (surface->d3d9_readback_staging != NULL) {
@@ -10835,6 +10886,11 @@ bool vmsvga3d_dxvk_clear(
 
     have_saved_scissor = true;
 
+    /* This helper temporarily bypasses the cached target setters below.  Drop
+     * the cache before changing native targets so a partial failure or restore
+     * failure can never leave a stale binding recorded. */
+    vmsvga3d_dxvk_d3d9_target_cache_invalidate(dxvk);
+
     for (i = 0; i <= highest_target; i++) {
         result = set_render_target(dxvk->d3d9_device, i, bound_targets[i]);
         if (!vmsvga3d_dxvk_succeeded(result)) {
@@ -10942,6 +10998,8 @@ bool vmsvga3d_dxvk_reset_state(VMSVGA3DDxvk *dxvk)
         return false;
     }
 
+    /* D3DSBT_ALL does not include render-target or depth/stencil bindings, so
+     * applying the pristine state does not invalidate the target cache. */
     result = apply(dxvk->d3d9_pristine_state);
 
     return vmsvga3d_dxvk_succeeded(result);
@@ -10958,10 +11016,22 @@ bool vmsvga3d_dxvk_set_render_target(VMSVGA3DDxvk *dxvk, uint32_t index,
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkSetRenderTarget set_render_target = NULL;
     void *d3d_surface = NULL;
+    bool cacheable;
+    bool success;
     int32_t result;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) ||
-        !vmsvga3d_dxvk_get_method(
+    if (!vmsvga3d_dxvk_ready(dxvk)) {
+        return false;
+    }
+
+    cacheable = index < G_N_ELEMENTS(dxvk->d3d9_bound_render_targets);
+    if (cacheable && dxvk->d3d9_bound_render_target_valid[index] &&
+        dxvk->d3d9_bound_render_targets[index] == surface &&
+        dxvk->d3d9_bound_render_target_levels[index] == level) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
             dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_RENDER_TARGET,
             &set_render_target, sizeof(set_render_target))) {
         return false;
@@ -10974,13 +11044,24 @@ bool vmsvga3d_dxvk_set_render_target(VMSVGA3DDxvk *dxvk, uint32_t index,
     }
 
     result = set_render_target(dxvk->d3d9_device, index, d3d_surface);
+    success = vmsvga3d_dxvk_succeeded(result);
 
     if (d3d_surface != NULL) {
         vmsvga3d_dxvk_release(d3d_surface,
                               VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
     }
 
-    return vmsvga3d_dxvk_succeeded(result);
+    if (cacheable) {
+        if (success) {
+            dxvk->d3d9_bound_render_targets[index] = surface;
+            dxvk->d3d9_bound_render_target_levels[index] = level;
+            dxvk->d3d9_bound_render_target_valid[index] = true;
+        } else {
+            dxvk->d3d9_bound_render_target_valid[index] = false;
+        }
+    }
+
+    return success;
 #else
     (void)dxvk;
     (void)index;
@@ -10997,10 +11078,20 @@ bool vmsvga3d_dxvk_set_depth_stencil(VMSVGA3DDxvk *dxvk,
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkSetDepthStencilSurface set_depth_stencil = NULL;
     void *d3d_surface = NULL;
+    bool success;
     int32_t result;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) ||
-        !vmsvga3d_dxvk_get_method(
+    if (!vmsvga3d_dxvk_ready(dxvk)) {
+        return false;
+    }
+
+    if (dxvk->d3d9_bound_depth_stencil_valid &&
+        dxvk->d3d9_bound_depth_stencil == surface &&
+        dxvk->d3d9_bound_depth_stencil_level == level) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
             dxvk->d3d9_device,
             VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_DEPTH_STENCIL_SURFACE,
             &set_depth_stencil, sizeof(set_depth_stencil))) {
@@ -11014,13 +11105,22 @@ bool vmsvga3d_dxvk_set_depth_stencil(VMSVGA3DDxvk *dxvk,
     }
 
     result = set_depth_stencil(dxvk->d3d9_device, d3d_surface);
+    success = vmsvga3d_dxvk_succeeded(result);
 
     if (d3d_surface != NULL) {
         vmsvga3d_dxvk_release(d3d_surface,
                               VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
     }
 
-    return vmsvga3d_dxvk_succeeded(result);
+    if (success) {
+        dxvk->d3d9_bound_depth_stencil = surface;
+        dxvk->d3d9_bound_depth_stencil_level = level;
+        dxvk->d3d9_bound_depth_stencil_valid = true;
+    } else {
+        dxvk->d3d9_bound_depth_stencil_valid = false;
+    }
+
+    return success;
 #else
     (void)dxvk;
     (void)surface;

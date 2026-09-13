@@ -7702,11 +7702,23 @@ static bool vmsvga3d_d3d10_buffer_materialize_live(
     surface = s->svga3d->surfaces[sid];
 
     if (surface == NULL || surface->dxvk_surface == NULL ||
-        !vmsvga3d_d3d10_surface_info_live(surface, &surface_info) ||
+        !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface)) {
+        return false;
+    }
+
+    /* Native vGPU10/11 buffers already retain their D3D11 resource contents.
+     * Pipeline setup calls this helper for bound buffers on every draw, so
+     * avoid rebuilding the resource plan and allocating an initial-data table
+     * when the buffer is already resident. Explicit DX buffer/subresource
+     * updates keep the resident resource synchronized in place. */
+    if (vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        return true;
+    }
+
+    if (!vmsvga3d_d3d10_surface_info_live(surface, &surface_info) ||
         !vmsvga3d_dx_resource_plan_live(
             s, &surface_info, VMSVGA3D_D3D10_RESOURCE_USE_BUFFER,
             &resource_plan) ||
-        !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface) ||
         !vmsvga3d_d3d10_initial_subresources_live(
             surface, &resource_plan.primary, &initial_data,
             &initial_data_count)) {

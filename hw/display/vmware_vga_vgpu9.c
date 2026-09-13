@@ -2731,6 +2731,8 @@ static bool vmsvga3d_dxvk_materialize_buffer(
     VMSVGA3DD3D9SurfaceInfo info = { 0 };
     VMSVGA3DD3D9ResourceCaps caps = { 0 };
     VMSVGA3DD3D9ResourcePlan plan;
+    VMSVGA3DD3D9TransferSurface before = { 0 };
+    bool compatible = false;
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
         !vmsvga3d_dxvk_handoff_d3d11_to_shadow(s, surface) ||
@@ -2739,7 +2741,8 @@ static bool vmsvga3d_dxvk_materialize_buffer(
         surface->storage_bytes > UINT32_MAX ||
         surface->mips[0].data_size < surface->storage_bytes ||
         (use != VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER &&
-         use != VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER)) {
+         use != VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER) ||
+        !vmsvga3d_d3d9_transfer_surface_info(s, surface, &before)) {
         return false;
     }
 
@@ -2752,12 +2755,41 @@ static bool vmsvga3d_dxvk_materialize_buffer(
     info.surface_bytes = (uint32_t)surface->storage_bytes;
     info.index_width = index_width;
 
-    if (!vmsvga3d_d3d9_resource_plan(&info, use, &caps, &plan) ||
-        !vmsvga3d_dxvk_surface_materialize(s->dxvk, surface->dxvk_surface,
-                                           &plan) ||
-        !vmsvga3d_dxvk_surface_upload_buffer(
+    if (!vmsvga3d_d3d9_resource_plan(&info, use, &caps, &plan)) {
+        return false;
+    }
+
+    if (before.resident) {
+        if (use == VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER) {
+            compatible = before.resource_type ==
+                         VMSVGA3D_D3D9_HOST_RESOURCE_VERTEX_BUFFER;
+        } else {
+            compatible = before.resource_type ==
+                             VMSVGA3D_D3D9_HOST_RESOURCE_INDEX_BUFFER &&
+                         before.format == plan.primary.format;
+        }
+    }
+
+    if (!vmsvga3d_dxvk_surface_materialize(s->dxvk, surface->dxvk_surface,
+                                           &plan)) {
+        return false;
+    }
+
+    /* A compatible resident D3D9 buffer already contains the authoritative
+     * contents. Guest writes update resident buffers explicitly, while CPU-only
+     * fallback writes evict them before the next draw. Re-uploading the full
+     * CPU shadow here would therefore discard/rename an unchanged dynamic
+     * buffer on every draw. */
+    if (compatible) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_surface_upload_buffer(
             s->dxvk, surface->dxvk_surface, surface->mips[0].data,
             (uint32_t)surface->storage_bytes)) {
+        /* Do not leave a newly materialized but uninitialized buffer resident;
+         * the next draw must recreate it from the authoritative CPU shadow. */
+        vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
         return false;
     }
 

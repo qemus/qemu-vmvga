@@ -10451,6 +10451,113 @@ out:
     return bridge;
 }
 
+static bool vmsvga3d_d3d10_present_d3d9_cpu_shadow_live(
+    struct vmsvga_state_s *s, const SVGA3dCmdDXPresentBlt *command,
+    VMSVGA3DSurface *source, VMSVGA3DSurface *destination,
+    VMSVGA3DSurfaceImage *source_image,
+    VMSVGA3DSurfaceImage *destination_image,
+    const VMSVGA3DD3D10Format *source_format,
+    const VMSVGA3DD3D10Format *destination_format,
+    const SVGA3dBox *source_box, const SVGA3dBox *destination_box,
+    const VMSVGA3DD3D9TransferSurface *source_legacy)
+{
+    VMSVGA3DD3D9TransferSurface destination_legacy = { 0 };
+    VMSVGA3DDXContext *context = NULL;
+    uint32_t rows;
+    uint32_t active_cid;
+    bool destination_d3d11_resident;
+
+    if (s == NULL || s->svga3d == NULL || command == NULL || source == NULL ||
+        destination == NULL || source_image == NULL ||
+        destination_image == NULL || source_format == NULL ||
+        destination_format == NULL || source_box == NULL ||
+        destination_box == NULL || source_legacy == NULL ||
+        source->dxvk_surface == NULL || destination->dxvk_surface == NULL ||
+        !source_legacy->resident || command->mode != 0 ||
+        source->format != destination->format ||
+        source_format->dxgi_format != destination_format->dxgi_format ||
+        vmsvga3d_d3d10_is_srgb_format(source_format->dxgi_format) ||
+        source->multisample_count > 1 || destination->multisample_count > 1 ||
+        source->mip_count != 1 || destination->mip_count != 1 ||
+        source->array_elements != 1 || destination->array_elements != 1 ||
+        source_image->size.depth != 1 || destination_image->size.depth != 1 ||
+        source_image->size.width != destination_image->size.width ||
+        source_image->size.height != destination_image->size.height ||
+        source_box->x != 0 || source_box->y != 0 || source_box->z != 0 ||
+        source_box->w != source_image->size.width ||
+        source_box->h != source_image->size.height || source_box->d != 1 ||
+        destination_box->x != 0 || destination_box->y != 0 ||
+        destination_box->z != 0 ||
+        destination_box->w != destination_image->size.width ||
+        destination_box->h != destination_image->size.height ||
+        destination_box->d != 1 ||
+        (source->surface_flags & (SVGA3D_SURFACE_1D |
+                                  SVGA3D_SURFACE_VOLUME |
+                                  SVGA3D_SURFACE_CUBEMAP)) != 0 ||
+        (destination->surface_flags & (SVGA3D_SURFACE_1D |
+                                       SVGA3D_SURFACE_VOLUME |
+                                       SVGA3D_SURFACE_CUBEMAP)) != 0 ||
+        (source->surface_flags & SVGA3D_SURFACE_BIND_SHADER_RESOURCE) == 0 ||
+        (destination->surface_flags & SVGA3D_SURFACE_BIND_RENDER_TARGET) == 0 ||
+        source_image->data == NULL || destination_image->data == NULL ||
+        source_image->pitch == 0 ||
+        source_image->pitch != destination_image->pitch ||
+        source_image->plane_size == 0 ||
+        source_image->plane_size != destination_image->plane_size ||
+        source_image->data_size != source_image->plane_size ||
+        destination_image->data_size != destination_image->plane_size ||
+        destination_image->plane_size % destination_image->pitch != 0 ||
+        !vmsvga3d_dxvk_surface_info(
+            destination->dxvk_surface, &destination_legacy) ||
+        destination_legacy.resident) {
+        return false;
+    }
+
+    rows = destination_image->plane_size / destination_image->pitch;
+    if (rows == 0 || !vmsvga3d_dxvk_surface_readback_level(
+                         s->dxvk, source->dxvk_surface,
+                         command->srcSubResource, destination_image->data,
+                         destination_image->pitch, rows)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "PRESENTBLT fast=d3d9-cpu-shadow src=%u/%u dst=%u/%u "
+            "bytes=%u result=FAIL",
+            command->srcSid, command->srcSubResource, command->dstSid,
+            command->destSubResource, destination_image->data_size);
+        return false;
+    }
+
+    destination_d3d11_resident =
+        vmsvga3d_dxvk_d3d11_surface_resident(destination->dxvk_surface);
+    if (destination_d3d11_resident) {
+        /* Evicting the stale destination invalidates its native views.  Force
+         * the active context to rebuild any pipeline bindings before its next
+         * draw so no cached binding can keep targeting the old resource. */
+        active_cid = s->svga3d->active_dx_context_id;
+        if (active_cid != SVGA3D_INVALID_ID &&
+            active_cid < SVGA3D_MAX_CONTEXT_IDS) {
+            context = vmsvga3d_dx_context(s, active_cid);
+            if (context != NULL) {
+                context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_ALL;
+            }
+        }
+    }
+
+    /* The full destination shadow now contains the presented image.  Drop the
+     * stale D3D11 copy so the following READBACK_GB_SURFACE can use the CPU
+     * shadow directly instead of synchronizing GPU -> CPU a second time. */
+    vmsvga3d_dxvk_surface_evict(destination->dxvk_surface);
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "PRESENTBLT fast=d3d9-cpu-shadow src=%u/%u dst=%u/%u bytes=%u "
+        "evicted-d3d11=%u result=OK",
+        command->srcSid, command->srcSubResource, command->dstSid,
+        command->destSubResource, destination_image->data_size,
+        destination_d3d11_resident ? 1u : 0u);
+    return true;
+}
+
 static bool vmsvga3d_d3d10_present_blt_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXPresentBlt *command)
@@ -10544,25 +10651,6 @@ static bool vmsvga3d_d3d10_present_blt_live(
         VMSVGA3D_PRESENTBLT_REJECT("subresource-range");
     }
 
-    source_dxvk = source->dxvk_surface;
-    if (vmsvga3d_dxvk_surface_info(source->dxvk_surface, &source_legacy) &&
-        source_legacy.resident) {
-        source_bridge =
-            vmsvga3d_d3d10_present_bridge_d3d9_source_live(s, source);
-        if (source_bridge == NULL) {
-            VMSVGA3D_PRESENTBLT_REJECT("source-d3d9-bridge");
-        }
-        source_dxvk = source_bridge;
-    } else if (!vmsvga3d_d3d10_copy_surface_materialize_live(
-                   s, source, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
-        VMSVGA3D_PRESENTBLT_REJECT("source-materialize");
-    }
-
-    if (!vmsvga3d_d3d10_copy_surface_materialize_live(
-            s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
-        VMSVGA3D_PRESENTBLT_REJECT("destination-materialize");
-    }
-
     source_image = &source->mips[command->srcSubResource];
     destination_image = &destination->mips[command->destSubResource];
     source_box = command->boxSrc;
@@ -10605,6 +10693,33 @@ static bool vmsvga3d_d3d10_present_blt_live(
             destination_format.dxgi_format,
             (unsigned)destination_format.min_level);
         VMSVGA3D_PRESENTBLT_REJECT("format-level");
+    }
+
+    source_dxvk = source->dxvk_surface;
+    if (vmsvga3d_dxvk_surface_info(source->dxvk_surface, &source_legacy) &&
+        source_legacy.resident &&
+        vmsvga3d_d3d10_present_d3d9_cpu_shadow_live(
+            s, command, source, destination, source_image, destination_image,
+            &source_format, &destination_format, &source_box, &destination_box,
+            &source_legacy)) {
+        goto present_complete;
+    }
+
+    if (source_legacy.resident) {
+        source_bridge =
+            vmsvga3d_d3d10_present_bridge_d3d9_source_live(s, source);
+        if (source_bridge == NULL) {
+            VMSVGA3D_PRESENTBLT_REJECT("source-d3d9-bridge");
+        }
+        source_dxvk = source_bridge;
+    } else if (!vmsvga3d_d3d10_copy_surface_materialize_live(
+                   s, source, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
+        VMSVGA3D_PRESENTBLT_REJECT("source-materialize");
+    }
+
+    if (!vmsvga3d_d3d10_copy_surface_materialize_live(
+            s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
+        VMSVGA3D_PRESENTBLT_REJECT("destination-materialize");
     }
 
     /* A 1:1 unfiltered same-format PRESENTBLT does not need the private

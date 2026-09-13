@@ -159,6 +159,8 @@ struct VMPortState {
 
 static VMPortState *port_state;
 
+static bool vmport_guestrpc_debug_enabled(VMPortState *s);
+
 void vmport_register(VMPortCommand command, VMPortReadFunc *func, void *opaque)
 {
     assert(command < VMPORT_ENTRIES);
@@ -167,6 +169,17 @@ void vmport_register(VMPortCommand command, VMPortReadFunc *func, void *opaque)
     trace_vmport_register(command, func, opaque);
     port_state->func[command] = func;
     port_state->opaque[command] = opaque;
+}
+
+bool vmport_register_if_available(VMPortCommand command, VMPortReadFunc *func,
+                                  void *opaque)
+{
+    if (command >= VMPORT_ENTRIES || port_state == NULL) {
+        return false;
+    }
+
+    vmport_register(command, func, opaque);
+    return true;
 }
 
 static uint64_t vmport_ioport_read(void *opaque, hwaddr addr,
@@ -194,6 +207,21 @@ static uint64_t vmport_ioport_read(void *opaque, hwaddr addr,
     command = env->regs[R_ECX];
     trace_vmport_command(command);
     if (command >= VMPORT_ENTRIES || !s->func[command]) {
+        if (vmport_guestrpc_debug_enabled(s)) {
+            fprintf(stderr,
+                    "vmport-unimplemented: command=%u reason=%s "
+                    "eax=0x%" PRIx64 " ebx=0x%" PRIx64
+                    " ecx=0x%" PRIx64 " edx=0x%" PRIx64
+                    " esi=0x%" PRIx64 " edi=0x%" PRIx64 "\n",
+                    command,
+                    command >= VMPORT_ENTRIES ? "out-of-range" : "no-handler",
+                    (uint64_t)env->regs[R_EAX],
+                    (uint64_t)env->regs[R_EBX],
+                    (uint64_t)env->regs[R_ECX],
+                    (uint64_t)env->regs[R_EDX],
+                    (uint64_t)env->regs[R_ESI],
+                    (uint64_t)env->regs[R_EDI]);
+        }
         qemu_log_mask(LOG_UNIMP, "vmport: unknown command %x\n", command);
         goto err;
     }

@@ -34,6 +34,10 @@
 #include "qemu/main-loop.h"
 #include "exec/target_page.h"
 #include "trace.h"
+#if defined(TARGET_I386) || defined(TARGET_X86_64)
+#include "hw/i386/vmport.h"
+#include "target/i386/cpu.h"
+#endif
 #include "include/vmware_vga_compat.h"
 #include "include/vmware_vga_gmr.h"
 #include "include/includeCheck.h"
@@ -110,6 +114,7 @@
 #define VMSVGA_PSEUDOCOLOR_ENTRIES 256
 #define VMSVGA_BLIT_SCRATCH_SIZE (VMSVGA_MAX_WIDTH * 4)
 #define VMSVGA_SCREEN_REBUILD_HOLD_FRAMES 1U
+#define VMSVGA_VMPORT_MAGIC 0x564D5868U
 
 /* #define ANY_FENCE_OFF */
 /* #define EXPCAPS */
@@ -7900,6 +7905,87 @@ static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s)
 
 }
 
+static uint32_t vmsvga_get_capabilities(struct vmsvga_state_s *s)
+{
+    uint32_t caps;
+
+#ifdef EXPCAPS
+    caps = 0xffffffff;
+#else
+    caps = SVGA_CAP_RECT_FILL | SVGA_CAP_RECT_COPY | SVGA_CAP_RECT_PAT_FILL |
+           SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
+           SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
+           SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH | SVGA_CAP_GLYPH_CLIPPING |
+           SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_3D |
+           SVGA_CAP_GMR | SVGA_CAP_GMR2 | SVGA_CAP_EXTENDED_FIFO |
+           SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK | SVGA_CAP_TRACES;
+#ifdef CONFIG_PIXMAN
+    caps |= SVGA_CAP_8BIT_EMULATION;
+#endif
+#endif
+    if (!s->svga3d_capable) {
+        caps &= ~SVGA_CAP_3D;
+    }
+    if (s->svga3d_dx_capable) {
+        caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
+                SVGA_CAP_GBOBJECTS | SVGA_CAP_DX;
+    } else if (vmsvga_vgpu9_modern_3d_capable(s)) {
+        /* Keep the legacy SVGA3D/D3D9 command set, but expose the
+         * guest-backed resource model and modern command-buffer
+         * transport independently from SVGA_CAP_DX. */
+        caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
+                SVGA_CAP_GBOBJECTS;
+        caps &= ~SVGA_CAP_DX;
+    } else {
+        caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
+                  SVGA_CAP_GBOBJECTS | SVGA_CAP_DX);
+    }
+    if (s->svga3d_dx_capable ||
+        s->vgpu_generation == VMSVGA_VGPU_9) {
+        caps |= SVGA_CAP_CAP2_REGISTER;
+    } else {
+        caps &= ~SVGA_CAP_CAP2_REGISTER;
+    }
+
+    return caps;
+}
+
+#if defined(TARGET_I386) || defined(TARGET_X86_64)
+/* VMware backdoor command 75 mirrors SVGA capabilities before the guest has
+ * initialized the SVGA device. Keep it sourced from the same live state as
+ * the ordinary SVGA registers and FIFO capability publication. */
+static uint32_t vmsvga_vmport_get_capabilities(void *opaque, uint32_t address)
+{
+    struct vmsvga_state_s *s = opaque;
+    X86CPU *cpu = X86_CPU(current_cpu);
+    uint32_t type = cpu->env.regs[R_ECX] >> 16;
+    uint32_t ret;
+
+    (void)address;
+
+    switch ((SVGABackdoorCapType)type) {
+    case SVGABackdoorCapDeviceCaps:
+        ret = vmsvga_get_capabilities(s);
+        break;
+    case SVGABackdoorCapFifoCaps:
+        ret = s->fc;
+        break;
+    case SVGABackdoorCap3dHWVersion:
+        ret = s->svga3d_capable ? vmsvga3d_host_hwversion() : 0;
+        break;
+    default:
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                          "VMPORT-CAPS type=%u result=unsupported", type);
+        return UINT32_MAX;
+    }
+
+    cpu->env.regs[R_EBX] = VMSVGA_VMPORT_MAGIC;
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                      "VMPORT-CAPS type=%u value=0x%08x", type, ret);
+    return ret;
+}
+#endif
+
 static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
                                        uint32_t reg)
 {
@@ -8297,7 +8383,6 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
     VPRINT("vmsvga_value_read was just executed\n");
 
     uint32_t ret;
-    uint32_t caps;
 
     struct vmsvga_state_s *s = opaque;
     struct pci_vmsvga_state_s *pci_vmsvga =
@@ -8512,44 +8597,7 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
                s->index, ret);
         break;
     case SVGA_REG_CAPABILITIES:
-#ifdef EXPCAPS
-        caps = 0xffffffff;
-#else
-        caps = SVGA_CAP_RECT_FILL | SVGA_CAP_RECT_COPY | SVGA_CAP_RECT_PAT_FILL |
-               SVGA_CAP_LEGACY_OFFSCREEN | SVGA_CAP_RASTER_OP | SVGA_CAP_CURSOR |
-               SVGA_CAP_CURSOR_BYPASS | SVGA_CAP_CURSOR_BYPASS_2 |
-               SVGA_CAP_ALPHA_CURSOR | SVGA_CAP_GLYPH | SVGA_CAP_GLYPH_CLIPPING |
-               SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_3D |
-               SVGA_CAP_GMR | SVGA_CAP_GMR2 | SVGA_CAP_EXTENDED_FIFO |
-               SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK | SVGA_CAP_TRACES;
-#ifdef CONFIG_PIXMAN
-        caps |= SVGA_CAP_8BIT_EMULATION;
-#endif
-#endif
-        if (!s->svga3d_capable) {
-            caps &= ~SVGA_CAP_3D;
-        }
-        if (s->svga3d_dx_capable) {
-            caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
-                    SVGA_CAP_GBOBJECTS | SVGA_CAP_DX;
-        } else if (vmsvga_vgpu9_modern_3d_capable(s)) {
-            /* Keep the legacy SVGA3D/D3D9 command set, but expose the
-             * guest-backed resource model and modern command-buffer
-             * transport independently from SVGA_CAP_DX. */
-            caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
-                    SVGA_CAP_GBOBJECTS;
-            caps &= ~SVGA_CAP_DX;
-        } else {
-            caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
-                      SVGA_CAP_GBOBJECTS | SVGA_CAP_DX);
-        }
-        if (s->svga3d_dx_capable ||
-            s->vgpu_generation == VMSVGA_VGPU_9) {
-            caps |= SVGA_CAP_CAP2_REGISTER;
-        } else {
-            caps &= ~SVGA_CAP_CAP2_REGISTER;
-        }
-        ret = caps;
+        ret = vmsvga_get_capabilities(s);
         VPRINT("SVGA_REG_CAPABILITIES register %u with the return of %u\n",
                s->index, ret);
         break;
@@ -10605,6 +10653,14 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
                 pci_address_space_io(dev));
     vmsvga3d_renderer_realize(&s->chip);
     vmsvga_vgpu_apply(&s->chip);
+#if defined(TARGET_I386) || defined(TARGET_X86_64)
+    if (!vmport_register_if_available(VMPORT_CMD_GET_SVGA_CAPABILITIES,
+                                      vmsvga_vmport_get_capabilities,
+                                      &s->chip)) {
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                          "VMPORT-CAPS registration unavailable");
+    }
+#endif
 
     /*
      * BAR1 is the SVGA framebuffer/GART aperture.  Keep the ordinary VRAM

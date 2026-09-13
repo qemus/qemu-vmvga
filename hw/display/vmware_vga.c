@@ -447,6 +447,11 @@ struct vmsvga_state_s {
     uint8_t *cb_fifo_scratch;
     uint32_t cb_fifo_scratch_capacity;
     bool cb_fifo_scratch_in_use;
+    /* Reusable parser storage for SVGA3D packet payloads.  This is host-only
+     * scratch state and is intentionally not migrated. */
+    uint8_t *d3d_payload_scratch;
+    uint32_t d3d_payload_scratch_capacity;
+    bool d3d_payload_scratch_in_use;
     uint32_t irq_mask;
     uint32_t irq_status;
     uint32_t display_id;
@@ -10405,6 +10410,9 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->cb_fifo_scratch = NULL;
     s->cb_fifo_scratch_capacity = 0;
     s->cb_fifo_scratch_in_use = false;
+    s->d3d_payload_scratch = NULL;
+    s->d3d_payload_scratch_capacity = 0;
+    s->d3d_payload_scratch_in_use = false;
     s->cursor = 0;
     s->cursor_x = 0;
     s->cursor_y = 0;
@@ -10615,6 +10623,9 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     g_clear_pointer(&s->chip.cb_fifo_scratch, g_free);
     s->chip.cb_fifo_scratch_capacity = 0;
     s->chip.cb_fifo_scratch_in_use = false;
+    g_clear_pointer(&s->chip.d3d_payload_scratch, g_free);
+    s->chip.d3d_payload_scratch_capacity = 0;
+    s->chip.d3d_payload_scratch_in_use = false;
     g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
 
     if (s->chip.debug) {

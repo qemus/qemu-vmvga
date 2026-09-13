@@ -78,6 +78,8 @@
 #define VMPORT_GUESTRPC_MAX_MESSAGE    (64 * 1024)
 #define VMPORT_GUESTRPC_TIMEOUT_US     (80 * G_USEC_PER_SEC)
 
+static const bool vmport_guestrpc_enable_vm3d_logging = true;
+
 typedef enum VMPortGuestRPCType {
     VMPORT_GUESTRPC_OPEN,
     VMPORT_GUESTRPC_SENDSIZE,
@@ -335,7 +337,6 @@ static bool vmport_guestrpc_debug_enabled(VMPortState *s)
 }
 
 static const bool vmport_guestrpc_trace_rpc = true;
-static const bool vmport_guestrpc_enable_vm3d_logging = true;
 
 static GString *vmport_guestrpc_format_line(const char *prefix,
                                              const uint8_t *message,
@@ -426,9 +427,16 @@ static void vmport_guestrpc_set_reply(VMPortGuestRPCChannel *channel,
 
 static const char *vmport_guestrpc_guestinfo_override(const char *key)
 {
-    if (vmport_guestrpc_enable_vm3d_logging &&
-        g_str_has_prefix(key, "guestinfo.loglevel.vm3d.")) {
-        return "9";
+    if (vmport_guestrpc_enable_vm3d_logging) {
+        if (!strcmp(key, "guestinfo.svga.wddm.miniportLogging") ||
+            !strcmp(key, "guestinfo.svga.wddm.usermodeLogging") ||
+            !strcmp(key, "guestinfo.svga.wddm.verboseTopologyLogging")) {
+            return "TRUE";
+        }
+
+        if (g_str_has_prefix(key, "guestinfo.loglevel.vm3d.")) {
+            return "9";
+        }
     }
 
     if (!strcmp(key, "guestinfo.svga.wddm.buildType")) {

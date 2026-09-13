@@ -6073,7 +6073,7 @@ bool vmsvga3d_dxvk_d3d11_set_render_targets(
     uint32_t uav_start_slot)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
-    VMSVGA3DDxvkD3D11OMSetRenderTargetsAndUAVs set_targets = NULL;
+    VMSVGA3DDxvkD3D11OMSetRenderTargets set_targets = NULL;
     void *render_targets[SVGA3D_MAX_RENDER_TARGETS] = { NULL };
     void *depth_stencil = NULL;
     uint32_t i;
@@ -6089,6 +6089,9 @@ bool vmsvga3d_dxvk_d3d11_set_render_targets(
             render_targets[i] = vmsvga3d_dxvk_d3d11_view_object(
                 dxvk, VMSVGA3D_DXVK_VIEW_RENDER_TARGET, cid,
                 render_target_ids[i]);
+            if (render_targets[i] == NULL) {
+                return false;
+            }
         }
     }
 
@@ -6096,18 +6099,22 @@ bool vmsvga3d_dxvk_d3d11_set_render_targets(
         depth_stencil = vmsvga3d_dxvk_d3d11_view_object(
             dxvk, VMSVGA3D_DXVK_VIEW_DEPTH_STENCIL, cid,
             depth_stencil_view_id);
+        if (depth_stencil == NULL) {
+            return false;
+        }
     }
 
     if (!vmsvga3d_dxvk_get_method(
             dxvk->d3d11_context,
-            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS_AND_UAVS,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_OM_SET_RENDER_TARGETS,
             &set_targets, sizeof(set_targets))) {
         return false;
     }
 
     set_targets(dxvk->d3d11_context, render_target_count, render_targets,
-                depth_stencil, uav_start_slot, 0, NULL, NULL);
+                depth_stencil);
 
+    (void)uav_start_slot;
     return true;
 #else
     (void)dxvk;

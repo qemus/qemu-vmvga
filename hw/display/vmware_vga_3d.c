@@ -359,6 +359,20 @@ static bool vmsvga3d_clear_readback_targets(
     struct vmsvga_state_s *s, uint32_t cid, SVGA3dClearFlag clear_flags);
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s);
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s);
+static void vmsvga3d_screen_target_write_tracking_reset_live(
+    struct vmsvga_state_s *s, bool valid);
+static void vmsvga3d_screen_target_write_tracking_invalidate_live(
+    struct vmsvga_state_s *s, uint32_t sid);
+static void vmsvga3d_screen_target_prepare_d3d9_draw_live(
+    struct vmsvga_state_s *s, uint32_t cid);
+static void vmsvga3d_screen_target_note_d3d9_draw_live(
+    struct vmsvga_state_s *s, uint32_t cid);
+static void vmsvga3d_screen_target_note_d3d9_clear_live(
+    struct vmsvga_state_s *s, uint32_t cid, const SVGA3dRect *rects,
+    uint32_t rect_count);
+static void vmsvga3d_screen_target_write_tracking_add_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dRect *rect);
 
 struct vmsvga3d_state_s {
     VMSVGA3DContext *contexts[SVGA3D_MAX_CONTEXT_IDS];
@@ -376,6 +390,10 @@ struct vmsvga3d_state_s {
     uint32_t screen_target_dirty_sid;
     uint32_t screen_target_dirty_count;
     SVGA3dRect screen_target_dirty_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    uint32_t screen_target_write_sid;
+    uint32_t screen_target_write_count;
+    SVGA3dRect screen_target_write_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    bool screen_target_write_tracking_valid;
     bool dx_context_ever_defined;
     uint64_t trace_vgpu9_present_seq;
     uint32_t trace_vgpu9_last_present_sid;
@@ -1822,6 +1840,7 @@ vmsvga3d_state_ensure(struct vmsvga_state_s *s)
             s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+            s->svga3d->screen_target_write_sid = SVGA3D_INVALID_ID;
             s->svga3d->trace_vgpu9_last_present_sid = SVGA3D_INVALID_ID;
         }
     }
@@ -1870,6 +1889,7 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s)
         s->svga3d->screen_target_dirty_count = 0;
         memset(s->svga3d->screen_target_dirty_rects, 0,
                sizeof(s->svga3d->screen_target_dirty_rects));
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
     s->svga3d_capable = false;
@@ -1931,6 +1951,7 @@ static void vmsvga3d_renderer_unrealize(struct vmsvga_state_s *s)
         s->svga3d->screen_target_dirty_count = 0;
         memset(s->svga3d->screen_target_dirty_rects, 0,
                sizeof(s->svga3d->screen_target_dirty_rects));
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
     s->svga3d_capable = false;
@@ -2511,6 +2532,9 @@ static void vmsvga3d_surface_install(
         vmsvga3d_surface_free(surface);
         return;
     }
+    if (old_surface != NULL && sid == state->active_screen_target_sid) {
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+    }
 
     state->surface_bytes -= old_bytes;
     if (old_surface != NULL) {
@@ -2755,6 +2779,9 @@ static void vmsvga3d_surface_destroy_live(struct vmsvga_state_s *s,
                           "reason=SCREEN_TARGET_PENDING sid=%u",
                           sid);
         return;
+    }
+    if (sid == state->active_screen_target_sid) {
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
     if (state->surface_bytes >= surface->storage_bytes) {
@@ -4511,11 +4538,13 @@ static bool vmsvga3d_handle_draw(struct vmsvga_state_s *s,
             if (vmsvga3d_state_draw_primitives(
                     s, body->cid, numDecls, decls, 1, &range,
                     context->num_vertex_divisors, context->vertex_divisors)) {
+                vmsvga3d_screen_target_prepare_d3d9_draw_live(s, body->cid);
                 if (vmsvga3d_d3d9_runtime_draw_primitives(
                         s, body->cid, numDecls, decls, 1, &range,
                         context->num_vertex_divisors,
                         context->vertex_divisors) ==
                     VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                    vmsvga3d_screen_target_note_d3d9_draw_live(s, body->cid);
                     if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
                         vmsvga3d_trace_vgpu9_render_target_write(
                             s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
@@ -4565,11 +4594,13 @@ static bool vmsvga3d_handle_draw_indexed(struct vmsvga_state_s *s,
             if (vmsvga3d_state_draw_primitives(
                     s, body->cid, numDecls, decls, 1, &range,
                     context->num_vertex_divisors, context->vertex_divisors)) {
+                vmsvga3d_screen_target_prepare_d3d9_draw_live(s, body->cid);
                 if (vmsvga3d_d3d9_runtime_draw_primitives(
                         s, body->cid, numDecls, decls, 1, &range,
                         context->num_vertex_divisors,
                         context->vertex_divisors) ==
                     VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                    vmsvga3d_screen_target_note_d3d9_draw_live(s, body->cid);
                     if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
                         vmsvga3d_trace_vgpu9_render_target_write(
                             s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
@@ -4639,10 +4670,12 @@ static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
     if (vmsvga3d_state_draw_primitives(
             s, body->cid, body->numVertexDecls, decls, body->numRanges, ranges,
             divisor_count, divisors)) {
+        vmsvga3d_screen_target_prepare_d3d9_draw_live(s, body->cid);
         if (vmsvga3d_d3d9_runtime_draw_primitives(
                 s, body->cid, body->numVertexDecls, decls, body->numRanges,
                 ranges, divisor_count, divisors) ==
             VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+            vmsvga3d_screen_target_note_d3d9_draw_live(s, body->cid);
             if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
                 vmsvga3d_trace_vgpu9_render_target_write(
                     s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_DRAW);
@@ -5094,6 +5127,8 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     }
 
     if (wrote && (body->clearFlag & SVGA3D_CLEAR_COLOR)) {
+        vmsvga3d_screen_target_note_d3d9_clear_live(
+            s, body->cid, rects, rect_count);
         if (trace_3d) {
             vmsvga3d_trace_vgpu9_render_target_write(
                 s, body->cid, VMSVGA3D_TRACE_VGPU9_WRITE_CLEAR);
@@ -5866,6 +5901,27 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, dst_surface);
     }
 
+    if (valid && dst_image != NULL && body->dest.face == 0 &&
+        body->dest.mipmap == 0) {
+        for (i = 0; i < box_count; i++) {
+            SVGA3dCopyBox clipped;
+            SVGA3dRect dirty;
+
+            vmsvga3d_clip_surface_copy_box(&boxes[i], &src_image->size,
+                                           &dst_image->size, &clipped);
+            if (clipped.z != 0 || clipped.d == 0 || clipped.w == 0 ||
+                clipped.h == 0) {
+                continue;
+            }
+            dirty.x = clipped.x;
+            dirty.y = clipped.y;
+            dirty.w = clipped.w;
+            dirty.h = clipped.h;
+            vmsvga3d_screen_target_write_tracking_add_live(
+                s, body->dest.sid, 0, &dirty);
+        }
+    }
+
     if (valid && dst_image != NULL && trace_3d) {
         bool full_copy = box_count == 1 && boxes[0].x == 0 && boxes[0].y == 0 &&
                          boxes[0].z == 0 &&
@@ -6218,6 +6274,11 @@ static bool vmsvga3d_handle_surface_stretchblt(struct vmsvga_state_s *s,
     if (valid && !d3d11_stretch &&
         accel != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
         vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, dst_surface);
+    }
+
+    if (valid) {
+        vmsvga3d_screen_target_write_tracking_invalidate_live(
+            s, body->dest.sid);
     }
 
     if (valid && !d3d11_stretch) {
@@ -7641,6 +7702,8 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
     }
 
     if (valid && box_count != 0 && body->transfer == SVGA3D_WRITE_HOST_VRAM) {
+        vmsvga3d_screen_target_write_tracking_invalidate_live(
+            s, body->host.sid);
         if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
             vmsvga3d_trace_vgpu9_surface_write(
                 s, body->host.sid, VMSVGA3D_TRACE_VGPU9_WRITE_DMA,
@@ -9850,6 +9913,347 @@ static void vmsvga3d_screen_target_merge_cheapest_pair(
     }
 }
 
+static bool vmsvga3d_screen_target_rect_intersection(
+    const SVGA3dRect *a, const SVGA3dRect *b, SVGA3dRect *intersection)
+{
+    uint64_t left;
+    uint64_t top;
+    uint64_t right;
+    uint64_t bottom;
+
+    if (a == NULL || b == NULL || intersection == NULL) {
+        return false;
+    }
+
+    left = MAX((uint64_t)a->x, (uint64_t)b->x);
+    top = MAX((uint64_t)a->y, (uint64_t)b->y);
+    right = MIN((uint64_t)a->x + a->w, (uint64_t)b->x + b->w);
+    bottom = MIN((uint64_t)a->y + a->h, (uint64_t)b->y + b->h);
+    if (right <= left || bottom <= top || left > UINT32_MAX ||
+        top > UINT32_MAX) {
+        return false;
+    }
+
+    intersection->x = (uint32_t)left;
+    intersection->y = (uint32_t)top;
+    intersection->w = (uint32_t)MIN(right - left, (uint64_t)UINT32_MAX);
+    intersection->h = (uint32_t)MIN(bottom - top, (uint64_t)UINT32_MAX);
+    return intersection->w != 0 && intersection->h != 0;
+}
+
+static bool vmsvga3d_screen_target_rect_is_full(
+    const VMSVGA3DSurface *surface, const SVGA3dRect *rect)
+{
+    return surface != NULL && rect != NULL && surface->mips != NULL &&
+           surface->mip_count != 0 && rect->x == 0 && rect->y == 0 &&
+           rect->w == surface->mips[0].size.width &&
+           rect->h == surface->mips[0].size.height;
+}
+
+static void vmsvga3d_screen_target_write_tracking_reset_live(
+    struct vmsvga_state_s *s, bool valid)
+{
+    struct vmsvga3d_state_s *state;
+
+    if (s == NULL || s->svga3d == NULL) {
+        return;
+    }
+
+    state = s->svga3d;
+    state->screen_target_write_sid =
+        valid ? state->active_screen_target_sid : SVGA3D_INVALID_ID;
+    state->screen_target_write_count = 0;
+    memset(state->screen_target_write_rects, 0,
+           sizeof(state->screen_target_write_rects));
+    state->screen_target_write_tracking_valid =
+        valid && state->active_screen_target_sid != SVGA3D_INVALID_ID;
+}
+
+static void vmsvga3d_screen_target_write_tracking_invalidate_live(
+    struct vmsvga_state_s *s, uint32_t sid)
+{
+    if (s == NULL || s->svga3d == NULL ||
+        sid != s->svga3d->active_screen_target_sid) {
+        return;
+    }
+
+    vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+}
+
+static void vmsvga3d_screen_target_write_merge_cheapest_pair(
+    struct vmsvga3d_state_s *state)
+{
+    uint32_t best_i = 0;
+    uint32_t best_j = 1;
+    uint64_t best_cost = UINT64_MAX;
+    uint64_t best_area = UINT64_MAX;
+    uint32_t i;
+    uint32_t j;
+
+    if (state == NULL || state->screen_target_write_count < 2) {
+        return;
+    }
+
+    for (i = 0; i < state->screen_target_write_count; i++) {
+        for (j = i + 1; j < state->screen_target_write_count; j++) {
+            const SVGA3dRect *a = &state->screen_target_write_rects[i];
+            const SVGA3dRect *b = &state->screen_target_write_rects[j];
+            SVGA3dRect merged = vmsvga3d_screen_target_rect_union(a, b);
+            uint64_t merged_area = vmsvga3d_screen_target_rect_area(&merged);
+            uint64_t combined_area = vmsvga3d_screen_target_area_add(
+                vmsvga3d_screen_target_rect_area(a),
+                vmsvga3d_screen_target_rect_area(b));
+            uint64_t cost = merged_area > combined_area
+                                ? merged_area - combined_area
+                                : 0;
+
+            if (cost < best_cost ||
+                (cost == best_cost && merged_area < best_area)) {
+                best_i = i;
+                best_j = j;
+                best_cost = cost;
+                best_area = merged_area;
+            }
+        }
+    }
+
+    state->screen_target_write_rects[best_i] =
+        vmsvga3d_screen_target_rect_union(
+            &state->screen_target_write_rects[best_i],
+            &state->screen_target_write_rects[best_j]);
+    state->screen_target_write_count--;
+    if (best_j != state->screen_target_write_count) {
+        state->screen_target_write_rects[best_j] =
+            state->screen_target_write_rects[state->screen_target_write_count];
+    }
+}
+
+static void vmsvga3d_screen_target_write_tracking_add_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dRect *rect)
+{
+    struct vmsvga3d_state_s *state;
+    VMSVGA3DSurface *surface;
+    SVGA3dRect dirty;
+    uint32_t i;
+
+    if (s == NULL || rect == NULL || s->svga3d == NULL) {
+        return;
+    }
+
+    state = s->svga3d;
+    if (!state->screen_target_write_tracking_valid ||
+        sid != state->active_screen_target_sid ||
+        sid != state->screen_target_write_sid || subresource != 0 ||
+        rect->w == 0 || rect->h == 0 || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return;
+    }
+
+    surface = state->surfaces[sid];
+    if (surface == NULL) {
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+        return;
+    }
+
+    dirty = *rect;
+    if (!vmsvga3d_screen_target_clip_rect(surface, &dirty)) {
+        return;
+    }
+
+retry_merge:
+    for (i = 0; i < state->screen_target_write_count; i++) {
+        SVGA3dRect merged;
+
+        if (vmsvga3d_screen_target_rect_contains(
+                &state->screen_target_write_rects[i], &dirty)) {
+            return;
+        }
+        if (vmsvga3d_screen_target_rect_contains(
+                &dirty, &state->screen_target_write_rects[i])) {
+            state->screen_target_write_count--;
+            if (i != state->screen_target_write_count) {
+                state->screen_target_write_rects[i] =
+                    state->screen_target_write_rects[
+                        state->screen_target_write_count];
+            }
+            goto retry_merge;
+        }
+
+        merged = vmsvga3d_screen_target_rect_union(
+            &dirty, &state->screen_target_write_rects[i]);
+        if (!vmsvga3d_screen_target_merge_is_efficient(
+                &dirty, &state->screen_target_write_rects[i], &merged)) {
+            continue;
+        }
+
+        dirty = merged;
+        state->screen_target_write_count--;
+        if (i != state->screen_target_write_count) {
+            state->screen_target_write_rects[i] =
+                state->screen_target_write_rects[
+                    state->screen_target_write_count];
+        }
+        goto retry_merge;
+    }
+
+    if (state->screen_target_write_count ==
+        VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS) {
+        vmsvga3d_screen_target_write_merge_cheapest_pair(state);
+        goto retry_merge;
+    }
+
+    state->screen_target_write_rects[state->screen_target_write_count++] = dirty;
+}
+
+static bool vmsvga3d_screen_target_context_targets_sid(
+    const VMSVGA3DContext *context, uint32_t sid)
+{
+    uint32_t type;
+
+    if (context == NULL || sid == SVGA3D_INVALID_ID) {
+        return false;
+    }
+
+    for (type = SVGA3D_RT_COLOR0; type <= SVGA3D_RT_COLOR3; type++) {
+        if (context->render_targets[type].sid == sid &&
+            context->render_targets[type].face == 0 &&
+            context->render_targets[type].mipmap == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void vmsvga3d_screen_target_prepare_d3d9_draw_live(
+    struct vmsvga_state_s *s, uint32_t cid)
+{
+    struct vmsvga3d_state_s *state;
+    VMSVGA3DContext *context;
+    VMSVGA3DSurface *surface;
+    uint32_t sid;
+
+    if (s == NULL || s->svga3d == NULL ||
+        !s->svga3d->screen_target_write_tracking_valid) {
+        return;
+    }
+
+    state = s->svga3d;
+    sid = state->active_screen_target_sid;
+    context = vmsvga3d_context(s, cid);
+    if (!vmsvga3d_screen_target_context_targets_sid(context, sid) ||
+        sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return;
+    }
+
+    surface = state->surfaces[sid];
+    if (surface != NULL && surface->dxvk_surface != NULL &&
+        vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        /* A D3D11 -> D3D9 handoff imports content that this legacy damage
+         * tracker did not observe.  Re-establish a full baseline first. */
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+    }
+}
+
+static void vmsvga3d_screen_target_note_d3d9_draw_live(
+    struct vmsvga_state_s *s, uint32_t cid)
+{
+    struct vmsvga3d_state_s *state;
+    VMSVGA3DContext *context;
+    VMSVGA3DSurface *surface;
+    SVGA3dRect dirty;
+    uint32_t sid;
+
+    if (s == NULL || s->svga3d == NULL ||
+        !s->svga3d->screen_target_write_tracking_valid) {
+        return;
+    }
+
+    state = s->svga3d;
+    sid = state->active_screen_target_sid;
+    context = vmsvga3d_context(s, cid);
+    if (!vmsvga3d_screen_target_context_targets_sid(context, sid) ||
+        sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return;
+    }
+
+    surface = state->surfaces[sid];
+    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+        return;
+    }
+
+    if (context->viewport_valid) {
+        dirty = context->viewport;
+    } else {
+        memset(&dirty, 0, sizeof(dirty));
+        dirty.w = surface->mips[0].size.width;
+        dirty.h = surface->mips[0].size.height;
+    }
+
+    if (!vmsvga3d_screen_target_clip_rect(surface, &dirty)) {
+        return;
+    }
+
+    if (context->render_state[SVGA3D_RS_SCISSORTESTENABLE].valid &&
+        context->render_state[SVGA3D_RS_SCISSORTESTENABLE].value != 0 &&
+        context->scissor_valid) {
+        SVGA3dRect clipped;
+
+        if (!vmsvga3d_screen_target_rect_intersection(
+                &dirty, &context->scissor, &clipped)) {
+            return;
+        }
+        dirty = clipped;
+    }
+
+    vmsvga3d_screen_target_write_tracking_add_live(s, sid, 0, &dirty);
+}
+
+static void vmsvga3d_screen_target_note_d3d9_clear_live(
+    struct vmsvga_state_s *s, uint32_t cid, const SVGA3dRect *rects,
+    uint32_t rect_count)
+{
+    struct vmsvga3d_state_s *state;
+    VMSVGA3DContext *context;
+    VMSVGA3DSurface *surface;
+    SVGA3dRect dirty;
+    uint32_t sid;
+    uint32_t i;
+
+    if (s == NULL || s->svga3d == NULL ||
+        !s->svga3d->screen_target_write_tracking_valid) {
+        return;
+    }
+
+    state = s->svga3d;
+    sid = state->active_screen_target_sid;
+    context = vmsvga3d_context(s, cid);
+    if (!vmsvga3d_screen_target_context_targets_sid(context, sid) ||
+        sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return;
+    }
+
+    surface = state->surfaces[sid];
+    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+        return;
+    }
+
+    if (rect_count == 0) {
+        memset(&dirty, 0, sizeof(dirty));
+        dirty.w = surface->mips[0].size.width;
+        dirty.h = surface->mips[0].size.height;
+        vmsvga3d_screen_target_write_tracking_add_live(s, sid, 0, &dirty);
+        return;
+    }
+
+    for (i = 0; i < rect_count; i++) {
+        vmsvga3d_screen_target_write_tracking_add_live(
+            s, sid, 0, &rects[i]);
+    }
+}
+
 static bool vmsvga3d_screen_target_mark_dirty_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dRect *rect, bool presentation)
@@ -10014,6 +10418,8 @@ static bool vmsvga3d_surface_changed_live(
         surface->screen_target_content_valid = true;
     }
 
+    vmsvga3d_screen_target_write_tracking_add_live(
+        s, sid, subresource, &rect);
     return vmsvga3d_screen_target_mark_dirty_live(
         s, sid, subresource, &rect, false);
 }
@@ -10057,6 +10463,8 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     uint32_t rect_count;
     uint32_t sid;
     uint32_t i;
+    bool full_refresh = false;
+    bool narrowed_by_write_damage = false;
     bool batch_readback = false;
     bool direct_screen_readback = false;
 
@@ -10112,6 +10520,26 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
              * vGPU10 ScreenTarget must be D3D11-resident. */
             if (d3d9_resident && d3d11_resident) {
                 return false;
+            }
+
+            full_refresh = rect_count == 1 &&
+                           vmsvga3d_screen_target_rect_is_full(
+                               surface, &rects[0]);
+            if (full_refresh && d3d9_resident && !d3d11_resident &&
+                state->screen_target_write_tracking_valid &&
+                state->screen_target_write_sid == sid &&
+                state->screen_target_write_count != 0) {
+                rect_count = state->screen_target_write_count;
+                memcpy(rects, state->screen_target_write_rects,
+                       rect_count * sizeof(rects[0]));
+                narrowed_by_write_damage = true;
+                if (vmsvga_trace_flight_enabled()) {
+                    fprintf(stderr,
+                            "VMVGA-SCREEN-TARGET phase=damage-narrow sid=%u "
+                            "full=%ux%u rects=%u\n",
+                            sid, surface->mips[0].size.width,
+                            surface->mips[0].size.height, rect_count);
+                }
             }
 
             if (desc->bytes_per_block == 4 &&
@@ -10191,6 +10619,15 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
             }
             return false;
         }
+    }
+
+    if (full_refresh || narrowed_by_write_damage) {
+        vmsvga3d_screen_target_write_tracking_reset_live(s, true);
+    } else {
+        /* A partial presentation may leave newer content outside the presented
+         * region.  Without rectangle subtraction, drop provenance and require
+         * the next full refresh to establish a new baseline. */
+        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
     state->screen_target_dirty_sid = SVGA3D_INVALID_ID;
@@ -10325,6 +10762,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             }
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+            vmsvga3d_screen_target_write_tracking_reset_live(s, false);
             /*
              * Do not destroy the currently visible Screen Object before a
              * redefine. vmsvga_screen_define() deliberately seeds its handoff
@@ -10361,6 +10799,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 if (s->svga3d != NULL) {
                     s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
                     s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+                    vmsvga3d_screen_target_write_tracking_reset_live(s, false);
                 }
                 (void)vmsvga_screen_destroy(s, body->stid);
             }
@@ -10400,6 +10839,9 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             }
             if (!vmsvga3d_d3d10_screen_target_bind_live(s, body->image.sid)) {
                 break;
+            }
+            if (body->image.sid != old_sid) {
+                vmsvga3d_screen_target_write_tracking_reset_live(s, false);
             }
             if (update_screen) {
                 SVGA3dRect rect = {0};

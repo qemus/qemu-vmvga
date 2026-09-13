@@ -3361,19 +3361,27 @@ bool vmsvga3d_dxvk_surface_materialize(
 
     primary_desc = &resource_plan->primary;
     if (primary_desc->resource_type == VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE) {
-        bool texture_valid = primary_desc->levels != 0 &&
-                             resource_plan->has_bounce &&
-                             resource_plan->bounce.valid &&
-                             resource_plan->bounce.resource_type ==
-                                 VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE &&
-                             resource_plan->bounce.levels == primary_desc->levels &&
-                             resource_plan->bounce.width == primary_desc->width &&
-                             resource_plan->bounce.height == primary_desc->height &&
-                             resource_plan->bounce.format == primary_desc->format &&
-                             vmsvga3d_dxvk_get_method(
-                                 dxvk->d3d9_device,
-                                 VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_TEXTURE,
-                                 &create_texture, sizeof(create_texture));
+        const uint32_t intz =
+            VMSVGA3D_D3D9_MAKE_FOURCC('I', 'N', 'T', 'Z');
+        bool direct_lock_texture =
+            resource_plan->stencil_as_texture && !resource_plan->has_bounce &&
+            primary_desc->format == intz &&
+            (primary_desc->usage & VMSVGA3D_DXVK_D3DUSAGE_DEPTHSTENCIL) != 0;
+        bool bounce_valid =
+            resource_plan->has_bounce && resource_plan->bounce.valid &&
+            resource_plan->bounce.resource_type ==
+                VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE &&
+            resource_plan->bounce.levels == primary_desc->levels &&
+            resource_plan->bounce.width == primary_desc->width &&
+            resource_plan->bounce.height == primary_desc->height &&
+            resource_plan->bounce.format == primary_desc->format;
+        bool texture_valid =
+            primary_desc->levels != 0 &&
+            (direct_lock_texture || bounce_valid) &&
+            vmsvga3d_dxvk_get_method(
+                dxvk->d3d9_device,
+                VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_TEXTURE,
+                &create_texture, sizeof(create_texture));
 
         if (texture_valid) {
             result = create_texture(
@@ -3405,7 +3413,7 @@ bool vmsvga3d_dxvk_surface_materialize(
             }
         }
 
-        if (primary != NULL) {
+        if (primary != NULL && resource_plan->has_bounce) {
             result = create_texture(
                 dxvk->d3d9_device, resource_plan->bounce.width,
                 resource_plan->bounce.height, resource_plan->bounce.levels,
@@ -3445,7 +3453,7 @@ bool vmsvga3d_dxvk_surface_materialize(
             surface->d3d9_has_bounce = false;
         } else {
             surface->d3d9_resource_type = VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE;
-            surface->d3d9_has_bounce = true;
+            surface->d3d9_has_bounce = bounce != NULL;
         }
     } else if (primary_desc->resource_type ==
                VMSVGA3D_DXVK_D3D9_RTYPE_CUBETEXTURE) {
@@ -10360,13 +10368,60 @@ bool vmsvga3d_dxvk_surface_upload_level(
     uint32_t z;
     int32_t result;
     bool success = false;
+    const uint32_t intz =
+        VMSVGA3D_D3D9_MAKE_FOURCC('I', 'N', 'T', 'Z');
+    bool direct_lock_texture;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
-        !surface->d3d9_resident || !surface->d3d9_has_bounce ||
-        surface->d3d9_bounce == NULL || surface->d3d9_resource == NULL ||
+        !surface->d3d9_resident || surface->d3d9_resource == NULL ||
         data == NULL || row_bytes == 0 || rows == 0 || depth == 0 ||
         slice_bytes < row_bytes || slice_bytes < row_bytes * (uint64_t)rows) {
         return false;
+    }
+
+    direct_lock_texture =
+        surface->d3d9_resource_type ==
+            VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+        !surface->d3d9_has_bounce && surface->d3d9_bounce == NULL &&
+        surface->d3d9_format == intz &&
+        (surface->d3d9_usage & VMSVGA3D_DXVK_D3DUSAGE_DEPTHSTENCIL) != 0;
+
+    if (!direct_lock_texture &&
+        (!surface->d3d9_has_bounce || surface->d3d9_bounce == NULL)) {
+        return false;
+    }
+
+    if (direct_lock_texture) {
+        if (depth != 1 ||
+            !vmsvga3d_dxvk_surface_level_acquire(surface, false, level,
+                                                 &source_surface) ||
+            !vmsvga3d_dxvk_get_method(
+                source_surface, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_LOCK_RECT,
+                &lock_rect, sizeof(lock_rect)) ||
+            !vmsvga3d_dxvk_get_method(
+                source_surface, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_UNLOCK_RECT,
+                &unlock_rect, sizeof(unlock_rect))) {
+            goto out;
+        }
+
+        result = lock_rect(source_surface, &locked, NULL, 0);
+        if (!vmsvga3d_dxvk_succeeded(result) || locked.bits == NULL ||
+            locked.pitch < 0 || (uint32_t)locked.pitch < row_bytes) {
+            if (vmsvga3d_dxvk_succeeded(result)) {
+                unlock_rect(source_surface);
+            }
+            goto out;
+        }
+
+        destination = locked.bits;
+        for (y = 0; y < rows; y++) {
+            memcpy(destination + (size_t)y * (uint32_t)locked.pitch,
+                   source + (size_t)y * row_bytes, row_bytes);
+        }
+
+        result = unlock_rect(source_surface);
+        success = vmsvga3d_dxvk_succeeded(result);
+        goto out;
     }
 
     if (surface->d3d9_resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE) {

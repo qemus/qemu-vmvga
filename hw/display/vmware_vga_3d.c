@@ -409,6 +409,9 @@ static void vmsvga3d_screen_target_note_d3d9_clear_live(
 static void vmsvga3d_screen_target_write_tracking_add_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dRect *rect);
+static bool vmsvga3d_surface_changed_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    const SVGA3dBox *box);
 
 struct vmsvga3d_state_s {
     VMSVGA3DContext *contexts[SVGA3D_MAX_CONTEXT_IDS];
@@ -427,6 +430,7 @@ struct vmsvga3d_state_s {
     uint32_t screen_target_dirty_sid;
     uint32_t screen_target_dirty_count;
     SVGA3dRect screen_target_dirty_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
+    bool screen_target_full_present_pending;
     uint32_t screen_target_write_sid;
     uint32_t screen_target_write_count;
     SVGA3dRect screen_target_write_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
@@ -2000,6 +2004,7 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s)
         s->svga3d->screen_target_dirty_count = 0;
         memset(s->svga3d->screen_target_dirty_rects, 0,
                sizeof(s->svga3d->screen_target_dirty_rects));
+        s->svga3d->screen_target_full_present_pending = false;
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
@@ -2063,6 +2068,7 @@ static void vmsvga3d_renderer_unrealize(struct vmsvga_state_s *s)
         s->svga3d->screen_target_dirty_count = 0;
         memset(s->svga3d->screen_target_dirty_rects, 0,
                sizeof(s->svga3d->screen_target_dirty_rects));
+        s->svga3d->screen_target_full_present_pending = false;
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
@@ -6029,7 +6035,7 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         body->dest.mipmap == 0) {
         for (i = 0; i < box_count; i++) {
             SVGA3dCopyBox clipped;
-            SVGA3dRect dirty;
+            SVGA3dBox dirty = {0};
 
             vmsvga3d_clip_surface_copy_box(&boxes[i], &src_image->size,
                                            &dst_image->size, &clipped);
@@ -6039,9 +6045,11 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
             }
             dirty.x = clipped.x;
             dirty.y = clipped.y;
+            dirty.z = clipped.z;
             dirty.w = clipped.w;
             dirty.h = clipped.h;
-            vmsvga3d_screen_target_write_tracking_add_live(
+            dirty.d = clipped.d;
+            (void)vmsvga3d_surface_changed_live(
                 s, body->dest.sid, 0, &dirty);
         }
     }
@@ -6398,6 +6406,12 @@ static bool vmsvga3d_handle_surface_stretchblt(struct vmsvga_state_s *s,
     if (valid && !d3d11_stretch &&
         accel != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
         vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, dst_surface);
+    }
+
+    if (valid && !d3d11_stretch && body->dest.face == 0 &&
+        body->dest.mipmap == 0) {
+        (void)vmsvga3d_surface_changed_live(
+            s, body->dest.sid, 0, &body->boxDest);
     }
 
     if (valid) {
@@ -8036,6 +8050,20 @@ static bool vmsvga3d_handle_surface_dma(struct vmsvga_state_s *s,
     }
 
     if (valid && box_count != 0 && body->transfer == SVGA3D_WRITE_HOST_VRAM) {
+        if (body->host.face == 0 && body->host.mipmap == 0) {
+            for (i = 0; i < box_count; i++) {
+                SVGA3dBox dirty = {0};
+
+                dirty.x = boxes[i].x;
+                dirty.y = boxes[i].y;
+                dirty.z = boxes[i].z;
+                dirty.w = boxes[i].w;
+                dirty.h = boxes[i].h;
+                dirty.d = boxes[i].d;
+                (void)vmsvga3d_surface_changed_live(
+                    s, body->host.sid, 0, &dirty);
+            }
+        }
         vmsvga3d_screen_target_write_tracking_invalidate_live(
             s, body->host.sid);
         if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
@@ -8087,9 +8115,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_bind_entry(
 static bool vmsvga3d_screen_target_mark_dirty_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dRect *rect, bool presentation);
-static bool vmsvga3d_surface_changed_live(
-    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
-    const SVGA3dBox *box);
 static bool vmsvga3d_surface_presented_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dBox *box);
@@ -10522,99 +10547,119 @@ static void vmsvga3d_screen_target_prepare_d3d9_draw_live(
 static void vmsvga3d_screen_target_note_d3d9_draw_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
-    struct vmsvga3d_state_s *state;
     VMSVGA3DContext *context;
-    VMSVGA3DSurface *surface;
-    SVGA3dRect dirty;
-    uint32_t sid;
+    uint32_t type;
 
-    if (s == NULL || s->svga3d == NULL ||
-        !s->svga3d->screen_target_write_tracking_valid) {
+    if (s == NULL || s->svga3d == NULL) {
         return;
     }
 
-    state = s->svga3d;
-    sid = state->active_screen_target_sid;
     context = vmsvga3d_context(s, cid);
-    if (!vmsvga3d_screen_target_context_targets_sid(context, sid) ||
-        sid >= SVGA3D_MAX_SURFACE_IDS) {
+    if (context == NULL) {
         return;
     }
 
-    surface = state->surfaces[sid];
-    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
-        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
-        return;
-    }
+    for (type = SVGA3D_RT_COLOR0; type <= SVGA3D_RT_COLOR3; type++) {
+        const SVGA3dSurfaceImageId *target = &context->render_targets[type];
+        VMSVGA3DSurface *surface;
+        SVGA3dRect dirty;
+        SVGA3dBox box;
 
-    if (context->viewport_valid) {
-        dirty = context->viewport;
-    } else {
-        memset(&dirty, 0, sizeof(dirty));
-        dirty.w = surface->mips[0].size.width;
-        dirty.h = surface->mips[0].size.height;
-    }
-
-    if (!vmsvga3d_screen_target_clip_rect(surface, &dirty)) {
-        return;
-    }
-
-    if (context->render_state[SVGA3D_RS_SCISSORTESTENABLE].valid &&
-        context->render_state[SVGA3D_RS_SCISSORTESTENABLE].value != 0 &&
-        context->scissor_valid) {
-        SVGA3dRect clipped;
-
-        if (!vmsvga3d_screen_target_rect_intersection(
-                &dirty, &context->scissor, &clipped)) {
-            return;
+        if (target->sid >= SVGA3D_MAX_SURFACE_IDS || target->face != 0 ||
+            target->mipmap != 0) {
+            continue;
         }
-        dirty = clipped;
-    }
 
-    vmsvga3d_screen_target_write_tracking_add_live(s, sid, 0, &dirty);
+        surface = s->svga3d->surfaces[target->sid];
+        if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
+            continue;
+        }
+
+        if (context->viewport_valid) {
+            dirty = context->viewport;
+        } else {
+            memset(&dirty, 0, sizeof(dirty));
+            dirty.w = surface->mips[0].size.width;
+            dirty.h = surface->mips[0].size.height;
+        }
+
+        if (!vmsvga3d_screen_target_clip_rect(surface, &dirty)) {
+            continue;
+        }
+
+        if (context->render_state[SVGA3D_RS_SCISSORTESTENABLE].valid &&
+            context->render_state[SVGA3D_RS_SCISSORTESTENABLE].value != 0 &&
+            context->scissor_valid) {
+            SVGA3dRect clipped;
+
+            if (!vmsvga3d_screen_target_rect_intersection(
+                    &dirty, &context->scissor, &clipped)) {
+                continue;
+            }
+            dirty = clipped;
+        }
+
+        memset(&box, 0, sizeof(box));
+        box.x = dirty.x;
+        box.y = dirty.y;
+        box.w = dirty.w;
+        box.h = dirty.h;
+        box.d = 1;
+        (void)vmsvga3d_surface_changed_live(s, target->sid, 0, &box);
+    }
 }
 
 static void vmsvga3d_screen_target_note_d3d9_clear_live(
     struct vmsvga_state_s *s, uint32_t cid, const SVGA3dRect *rects,
     uint32_t rect_count)
 {
-    struct vmsvga3d_state_s *state;
     VMSVGA3DContext *context;
-    VMSVGA3DSurface *surface;
-    SVGA3dRect dirty;
-    uint32_t sid;
-    uint32_t i;
+    uint32_t type;
 
-    if (s == NULL || s->svga3d == NULL ||
-        !s->svga3d->screen_target_write_tracking_valid) {
+    if (s == NULL || s->svga3d == NULL) {
         return;
     }
 
-    state = s->svga3d;
-    sid = state->active_screen_target_sid;
     context = vmsvga3d_context(s, cid);
-    if (!vmsvga3d_screen_target_context_targets_sid(context, sid) ||
-        sid >= SVGA3D_MAX_SURFACE_IDS) {
+    if (context == NULL) {
         return;
     }
 
-    surface = state->surfaces[sid];
-    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
-        vmsvga3d_screen_target_write_tracking_reset_live(s, false);
-        return;
-    }
+    for (type = SVGA3D_RT_COLOR0; type <= SVGA3D_RT_COLOR3; type++) {
+        const SVGA3dSurfaceImageId *target = &context->render_targets[type];
+        VMSVGA3DSurface *surface;
+        uint32_t i;
 
-    if (rect_count == 0) {
-        memset(&dirty, 0, sizeof(dirty));
-        dirty.w = surface->mips[0].size.width;
-        dirty.h = surface->mips[0].size.height;
-        vmsvga3d_screen_target_write_tracking_add_live(s, sid, 0, &dirty);
-        return;
-    }
+        if (target->sid >= SVGA3D_MAX_SURFACE_IDS || target->face != 0 ||
+            target->mipmap != 0) {
+            continue;
+        }
 
-    for (i = 0; i < rect_count; i++) {
-        vmsvga3d_screen_target_write_tracking_add_live(
-            s, sid, 0, &rects[i]);
+        surface = s->svga3d->surfaces[target->sid];
+        if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
+            continue;
+        }
+
+        if (rect_count == 0) {
+            SVGA3dBox box = {0};
+
+            box.w = surface->mips[0].size.width;
+            box.h = surface->mips[0].size.height;
+            box.d = 1;
+            (void)vmsvga3d_surface_changed_live(s, target->sid, 0, &box);
+            continue;
+        }
+
+        for (i = 0; i < rect_count; i++) {
+            SVGA3dBox box = {0};
+
+            box.x = rects[i].x;
+            box.y = rects[i].y;
+            box.w = rects[i].w;
+            box.h = rects[i].h;
+            box.d = 1;
+            (void)vmsvga3d_surface_changed_live(s, target->sid, 0, &box);
+        }
     }
 }
 
@@ -10665,6 +10710,24 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
             return true;
         }
 
+        /* A rapid valid-to-valid target flip may supersede queued damage
+         * before the display refresh consumes it.  Carry that presentation
+         * obligation to the newest target.  The next guest presentation
+         * boundary is authoritative, so promote it to a complete target
+         * refresh rather than exposing a mixture of frames. */
+        if (state->screen_target_full_present_pending) {
+            dirty.x = 0;
+            dirty.y = 0;
+            dirty.w = width;
+            dirty.h = height;
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-TARGET phase=flip-full-present "
+                        "sid=%u trigger=%u,%u/%ux%u\n",
+                        sid, rect->x, rect->y, rect->w, rect->h);
+            }
+        }
+
         if (state->screen_target_dirty_count == 0) {
             state->screen_target_dirty_sid = sid;
         } else if (state->screen_target_dirty_sid != sid) {
@@ -10693,11 +10756,13 @@ static bool vmsvga3d_screen_target_mark_dirty_live(
             if (state->screen_target_dirty_count == 1 &&
                 vmsvga3d_screen_target_rect_contains(
                     &state->screen_target_dirty_rects[0], &dirty)) {
+                state->screen_target_full_present_pending = false;
                 return true;
             }
 
             state->screen_target_dirty_count = 1;
             state->screen_target_dirty_rects[0] = dirty;
+            state->screen_target_full_present_pending = false;
             return true;
         }
     }
@@ -11045,12 +11110,21 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
            sizeof(state->screen_target_dirty_rects));
 
     if (s->screen_frontend_deferred) {
-        s->screen_frontend_deferred = false;
-        if (vmsvga_trace_flight_enabled()) {
-            fprintf(stderr,
-                    "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
-                    "size=%ux%u rects=%u\n",
-                    sid, s->screen_width, s->screen_height, rect_count);
+        if (!full_refresh) {
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-HANDOFF phase=frontend-wait sid=%u "
+                        "reason=partial-presentation rects=%u\n",
+                        sid, rect_count);
+            }
+        } else {
+            s->screen_frontend_deferred = false;
+            if (vmsvga_trace_flight_enabled()) {
+                fprintf(stderr,
+                        "VMVGA-SCREEN-HANDOFF phase=frontend-ready sid=%u "
+                        "size=%ux%u rects=%u\n",
+                        sid, s->screen_width, s->screen_height, rect_count);
+            }
         }
     }
 
@@ -11181,6 +11255,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             }
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+            s->svga3d->screen_target_full_present_pending = false;
             vmsvga3d_screen_target_write_tracking_reset_live(s, false);
             /*
              * Do not destroy the currently visible Screen Object before a
@@ -11218,6 +11293,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 if (s->svga3d != NULL) {
                     s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
                     s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+                    s->svga3d->screen_target_full_present_pending = false;
                     vmsvga3d_screen_target_write_tracking_reset_live(s, false);
                 }
                 (void)vmsvga_screen_destroy(s, body->stid);
@@ -11230,6 +11306,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             const SVGA3dCmdBindGBScreenTarget *body = payload;
             SVGAOTableScreenTargetEntry entry;
             uint32_t old_sid;
+            uint32_t old_active_sid;
             bool update_screen = false;
 
             if (body->stid != VMSVGA_SCREEN_V1_ID || body->image.face != 0 ||
@@ -11256,21 +11333,26 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                     break;
                 }
             }
+            old_active_sid = s->svga3d->active_screen_target_sid;
             if (!vmsvga3d_d3d10_screen_target_bind_live(s, body->image.sid)) {
                 break;
             }
             if (body->image.sid != old_sid) {
                 vmsvga3d_screen_target_write_tracking_reset_live(s, false);
             }
-            if (update_screen) {
+            if (update_screen &&
+                !(s->screen_frontend_deferred &&
+                  old_active_sid == SVGA3D_INVALID_ID)) {
                 SVGA3dRect rect = {0};
 
                 rect.w = le32_to_cpu(entry.width);
                 rect.h = le32_to_cpu(entry.height);
-                /* Binding a new surface is itself a flip.  Treat it as a
-                 * presentation boundary outside deferred takeover; the bind
-                 * path clears content-valid while deferred, so an empty new
-                 * target still cannot become visible prematurely.  Unlike
+                /* A valid-to-valid BIND is itself a flip and therefore a
+                 * presentation boundary.  Content validity remains owned by
+                 * actual writers, so an untouched destination is still gated
+                 * by screen_target_mark_dirty_live().  During initial deferred
+                 * takeover, selecting the first target is not sufficient: wait
+                 * for UPDATE/PRESENTBLT after the target becomes active.  Unlike
                  * explicit UPDATE, VBox does not require the Surface OTable
                  * entry to have a valid MOB here. */
                 (void)vmsvga3d_screen_target_mark_dirty_live(

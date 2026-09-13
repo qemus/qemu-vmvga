@@ -136,6 +136,15 @@ typedef struct vmsvga3d_query_s {
     bool defined;
 } VMSVGA3DQuery;
 
+#define VMSVGA3D_LEGACY_RS_DIRTY_WORDS \
+    ((SVGA3D_RS_MAX + 63u) / 64u)
+#define VMSVGA3D_LEGACY_FLOAT_CONST_DIRTY_WORDS \
+    ((SVGA3D_CONSTREG_MAX + 63u) / 64u)
+#define VMSVGA3D_LEGACY_INT_CONST_DIRTY_WORDS \
+    ((SVGA3D_CONSTINTREG_MAX + 63u) / 64u)
+#define VMSVGA3D_LEGACY_BOOL_CONST_DIRTY_WORDS \
+    ((SVGA3D_CONSTBOOLREG_MAX + 63u) / 64u)
+
 typedef struct vmsvga3d_context_s {
     uint32_t cid;
     SVGA3dSurfaceImageId render_targets[SVGA3D_RT_MAX];
@@ -160,6 +169,24 @@ typedef struct vmsvga3d_context_s {
     VMSVGA3DShaderConstant shader_int[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTINTREG_MAX];
     VMSVGA3DShaderConstant shader_bool[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTBOOLREG_MAX];
     VMSVGA3DQuery occlusion;
+    uint32_t legacy_target_dirty;
+    uint64_t legacy_transform_dirty;
+    uint64_t legacy_render_state_dirty[VMSVGA3D_LEGACY_RS_DIRTY_WORDS];
+    uint64_t legacy_texture_state_dirty[VMSVGA3D_MAX_SAMPLERS];
+    uint32_t legacy_material_dirty;
+    uint32_t legacy_light_data_dirty;
+    uint32_t legacy_light_enable_dirty;
+    uint32_t legacy_clip_plane_dirty;
+    uint32_t legacy_shader_dirty;
+    uint64_t legacy_shader_float_dirty[SVGA3D_NUM_SHADERTYPE_PREDX]
+                                      [VMSVGA3D_LEGACY_FLOAT_CONST_DIRTY_WORDS];
+    uint64_t legacy_shader_int_dirty[SVGA3D_NUM_SHADERTYPE_PREDX]
+                                    [VMSVGA3D_LEGACY_INT_CONST_DIRTY_WORDS];
+    uint64_t legacy_shader_bool_dirty[SVGA3D_NUM_SHADERTYPE_PREDX]
+                                     [VMSVGA3D_LEGACY_BOOL_CONST_DIRTY_WORDS];
+    bool legacy_viewport_dirty;
+    bool legacy_scissor_dirty;
+    bool legacy_full_replay;
     bool viewport_valid;
     bool scissor_valid;
     bool z_range_valid;
@@ -394,6 +421,7 @@ struct vmsvga3d_state_s {
     SVGAMobId gart_mobid;
     uint32_t gart_page_count;
     bool gart_enabled;
+    uint32_t active_legacy_context_id;
     uint32_t active_dx_context_id;
     uint32_t active_screen_target_sid;
     uint32_t screen_target_dirty_sid;
@@ -537,12 +565,18 @@ static void vmsvga3d_surface_clear_legacy_bindings(
 
             if (binding->valid && binding->value == sid) {
                 binding->value = SVGA3D_INVALID_ID;
+                context->legacy_texture_state_dirty[i] |=
+                    UINT64_C(1) << SVGA3D_TS_BIND_TEXTURE;
             }
         }
 
         for (i = 0; i < SVGA3D_RT_MAX; i++) {
             if (context->render_targets[i].sid == sid) {
                 context->render_targets[i].sid = SVGA3D_INVALID_ID;
+                context->legacy_target_dirty |= UINT32_C(1) << i;
+                if (i >= SVGA3D_RT_COLOR0 && i <= SVGA3D_RT_COLOR3) {
+                    context->legacy_viewport_dirty = true;
+                }
             }
         }
     }
@@ -1910,6 +1944,7 @@ vmsvga3d_state_ensure(struct vmsvga_state_s *s)
         s->svga3d = g_try_new0(struct vmsvga3d_state_s, 1);
         if (s->svga3d != NULL) {
             s->svga3d->gart_mobid = SVGA3D_INVALID_ID;
+            s->svga3d->active_legacy_context_id = SVGA3D_INVALID_ID;
             s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
@@ -1958,6 +1993,7 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s)
     vmsvga3d_gb_query_cancel_all(s, "renderer-realize");
 
     if (s->svga3d != NULL) {
+        s->svga3d->active_legacy_context_id = SVGA3D_INVALID_ID;
         s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
         s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
         s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
@@ -2020,6 +2056,7 @@ static void vmsvga3d_renderer_unrealize(struct vmsvga_state_s *s)
     vmsvga3d_gb_query_cancel_all(s, "renderer-unrealize");
 
     if (s->svga3d != NULL) {
+        s->svga3d->active_legacy_context_id = SVGA3D_INVALID_ID;
         s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
         s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
         s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
@@ -9605,7 +9642,7 @@ static bool vmsvga3d_gb_zero_surface_live(struct vmsvga_state_s *s,
      * replacement, so dropping both native copies leaves the zeroed CPU shadow
      * as an unambiguous authoritative representation. */
     if (d3d9_resident && d3d11_resident) {
-        vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+        vmsvga3d_legacy_surface_evict(s, surface);
         d3d9_resident = false;
         d3d11_resident = false;
     }
@@ -9634,7 +9671,7 @@ static bool vmsvga3d_gb_zero_surface_live(struct vmsvga_state_s *s,
                 /* The CPU shadow is complete, so eviction is a correct
                  * fallback for D3D9 resource types that cannot be updated in
                  * place (for example a depth/stencil surface). */
-                vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+                vmsvga3d_legacy_surface_evict(s, surface);
                 d3d9_resident = false;
                 d3d11_resident = false;
                 VMVGA_TRACE_LOCAL(
@@ -9655,7 +9692,7 @@ static bool vmsvga3d_gb_zero_surface_live(struct vmsvga_state_s *s,
             if (!vmsvga3d_dxvk_d3d11_update_subresource(
                     s->dxvk, surface->dxvk_surface, subresource, &native_box,
                     image->data, image->pitch, image->plane_size)) {
-                vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+                vmsvga3d_legacy_surface_evict(s, surface);
                 d3d11_resident = false;
                 VMVGA_TRACE_LOCAL(
                     VMVGA_TRACE_3D,
@@ -9664,7 +9701,7 @@ static bool vmsvga3d_gb_zero_surface_live(struct vmsvga_state_s *s,
             }
         } else if (d3d11_resident) {
             /* D3D11 UpdateSubresource cannot update multisampled resources. */
-            vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+            vmsvga3d_legacy_surface_evict(s, surface);
             d3d11_resident = false;
         }
 

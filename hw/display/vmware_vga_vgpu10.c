@@ -7676,7 +7676,7 @@ static bool vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(
         }
     }
 
-    vmsvga3d_dxvk_surface_evict(surface->dxvk_surface);
+    vmsvga3d_legacy_surface_evict(s, surface);
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "COHERENCE op=handoff sid=%u from=d3d9 to=d3d11 subresources=%u result=OK",
@@ -10643,7 +10643,7 @@ static bool vmsvga3d_d3d10_present_d3d9_cpu_shadow_live(
     /* The full destination shadow now contains the presented image.  Drop the
      * stale D3D11 copy so the following READBACK_GB_SURFACE can use the CPU
      * shadow directly instead of synchronizing GPU -> CPU a second time. */
-    vmsvga3d_dxvk_surface_evict(destination->dxvk_surface);
+    vmsvga3d_legacy_surface_evict(s, destination);
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,

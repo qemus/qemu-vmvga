@@ -442,6 +442,11 @@ struct vmsvga_state_s {
     uint32_t fifo_max;
     uint32_t fifo_next;
     uint32_t fifo_stop;
+    /* Reusable private FIFO image for register command buffers.  This is
+     * host-only scratch state and is intentionally not migrated. */
+    uint8_t *cb_fifo_scratch;
+    uint32_t cb_fifo_scratch_capacity;
+    bool cb_fifo_scratch_in_use;
     uint32_t irq_mask;
     uint32_t irq_status;
     uint32_t display_id;
@@ -7175,6 +7180,7 @@ static SVGACBStatus vmsvga_command_buffer_process(
     uint32_t previous_stop;
     uint8_t *temp_bytes;
     uint32_t *temp_fifo;
+    bool temp_is_scratch = false;
     SVGACBStatus status = SVGA_CB_STATUS_COMMAND_ERROR;
 
     if (error_offset == NULL || s == NULL ||
@@ -7212,12 +7218,38 @@ static SVGACBStatus vmsvga_command_buffer_process(
     fifo_max = fifo_min + ring_bytes;
     fifo_next = fifo_min + size;
 
-    temp_bytes = g_try_malloc0(fifo_max);
-    if (temp_bytes == NULL) {
-        return SVGA_CB_STATUS_QUEUE_FULL;
+    /*
+     * Command buffers are extremely frequent and usually small.  Keep one
+     * private FIFO image around instead of allocating and freeing it for every
+     * submission.  Preserve re-entrant safety by falling back to a temporary
+     * allocation if command-buffer processing is ever nested.
+     */
+    if (!s->cb_fifo_scratch_in_use) {
+        if (s->cb_fifo_scratch_capacity < fifo_max) {
+            uint32_t new_capacity = QEMU_ALIGN_UP(fifo_max, 64u * 1024u);
+            uint8_t *new_scratch =
+                g_try_realloc(s->cb_fifo_scratch, new_capacity);
+
+            if (new_scratch == NULL) {
+                return SVGA_CB_STATUS_QUEUE_FULL;
+            }
+            s->cb_fifo_scratch = new_scratch;
+            s->cb_fifo_scratch_capacity = new_capacity;
+        }
+        temp_bytes = s->cb_fifo_scratch;
+        s->cb_fifo_scratch_in_use = true;
+        temp_is_scratch = true;
+    } else {
+        temp_bytes = g_try_malloc(fifo_max);
+        if (temp_bytes == NULL) {
+            return SVGA_CB_STATUS_QUEUE_FULL;
+        }
     }
     temp_fifo = (uint32_t *)temp_bytes;
 
+    /* Only the register block and submitted command bytes are observable by
+     * the parser.  Do not clear the unused ring tail on every submission. */
+    memset(temp_bytes, 0, fifo_min);
     if (saved_fifo != NULL && saved_fifo_size >= fifo_min) {
         memcpy(temp_bytes, saved_fifo, fifo_min);
     }
@@ -7277,7 +7309,11 @@ restore:
         saved_fifo[SVGA_FIFO_FENCE] = cpu_to_le32(s->fence);
     }
 
-    g_free(temp_bytes);
+    if (temp_is_scratch) {
+        s->cb_fifo_scratch_in_use = false;
+    } else {
+        g_free(temp_bytes);
+    }
     *error_offset = consumed;
     return status;
 }
@@ -8946,7 +8982,9 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
                value);
         break;
     }
-  case SVGA_REG_SYNC:
+  case SVGA_REG_SYNC: {
+      bool sync_scheduled = false;
+
       if (vmsvga_trace_flight_enabled()) {
           uint32_t fifo_busy =
               s->fifo != NULL && s->config &&
@@ -8979,18 +9017,31 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           s->trace_activity_seq++;
       }
       if (s->enable && s->config) {
-          s->sync = 1;
-          qemu_bh_schedule(s->fifo_bh);
+          if (vmsvga_fifo_pending(s)) {
+              s->sync = 1;
+              qemu_bh_schedule(s->fifo_bh);
+              sync_scheduled = true;
+          } else {
+              /*
+               * An empty FIFO is already fully synchronized.  Avoid waking a
+               * bottom half which can only rediscover STOP == NEXT and clear
+               * BUSY again.  A legacy SVGA_REG_BUSY read observes the same
+               * completed state (zero) as it would after that empty pass.
+               */
+              s->sync = 0;
+              vmsvga_fifo_set_busy(s, false);
+          }
       }
       if (vmsvga_trace_flight_enabled()) {
           fprintf(stderr,
                   "VMVGA-SYNC result sync-after=%u scheduled=%u "
                   "mask=0x%08x status=0x%08x\n",
-                  s->sync, s->enable && s->config, s->irq_mask, s->irq_status);
+                  s->sync, sync_scheduled, s->irq_mask, s->irq_status);
       }
       /* vmware_value_write already traces this register when enabled. */
       VPRINT("SVGA_REG_SYNC register %u with the value of %u\n", s->index, value);
       break;
+  }
   case SVGA_REG_BUSY:
       VPRINT("SVGA_REG_BUSY register %u with the value of %u\n", s->index, value);
       break;
@@ -10351,6 +10402,9 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->traces = 0;
     s->guest = 0;
     s->sync = 0;
+    s->cb_fifo_scratch = NULL;
+    s->cb_fifo_scratch_capacity = 0;
+    s->cb_fifo_scratch_in_use = false;
     s->cursor = 0;
     s->cursor_x = 0;
     s->cursor_y = 0;
@@ -10558,6 +10612,9 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     vmsvga_cursor_source_clear(&s->chip);
     vmsvga_objects_clear(&s->chip);
 
+    g_clear_pointer(&s->chip.cb_fifo_scratch, g_free);
+    s->chip.cb_fifo_scratch_capacity = 0;
+    s->chip.cb_fifo_scratch_in_use = false;
     g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
 
     if (s->chip.debug) {

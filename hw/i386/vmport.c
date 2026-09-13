@@ -78,7 +78,7 @@
 #define VMPORT_GUESTRPC_MAX_MESSAGE    (64 * 1024)
 #define VMPORT_GUESTRPC_TIMEOUT_US     (80 * G_USEC_PER_SEC)
 
-static const bool vmport_guestrpc_enable_vm3d_logging = true;
+static const bool vmport_guestrpc_enable_vm3d_logging = false;
 
 typedef enum VMPortGuestRPCType {
     VMPORT_GUESTRPC_OPEN,

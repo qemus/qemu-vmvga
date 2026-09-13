@@ -157,7 +157,8 @@ static inline void vmvga_memory_region_set_dirty_mask(MemoryRegion *mr,
 #endif
 }
 
-#if QEMU_VERSION_MAJOR == 7
+#if QEMU_VERSION_MAJOR == 7 || \
+    (QEMU_VERSION_MAJOR == 9 && QEMU_VERSION_MINOR < 2)
 #define VMVGA_SET_LEGACY_RESET(_dc, _reset) ((_dc)->reset = (_reset))
 #else
 #define VMVGA_SET_LEGACY_RESET(_dc, _reset) \

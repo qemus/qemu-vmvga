@@ -5715,6 +5715,28 @@ static bool vmsvga3d_d3d10_blend_state_realize_live(
 
     level = vmsvga3d_d3d10_blend_state(entry, &desc);
 
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+        uint32_t i;
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-BLEND-NATIVE-DESC cid=%u id=%u atc=%u independent=%u level=%u",
+            cid, state_id, desc.alpha_to_coverage_enable ? 1u : 0u,
+            desc.independent_blend_enable ? 1u : 0u, level);
+        for (i = 0; i < SVGA3D_DX_MAX_RENDER_TARGETS; i++) {
+            const VMSVGA3DD3D10RTBlend *rt = &desc.render_target[i];
+
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-BLEND-NATIVE-RT cid=%u id=%u slot=%u enable=%u "
+                "src=%u dst=%u op=%u asrc=%u adst=%u aop=%u mask=0x%02x",
+                cid, state_id, i, rt->blend_enable ? 1u : 0u,
+                rt->src_blend, rt->dest_blend, rt->blend_op,
+                rt->src_blend_alpha, rt->dest_blend_alpha,
+                rt->blend_op_alpha, rt->write_mask);
+        }
+    }
+
     return vmsvga3d_d3d10_level_is_vgpu10(level) &&
            vmsvga3d_dxvk_d3d11_blend_state_define(
                s->dxvk, cid, state_id, &desc);
@@ -6827,8 +6849,8 @@ static bool vmsvga3d_d3d10_draw_live(
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-DRAW-STATE cid=%u count=%u start=%u layout=%u topology=%u "
-            "vb0=%u/%u/%u vs=%u ps=%u cb0=%u/%u/%u rtv0=%u "
-            "blend=%u sampleMask=0x%08x raster=%u viewports=%u "
+            "vb0=%u/%u/%u vs=%u ps=%u cb0=%u/%u/%u rtv0=%u dsv=%u "
+            "blend=%u sampleMask=0x%08x depth=%u stencilRef=%u raster=%u viewports=%u "
             "vp0=%g,%g/%gx%g/%g..%g dirty=0x%016" PRIx64,
             cid, vertex_count, start_vertex_location,
             context->shadow.inputAssembly.layoutId,
@@ -6838,8 +6860,11 @@ static bool vmsvga3d_d3d10_draw_live(
             context->shadow.shaderState[ps_stage].shaderId,
             cb0->sid, cb0->offsetInBytes, cb0->sizeInBytes,
             context->shadow.renderState.renderTargetViewIds[0],
+            context->shadow.renderState.depthStencilViewId,
             context->shadow.renderState.blendStateId,
             context->shadow.renderState.sampleMask,
+            context->shadow.renderState.depthStencilStateId,
+            context->shadow.renderState.stencilRef,
             context->shadow.renderState.rasterizerStateId,
             context->shadow.numViewports,
             vp0 != NULL ? (double)vp0->x : 0.0,
@@ -8289,6 +8314,11 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
      * Do not reject a resident resource merely because a later caller would
      * have chosen a different creation policy for a fresh resource. */
     if (vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-RESOURCE-MATERIALIZE sid=%u guest=%u kind=%u reuse=1 native=%u",
+            surface->sid, surface->format, create_kind,
+            vmsvga3d_dxvk_d3d11_surface_native_format(surface->dxvk_surface));
         return true;
     }
 
@@ -8309,9 +8339,25 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
         return false;
     }
 
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-RESOURCE-MATERIALIZE sid=%u guest=%u kind=%u reuse=0 "
+        "requested=%u resource=%u primary=%u dim=%u bind=0x%08x init=%u",
+        surface->sid, surface->format, create_kind,
+        resource_plan.requested_format, resource_plan.resource_format,
+        resource_plan.primary.format, resource_plan.primary.resource_dimension,
+        resource_plan.primary.bind_flags, initial_data_count);
+
     success = vmsvga3d_dxvk_d3d11_surface_materialize(
         s->dxvk, surface->dxvk_surface, &resource_plan.primary,
         initial_data, initial_data_count);
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-RESOURCE-MATERIALIZE-RESULT sid=%u guest=%u kind=%u result=%s native=%u",
+        surface->sid, surface->format, create_kind,
+        success ? "OK" : "FAIL",
+        vmsvga3d_dxvk_d3d11_surface_native_format(surface->dxvk_surface));
 
     g_free(initial_data);
     return success;
@@ -9799,6 +9845,13 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
             &entry, surface, command->subResource, &mob_layout)) {
         return false;
     }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "GB-READBACK-FORMAT sid=%u sub=%u guest=%u resident=%u native=%u",
+        command->sid, command->subResource, surface->format,
+        vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface) ? 1u : 0u,
+        vmsvga3d_dxvk_d3d11_surface_native_format(surface->dxvk_surface));
 
     if (!vmsvga3d_surface_readback_to_shadow(
             s, surface, image, command->subResource)) {
@@ -12792,6 +12845,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           VMSVGA3DD3D10ViewportsSetPlan plan;
           const uint32_t header_size = sizeof(SVGA3dCmdDXSetViewports);
           uint32_t count;
+          uint32_t i;
 
           if (size < header_size) {
               return false;
@@ -12805,6 +12859,20 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           if (count != 0) {
               memcpy(viewports, (const uint8_t *)payload + header_size,
                      count * sizeof(viewports[0]));
+          }
+
+          if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-VIEWPORTS-CMD cid=%u count=%u", cid, count);
+              for (i = 0; i < count; i++) {
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "DX-VIEWPORT-CMD cid=%u slot=%u x=%g y=%g w=%g h=%g min=%g max=%g",
+                      cid, i, (double)viewports[i].x, (double)viewports[i].y,
+                      (double)viewports[i].width, (double)viewports[i].height,
+                      (double)viewports[i].minDepth, (double)viewports[i].maxDepth);
+              }
           }
 
           return vmsvga3d_d3d10_viewports_set_plan(
@@ -12848,6 +12916,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
           const uint32_t header_size = sizeof(command);
           uint32_t count;
+          uint32_t i;
 
           if (context == NULL || size < header_size) {
               return false;
@@ -12863,6 +12932,18 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           if (count != 0) {
               memcpy(ids, (const uint8_t *)payload + header_size,
                      count * sizeof(ids[0]));
+          }
+
+          if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-RT-CMD cid=%u dsv=%u count=%u", cid,
+                  command.depthStencilViewId, count);
+              for (i = 0; i < count; i++) {
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "DX-RT-CMD-ID cid=%u slot=%u rtv=%u", cid, i, ids[i]);
+              }
           }
 
           return vmsvga3d_d3d10_render_targets_set_plan(
@@ -13235,12 +13316,33 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           SVGA3dCmdDXDefineBlendState command;
           SVGACOTableDXBlendStateEntry *entry;
           VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+          uint32_t i;
 
           if (context == NULL || size < sizeof(command)) {
               return false;
           }
 
           memcpy(&command, payload, sizeof(command));
+
+          if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-BLEND-DEFINE cid=%u id=%u atc=%u independent=%u",
+                  cid, command.blendId, command.alphaToCoverageEnable,
+                  command.independentBlendEnable);
+              for (i = 0; i < SVGA3D_DX_MAX_RENDER_TARGETS; i++) {
+                  const SVGA3dDXBlendStatePerRT *rt = &command.perRT[i];
+
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "DX-BLEND-DEFINE-RT cid=%u id=%u slot=%u enable=%u "
+                      "src=%u dst=%u op=%u asrc=%u adst=%u aop=%u mask=0x%02x logic=%u/%u",
+                      cid, command.blendId, i, rt->blendEnable,
+                      rt->srcBlend, rt->destBlend, rt->blendOp,
+                      rt->srcBlendAlpha, rt->destBlendAlpha, rt->blendOpAlpha,
+                      rt->renderTargetWriteMask, rt->logicOpEnable, rt->logicOp);
+              }
+          }
 
           entry = vmsvga3d_dx_cotable_entry_ptr(
               s, cid, SVGA_COTABLE_BLENDSTATE, command.blendId);
@@ -13298,6 +13400,15 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-DEPTH-DEFINE cid=%u id=%u enable=%u write=%u func=%u "
+              "stencil=%u front=%u back=%u readMask=0x%02x writeMask=0x%02x",
+              cid, command.depthStencilId, command.depthEnable,
+              command.depthWriteMask, command.depthFunc,
+              command.stencilEnable, command.frontEnable, command.backEnable,
+              command.stencilReadMask, command.stencilWriteMask);
 
           entry = vmsvga3d_dx_cotable_entry_ptr(
               s, cid, SVGA_COTABLE_DEPTHSTENCIL, command.depthStencilId);
@@ -13520,6 +13631,10 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+          VMVGA_TRACE_LOCAL(
+              VMVGA_TRACE_3D,
+              "DX-DEPTH-SET cid=%u id=%u stencilRef=%u",
+              cid, command.depthStencilId, command.stencilRef);
 
           return vmsvga3d_d3d10_depth_stencil_state_set_plan(
                      &command,

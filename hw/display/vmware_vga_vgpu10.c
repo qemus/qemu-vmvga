@@ -8516,11 +8516,32 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         return false;
     }
 
-    /* A target switch is a coalescing barrier.  Consume presentation damage
-     * while the old SID is still active and its backing surface still exists;
-     * otherwise a later bind/unbind could silently reinterpret or discard it.
+    /* A normal valid-to-valid ScreenTarget switch is a flip.  Pending
+     * presentation damage for the old target is superseded by the newer
+     * target, so do not turn every flip into a synchronous GPU-to-CPU
+     * readback.  Keep the quiesce barrier during the initial frontend
+     * takeover/handoff, where the old frame still participates in transition
+     * correctness.  Unbind, destroy, redefine, and migration retain their
+     * existing barriers elsewhere.
      */
-    if (!vmsvga3d_screen_target_quiesce_live(s)) {
+    if (old_sid != SVGA3D_INVALID_ID &&
+        !s->screen_frontend_deferred && !s->screen_handoff_active) {
+        if (s->svga3d->screen_target_dirty_count != 0 &&
+            s->svga3d->screen_target_dirty_sid != old_sid) {
+            return false;
+        }
+        if (vmsvga_trace_flight_enabled() &&
+            s->svga3d->screen_target_dirty_count != 0) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-TARGET phase=flip-coalesce old-sid=%u "
+                    "new-sid=%u dropped-rects=%u\n",
+                    old_sid, sid, s->svga3d->screen_target_dirty_count);
+        }
+        s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+        s->svga3d->screen_target_dirty_count = 0;
+        memset(s->svga3d->screen_target_dirty_rects, 0,
+               sizeof(s->svga3d->screen_target_dirty_rects));
+    } else if (!vmsvga3d_screen_target_quiesce_live(s)) {
         return false;
     }
     if (s->screen_direct_active &&

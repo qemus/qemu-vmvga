@@ -213,6 +213,7 @@ struct vmsvga3d_dxvk_surface_s {
     uint32_t d3d9_usage;
     uint32_t d3d9_format;
     uint32_t d3d9_length;
+    uint32_t d3d9_levels;
     void *d3d9_resource;
     void *d3d9_bounce;
     void *d3d9_readback_render_target;
@@ -287,11 +288,14 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_IDIRECT3D9_CREATE_DEVICE 16u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE 2u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_TEXTURE 23u
+#define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_VOLUME_TEXTURE 24u
+#define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_CUBE_TEXTURE 25u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_VERTEX_BUFFER 26u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_INDEX_BUFFER 27u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_RENDER_TARGET 28u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_DEPTH_STENCIL_SURFACE 29u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_UPDATE_SURFACE 30u
+#define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_UPDATE_TEXTURE 31u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_RENDER_TARGET_DATA 32u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_STRETCH_RECT 34u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_OFFSCREEN_PLAIN_SURFACE 36u
@@ -304,6 +308,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CLEAR 43u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_TRANSFORM 44u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_VIEWPORT 47u
+#define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_VIEWPORT 48u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_MATERIAL 49u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_LIGHT 51u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_LIGHT_ENABLE 53u
@@ -342,6 +347,10 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_GET_SURFACE_LEVEL 18u
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_LOCK_RECT 19u
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_UNLOCK_RECT 20u
+#define VMSVGA3D_DXVK_IDIRECT3DCUBETEXTURE9_LOCK_RECT 19u
+#define VMSVGA3D_DXVK_IDIRECT3DCUBETEXTURE9_UNLOCK_RECT 20u
+#define VMSVGA3D_DXVK_IDIRECT3DVOLUMETEXTURE9_LOCK_BOX 19u
+#define VMSVGA3D_DXVK_IDIRECT3DVOLUMETEXTURE9_UNLOCK_BOX 20u
 #define VMSVGA3D_DXVK_IDIRECT3DSURFACE9_LOCK_RECT 13u
 #define VMSVGA3D_DXVK_IDIRECT3DSURFACE9_UNLOCK_RECT 14u
 #define VMSVGA3D_DXVK_IDIRECT3DBUFFER9_LOCK 11u
@@ -598,6 +607,13 @@ typedef int32_t (*VMSVGA3DDxvkCreateTexture)(
     void *device, uint32_t width, uint32_t height, uint32_t levels,
     uint32_t usage, uint32_t format, uint32_t pool, void **texture,
     void **shared_handle);
+typedef int32_t (*VMSVGA3DDxvkCreateVolumeTexture)(
+    void *device, uint32_t width, uint32_t height, uint32_t depth,
+    uint32_t levels, uint32_t usage, uint32_t format, uint32_t pool,
+    void **texture, void **shared_handle);
+typedef int32_t (*VMSVGA3DDxvkCreateCubeTexture)(
+    void *device, uint32_t edge_length, uint32_t levels, uint32_t usage,
+    uint32_t format, uint32_t pool, void **texture, void **shared_handle);
 typedef int32_t (*VMSVGA3DDxvkCreateVertexBuffer)(
     void *device, uint32_t length, uint32_t usage, uint32_t fvf,
     uint32_t pool, void **buffer, void **shared_handle);
@@ -618,6 +634,8 @@ typedef int32_t (*VMSVGA3DDxvkCreateOffscreenPlainSurface)(
 typedef int32_t (*VMSVGA3DDxvkUpdateSurface)(
     void *device, void *source, const void *source_rect, void *destination,
     const void *destination_point);
+typedef int32_t (*VMSVGA3DDxvkUpdateTexture)(void *device, void *source,
+                                             void *destination);
 typedef int32_t (*VMSVGA3DDxvkGetRenderTargetData)(void *device,
                                                     void *source,
                                                     void *destination);
@@ -645,6 +663,7 @@ typedef int32_t (*VMSVGA3DDxvkSetTransform)(void *device, uint32_t type,
                                             const void *matrix);
 typedef int32_t (*VMSVGA3DDxvkSetViewport)(void *device,
                                            const void *viewport);
+typedef int32_t (*VMSVGA3DDxvkGetViewport)(void *device, void *viewport);
 typedef int32_t (*VMSVGA3DDxvkSetMaterial)(void *device,
                                            const void *material);
 typedef int32_t (*VMSVGA3DDxvkSetLight)(void *device, uint32_t index,
@@ -714,6 +733,16 @@ typedef int32_t (*VMSVGA3DDxvkTextureLockRect)(void *texture, uint32_t level,
                                                uint32_t flags);
 typedef int32_t (*VMSVGA3DDxvkTextureUnlockRect)(void *texture,
                                                  uint32_t level);
+typedef int32_t (*VMSVGA3DDxvkCubeTextureLockRect)(
+    void *texture, uint32_t face, uint32_t level, void *locked_rect,
+    const void *rect, uint32_t flags);
+typedef int32_t (*VMSVGA3DDxvkCubeTextureUnlockRect)(
+    void *texture, uint32_t face, uint32_t level);
+typedef int32_t (*VMSVGA3DDxvkVolumeTextureLockBox)(
+    void *texture, uint32_t level, void *locked_box, const void *box,
+    uint32_t flags);
+typedef int32_t (*VMSVGA3DDxvkVolumeTextureUnlockBox)(void *texture,
+                                                      uint32_t level);
 typedef int32_t (*VMSVGA3DDxvkSurfaceLockRect)(void *surface,
                                                void *locked_rect,
                                                const void *rect,
@@ -1164,6 +1193,12 @@ typedef struct vmsvga3d_dxvk_locked_rect_s {
     int32_t pitch;
     void *bits;
 } VMSVGA3DDxvkLockedRect;
+
+typedef struct vmsvga3d_dxvk_locked_box_s {
+    int32_t row_pitch;
+    int32_t slice_pitch;
+    void *bits;
+} VMSVGA3DDxvkLockedBox;
 
 static VMSVGA3DDxvkComFunction *vmsvga3d_dxvk_vtable(void *object)
 {
@@ -3081,6 +3116,7 @@ static void vmsvga3d_dxvk_surface_evict_d3d9(
     surface->d3d9_usage = 0;
     surface->d3d9_format = 0;
     surface->d3d9_length = 0;
+    surface->d3d9_levels = 0;
     surface->d3d9_readback_width = 0;
     surface->d3d9_readback_height = 0;
     surface->d3d9_resident = false;
@@ -3163,7 +3199,19 @@ static bool vmsvga3d_dxvk_surface_plan_compatible(
 
     switch (plan->use) {
     case VMSVGA3D_D3D9_RESOURCE_USE_TEXTURE:
-        return surface->d3d9_resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE;
+        switch (plan->primary.resource_type) {
+        case VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE:
+            return surface->d3d9_resource_type ==
+                   VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE;
+        case VMSVGA3D_DXVK_D3D9_RTYPE_CUBETEXTURE:
+            return surface->d3d9_resource_type ==
+                   VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE;
+        case VMSVGA3D_DXVK_D3D9_RTYPE_VOLUMETEXTURE:
+            return surface->d3d9_resource_type ==
+                   VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE;
+        default:
+            return false;
+        }
     case VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET:
         return (surface->d3d9_resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE ||
                 surface->d3d9_resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE) &&
@@ -3268,6 +3316,8 @@ bool vmsvga3d_dxvk_surface_materialize(
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkCreateTexture create_texture = NULL;
+    VMSVGA3DDxvkCreateVolumeTexture create_volume_texture = NULL;
+    VMSVGA3DDxvkCreateCubeTexture create_cube_texture = NULL;
     VMSVGA3DDxvkCreateVertexBuffer create_vertex_buffer = NULL;
     VMSVGA3DDxvkCreateIndexBuffer create_index_buffer = NULL;
     VMSVGA3DDxvkCreateRenderTarget create_render_target = NULL;
@@ -3398,6 +3448,157 @@ bool vmsvga3d_dxvk_surface_materialize(
             surface->d3d9_has_bounce = true;
         }
     } else if (primary_desc->resource_type ==
+               VMSVGA3D_DXVK_D3D9_RTYPE_CUBETEXTURE) {
+        bool cube_valid = primary_desc->levels != 0 &&
+                          primary_desc->width != 0 &&
+                          resource_plan->has_bounce &&
+                          resource_plan->bounce.valid &&
+                          resource_plan->bounce.resource_type ==
+                              VMSVGA3D_DXVK_D3D9_RTYPE_CUBETEXTURE &&
+                          resource_plan->bounce.levels == primary_desc->levels &&
+                          resource_plan->bounce.width == primary_desc->width &&
+                          resource_plan->bounce.format == primary_desc->format &&
+                          vmsvga3d_dxvk_get_method(
+                              dxvk->d3d9_device,
+                              VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_CUBE_TEXTURE,
+                              &create_cube_texture, sizeof(create_cube_texture));
+
+        if (cube_valid) {
+            result = create_cube_texture(
+                dxvk->d3d9_device, primary_desc->width, primary_desc->levels,
+                primary_desc->usage, primary_desc->format, primary_desc->pool,
+                &primary, NULL);
+            if (!vmsvga3d_dxvk_succeeded(result) || primary == NULL) {
+                vmsvga3d_dxvk_trace_d3d9_create_failure(
+                    "CreateCubeTexturePrimary", surface, primary_desc, result);
+            }
+            if ((!vmsvga3d_dxvk_succeeded(result) || primary == NULL) &&
+                resource_plan->has_fallback && resource_plan->fallback.valid &&
+                resource_plan->fallback.resource_type ==
+                    VMSVGA3D_DXVK_D3D9_RTYPE_CUBETEXTURE &&
+                resource_plan->fallback.width == resource_plan->primary.width &&
+                resource_plan->fallback.levels == resource_plan->primary.levels &&
+                resource_plan->fallback.format == resource_plan->primary.format) {
+                primary = NULL;
+                primary_desc = &resource_plan->fallback;
+                result = create_cube_texture(
+                    dxvk->d3d9_device, primary_desc->width,
+                    primary_desc->levels, primary_desc->usage,
+                    primary_desc->format, primary_desc->pool, &primary, NULL);
+                if (!vmsvga3d_dxvk_succeeded(result) || primary == NULL) {
+                    vmsvga3d_dxvk_trace_d3d9_create_failure(
+                        "CreateCubeTextureFallback", surface, primary_desc,
+                        result);
+                }
+            }
+        }
+
+        if (primary == NULL) {
+            return false;
+        }
+
+        result = create_cube_texture(
+            dxvk->d3d9_device, resource_plan->bounce.width,
+            resource_plan->bounce.levels, resource_plan->bounce.usage,
+            resource_plan->bounce.format, resource_plan->bounce.pool,
+            &bounce, NULL);
+        if (!vmsvga3d_dxvk_succeeded(result) || bounce == NULL) {
+            vmsvga3d_dxvk_trace_d3d9_create_failure(
+                "CreateCubeTextureBounce", surface, &resource_plan->bounce,
+                result);
+            if (bounce != NULL) {
+                vmsvga3d_dxvk_release(
+                    bounce, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+            }
+            vmsvga3d_dxvk_release(
+                primary, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+            return false;
+        }
+        surface->d3d9_resource_type =
+            VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE;
+        surface->d3d9_has_bounce = true;
+    } else if (primary_desc->resource_type ==
+               VMSVGA3D_DXVK_D3D9_RTYPE_VOLUMETEXTURE) {
+        bool volume_valid = primary_desc->levels != 0 &&
+                            primary_desc->width != 0 &&
+                            primary_desc->height != 0 &&
+                            primary_desc->depth != 0 &&
+                            resource_plan->has_bounce &&
+                            resource_plan->bounce.valid &&
+                            resource_plan->bounce.resource_type ==
+                                VMSVGA3D_DXVK_D3D9_RTYPE_VOLUMETEXTURE &&
+                            resource_plan->bounce.levels == primary_desc->levels &&
+                            resource_plan->bounce.width == primary_desc->width &&
+                            resource_plan->bounce.height == primary_desc->height &&
+                            resource_plan->bounce.depth == primary_desc->depth &&
+                            resource_plan->bounce.format == primary_desc->format &&
+                            vmsvga3d_dxvk_get_method(
+                                dxvk->d3d9_device,
+                                VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_VOLUME_TEXTURE,
+                                &create_volume_texture,
+                                sizeof(create_volume_texture));
+
+        if (volume_valid) {
+            result = create_volume_texture(
+                dxvk->d3d9_device, primary_desc->width, primary_desc->height,
+                primary_desc->depth, primary_desc->levels,
+                primary_desc->usage, primary_desc->format, primary_desc->pool,
+                &primary, NULL);
+            if (!vmsvga3d_dxvk_succeeded(result) || primary == NULL) {
+                vmsvga3d_dxvk_trace_d3d9_create_failure(
+                    "CreateVolumeTexturePrimary", surface, primary_desc,
+                    result);
+            }
+            if ((!vmsvga3d_dxvk_succeeded(result) || primary == NULL) &&
+                resource_plan->has_fallback && resource_plan->fallback.valid &&
+                resource_plan->fallback.resource_type ==
+                    VMSVGA3D_DXVK_D3D9_RTYPE_VOLUMETEXTURE &&
+                resource_plan->fallback.width == resource_plan->primary.width &&
+                resource_plan->fallback.height == resource_plan->primary.height &&
+                resource_plan->fallback.depth == resource_plan->primary.depth &&
+                resource_plan->fallback.levels == resource_plan->primary.levels &&
+                resource_plan->fallback.format == resource_plan->primary.format) {
+                primary = NULL;
+                primary_desc = &resource_plan->fallback;
+                result = create_volume_texture(
+                    dxvk->d3d9_device, primary_desc->width,
+                    primary_desc->height, primary_desc->depth,
+                    primary_desc->levels, primary_desc->usage,
+                    primary_desc->format, primary_desc->pool, &primary, NULL);
+                if (!vmsvga3d_dxvk_succeeded(result) || primary == NULL) {
+                    vmsvga3d_dxvk_trace_d3d9_create_failure(
+                        "CreateVolumeTextureFallback", surface, primary_desc,
+                        result);
+                }
+            }
+        }
+
+        if (primary == NULL) {
+            return false;
+        }
+
+        result = create_volume_texture(
+            dxvk->d3d9_device, resource_plan->bounce.width,
+            resource_plan->bounce.height, resource_plan->bounce.depth,
+            resource_plan->bounce.levels, resource_plan->bounce.usage,
+            resource_plan->bounce.format, resource_plan->bounce.pool,
+            &bounce, NULL);
+        if (!vmsvga3d_dxvk_succeeded(result) || bounce == NULL) {
+            vmsvga3d_dxvk_trace_d3d9_create_failure(
+                "CreateVolumeTextureBounce", surface, &resource_plan->bounce,
+                result);
+            if (bounce != NULL) {
+                vmsvga3d_dxvk_release(
+                    bounce, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+            }
+            vmsvga3d_dxvk_release(
+                primary, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+            return false;
+        }
+        surface->d3d9_resource_type =
+            VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE;
+        surface->d3d9_has_bounce = true;
+    } else if (primary_desc->resource_type ==
                VMSVGA3D_DXVK_D3D9_RTYPE_SURFACE) {
         if ((primary_desc->usage & VMSVGA3D_DXVK_D3DUSAGE_DEPTHSTENCIL) != 0) {
             if (!vmsvga3d_dxvk_create_depth_surface(
@@ -3512,6 +3713,7 @@ bool vmsvga3d_dxvk_surface_materialize(
     surface->d3d9_usage = primary_desc->usage;
     surface->d3d9_format = primary_desc->format;
     surface->d3d9_length = primary_desc->length;
+    surface->d3d9_levels = primary_desc->levels;
     surface->d3d9_resident = true;
 
     if (resource_plan->use == VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET &&
@@ -3540,7 +3742,14 @@ bool vmsvga3d_dxvk_surface_materialize(
     }
 
     if (resource_plan->set_autogen_filter &&
-        surface->d3d9_resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+        surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+        surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE &&
+        surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE) {
+        vmsvga3d_dxvk_surface_evict_d3d9(surface);
+        return false;
+    }
+
+    if (resource_plan->set_autogen_filter &&
         !vmsvga3d_dxvk_d3d9_set_autogen_filter(
             surface->d3d9_resource, resource_plan->autogen_filter)) {
         vmsvga3d_dxvk_surface_evict_d3d9(surface);
@@ -3563,7 +3772,9 @@ bool vmsvga3d_dxvk_surface_generate_mipmaps(
     if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
         surface->owner != dxvk || surface->d3d11_resident ||
         !surface->d3d9_resident || surface->d3d9_resource == NULL ||
-        surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE) {
+        (surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+         surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE &&
+         surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE)) {
         return false;
     }
 
@@ -10127,24 +10338,135 @@ static bool vmsvga3d_dxvk_surface_level_acquire(
 
 bool vmsvga3d_dxvk_surface_upload_level(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
-    const void *data, uint32_t row_bytes, uint32_t rows)
+    const void *data, uint32_t row_bytes, uint32_t rows,
+    uint32_t depth, uint32_t slice_bytes)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkSurfaceLockRect lock_rect = NULL;
     VMSVGA3DDxvkSurfaceUnlockRect unlock_rect = NULL;
+    VMSVGA3DDxvkCubeTextureLockRect cube_lock_rect = NULL;
+    VMSVGA3DDxvkCubeTextureUnlockRect cube_unlock_rect = NULL;
+    VMSVGA3DDxvkVolumeTextureLockBox volume_lock_box = NULL;
+    VMSVGA3DDxvkVolumeTextureUnlockBox volume_unlock_box = NULL;
     VMSVGA3DDxvkUpdateSurface update_surface = NULL;
+    VMSVGA3DDxvkUpdateTexture update_texture = NULL;
     VMSVGA3DDxvkLockedRect locked = { 0 };
+    VMSVGA3DDxvkLockedBox locked_box = { 0 };
     void *source_surface = NULL;
     void *destination_surface = NULL;
     const uint8_t *source = data;
     uint8_t *destination;
     uint32_t y;
+    uint32_t z;
     int32_t result;
     bool success = false;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL || !surface->d3d9_resident ||
-        !surface->d3d9_has_bounce || surface->d3d9_bounce == NULL || data == NULL ||
-        row_bytes == 0 || rows == 0 ||
+    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
+        !surface->d3d9_resident || !surface->d3d9_has_bounce ||
+        surface->d3d9_bounce == NULL || surface->d3d9_resource == NULL ||
+        data == NULL || row_bytes == 0 || rows == 0 || depth == 0 ||
+        slice_bytes < row_bytes || slice_bytes < row_bytes * (uint64_t)rows) {
+        return false;
+    }
+
+    if (surface->d3d9_resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE) {
+        uint32_t face;
+        uint32_t mip;
+
+        if (depth != 1 || surface->d3d9_levels == 0) {
+            return false;
+        }
+        face = level / surface->d3d9_levels;
+        mip = level % surface->d3d9_levels;
+        if (face >= 6 ||
+            !vmsvga3d_dxvk_get_method(
+                surface->d3d9_bounce,
+                VMSVGA3D_DXVK_IDIRECT3DCUBETEXTURE9_LOCK_RECT,
+                &cube_lock_rect, sizeof(cube_lock_rect)) ||
+            !vmsvga3d_dxvk_get_method(
+                surface->d3d9_bounce,
+                VMSVGA3D_DXVK_IDIRECT3DCUBETEXTURE9_UNLOCK_RECT,
+                &cube_unlock_rect, sizeof(cube_unlock_rect)) ||
+            !vmsvga3d_dxvk_get_method(
+                dxvk->d3d9_device,
+                VMSVGA3D_DXVK_IDIRECT3DDEVICE9_UPDATE_TEXTURE,
+                &update_texture, sizeof(update_texture))) {
+            return false;
+        }
+
+        result = cube_lock_rect(surface->d3d9_bounce, face, mip, &locked,
+                                NULL, 0);
+        if (!vmsvga3d_dxvk_succeeded(result) || locked.bits == NULL ||
+            locked.pitch < 0 || (uint32_t)locked.pitch < row_bytes) {
+            if (vmsvga3d_dxvk_succeeded(result)) {
+                cube_unlock_rect(surface->d3d9_bounce, face, mip);
+            }
+            return false;
+        }
+
+        destination = locked.bits;
+        for (y = 0; y < rows; y++) {
+            memcpy(destination + (size_t)y * (uint32_t)locked.pitch,
+                   source + (size_t)y * row_bytes, row_bytes);
+        }
+        result = cube_unlock_rect(surface->d3d9_bounce, face, mip);
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            return false;
+        }
+        result = update_texture(dxvk->d3d9_device, surface->d3d9_bounce,
+                                surface->d3d9_resource);
+        return vmsvga3d_dxvk_succeeded(result);
+    }
+
+    if (surface->d3d9_resource_type ==
+        VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE) {
+        if (level >= surface->d3d9_levels ||
+            !vmsvga3d_dxvk_get_method(
+                surface->d3d9_bounce,
+                VMSVGA3D_DXVK_IDIRECT3DVOLUMETEXTURE9_LOCK_BOX,
+                &volume_lock_box, sizeof(volume_lock_box)) ||
+            !vmsvga3d_dxvk_get_method(
+                surface->d3d9_bounce,
+                VMSVGA3D_DXVK_IDIRECT3DVOLUMETEXTURE9_UNLOCK_BOX,
+                &volume_unlock_box, sizeof(volume_unlock_box)) ||
+            !vmsvga3d_dxvk_get_method(
+                dxvk->d3d9_device,
+                VMSVGA3D_DXVK_IDIRECT3DDEVICE9_UPDATE_TEXTURE,
+                &update_texture, sizeof(update_texture))) {
+            return false;
+        }
+
+        result = volume_lock_box(surface->d3d9_bounce, level, &locked_box,
+                                 NULL, 0);
+        if (!vmsvga3d_dxvk_succeeded(result) || locked_box.bits == NULL ||
+            locked_box.row_pitch < 0 || locked_box.slice_pitch < 0 ||
+            (uint32_t)locked_box.row_pitch < row_bytes ||
+            (uint32_t)locked_box.slice_pitch < row_bytes * (uint64_t)rows) {
+            if (vmsvga3d_dxvk_succeeded(result)) {
+                volume_unlock_box(surface->d3d9_bounce, level);
+            }
+            return false;
+        }
+
+        for (z = 0; z < depth; z++) {
+            destination = (uint8_t *)locked_box.bits +
+                          (size_t)z * (uint32_t)locked_box.slice_pitch;
+            source = (const uint8_t *)data + (size_t)z * slice_bytes;
+            for (y = 0; y < rows; y++) {
+                memcpy(destination + (size_t)y * (uint32_t)locked_box.row_pitch,
+                       source + (size_t)y * row_bytes, row_bytes);
+            }
+        }
+        result = volume_unlock_box(surface->d3d9_bounce, level);
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            return false;
+        }
+        result = update_texture(dxvk->d3d9_device, surface->d3d9_bounce,
+                                surface->d3d9_resource);
+        return vmsvga3d_dxvk_succeeded(result);
+    }
+
+    if (depth != 1 ||
         !vmsvga3d_dxvk_surface_level_acquire(surface, true, level,
                                              &source_surface) ||
         !vmsvga3d_dxvk_surface_level_acquire(surface, false, level,
@@ -10171,7 +10493,7 @@ bool vmsvga3d_dxvk_surface_upload_level(
     }
 
     destination = locked.bits;
-
+    source = data;
     for (y = 0; y < rows; y++) {
         memcpy(destination + (size_t)y * (uint32_t)locked.pitch,
                source + (size_t)y * row_bytes, row_bytes);
@@ -10184,7 +10506,6 @@ bool vmsvga3d_dxvk_surface_upload_level(
 
     result = update_surface(dxvk->d3d9_device, source_surface, NULL,
                             destination_surface, NULL);
-
     success = vmsvga3d_dxvk_succeeded(result);
 
 out:
@@ -10192,12 +10513,10 @@ out:
         vmsvga3d_dxvk_release(destination_surface,
                               VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
     }
-
     if (source_surface != NULL) {
         vmsvga3d_dxvk_release(source_surface,
                               VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
     }
-
     return success;
 #else
     (void)dxvk;
@@ -10206,6 +10525,8 @@ out:
     (void)data;
     (void)row_bytes;
     (void)rows;
+    (void)depth;
+    (void)slice_bytes;
     return false;
 #endif
 }
@@ -10803,16 +11124,21 @@ bool vmsvga3d_dxvk_clear(
     VMSVGA3DDxvkClear clear = NULL;
     VMSVGA3DDxvkSetScissorRect set_scissor = NULL;
     VMSVGA3DDxvkGetScissorRect get_scissor = NULL;
+    VMSVGA3DDxvkSetViewport set_viewport = NULL;
+    VMSVGA3DDxvkGetViewport get_viewport = NULL;
     void *saved_targets[8] = { 0 };
     void *bound_targets[8] = { 0 };
     void *saved_depth_stencil = NULL;
     void *bound_depth_stencil = NULL;
     VMSVGA3DD3D9Rect saved_scissor;
+    VMSVGA3DD3D9Viewport saved_viewport;
     uint32_t highest_target = 0;
     uint32_t i;
     int32_t result;
     bool have_saved_depth = false;
     bool have_saved_scissor = false;
+    bool have_saved_viewport = false;
+    bool state_mutated = false;
     bool success = false;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || color_targets == NULL ||
@@ -10841,7 +11167,13 @@ bool vmsvga3d_dxvk_clear(
             &set_scissor, sizeof(set_scissor)) ||
         !vmsvga3d_dxvk_get_method(
             dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_SCISSOR_RECT,
-            &get_scissor, sizeof(get_scissor))) {
+            &get_scissor, sizeof(get_scissor)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_VIEWPORT,
+            &set_viewport, sizeof(set_viewport)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_VIEWPORT,
+            &get_viewport, sizeof(get_viewport))) {
         return false;
     }
 
@@ -10886,10 +11218,17 @@ bool vmsvga3d_dxvk_clear(
 
     have_saved_scissor = true;
 
+    result = get_viewport(dxvk->d3d9_device, &saved_viewport);
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        goto restore;
+    }
+    have_saved_viewport = true;
+
     /* This helper temporarily bypasses the cached target setters below.  Drop
      * the cache before changing native targets so a partial failure or restore
      * failure can never leave a stale binding recorded. */
     vmsvga3d_dxvk_d3d9_target_cache_invalidate(dxvk);
+    state_mutated = true;
 
     for (i = 0; i <= highest_target; i++) {
         result = set_render_target(dxvk->d3d9_device, i, bound_targets[i]);
@@ -10914,18 +11253,33 @@ bool vmsvga3d_dxvk_clear(
     success = vmsvga3d_dxvk_succeeded(result);
 
 restore:
-    if (have_saved_scissor) {
-        set_scissor(dxvk->d3d9_device, &saved_scissor);
-    }
+    if (state_mutated) {
+        for (i = 0; i <= highest_target; i++) {
+            result = set_render_target(dxvk->d3d9_device, i,
+                                       saved_targets[i]);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                success = false;
+            }
+        }
 
-    for (i = 0; i <= highest_target; i++) {
-        set_render_target(dxvk->d3d9_device, i, saved_targets[i]);
-    }
+        result = set_depth_stencil(dxvk->d3d9_device,
+                                   have_saved_depth ? saved_depth_stencil : NULL);
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            success = false;
+        }
 
-    if (have_saved_depth) {
-        set_depth_stencil(dxvk->d3d9_device, saved_depth_stencil);
-    } else {
-        set_depth_stencil(dxvk->d3d9_device, NULL);
+        if (have_saved_scissor) {
+            result = set_scissor(dxvk->d3d9_device, &saved_scissor);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                success = false;
+            }
+        }
+        if (have_saved_viewport) {
+            result = set_viewport(dxvk->d3d9_device, &saved_viewport);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                success = false;
+            }
+        }
     }
 
     for (i = 0; i < 8; i++) {
@@ -11185,7 +11539,9 @@ bool vmsvga3d_dxvk_set_texture(VMSVGA3DDxvk *dxvk, uint32_t stage,
 
     if (surface != NULL) {
         if (!surface->d3d9_resident || surface->d3d9_resource == NULL ||
-            surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE) {
+            (surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE &&
+             surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE &&
+             surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE)) {
             return false;
         }
         texture = surface->d3d9_resource;

@@ -6527,6 +6527,188 @@ static uint64_t vmsvga3d_present_load_pixel(const uint8_t *src,
     return pixel;
 }
 
+typedef struct VMSVGA3DScreenRGBTrace {
+    uint32_t red_hash;
+    uint32_t green_hash;
+    uint32_t blue_hash;
+    uint32_t samples;
+    uint32_t chromatic;
+    uint32_t nonzero;
+    uint64_t red_sum;
+    uint64_t green_sum;
+    uint64_t blue_sum;
+} VMSVGA3DScreenRGBTrace;
+
+static void vmsvga3d_screen_rgb_trace_init(VMSVGA3DScreenRGBTrace *trace)
+{
+    memset(trace, 0, sizeof(*trace));
+    trace->red_hash = 2166136261u;
+    trace->green_hash = 2166136261u;
+    trace->blue_hash = 2166136261u;
+}
+
+static void vmsvga3d_screen_rgb_trace_add(VMSVGA3DScreenRGBTrace *trace,
+                                           uint8_t red, uint8_t green,
+                                           uint8_t blue)
+{
+    trace->red_hash = (trace->red_hash ^ red) * 16777619u;
+    trace->green_hash = (trace->green_hash ^ green) * 16777619u;
+    trace->blue_hash = (trace->blue_hash ^ blue) * 16777619u;
+    trace->red_sum += red;
+    trace->green_sum += green;
+    trace->blue_sum += blue;
+    trace->samples++;
+    trace->chromatic += red != green || green != blue;
+    trace->nonzero += red != 0 || green != 0 || blue != 0;
+}
+
+static bool vmsvga3d_screen_rgb_trace_surface(
+    VMSVGA3DSurface *surface, VMSVGA3DSurfaceImage *image,
+    const struct svga3d_surface_desc *desc, const SVGA3dCopyRect *rect,
+    VMSVGA3DScreenRGBTrace *trace)
+{
+    SVGA3dCopyRect clipped;
+    uint32_t step_x;
+    uint32_t step_y;
+    uint32_t y;
+
+    if (surface == NULL || image == NULL || desc == NULL || rect == NULL ||
+        trace == NULL || image->data == NULL || desc->bytes_per_block == 0) {
+        return false;
+    }
+
+    vmsvga3d_clip_present_rect(rect, &image->size, image->size.width,
+                                image->size.height, &clipped);
+    if (clipped.w == 0 || clipped.h == 0) {
+        return false;
+    }
+
+    /* Keep the debug-only walk bounded to at most 32x32 source pixels. */
+    step_x = MAX(1u, (clipped.w + 31u) / 32u);
+    step_y = MAX(1u, (clipped.h + 31u) / 32u);
+    vmsvga3d_screen_rgb_trace_init(trace);
+
+    for (y = 0; y < clipped.h; y += step_y) {
+        uint64_t row_offset =
+            (uint64_t)(clipped.srcy + y) * image->pitch +
+            (uint64_t)clipped.srcx * desc->bytes_per_block;
+        uint32_t x;
+
+        if (row_offset >= image->data_size) {
+            return false;
+        }
+
+        for (x = 0; x < clipped.w; x += step_x) {
+            uint64_t pixel_offset =
+                row_offset + (uint64_t)x * desc->bytes_per_block;
+            uint64_t pixel;
+            uint8_t blue;
+            uint8_t green;
+            uint8_t red;
+
+            if (pixel_offset > image->data_size ||
+                desc->bytes_per_block > image->data_size - pixel_offset) {
+                return false;
+            }
+
+            pixel = vmsvga3d_present_load_pixel(
+                image->data + pixel_offset, desc->bytes_per_block);
+            blue = vmsvga3d_present_channel(
+                pixel, desc->bitDepth.blue, desc->bitOffset.blue);
+            green = vmsvga3d_present_channel(
+                pixel, desc->bitDepth.green, desc->bitOffset.green);
+            red = vmsvga3d_present_channel(
+                pixel, desc->bitDepth.red, desc->bitOffset.red);
+            vmsvga3d_screen_rgb_trace_add(trace, red, green, blue);
+        }
+    }
+
+    return trace->samples != 0;
+}
+
+static bool vmsvga3d_screen_rgb_trace_scanout(
+    struct vmsvga_state_s *s, const SVGA3dCopyRect *rect,
+    VMSVGA3DScreenRGBTrace *trace)
+{
+    uint8_t *screen_base;
+    size_t screen_size;
+    uint32_t screen_stride;
+    uint32_t width;
+    uint32_t height;
+    uint32_t step_x;
+    uint32_t step_y;
+    uint32_t y;
+
+    if (s == NULL || rect == NULL || trace == NULL ||
+        !vmsvga_screen_storage(s, &screen_base, &screen_size,
+                               &screen_stride) ||
+        rect->x >= s->screen_width || rect->y >= s->screen_height) {
+        return false;
+    }
+
+    width = MIN(rect->w, s->screen_width - rect->x);
+    height = MIN(rect->h, s->screen_height - rect->y);
+    if (width == 0 || height == 0) {
+        return false;
+    }
+
+    /* Screen Object scanout is always 32-bit B8G8R8X8/B8G8R8A8 storage. */
+    step_x = MAX(1u, (width + 31u) / 32u);
+    step_y = MAX(1u, (height + 31u) / 32u);
+    vmsvga3d_screen_rgb_trace_init(trace);
+
+    for (y = 0; y < height; y += step_y) {
+        uint64_t row_offset =
+            (uint64_t)(rect->y + y) * screen_stride +
+            (uint64_t)rect->x * 4u;
+        uint32_t x;
+
+        if (row_offset >= screen_size) {
+            return false;
+        }
+
+        for (x = 0; x < width; x += step_x) {
+            uint64_t pixel_offset = row_offset + (uint64_t)x * 4u;
+            const uint8_t *pixel;
+
+            if (pixel_offset > screen_size || 4u > screen_size - pixel_offset) {
+                return false;
+            }
+
+            pixel = screen_base + pixel_offset;
+            vmsvga3d_screen_rgb_trace_add(
+                trace, pixel[2], pixel[1], pixel[0]);
+        }
+    }
+
+    return trace->samples != 0;
+}
+
+static void vmsvga3d_screen_rgb_trace_log(
+    const char *stage, uint32_t sid, SVGA3dSurfaceFormat format,
+    const SVGA3dCopyRect *rect, bool readback, bool copy_to_screen,
+    const VMSVGA3DScreenRGBTrace *trace)
+{
+    if (stage == NULL || rect == NULL || trace == NULL ||
+        trace->samples == 0) {
+        return;
+    }
+
+    fprintf(stderr,
+            "VMVGA-SCREEN-RGB stage=%s sid=%u format=%u "
+            "rect=%u,%u/%ux%u readback=%u copy=%u "
+            "samples=%u chromatic=%u nonzero=%u "
+            "hash-r=0x%08x hash-g=0x%08x hash-b=0x%08x "
+            "avg-r=%" PRIu64 " avg-g=%" PRIu64 " avg-b=%" PRIu64 "\n",
+            stage, sid, (unsigned)format, rect->x, rect->y, rect->w, rect->h,
+            readback, copy_to_screen, trace->samples, trace->chromatic,
+            trace->nonzero,
+            trace->red_hash, trace->green_hash, trace->blue_hash,
+            trace->red_sum / trace->samples,
+            trace->green_sum / trace->samples,
+            trace->blue_sum / trace->samples);
+}
+
 static bool vmsvga3d_present_rect_to_buffer(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DSurfaceImage *image, const struct svga3d_surface_desc *desc,
@@ -9832,6 +10014,7 @@ static bool vmsvga3d_screen_target_present_live(
     VMSVGA3DSurfaceImage *image;
     const struct svga3d_surface_desc *desc;
     SVGA3dCopyRect copy;
+    bool trace_rgb;
 
     if (s == NULL || rect == NULL || s->svga3d == NULL) {
         return false;
@@ -9881,6 +10064,9 @@ static bool vmsvga3d_screen_target_present_live(
         return false;
     }
 
+    trace_rgb = surface->format == SVGA3D_B8G8R8A8_UNORM &&
+                vmsvga_trace_flight_enabled();
+
     /*
      * The screen-target path is restricted by vmsvga3d_present_format() to
      * single-sample, uncompressed 2D pixel formats. Read back only the dirty
@@ -9905,6 +10091,22 @@ static bool vmsvga3d_screen_target_present_live(
         }
     }
 
+    if (trace_rgb) {
+        VMSVGA3DScreenRGBTrace trace;
+
+        if (vmsvga3d_screen_rgb_trace_surface(
+                surface, image, desc, &copy, &trace)) {
+            vmsvga3d_screen_rgb_trace_log(
+                "shadow-ready", sid, surface->format, &copy, readback,
+                copy_to_screen, &trace);
+        }
+        if (vmsvga3d_screen_rgb_trace_scanout(s, &copy, &trace)) {
+            vmsvga3d_screen_rgb_trace_log(
+                "scanout-before", sid, surface->format, &copy, readback,
+                copy_to_screen, &trace);
+        }
+    }
+
     if (copy_to_screen) {
         if (!vmsvga3d_present_screen_rect(
                 s, surface, image, desc, &copy, true)) {
@@ -9913,6 +10115,16 @@ static bool vmsvga3d_screen_target_present_live(
     } else if (!vmsvga3d_present_screen_rect_damage_only(
                    s, surface, image, desc, &copy)) {
         return false;
+    }
+
+    if (trace_rgb) {
+        VMSVGA3DScreenRGBTrace trace;
+
+        if (vmsvga3d_screen_rgb_trace_scanout(s, &copy, &trace)) {
+            vmsvga3d_screen_rgb_trace_log(
+                "scanout-after", sid, surface->format, &copy, readback,
+                copy_to_screen, &trace);
+        }
     }
 
     /*

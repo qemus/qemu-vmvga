@@ -5931,36 +5931,26 @@ static void vmsvga3d_d3d10_pipeline_output_targets_live(
             }
         }
 
-        /* Do not route ordinary RTV/DSV-only draws through
-         * OMSetRenderTargetsAndUnorderedAccessViews.  D3D11 requires the UAV
-         * start slot to be at or beyond the RTV range when UAVs are present,
-         * while a freshly initialized SVGA context has uavSpliceIndex == 0.
-         */
-        if (uav_count == 0) {
-            (void)vmsvga3d_dxvk_d3d11_set_render_targets(
-                s->dxvk, cid, context->render_target_count,
-                context->shadow.renderState.renderTargetViewIds,
-                context->shadow.renderState.depthStencilViewId,
-                context->shadow.uavSpliceIndex);
-        } else if (uav_count <= SVGA3D_MAX_UAVIEWS &&
-                   context->shadow.uavSpliceIndex >=
-                       context->render_target_count &&
-                   context->shadow.uavSpliceIndex <=
-                       SVGA3D_MAX_UAVIEWS - uav_count) {
-            (void)vmsvga3d_d3d11_graphics_uav_bind_live(
-                s->dxvk, cid, context->render_target_count,
-                context->shadow.renderState.renderTargetViewIds,
-                context->shadow.renderState.depthStencilViewId,
-                context->shadow.uavSpliceIndex, uav_count,
-                context->shadow.uaViewIds,
-                (const SVGACOTableDXUAViewEntry *)uav_table->host,
-                uav_table->capacity_entries);
-        } else {
-            /* Keep the state dirty so a malformed/overlapping UAV splice does
-             * not silently become the accepted renderer state.
-             */
+        if (uav_count != 0 &&
+            context->shadow.uavSpliceIndex < context->render_target_count) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-OM-REJECT cid=%u rt-count=%u uav-start=%u uav-count=%u "
+                "reason=uav-overlaps-rtv",
+                cid, context->render_target_count,
+                context->shadow.uavSpliceIndex, uav_count);
             context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+            return;
         }
+
+        (void)vmsvga3d_d3d11_graphics_uav_bind_live(
+            s->dxvk, cid, context->render_target_count,
+            context->shadow.renderState.renderTargetViewIds,
+            context->shadow.renderState.depthStencilViewId,
+            context->shadow.uavSpliceIndex, uav_count,
+            context->shadow.uaViewIds,
+            (const SVGACOTableDXUAViewEntry *)uav_table->host,
+            uav_table->capacity_entries);
     } else {
         (void)vmsvga3d_dxvk_d3d11_set_render_targets(
             s->dxvk, cid, context->render_target_count,
@@ -10114,12 +10104,21 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-COPY-FORMAT kind=region cid=%u src=%u:%u guest=%u native=%u "
-        "dst=%u:%u guest=%u native=%u src-kind=%u dst-kind=%u",
+        "dst=%u:%u guest=%u native=%u src-kind=%u dst-kind=%u "
+        "guest-dst=%u,%u,%u guest-size=%u,%u,%u guest-src=%u,%u,%u "
+        "applied-dst=%u,%u,%u applied-src=%u,%u,%u-%u,%u,%u",
         cid, command->srcSid, plan.source_subresource, source->format,
         vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
         command->dstSid, plan.destination_subresource, destination->format,
         vmsvga3d_dxvk_d3d11_surface_native_format(destination->dxvk_surface),
-        plan.source_create_kind, plan.destination_create_kind);
+        plan.source_create_kind, plan.destination_create_kind,
+        command->box.x, command->box.y, command->box.z, command->box.w,
+        command->box.h, command->box.d, command->box.srcx, command->box.srcy,
+        command->box.srcz, plan.region.destination_x,
+        plan.region.destination_y, plan.region.destination_z,
+        plan.region.source_box.left, plan.region.source_box.top,
+        plan.region.source_box.front, plan.region.source_box.right,
+        plan.region.source_box.bottom, plan.region.source_box.back);
 
     if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
             s->dxvk, destination->dxvk_surface, plan.destination_subresource,
@@ -12904,6 +12903,22 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           if (count != 0) {
               memcpy(rects, (const uint8_t *)payload + header_size,
                      count * sizeof(rects[0]));
+          }
+
+          if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+              uint32_t i;
+
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-SCISSORS-CMD cid=%u count=%u", cid, count);
+              for (i = 0; i < count; i++) {
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "DX-SCISSOR-CMD cid=%u slot=%u left=%d top=%d "
+                      "right=%d bottom=%d",
+                      cid, i, rects[i].left, rects[i].top, rects[i].right,
+                      rects[i].bottom);
+              }
           }
 
           return vmsvga3d_d3d10_scissor_plan(

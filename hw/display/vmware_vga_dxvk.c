@@ -2083,6 +2083,39 @@ fail_unlocked:
 #endif
 }
 
+static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
+    VMSVGA3DDxvk *dxvk)
+{
+    if (dxvk == NULL) {
+        return;
+    }
+
+    memset(dxvk->d3d11_bound_constant_buffers, 0,
+           sizeof(dxvk->d3d11_bound_constant_buffers));
+    memset(dxvk->d3d11_bound_constant_buffer_valid, 0,
+           sizeof(dxvk->d3d11_bound_constant_buffer_valid));
+    memset(dxvk->d3d11_bound_constant_buffer_first_constant, 0,
+           sizeof(dxvk->d3d11_bound_constant_buffer_first_constant));
+    memset(dxvk->d3d11_bound_constant_buffer_num_constants, 0,
+           sizeof(dxvk->d3d11_bound_constant_buffer_num_constants));
+    memset(dxvk->d3d11_constant_buffer_start_slot, 0,
+           sizeof(dxvk->d3d11_constant_buffer_start_slot));
+    memset(dxvk->d3d11_constant_buffer_num_buffers, 0,
+           sizeof(dxvk->d3d11_constant_buffer_num_buffers));
+    memset(dxvk->d3d11_bound_vertex_buffers, 0,
+           sizeof(dxvk->d3d11_bound_vertex_buffers));
+    memset(dxvk->d3d11_bound_vertex_strides, 0,
+           sizeof(dxvk->d3d11_bound_vertex_strides));
+    memset(dxvk->d3d11_bound_vertex_offsets, 0,
+           sizeof(dxvk->d3d11_bound_vertex_offsets));
+    memset(dxvk->d3d11_bound_vertex_buffer_valid, 0,
+           sizeof(dxvk->d3d11_bound_vertex_buffer_valid));
+    dxvk->d3d11_bound_index_buffer = NULL;
+    dxvk->d3d11_bound_index_format = 0;
+    dxvk->d3d11_bound_index_offset = 0;
+    dxvk->d3d11_bound_index_buffer_valid = false;
+}
+
 static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -2182,30 +2215,29 @@ static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
     }
 #endif
 
-    memset(dxvk->d3d11_bound_constant_buffers, 0,
-           sizeof(dxvk->d3d11_bound_constant_buffers));
-    memset(dxvk->d3d11_bound_constant_buffer_valid, 0,
-           sizeof(dxvk->d3d11_bound_constant_buffer_valid));
-    memset(dxvk->d3d11_bound_constant_buffer_first_constant, 0,
-           sizeof(dxvk->d3d11_bound_constant_buffer_first_constant));
-    memset(dxvk->d3d11_bound_constant_buffer_num_constants, 0,
-           sizeof(dxvk->d3d11_bound_constant_buffer_num_constants));
-    memset(dxvk->d3d11_constant_buffer_start_slot, 0,
-           sizeof(dxvk->d3d11_constant_buffer_start_slot));
-    memset(dxvk->d3d11_constant_buffer_num_buffers, 0,
-           sizeof(dxvk->d3d11_constant_buffer_num_buffers));
-    memset(dxvk->d3d11_bound_vertex_buffers, 0,
-           sizeof(dxvk->d3d11_bound_vertex_buffers));
-    memset(dxvk->d3d11_bound_vertex_strides, 0,
-           sizeof(dxvk->d3d11_bound_vertex_strides));
-    memset(dxvk->d3d11_bound_vertex_offsets, 0,
-           sizeof(dxvk->d3d11_bound_vertex_offsets));
-    memset(dxvk->d3d11_bound_vertex_buffer_valid, 0,
-           sizeof(dxvk->d3d11_bound_vertex_buffer_valid));
-    dxvk->d3d11_bound_index_buffer = NULL;
-    dxvk->d3d11_bound_index_format = 0;
-    dxvk->d3d11_bound_index_offset = 0;
-    dxvk->d3d11_bound_index_buffer_valid = false;
+    vmsvga3d_dxvk_d3d11_binding_cache_reset(dxvk);
+}
+
+bool vmsvga3d_dxvk_d3d11_clear_state(VMSVGA3DDxvk *dxvk)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11ClearState clear_state = NULL;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_CLEAR_STATE,
+            &clear_state, sizeof(clear_state))) {
+        return false;
+    }
+
+    clear_state(dxvk->d3d11_context);
+    vmsvga3d_dxvk_d3d11_binding_cache_reset(dxvk);
+    return true;
+#else
+    (void)dxvk;
+    return false;
+#endif
 }
 
 void vmsvga3d_dxvk_reset_guest_objects(VMSVGA3DDxvk *dxvk,

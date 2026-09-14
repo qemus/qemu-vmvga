@@ -7845,13 +7845,7 @@ static bool vmsvga3d_d3d10_context_switch_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
     VMSVGA3DDXContext *context;
-    VMSVGA3DDXContext *old_context = NULL;
     VMSVGA3DD3D10SOTargetsPlan plan;
-    uint32_t null_views[SVGA3D_DX_MAX_SRVIEWS];
-    VMSVGA3DDxvkSurface *null_vertex_buffers[
-        SVGA3D_DX_MAX_VERTEXBUFFERS] = { NULL };
-    uint32_t zero_vertex_strides[SVGA3D_DX_MAX_VERTEXBUFFERS] = { 0 };
-    uint32_t zero_vertex_offsets[SVGA3D_DX_MAX_VERTEXBUFFERS] = { 0 };
     uint32_t old_cid;
     uint32_t stage;
     uint32_t slot;
@@ -7871,58 +7865,64 @@ static bool vmsvga3d_d3d10_context_switch_live(
         return true;
     }
 
-    if (old_cid != SVGA3D_INVALID_ID && old_cid < SVGA3D_MAX_CONTEXT_IDS) {
-        old_context = vmsvga3d_dx_context(s, old_cid);
-    }
-
     /* Current VirtualBox DX_STATE_TRACKER marks every frontend pipeline state
      * dirty before switching the D3D11 backend context.  The next Draw will
      * therefore replay the complete new-context state from its shadow MOB.
      */
     context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_ALL;
 
+    /* All guest DX contexts share one native D3D11 immediate context.  Clear
+     * that native pipeline before selecting another guest context so state
+     * without a frontend dirty bit (predication and vGPU11 UAVs in particular)
+     * cannot survive the switch.  The authoritative guest shadow is preserved;
+     * dirty-state setup below reconstructs the selected context lazily.
+     */
+    if (!vmsvga3d_dxvk_d3d11_clear_state(s->dxvk)) {
+        return false;
+    }
+    s->svga3d->active_dx_context_id = SVGA3D_INVALID_ID;
+
     /* The backend makes every constant-buffer slot pending again on a context
-     * switch.  vGPU10 exposes only VS/PS/GS, so mirror the 14 API slots for
-     * those three stages here.
+     * switch.  vGPU11 has separate renderer-side pending/range metadata for
+     * SetConstantBuffers1, so rebuild it from the selected context's shadow
+     * before the next draw.  vGPU10 keeps the existing VS/PS/GS tracker.
      */
-    for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE_DX10; stage++) {
-        context->constant_buffer_start_slot[stage] = 0;
-        context->constant_buffer_num_buffers[stage] = SVGA3D_DX_MAX_CONSTBUFFERS;
-    }
+    if (s->vgpu_generation == VMSVGA_VGPU_11) {
+        for (stage = 0; stage < vmsvga3d_dx_shader_stage_count(s); stage++) {
+            context->constant_buffer_start_slot[stage] = 0;
+            context->constant_buffer_num_buffers[stage] =
+                SVGA3D_DX_MAX_CONSTBUFFERS;
 
-    /* Old SRVs are explicitly NULL-unbound before setupPipeline binds the new
-     * context.  This is required because RTV/DSV targets are installed before
-     * SRVs and stale views from the prior context could otherwise conflict.
-     */
-    for (slot = 0; slot < SVGA3D_DX_MAX_SRVIEWS; slot++) {
-        null_views[slot] = SVGA3D_INVALID_ID;
-    }
+            for (slot = 0; slot < SVGA3D_DX_MAX_CONSTBUFFERS; slot++) {
+                const SVGA3dConstantBufferBinding *binding =
+                    &context->shadow.shaderState[stage].constantBuffers[slot];
+                uint32_t aligned_size = 0;
 
-    for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE_DX10; stage++) {
-        uint32_t count = old_context != NULL
-                             ? MIN(old_context->shader_resource_max_bound[stage],
-                                   (uint32_t)SVGA3D_DX_MAX_SRVIEWS)
-                             : SVGA3D_DX_MAX_SRVIEWS;
+                if (binding->sid != SVGA3D_INVALID_ID) {
+                    aligned_size = (binding->sizeInBytes + 255u) & ~255u;
+                    if (aligned_size > 4096u * 16u) {
+                        aligned_size = 4096u * 16u;
+                    }
+                }
 
-        if (count != 0 &&
-            !vmsvga3d_dxvk_d3d11_set_shader_resources(
-                s->dxvk, cid, stage, 0, count, null_views)) {
-            return false;
+                if (!vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
+                        s->dxvk, stage, slot, 0, aligned_size / 16u)) {
+                    return false;
+                }
+            }
+        }
+    } else {
+        for (stage = 0; stage < SVGA3D_NUM_SHADERTYPE_DX10; stage++) {
+            context->constant_buffer_start_slot[stage] = 0;
+            context->constant_buffer_num_buffers[stage] =
+                SVGA3D_DX_MAX_CONSTBUFFERS;
         }
     }
 
-    /* All guest DX contexts share one native D3D11 immediate context.  Clear
-     * the complete native VB table on every guest-context switch so bindings
-     * from a context with a wider/higher VB span cannot leak into the next
-     * context.  Then mark the new context's remembered span modified so the
-     * next pipeline setup restores its own buffers, strides and offsets.
+    /* ClearState also clears all vertex-buffer slots.  Re-mark the selected
+     * context's complete remembered span so setupPipeline restores it before
+     * the next draw rather than relying on the old per-slot modification mask.
      */
-    if (!vmsvga3d_dxvk_d3d11_set_vertex_buffers(
-            s->dxvk, 0, SVGA3D_DX_MAX_VERTEXBUFFERS, null_vertex_buffers,
-            zero_vertex_strides, zero_vertex_offsets)) {
-        return false;
-    }
-
     new_vb_count = MIN(context->vertex_buffer_max_bound,
                        (uint32_t)SVGA3D_DX_MAX_VERTEXBUFFERS);
     if (new_vb_count == 0) {
@@ -7932,6 +7932,17 @@ static bool vmsvga3d_d3d10_context_switch_live(
     } else {
         context->vertex_buffer_modified =
             (UINT64_C(1) << new_vb_count) - UINT64_C(1);
+    }
+
+    /* Predication is part of D3D11 device-context state but has no renderer
+     * dirty bit in SVGADXContextMobFormat.  Restore it explicitly from the
+     * selected context's shadow after ClearState.
+     */
+    if (!vmsvga3d_dxvk_d3d11_set_predication(
+            s->dxvk, cid, context->shadow.predication.queryID,
+            context->shadow.predication.queryID != SVGA3D_INVALID_ID,
+            context->shadow.predication.value != 0)) {
+        return false;
     }
 
     /* VirtualBox restores SO targets on every DX context switch.  The context
@@ -11950,6 +11961,33 @@ static bool vmsvga3d_d3d10_set_predication_live(
         s->dxvk, cid, command->queryId, plan.enabled, plan.predicate_value);
 }
 
+static bool vmsvga3d_d3d11_constant_buffer_mark_pending(
+    VMSVGA3DDXContext *context, uint32_t stage_index, uint32_t slot)
+{
+    uint32_t new_start;
+    uint32_t new_end;
+
+    if (context == NULL || stage_index >= SVGA3D_NUM_SHADERTYPE ||
+        slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+        return false;
+    }
+
+    if (context->constant_buffer_num_buffers[stage_index] == 0) {
+        context->constant_buffer_start_slot[stage_index] = slot;
+        context->constant_buffer_num_buffers[stage_index] = 1;
+    } else {
+        new_start = MIN(context->constant_buffer_start_slot[stage_index], slot);
+        new_end = context->constant_buffer_start_slot[stage_index] +
+                  context->constant_buffer_num_buffers[stage_index];
+        new_end = MAX(new_end, slot + 1u);
+        context->constant_buffer_start_slot[stage_index] = new_start;
+        context->constant_buffer_num_buffers[stage_index] =
+            new_end - new_start;
+    }
+
+    return true;
+}
+
 static bool vmsvga3d_d3d10_constant_buffer_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10ConstantBufferPlan *plan,
@@ -12074,11 +12112,13 @@ static bool vmsvga3d_d3d10_constant_buffer_offset_live(
             return false;
         }
 
-        return vmsvga3d_d3d11_constant_buffer_offset_live(
-                   s->dxvk, cid, &offset_plan, binding,
-                   has_surface_data ? surface->mips[0].data : NULL,
-                   surface_bytes, surface_available, has_surface_data) !=
-               VMSVGA3D_D3D11_LEVEL_INVALID;
+        level = vmsvga3d_d3d11_constant_buffer_offset_live(
+            s->dxvk, cid, &offset_plan, binding,
+            has_surface_data ? surface->mips[0].data : NULL,
+            surface_bytes, surface_available, has_surface_data);
+        return level != VMSVGA3D_D3D11_LEVEL_INVALID &&
+               vmsvga3d_d3d11_constant_buffer_mark_pending(
+                   context, stage_index, command->slot);
     }
 
     {
@@ -12395,12 +12435,13 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
     case SVGA_3D_CMD_DX_SET_SINGLE_CONSTANT_BUFFER: {
           SVGA3dCmdDXSetSingleConstantBuffer command;
+          VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
           VMSVGA3DSurface *surface = NULL;
           bool surface_available = false;
           uint32_t surface_bytes = 0;
           bool has_surface_data = false;
 
-          if (vmsvga3d_dx_context(s, cid) == NULL || size < sizeof(command)) {
+          if (context == NULL || size < sizeof(command)) {
               return false;
           }
 
@@ -12438,12 +12479,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                   return false;
               }
 
-              return vmsvga3d_state_dx_apply_constant_buffer_d3d11(
-                         s, cid, &plan) &&
-                     vmsvga3d_d3d11_constant_buffer_live(
-                         s->dxvk, cid, &plan,
-                         has_surface_data ? surface->mips[0].data : NULL,
-                         surface_bytes) != VMSVGA3D_D3D11_LEVEL_INVALID;
+              if (!vmsvga3d_state_dx_apply_constant_buffer_d3d11(
+                      s, cid, &plan) ||
+                  vmsvga3d_d3d11_constant_buffer_live(
+                      s->dxvk, cid, &plan,
+                      has_surface_data ? surface->mips[0].data : NULL,
+                      surface_bytes) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+                  return false;
+              }
+
+              return vmsvga3d_d3d11_constant_buffer_mark_pending(
+                  context, plan.stage_index, plan.slot);
           }
 
           {

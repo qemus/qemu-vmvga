@@ -8236,10 +8236,9 @@ static bool vmsvga3d_d3d10_srv_realize_live(
     VMSVGA3DSurface *surface;
     VMSVGA3DD3D10SurfaceInfo surface_info;
     VMSVGA3DD3D10ResourcePlan resource_plan;
-    VMSVGA3DD3D10SRVDesc srv_desc;
+    VMSVGA3DD3D11SRVDesc srv_desc;
     VMSVGA3DDxvkSubresourceData *initial_data = NULL;
     VMSVGA3DD3D10ResourceUse resource_use;
-    VMSVGA3DD3D10Level level;
     uint32_t initial_data_count = 0;
     bool success = false;
 
@@ -8264,7 +8263,8 @@ static bool vmsvga3d_d3d10_srv_realize_live(
         return false;
     }
 
-    resource_use = entry->resourceDimension == SVGA3D_RESOURCE_BUFFER
+    resource_use = entry->resourceDimension == SVGA3D_RESOURCE_BUFFER ||
+                   entry->resourceDimension == SVGA3D_RESOURCE_BUFFEREX
                        ? VMSVGA3D_D3D10_RESOURCE_USE_GENERIC_BUFFER
                        : VMSVGA3D_D3D10_RESOURCE_USE_TEXTURE;
     if (!vmsvga3d_dx_resource_plan_live(
@@ -8291,11 +8291,33 @@ static bool vmsvga3d_d3d10_srv_realize_live(
         goto out;
     }
 
-    level = vmsvga3d_d3d10_srv_desc(
-        entry, surface_info.array_elements, surface_info.multisample_count,
-        &srv_desc);
-    if (!vmsvga3d_d3d10_level_is_vgpu10(level)) {
-        goto out;
+    if (s->vgpu_generation == VMSVGA_VGPU_11) {
+        if (vmsvga3d_d3d11_srv_desc(
+                entry, surface_info.array_elements,
+                surface_info.multisample_count, &srv_desc) ==
+            VMSVGA3D_D3D11_LEVEL_INVALID) {
+            goto out;
+        }
+    } else {
+        VMSVGA3DD3D10SRVDesc base;
+        VMSVGA3DD3D10Level level;
+
+        level = vmsvga3d_d3d10_srv_desc(
+            entry, surface_info.array_elements, surface_info.multisample_count,
+            &base);
+        if (!vmsvga3d_d3d10_level_is_vgpu10(level)) {
+            goto out;
+        }
+
+        memset(&srv_desc, 0, sizeof(srv_desc));
+        srv_desc.format = base.format;
+        srv_desc.view_dimension = base.view_dimension;
+        srv_desc.most_detailed_mip = base.most_detailed_mip;
+        srv_desc.mip_levels = base.mip_levels;
+        srv_desc.first_array_slice = base.first_array_slice;
+        srv_desc.array_size = base.array_size;
+        srv_desc.first_element = base.first_element;
+        srv_desc.num_elements = base.num_elements;
     }
 
     success = vmsvga3d_dxvk_d3d11_shader_resource_view_ensure(

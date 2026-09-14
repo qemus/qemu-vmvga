@@ -559,6 +559,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE3D 8u
 #define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURECUBE 9u
 #define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURECUBEARRAY 10u
+#define VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_BUFFEREX 11u
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_BUFFER 1u
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE1D 2u
 #define VMSVGA3D_DXVK_D3D11_RTV_DIMENSION_TEXTURE1DARRAY 3u
@@ -3965,7 +3966,7 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
 static bool vmsvga3d_dxvk_d3d11_srv_desc(
-    const VMSVGA3DD3D10SRVDesc *src, VMSVGA3DDxvkD3D11SRVDesc *dst)
+    const VMSVGA3DD3D11SRVDesc *src, VMSVGA3DDxvkD3D11SRVDesc *dst)
 {
     if (src == NULL || dst == NULL) {
         return false;
@@ -3979,6 +3980,11 @@ static bool vmsvga3d_dxvk_d3d11_srv_desc(
     case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_BUFFER:
         dst->data[0] = src->first_element;
         dst->data[1] = src->num_elements;
+        break;
+    case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_BUFFEREX:
+        dst->data[0] = src->first_element;
+        dst->data[1] = src->num_elements;
+        dst->data[2] = src->flags;
         break;
     case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE1D:
     case VMSVGA3D_DXVK_D3D11_SRV_DIMENSION_TEXTURE2D:
@@ -4016,12 +4022,12 @@ static bool vmsvga3d_dxvk_d3d11_srv_desc(
 bool vmsvga3d_dxvk_d3d11_shader_resource_view_ensure(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
     VMSVGA3DDxvkSurface *surface,
-    const struct vmsvga3d_d3d10_srv_desc_s *desc)
+    const struct vmsvga3d_d3d11_srv_desc_s *desc)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CreateShaderResourceView create_view = NULL;
     VMSVGA3DDxvkD3D11SRVDesc native;
-    const VMSVGA3DD3D10SRVDesc *view_desc = desc;
+    const VMSVGA3DD3D11SRVDesc *view_desc = desc;
     void *view = NULL;
     int32_t result;
 

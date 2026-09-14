@@ -3573,6 +3573,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     uint32_t i;
     bool scene_started = false;
     bool success = false;
+    bool reset_state = false;
     bool full_replay = false;
     bool trace = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
     const char *failure_stage = NULL;
@@ -3693,16 +3694,14 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         goto out;
     }
 
-    /* Re-establish a canonical native D3D9 state at structural pipeline
-     * boundaries. Render-target changes have native viewport/scissor and
-     * backend-derived side effects, while shader changes switch the pipeline
-     * interpretation of otherwise persistent legacy state. Between those
-     * boundaries, keep #364's cheap dirty-state replay. */
-    full_replay = context->legacy_full_replay ||
-                  s->svga3d->active_legacy_context_id != cid ||
-                  context->legacy_target_dirty != 0 ||
-                  context->legacy_shader_dirty != 0;
-    if (full_replay && !vmsvga3d_dxvk_reset_state(s->dxvk)) {
+    /* Keep dirty replay for repeated draws.  A new context still needs a
+     * pristine native D3D9 state, while a shader binding change replays the
+     * complete VMware context without resetting first.  This separates the
+     * full-replay requirement from the pristine-state reset. */
+    reset_state = context->legacy_full_replay ||
+                  s->svga3d->active_legacy_context_id != cid;
+    full_replay = reset_state || context->legacy_shader_dirty != 0;
+    if (reset_state && !vmsvga3d_dxvk_reset_state(s->dxvk)) {
         failure_stage = "reset-state-before";
         goto out;
     }

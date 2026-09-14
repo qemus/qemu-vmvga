@@ -55,6 +55,7 @@ struct vmsvga3d_d3d10_create_desc_s;
 struct vmsvga3d_d3d10_rtv_desc_s;
 struct vmsvga3d_d3d10_dsv_desc_s;
 struct vmsvga3d_d3d10_srv_desc_s;
+struct vmsvga3d_d3d11_srv_desc_s;
 struct vmsvga3d_d3d10_box_s;
 struct vmsvga3d_d3d10_input_element_s;
 struct vmsvga3d_d3d10_shader_info_s;
@@ -154,7 +155,7 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
 bool vmsvga3d_dxvk_d3d11_shader_resource_view_ensure(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id,
     VMSVGA3DDxvkSurface *surface,
-    const struct vmsvga3d_d3d10_srv_desc_s *desc);
+    const struct vmsvga3d_d3d11_srv_desc_s *desc);
 bool vmsvga3d_dxvk_d3d11_shader_resource_view_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t view_id);
 bool vmsvga3d_dxvk_d3d11_render_target_view_ensure(

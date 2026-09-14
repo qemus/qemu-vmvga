@@ -64,6 +64,8 @@ struct vmsvga3d_d3d10_blend_desc_s;
 struct vmsvga3d_d3d10_depth_stencil_desc_s;
 struct vmsvga3d_d3d10_rasterizer_desc_s;
 struct vmsvga3d_d3d10_sampler_desc_s;
+struct vmsvga3d_d3d11_blend_desc_s;
+struct vmsvga3d_d3d11_rasterizer_desc_s;
 struct vmsvga3d_d3d11_uav_desc_s;
 
 typedef struct vmsvga3d_dxvk_subresource_data_s {
@@ -249,6 +251,8 @@ bool vmsvga3d_dxvk_d3d11_context1_acquire(VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
     VMSVGA3DDxvk *dxvk, uint32_t stage_index, uint32_t slot,
     uint32_t first_constant, uint32_t num_constants);
+bool vmsvga3d_dxvk_d3d11_constant_buffer_mark_pending(
+    VMSVGA3DDxvk *dxvk, uint32_t stage_index, uint32_t slot);
 bool vmsvga3d_dxvk_d3d11_constant_buffers1_flush(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stage_index);
 bool vmsvga3d_dxvk_d3d11_constant_buffers1_flush_all(
@@ -319,6 +323,9 @@ void vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(
 bool vmsvga3d_dxvk_d3d11_blend_state_define(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
     const struct vmsvga3d_d3d10_blend_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_blend_state1_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
+    const struct vmsvga3d_d3d11_blend_desc_s *desc);
 bool vmsvga3d_dxvk_d3d11_blend_state_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id);
 bool vmsvga3d_dxvk_d3d11_depth_stencil_state_define(
@@ -329,6 +336,9 @@ bool vmsvga3d_dxvk_d3d11_depth_stencil_state_destroy(
 bool vmsvga3d_dxvk_d3d11_rasterizer_state_define(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
     const struct vmsvga3d_d3d10_rasterizer_desc_s *desc);
+bool vmsvga3d_dxvk_d3d11_rasterizer_state1_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
+    const struct vmsvga3d_d3d11_rasterizer_desc_s *desc);
 bool vmsvga3d_dxvk_d3d11_rasterizer_state_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id);
 bool vmsvga3d_dxvk_d3d11_sampler_state_define(

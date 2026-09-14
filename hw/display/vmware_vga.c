@@ -1651,6 +1651,9 @@ static void cursor_update_from_fifo(struct vmsvga_state_s *s)
 static inline void vmsvga_legacy_handoff_present_rect(
     struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t w,
     uint32_t h);
+static inline void vmsvga_legacy_handoff_sync_dirty_rect(
+    struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t w,
+    uint32_t h);
 
 static inline void vmsvga_damage_flush(struct vmsvga_state_s *s)
 {
@@ -1775,9 +1778,9 @@ static inline void vmsvga_damage_add_dirty(struct vmsvga_state_s *s,
                                            uint32_t x, uint32_t y,
                                            uint32_t w, uint32_t h)
 {
-    /* DIRTY_MEMORY_VGA is page-granular and therefore cannot describe an exact
-     * handoff rectangle.  Keep its ordinary redraw role without using it to
-     * overwrite or complete the transition mirror. */
+    /* DIRTY_MEMORY_VGA is page-granular, so it can refresh an already-active
+     * transition mirror but must never arm or complete the handoff. */
+    vmsvga_legacy_handoff_sync_dirty_rect(s, x, y, w, h);
     vmsvga_damage_queue(s, x, y, w, h);
 }
 
@@ -8367,13 +8370,16 @@ static bool vmsvga_legacy_handoff_rect_is_zero(
     }
 
     for (row = 0; row < height; row++) {
-        const uint32_t *pixels = (const uint32_t *)(
+        const uint8_t *pixels =
             vram + (size_t)(y + row) * s->active_stride +
-            (size_t)x * 4U);
+            (size_t)x * 4U;
         uint32_t col;
 
         for (col = 0; col < width; col++) {
-            if ((pixels[col] & 0x00ffffffU) != 0) {
+            uint32_t pixel;
+
+            memcpy(&pixel, pixels + (size_t)col * 4U, sizeof(pixel));
+            if ((le32_to_cpu(pixel) & 0x00ffffffU) != 0) {
                 return false;
             }
         }
@@ -8410,6 +8416,28 @@ static bool vmsvga_legacy_handoff_copy_rect(
     }
 
     return true;
+}
+
+static inline void vmsvga_legacy_handoff_sync_dirty_rect(
+    struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t w,
+    uint32_t h)
+{
+    uint64_t right;
+    uint64_t bottom;
+
+    if (s == NULL || !s->legacy_handoff_active ||
+        s->legacy_handoff_rebind || s->screen_defined ||
+        !s->active_valid || s->active_depth != 32 ||
+        s->screen_base == NULL || w == 0 || h == 0 ||
+        x >= s->active_width || y >= s->active_height) {
+        return;
+    }
+
+    right = MIN((uint64_t)x + w, (uint64_t)s->active_width);
+    bottom = MIN((uint64_t)y + h, (uint64_t)s->active_height);
+
+    (void)vmsvga_legacy_handoff_copy_rect(
+        s, x, y, (uint32_t)(right - x), (uint32_t)(bottom - y));
 }
 
 static bool vmsvga_legacy_handoff_arm(struct vmsvga_state_s *s)

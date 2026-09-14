@@ -7595,6 +7595,16 @@ static inline void vmsvga_legacy_mode_handoff_seed(
         return;
     }
 
+    /*
+     * The shadow may have become the authoritative classic-VGA backing only
+     * after the frontend last rendered this mode.  Force one full VGA render
+     * from that shadow before snapshotting it for the register-mode handoff.
+     * Without this, the console surface can still contain the stale/black BAR1
+     * image even though the visible classic-VGA state is intact in the shadow.
+     */
+    s->vga.hw_ops->invalidate(&s->vga);
+    (void)vmsvga_legacy_vga_gfx_update(s);
+
     surface = qemu_console_surface(s->vga.con);
     if (surface == NULL || surface_width(surface) <= 0 ||
         surface_height(surface) <= 0 || surface_stride(surface) <= 0 ||

@@ -9880,9 +9880,9 @@ static bool vmsvga3d_gb_zero_surface_live(struct vmsvga_state_s *s,
             continue;
         }
 
-        /* WRITE_ZERO_SURFACE and HINT_ZERO_SURFACE both establish zero as the
-         * current surface contents.  Keep the bound MOB untouched; a later
-         * explicit readback synchronizes guest backing in the normal GB path. */
+        /* WRITE_ZERO_SURFACE establishes zero as the current surface contents.
+         * Keep the bound MOB untouched; a later explicit readback synchronizes
+         * guest backing in the normal GB path. */
         memset(image->data, 0, image->data_size);
 
         if (d3d9_resident) {
@@ -9950,7 +9950,37 @@ static bool vmsvga3d_handle_zero_surface(struct vmsvga_state_s *s,
 
     if (size >= sizeof(uint32_t)) {
         uint32_t sid = ldl_le_p(payload);
-        bool success = vmsvga3d_gb_zero_surface_live(s, sid);
+        bool success;
+
+        if (cmd == SVGA_3D_CMD_WRITE_ZERO_SURFACE) {
+            success = vmsvga3d_gb_zero_surface_live(s, sid);
+        } else {
+            VMSVGA3DSurface *surface =
+                s != NULL && s->svga3d != NULL &&
+                        sid < SVGA3D_MAX_SURFACE_IDS
+                    ? s->svga3d->surfaces[sid]
+                    : NULL;
+
+            /* HINT_ZERO_SURFACE is advisory: do not overwrite either the CPU
+             * shadow or a resident native resource.  A ScreenTarget hint still
+             * establishes that the whole target has defined contents for the
+             * deferred handoff gate, without treating it as an actual write. */
+            success = surface != NULL;
+            if (surface != NULL && surface->mips != NULL &&
+                surface->mip_count != 0 &&
+                (surface->surface_flags & SVGA3D_SURFACE_SCREENTARGET) != 0) {
+                SVGA3dRect rect = {
+                    .w = surface->mips[0].size.width,
+                    .h = surface->mips[0].size.height,
+                };
+
+                surface->screen_target_content_valid = true;
+                if (s->screen_frontend_deferred) {
+                    vmsvga3d_screen_handoff_coverage_add_live(
+                        s, sid, 0, &rect, "zero-hint");
+                }
+            }
+        }
 
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
@@ -11709,10 +11739,15 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             }
             if (body->image.sid != old_sid) {
                 vmsvga3d_screen_target_write_tracking_reset_live(s, false);
-                vmsvga3d_screen_handoff_coverage_reset_live(
-                    s, body->image.sid,
-                    s->screen_frontend_deferred &&
-                    body->image.sid != SVGA3D_INVALID_ID);
+                /* A temporary UNBIND is part of the normal DWM flip sequence.
+                 * Keep the deferred-handoff coverage epoch alive so writes to a
+                 * candidate ScreenTarget that happened before the UNBIND remain
+                 * available when that target is bound a moment later. */
+                if (s->screen_frontend_deferred &&
+                    body->image.sid != SVGA3D_INVALID_ID) {
+                    vmsvga3d_screen_handoff_coverage_reset_live(
+                        s, body->image.sid, true);
+                }
             }
             if (update_screen &&
                 !(s->screen_frontend_deferred &&

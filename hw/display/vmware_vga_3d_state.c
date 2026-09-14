@@ -996,6 +996,7 @@ static bool vmsvga3d_state_set_render_target(
             context->legacy_target_dirty |= UINT32_C(1) << type;
             if (type >= SVGA3D_RT_COLOR0 && type <= SVGA3D_RT_COLOR3) {
                 context->legacy_viewport_dirty = true;
+                context->legacy_scissor_dirty = true;
             }
         }
         return true;
@@ -1023,6 +1024,7 @@ static bool vmsvga3d_state_set_render_target(
         context->legacy_target_dirty |= UINT32_C(1) << type;
         if (type >= SVGA3D_RT_COLOR0 && type <= SVGA3D_RT_COLOR3) {
             context->legacy_viewport_dirty = true;
+            context->legacy_scissor_dirty = true;
         }
     }
 

@@ -2570,6 +2570,7 @@ static void vmsvga3d_legacy_surface_bindings_dirty(
                 context->legacy_target_dirty |= UINT32_C(1) << i;
                 if (i >= SVGA3D_RT_COLOR0 && i <= SVGA3D_RT_COLOR3) {
                     context->legacy_viewport_dirty = true;
+                    context->legacy_scissor_dirty = true;
                 }
             }
         }
@@ -3572,7 +3573,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     uint32_t i;
     bool scene_started = false;
     bool success = false;
-    bool full_replay = false;
+    bool full_replay = true;
     bool trace = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
     const char *failure_stage = NULL;
     uint32_t failure_range = UINT32_MAX;
@@ -3692,9 +3693,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         goto out;
     }
 
-    full_replay = context->legacy_full_replay ||
-                  s->svga3d->active_legacy_context_id != cid;
-    if (full_replay && !vmsvga3d_dxvk_reset_state(s->dxvk)) {
+    if (!vmsvga3d_dxvk_reset_state(s->dxvk)) {
         failure_stage = "reset-state-before";
         goto out;
     }
@@ -3970,17 +3969,15 @@ out:
         (void)vmsvga3d_dxvk_end_scene(s->dxvk);
     }
 
-    if (success) {
-        context->legacy_full_replay = false;
-        s->svga3d->active_legacy_context_id = cid;
-    } else {
-        context->legacy_full_replay = true;
-        s->svga3d->active_legacy_context_id = SVGA3D_INVALID_ID;
-        if (!vmsvga3d_dxvk_reset_state(s->dxvk) && trace) {
+    context->legacy_full_replay = true;
+    s->svga3d->active_legacy_context_id = SVGA3D_INVALID_ID;
+    if (!vmsvga3d_dxvk_reset_state(s->dxvk)) {
+        if (trace) {
             fprintf(stderr,
                     "VMVGA-D3D9-DRAW fail cid=%u stage=reset-state-after\n",
                     cid);
         }
+        success = false;
     }
 
     if (declaration != NULL) {

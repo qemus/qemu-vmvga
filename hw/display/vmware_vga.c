@@ -1283,6 +1283,38 @@ static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s)
     return memory_region_get_ram_ptr(&s->vga.vram);
 }
 
+static inline bool vmsvga_legacy_vga_shadow_rendering(
+    const struct vmsvga_state_s *s)
+{
+    /*
+     * The isolated buffer backs the classic VGA aperture only.  Once VBE
+     * linear-framebuffer mode is active, generic VGA must keep rendering from
+     * BAR1 instead of the 512 KiB low-memory shadow.
+     */
+    return s->enable && s->legacy_vga_size != 0 &&
+           !(s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE] & 0x01);
+}
+
+static inline VMVGA_GFX_UPDATE_RET
+vmsvga_legacy_vga_gfx_update(struct vmsvga_state_s *s)
+{
+    uint8_t *vram_ptr = s->vga.vram_ptr;
+
+    if (vmsvga_legacy_vga_shadow_rendering(s)) {
+        s->vga.vram_ptr = s->legacy_vga_ptr;
+    }
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
+    {
+        bool updated = s->vga.hw_ops->gfx_update(&s->vga);
+        s->vga.vram_ptr = vram_ptr;
+        return updated;
+    }
+#else
+    s->vga.hw_ops->gfx_update(&s->vga);
+    s->vga.vram_ptr = vram_ptr;
+#endif
+}
+
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s)
 {
     size_t backup_size = vmsvga_legacy_vga_backup_size(s);
@@ -7528,6 +7560,89 @@ static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s)
     return s->active_valid ? s->active_stride : 0;
 }
 
+static inline void vmsvga_legacy_mode_handoff_seed(
+    struct vmsvga_state_s *s, uint32_t width, uint32_t height,
+    uint32_t depth, uint32_t stride)
+{
+    DisplaySurface *surface;
+    const uint8_t *src;
+    uint8_t *dst;
+    uint32_t src_width;
+    uint32_t src_height;
+    uint32_t src_stride;
+    uint32_t copy_width;
+    uint32_t copy_height;
+    uint32_t src_x;
+    uint32_t src_y;
+    uint32_t dst_x;
+    uint32_t dst_y;
+    uint32_t row;
+    size_t row_bytes;
+    uint64_t framebuffer_size;
+
+    /*
+     * XP switches directly from the classic 640x480 VGA boot screen to a
+     * larger register-mode SVGA framebuffer.  The driver only redraws changing
+     * regions (notably the progress bar), so retain the visible VGA image in
+     * BAR1 before the new register mode becomes the scanout.
+     *
+     * Restrict this to the classic-VGA shadow path.  VBE/GOP and Screen Object
+     * handoffs already have their own synchronization/preservation paths.
+     */
+    if (!vmsvga_legacy_vga_shadow_rendering(s) || s->screen_defined ||
+        s->svga_surface_bound || depth != 32 || width == 0 || height == 0 ||
+        stride < width * 4U) {
+        return;
+    }
+
+    surface = qemu_console_surface(s->vga.con);
+    if (surface == NULL || surface_width(surface) <= 0 ||
+        surface_height(surface) <= 0 || surface_stride(surface) <= 0 ||
+        surface_bits_per_pixel(surface) != 32) {
+        return;
+    }
+
+    src = surface_data(surface);
+    dst = vmsvga_svga_vram_ptr(s);
+    if (src == NULL || dst == NULL || src == dst) {
+        return;
+    }
+
+    src_width = (uint32_t)surface_width(surface);
+    src_height = (uint32_t)surface_height(surface);
+    src_stride = (uint32_t)surface_stride(surface);
+    framebuffer_size = (uint64_t)stride * height;
+    if (framebuffer_size == 0 || framebuffer_size > s->vga.vram_size) {
+        return;
+    }
+
+    copy_width = MIN(src_width, width);
+    copy_height = MIN(src_height, height);
+    row_bytes = (size_t)copy_width * 4U;
+    if (row_bytes > src_stride || row_bytes > stride) {
+        return;
+    }
+
+    src_x = (src_width - copy_width) / 2U;
+    src_y = (src_height - copy_height) / 2U;
+    dst_x = (width - copy_width) / 2U;
+    dst_y = (height - copy_height) / 2U;
+
+    memset(dst, 0, (size_t)framebuffer_size);
+    src += (size_t)src_y * src_stride + (size_t)src_x * 4U;
+    dst += (size_t)dst_y * stride + (size_t)dst_x * 4U;
+    for (row = 0; row < copy_height; row++) {
+        memcpy(dst + (size_t)row * stride,
+               src + (size_t)row * src_stride, row_bytes);
+    }
+    memory_region_set_dirty(&s->vga.vram, 0, (size_t)framebuffer_size);
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_STATE,
+        "LEGACY_HANDOFF seed src=%ux%u dst=%ux%u offset=%u,%u stride=%u",
+        src_width, src_height, width, height, dst_x, dst_y, stride);
+}
+
 static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
 {
     uint32_t stride;
@@ -7541,6 +7656,11 @@ static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
     changed = !s->active_valid || s->active_width != s->new_width ||
               s->active_height != s->new_height ||
               s->active_depth != s->new_depth || s->active_stride != stride;
+
+    if (changed) {
+        vmsvga_legacy_mode_handoff_seed(
+            s, s->new_width, s->new_height, s->new_depth, stride);
+    }
 
     s->active_valid = true;
     s->active_width = s->new_width;
@@ -8926,15 +9046,16 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
               /*
                * Firmware/GOP can leave QEMU's console surface stale even
                * though the VGA/VBE registers already describe the final boot
-               * mode.  Several SVGA registers fall back to the console surface
-               * before an SVGA mode is committed, so make generic VGA realize
-               * its current VBE state before SVGA takes display ownership.
-               *
-               * This is intentionally synchronous: the guest can read those
-               * SVGA registers immediately after setting ENABLE.
+               * mode.  Realize that VBE state synchronously before SVGA takes
+               * display ownership.  Do not do this for classic VGA: XP's boot
+               * image already lives in the frontend, and forcing a generic VGA
+               * rebuild here replaces it with black immediately before the
+               * legacy handoff.
                */
-              s->vga.hw_ops->invalidate(&s->vga);
-              s->vga.hw_ops->gfx_update(&s->vga);
+              if (s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE] & 0x01) {
+                  s->vga.hw_ops->invalidate(&s->vga);
+                  s->vga.hw_ops->gfx_update(&s->vga);
+              }
               vmsvga_trace_vga_state(s, "svga-enable-before");
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {
@@ -9439,8 +9560,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     if (!s->enable || !s->config) {
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
         s->svga_surface_bound = false;
-        VMVGA_GFX_UPDATE_FALLBACK(s);
-        goto done;
+        return vmsvga_legacy_vga_gfx_update(s);
     }
 
     if (s->hidden) {
@@ -9460,7 +9580,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
         s->svga_surface_bound = false;
         s->damage_count = 0;
-        s->vga.hw_ops->gfx_update(&s->vga);
+        (void)vmsvga_legacy_vga_gfx_update(s);
         goto done;
     }
 

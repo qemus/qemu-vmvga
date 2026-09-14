@@ -80,6 +80,8 @@
 #define SVGA_PALETTE_SIZE 768
 #define VMSVGA_PALETTE_STORAGE_SIZE 768
 #define SVGA_PIXMAP_SIZE(w, h, bpp) (((((w) * (bpp)) + 31) >> 5) * (h))
+#define VMSVGA_LEGACY_MAX_WIDTH SVGA_MAX_WIDTH
+#define VMSVGA_LEGACY_MAX_HEIGHT SVGA_MAX_HEIGHT
 #define VMSVGA_MAX_WIDTH 8192
 #define VMSVGA_MAX_HEIGHT 8192
 #define VMSVGA_HOST_BITS_PER_PIXEL 32
@@ -8431,12 +8433,12 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
                ret);
         break;
     case SVGA_REG_MAX_WIDTH:
-        ret = VMSVGA_MAX_WIDTH;
+        ret = VMSVGA_LEGACY_MAX_WIDTH;
         VPRINT("SVGA_REG_MAX_WIDTH register %u with the return of %u\n", s->index,
                ret);
         break;
     case SVGA_REG_MAX_HEIGHT:
-        ret = VMSVGA_MAX_HEIGHT;
+        ret = VMSVGA_LEGACY_MAX_HEIGHT;
         VPRINT("SVGA_REG_MAX_HEIGHT register %u with the return of %u\n", s->index,
                ret);
         break;
@@ -8973,7 +8975,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           break;
       }
     case SVGA_REG_WIDTH:
-        if (value >= 1 && value <= VMSVGA_MAX_WIDTH) {
+        if (value >= 1 && value <= VMSVGA_LEGACY_MAX_WIDTH) {
             s->new_width = value;
             vmsvga_try_commit_mode(s);
         }
@@ -8981,7 +8983,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
                value);
         break;
     case SVGA_REG_HEIGHT:
-        if (value >= 1 && value <= VMSVGA_MAX_HEIGHT) {
+        if (value >= 1 && value <= VMSVGA_LEGACY_MAX_HEIGHT) {
             s->new_height = value;
             vmsvga_try_commit_mode(s);
         }

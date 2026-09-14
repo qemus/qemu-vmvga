@@ -1,4 +1,4 @@
-/*
+ze/*
 
  QEMU VMware Super Video Graphics Array 2 [SVGA-II]
 
@@ -9243,7 +9243,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           break;
       }
     case SVGA_REG_WIDTH:
-        if (value >= 1 && value <= VMSVGA_MAX_WIDTH) {
+        if (value >= 1 && value <= VMSVGA_LEGACY_MAX_WIDTH) {
             s->new_width = value;
             vmsvga_try_commit_mode(s);
         }
@@ -9251,7 +9251,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
                value);
         break;
     case SVGA_REG_HEIGHT:
-        if (value >= 1 && value <= VMSVGA_MAX_HEIGHT) {
+        if (value >= 1 && value <= VMSVGA_LEGACY_MAX_HEIGHT) {
             s->new_height = value;
             vmsvga_try_commit_mode(s);
         }

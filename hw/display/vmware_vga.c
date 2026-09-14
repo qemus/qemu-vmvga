@@ -1,4 +1,4 @@
-ze/*
+/*
 
  QEMU VMware Super Video Graphics Array 2 [SVGA-II]
 

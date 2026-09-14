@@ -84,6 +84,7 @@
 #define VMSVGA_LEGACY_MAX_HEIGHT SVGA_MAX_HEIGHT
 #define VMSVGA_MAX_WIDTH 8192
 #define VMSVGA_MAX_HEIGHT 8192
+#define VMSVGA_LEGACY_HANDOFF_ROW_WORDS ((VMSVGA_MAX_HEIGHT + 63U) / 64U)
 #define VMSVGA_HOST_BITS_PER_PIXEL 32
 #define VMSVGA_CURSOR_MAX_DIMENSION 512
 #define VMSVGA_FIFO_SIZE (2 * 1024 * 1024)
@@ -618,12 +619,17 @@ struct vmsvga_state_s {
     MemoryRegion legacy_vga_mem;
     uint8_t *legacy_vga_ptr;
     uint32_t legacy_vga_size;
-    uint8_t *legacy_handoff_ptr;
-    uint32_t legacy_handoff_size;
-    uint32_t legacy_handoff_width;
-    uint32_t legacy_handoff_height;
-    uint32_t legacy_handoff_stride;
-    bool legacy_handoff_capture_attempted;
+    /* Host-only state for the generic VGA -> indexed-register SVGA handoff.
+     * The transition pixels themselves reuse screen_base, the same mirror
+     * storage used by the existing Screen Object handoff. */
+    bool legacy_handoff_active;
+    bool legacy_handoff_rebind;
+    bool legacy_handoff_write_overflow;
+    uint32_t legacy_handoff_write_damage_count;
+    struct vmsvga_damage_rect_s
+        legacy_handoff_write_damage[VMSVGA_DAMAGE_RECTS];
+    uint32_t legacy_handoff_full_width_row_count;
+    uint64_t legacy_handoff_full_width_rows[VMSVGA_LEGACY_HANDOFF_ROW_WORDS];
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMVGA, "vmvga")
 
@@ -1289,72 +1295,58 @@ static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s)
     return memory_region_get_ram_ptr(&s->vga.vram);
 }
 
-static void vmsvga_legacy_handoff_clear(struct vmsvga_state_s *s)
-{
-    g_clear_pointer(&s->legacy_handoff_ptr, g_free);
-    s->legacy_handoff_size = 0;
-    s->legacy_handoff_width = 0;
-    s->legacy_handoff_height = 0;
-    s->legacy_handoff_stride = 0;
-    s->legacy_handoff_capture_attempted = false;
-}
-
-static void vmsvga_legacy_handoff_capture(struct vmsvga_state_s *s)
+static inline bool vmsvga_legacy_handoff_candidate(
+    const struct vmsvga_state_s *s)
 {
     DisplaySurface *surface;
-    const uint8_t *data;
-    uint8_t *snapshot;
-    uint32_t width;
-    uint32_t height;
-    uint32_t stride;
-    uint64_t size;
+    uint8_t *bar1;
 
     /*
-     * Capture exactly once at the first SVGA_REG_ENABLE access while SVGA is
-     * still disabled.  This is early enough to retain the visible classic-VGA
-     * boot frame before the legacy miniport starts changing display ownership,
-     * and avoids any per-refresh framebuffer scanning or copying.
+     * The transition mirror is a 32-bpp host surface.  Keep other legacy
+     * register formats on their original direct-BAR1 path until they have an
+     * equally lossless conversion/update path.
      */
-    if (s->legacy_handoff_capture_attempted) {
-        return;
-    }
-    s->legacy_handoff_capture_attempted = true;
-
-    /* VBE/GOP handoffs already have their own synchronization path. */
-    if (s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE] & 0x01) {
-        return;
+    if (s == NULL || s->screen_defined || !s->enable || !s->config ||
+        !s->active_valid || s->active_depth != 32) {
+        return false;
     }
 
     surface = qemu_console_surface(s->vga.con);
-    if (surface == NULL || surface_data(surface) == NULL ||
-        surface_width(surface) <= 0 || surface_height(surface) <= 0 ||
-        surface_stride(surface) <= 0 || surface_bits_per_pixel(surface) != 32) {
-        return;
+    if (surface == NULL || surface_data(surface) == NULL) {
+        return false;
     }
 
-    width = (uint32_t)surface_width(surface);
-    height = (uint32_t)surface_height(surface);
-    stride = (uint32_t)surface_stride(surface);
-    size = (uint64_t)stride * height;
-    if (size == 0 || size > UINT32_MAX || size > VMSVGA_MAX_PRIMARY_MEM_SIZE) {
-        return;
-    }
+    bar1 = memory_region_get_ram_ptr((MemoryRegion *)&s->vga.vram);
+    return surface_data(surface) != bar1 ||
+           surface_width(surface) != s->active_width ||
+           surface_height(surface) != s->active_height ||
+           surface_bits_per_pixel(surface) != s->active_depth ||
+           surface_stride(surface) != s->active_stride;
+}
 
-    data = surface_data(surface);
-    snapshot = g_malloc((size_t)size);
-    memcpy(snapshot, data, (size_t)size);
+static inline bool vmsvga_legacy_handoff_tracking(
+    const struct vmsvga_state_s *s)
+{
+    return s != NULL &&
+           (s->legacy_handoff_active || vmsvga_legacy_handoff_candidate(s));
+}
 
-    s->legacy_handoff_ptr = snapshot;
-    s->legacy_handoff_size = (uint32_t)size;
-    s->legacy_handoff_width = width;
-    s->legacy_handoff_height = height;
-    s->legacy_handoff_stride = stride;
+static inline void vmsvga_legacy_handoff_reset_tracking(
+    struct vmsvga_state_s *s)
+{
+    s->legacy_handoff_write_overflow = false;
+    s->legacy_handoff_write_damage_count = 0;
+    s->legacy_handoff_full_width_row_count = 0;
+    memset(s->legacy_handoff_full_width_rows, 0,
+           sizeof(s->legacy_handoff_full_width_rows));
+}
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_STATE,
-        "LEGACY_HANDOFF capture src=%ux%u stride=%u size=%u",
-        s->legacy_handoff_width, s->legacy_handoff_height,
-        s->legacy_handoff_stride, s->legacy_handoff_size);
+static inline void vmsvga_legacy_handoff_reset_state(
+    struct vmsvga_state_s *s)
+{
+    s->legacy_handoff_active = false;
+    s->legacy_handoff_rebind = false;
+    vmsvga_legacy_handoff_reset_tracking(s);
 }
 
 static inline bool vmsvga_legacy_vga_shadow_rendering(
@@ -1499,7 +1491,8 @@ static inline bool vmsvga_effective_traces(const struct vmsvga_state_s *s)
      * SVGA scanout exists, the frontend still presents the VGA/GOP framebuffer.
      */
     return !s->enable || !s->config || !s->active_valid || !!s->traces ||
-           vmsvga_direct_screen_vram_scanout(s);
+           vmsvga_direct_screen_vram_scanout(s) ||
+           vmsvga_legacy_handoff_tracking(s);
 }
 
 static inline void vmsvga_update_dirty_log(struct vmsvga_state_s *s)
@@ -1679,6 +1672,9 @@ static void cursor_update_from_fifo(struct vmsvga_state_s *s)
     }
 }
 
+static inline void vmsvga_legacy_handoff_sync_damage(
+    struct vmsvga_state_s *s);
+
 static inline void vmsvga_damage_flush(struct vmsvga_state_s *s)
 {
     uint32_t i;
@@ -1689,6 +1685,9 @@ static inline void vmsvga_damage_flush(struct vmsvga_state_s *s)
         s->trace_now.damage_rects += s->damage_count;
         s->trace_activity_seq++;
     }
+
+    /* Apply guest BAR1 damage to the transition mirror before repainting it. */
+    vmsvga_legacy_handoff_sync_damage(s);
 
     for (i = 0; i < s->damage_count; i++) {
         struct vmsvga_damage_rect_s *rect = &s->damage[i];
@@ -1728,14 +1727,118 @@ static inline bool vmsvga_damage_merge_is_efficient(
     return merged_area <= combined_area;
 }
 
-static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
-                                     uint32_t y, uint32_t w, uint32_t h)
+static inline void vmsvga_legacy_handoff_track_full_width_rows(
+    struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t w,
+    uint32_t h)
+{
+    uint32_t row;
+
+    if (!s->active_valid || s->active_width == 0 || s->active_height == 0 ||
+        x != 0 || w < s->active_width || y >= s->active_height) {
+        return;
+    }
+
+    h = MIN(h, s->active_height - y);
+    for (row = y; row < y + h; row++) {
+        uint32_t word = row / 64U;
+        uint64_t mask = UINT64_C(1) << (row % 64U);
+
+        if (!(s->legacy_handoff_full_width_rows[word] & mask)) {
+            s->legacy_handoff_full_width_rows[word] |= mask;
+            s->legacy_handoff_full_width_row_count++;
+        }
+    }
+}
+
+static inline void vmsvga_legacy_handoff_track_write(
+    struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t w,
+    uint32_t h)
 {
     struct vmsvga_damage_rect_s rect;
     uint32_t i;
 
-    if (s->invalidated || w == 0 || h == 0) {
+    if (w == 0 || h == 0 || s->screen_defined || !s->active_valid ||
+        s->active_depth != 32 ||
+        !(s->legacy_handoff_active || vmsvga_legacy_handoff_candidate(s))) {
         return;
+    }
+
+    vmsvga_legacy_handoff_track_full_width_rows(s, x, y, w, h);
+
+    rect.x = x;
+    rect.y = y;
+    rect.w = w;
+    rect.h = h;
+
+    for (i = 0; i < s->legacy_handoff_write_damage_count;) {
+        struct vmsvga_damage_rect_s *old =
+            &s->legacy_handoff_write_damage[i];
+        uint64_t rect_right = (uint64_t)rect.x + rect.w;
+        uint64_t rect_bottom = (uint64_t)rect.y + rect.h;
+        uint64_t old_right = (uint64_t)old->x + old->w;
+        uint64_t old_bottom = (uint64_t)old->y + old->h;
+        bool x_overlap = (uint64_t)rect.x < old_right &&
+                         (uint64_t)old->x < rect_right;
+        bool y_overlap = (uint64_t)rect.y < old_bottom &&
+                         (uint64_t)old->y < rect_bottom;
+        bool x_close = (uint64_t)rect.x <= old_right &&
+                       (uint64_t)old->x <= rect_right;
+        bool y_close = (uint64_t)rect.y <= old_bottom &&
+                       (uint64_t)old->y <= rect_bottom;
+        uint32_t left = MIN(rect.x, old->x);
+        uint32_t top = MIN(rect.y, old->y);
+        uint64_t right = MAX(rect_right, old_right);
+        uint64_t bottom = MAX(rect_bottom, old_bottom);
+
+        if (((x_overlap && y_close) || (y_overlap && x_close)) &&
+            vmsvga_damage_merge_is_efficient(&rect, old, right - left,
+                                             bottom - top)) {
+            rect.x = left;
+            rect.y = top;
+            rect.w = (uint32_t)(right - left);
+            rect.h = (uint32_t)(bottom - top);
+            s->legacy_handoff_write_damage_count--;
+            s->legacy_handoff_write_damage[i] =
+                s->legacy_handoff_write_damage[
+                    s->legacy_handoff_write_damage_count];
+            continue;
+        }
+        i++;
+    }
+
+    if (s->legacy_handoff_write_damage_count == VMSVGA_DAMAGE_RECTS) {
+        /*
+         * Never approximate write provenance with a bounding box: doing so can
+         * turn untouched pixels into apparent guest writes.  Falling back to
+         * canonical BAR1 is safer than keeping a mirror we can no longer update
+         * exactly.
+         */
+        s->legacy_handoff_write_overflow = true;
+        s->legacy_handoff_write_damage_count = 0;
+        if (s->legacy_handoff_active) {
+            s->legacy_handoff_rebind = true;
+        }
+        return;
+    }
+
+    s->legacy_handoff_write_damage[
+        s->legacy_handoff_write_damage_count++] = rect;
+}
+
+static inline void vmsvga_damage_add_internal(
+    struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t w,
+    uint32_t h, bool framebuffer_write)
+{
+    struct vmsvga_damage_rect_s rect;
+    uint32_t i;
+    bool handoff_tracking = vmsvga_legacy_handoff_tracking(s);
+
+    if ((s->invalidated && !handoff_tracking) || w == 0 || h == 0) {
+        return;
+    }
+
+    if (framebuffer_write) {
+        vmsvga_legacy_handoff_track_write(s, x, y, w, h);
     }
 
     rect.x = x;
@@ -1781,6 +1884,19 @@ static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
     }
 
     s->damage[s->damage_count++] = rect;
+}
+
+static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
+                                     uint32_t y, uint32_t w, uint32_t h)
+{
+    vmsvga_damage_add_internal(s, x, y, w, h, true);
+}
+
+static inline void vmsvga_damage_add_present(struct vmsvga_state_s *s,
+                                             uint32_t x, uint32_t y,
+                                             uint32_t w, uint32_t h)
+{
+    vmsvga_damage_add_internal(s, x, y, w, h, false);
 }
 
 static inline uint32_t vmsvga_bytes_per_pixel(uint32_t bpp);
@@ -1876,8 +1992,9 @@ static inline void vmsvga_damage_add_visible(struct vmsvga_state_s *s,
     right = MIN((uint64_t)x + w, surface_width_px);
     bottom = MIN((uint64_t)y + h, surface_height_px);
 
-    vmsvga_damage_add(s, x, y, (uint32_t)(right - x),
-                      (uint32_t)(bottom - y));
+    /* UPDATE is a presentation notification, not proof that BAR1 changed. */
+    vmsvga_damage_add_present(s, x, y, (uint32_t)(right - x),
+                              (uint32_t)(bottom - y));
 }
 
 static inline void vmsvga_mark_vram_dirty_range(
@@ -7634,80 +7751,6 @@ static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s)
     return s->active_valid ? s->active_stride : 0;
 }
 
-static inline bool vmsvga_legacy_mode_handoff_seed(
-    struct vmsvga_state_s *s, uint32_t width, uint32_t height,
-    uint32_t depth, uint32_t stride)
-{
-    const uint8_t *src;
-    uint8_t *dst;
-    uint32_t src_width;
-    uint32_t src_height;
-    uint32_t src_stride;
-    uint32_t copy_width;
-    uint32_t copy_height;
-    uint32_t src_x;
-    uint32_t src_y;
-    uint32_t dst_x;
-    uint32_t dst_y;
-    uint32_t row;
-    size_t row_bytes;
-    uint64_t framebuffer_size;
-
-    /*
-     * The visible classic-VGA frame is captured at the VGA -> SVGA ownership
-     * transition, before vmsvga_legacy_vga_enter() replaces the shadow from
-     * BAR1.  Consume that snapshot when the first valid register mode exists,
-     * even if its tuple was already committed while SVGA was disabled.
-     */
-    if (s->legacy_handoff_ptr == NULL || s->legacy_handoff_size == 0 ||
-        s->screen_defined || s->svga_surface_bound || depth != 32 ||
-        width == 0 || height == 0 || stride < width * 4U) {
-        return false;
-    }
-
-    src = s->legacy_handoff_ptr;
-    dst = vmsvga_svga_vram_ptr(s);
-    src_width = s->legacy_handoff_width;
-    src_height = s->legacy_handoff_height;
-    src_stride = s->legacy_handoff_stride;
-    framebuffer_size = (uint64_t)stride * height;
-
-    if (src_width == 0 || src_height == 0 || src_stride == 0 ||
-        (uint64_t)src_stride * src_height > s->legacy_handoff_size ||
-        framebuffer_size == 0 || framebuffer_size > s->vga.vram_size) {
-        return false;
-    }
-
-    copy_width = MIN(src_width, width);
-    copy_height = MIN(src_height, height);
-    row_bytes = (size_t)copy_width * 4U;
-    if (row_bytes > src_stride || row_bytes > stride) {
-        return false;
-    }
-
-    src_x = (src_width - copy_width) / 2U;
-    src_y = (src_height - copy_height) / 2U;
-    dst_x = (width - copy_width) / 2U;
-    dst_y = (height - copy_height) / 2U;
-
-    memset(dst, 0, (size_t)framebuffer_size);
-    src += (size_t)src_y * src_stride + (size_t)src_x * 4U;
-    dst += (size_t)dst_y * stride + (size_t)dst_x * 4U;
-    for (row = 0; row < copy_height; row++) {
-        memcpy(dst + (size_t)row * stride,
-               src + (size_t)row * src_stride, row_bytes);
-    }
-    memory_region_set_dirty(&s->vga.vram, 0, (size_t)framebuffer_size);
-
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_STATE,
-        "LEGACY_HANDOFF seed src=%ux%u dst=%ux%u offset=%u,%u stride=%u",
-        src_width, src_height, width, height, dst_x, dst_y, stride);
-
-    vmsvga_legacy_handoff_clear(s);
-    return true;
-}
-
 static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
 {
     uint32_t stride;
@@ -7722,12 +7765,6 @@ static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
               s->active_height != s->new_height ||
               s->active_depth != s->new_depth || s->active_stride != stride;
 
-    if (s->enable &&
-        vmsvga_legacy_mode_handoff_seed(
-            s, s->new_width, s->new_height, s->new_depth, stride)) {
-        vmsvga_invalidate(s, "legacy-mode-handoff");
-    }
-
     s->active_valid = true;
     s->active_width = s->new_width;
     s->active_height = s->new_height;
@@ -7735,6 +7772,18 @@ static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
     s->active_stride = stride;
 
     if (changed) {
+        /* A new register-mode tuple starts a fresh write-provenance interval.
+         * Enable the dirty client before invalidation so CPU BAR1 writes made
+         * before the next display refresh are not discarded. */
+        vmsvga_legacy_handoff_reset_tracking(s);
+        if (s->legacy_handoff_active) {
+            /* The existing mirror has the old geometry.  Retire it before
+             * considering a later transition for the new tuple. */
+            s->legacy_handoff_rebind = true;
+        }
+        if (!s->screen_defined && s->active_depth == 32) {
+            vmsvga_set_dirty_log(s, true);
+        }
         vmsvga_invalidate(s, "mode-commit");
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
                            "MODE_COMMIT width=%u height=%u depth=%u stride=%u",
@@ -7904,9 +7953,9 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
         }
     }
 
-    if (!s->invalidated && memory_region_snapshot_get_dirty(
-                              &s->vga.vram, snap, visible_offset,
-                              visible_size)) {
+    if ((!s->invalidated || vmsvga_legacy_handoff_tracking(s)) &&
+        memory_region_snapshot_get_dirty(&s->vga.vram, snap, visible_offset,
+                                         visible_size)) {
         block_size = (hwaddr)TARGET_PAGE_SIZE * VMSVGA_DIRTY_BLOCK_PAGES;
         for (block_addr = visible_offset; block_addr < visible_end;
              block_addr += block_size) {
@@ -8429,6 +8478,87 @@ static inline void vmsvga_palette_rebuild(struct vmsvga_state_s *s)
 }
 #endif
 
+static bool vmsvga_legacy_handoff_copy_rect(
+    struct vmsvga_state_s *s, uint32_t x, uint32_t y,
+    uint32_t width, uint32_t height)
+{
+    uint8_t *vram = vmsvga_svga_vram_ptr(s);
+    uint32_t row;
+    size_t row_bytes;
+
+    if (vram == NULL || s->screen_base == NULL || width == 0 || height == 0 ||
+        !s->active_valid || s->active_depth != 32 ||
+        x >= s->active_width || y >= s->active_height ||
+        width > s->active_width - x || height > s->active_height - y ||
+        s->screen_stride < (uint64_t)s->active_width * 4U ||
+        (uint64_t)s->screen_stride * s->active_height > s->screen_base_size) {
+        return false;
+    }
+
+    row_bytes = (size_t)width * 4U;
+    for (row = 0; row < height; row++) {
+        memcpy(s->screen_base +
+                   (size_t)(y + row) * s->screen_stride +
+                   (size_t)x * 4U,
+               vram + (size_t)(y + row) * s->active_stride +
+                   (size_t)x * 4U,
+               row_bytes);
+    }
+
+    return true;
+}
+
+static inline void vmsvga_legacy_handoff_sync_damage(
+    struct vmsvga_state_s *s)
+{
+    uint32_t i;
+
+    if (!s->legacy_handoff_active || s->legacy_handoff_rebind ||
+        s->screen_defined || !s->enable || !s->config || !s->active_valid) {
+        return;
+    }
+
+    if (s->legacy_handoff_write_overflow) {
+        s->legacy_handoff_rebind = true;
+        return;
+    }
+
+    for (i = 0; i < s->legacy_handoff_write_damage_count; i++) {
+        const struct vmsvga_damage_rect_s *rect =
+            &s->legacy_handoff_write_damage[i];
+        uint64_t right = MIN((uint64_t)rect->x + rect->w,
+                             (uint64_t)s->active_width);
+        uint64_t bottom = MIN((uint64_t)rect->y + rect->h,
+                              (uint64_t)s->active_height);
+
+        if (rect->x >= s->active_width || rect->y >= s->active_height ||
+            right <= rect->x || bottom <= rect->y) {
+            continue;
+        }
+
+        (void)vmsvga_legacy_handoff_copy_rect(
+            s, rect->x, rect->y, (uint32_t)(right - rect->x),
+            (uint32_t)(bottom - rect->y));
+    }
+    s->legacy_handoff_write_damage_count = 0;
+
+    /*
+     * Completion is based on write provenance, never pixel value.  Every row
+     * must have received an actual full-width framebuffer write before BAR1 is
+     * considered a complete replacement for the preserved frontend image.
+     * A legitimate black clear therefore completes normally, while a bare
+     * full-screen UPDATE of untouched zero VRAM does not destroy the handoff.
+     */
+    if (s->active_height != 0 &&
+        s->legacy_handoff_full_width_row_count >= s->active_height) {
+        s->legacy_handoff_rebind = true;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_STATE,
+            "REG_HANDOFF complete rows=%u height=%u",
+            s->legacy_handoff_full_width_row_count, s->active_height);
+    }
+}
+
 static inline void vmsvga_check_size(struct vmsvga_state_s *s)
 {
     VPRINT("vmsvga_check_size was just executed\n");
@@ -8436,6 +8566,9 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
     DisplaySurface *surface = qemu_console_surface(s->vga.con);
     uint8_t *scanout;
     uint32_t stride;
+    uint32_t display_depth;
+    bool register_handoff_scanout = false;
+    bool release_register_handoff = false;
 
     if (!s->active_valid || s->screen_frontend_deferred) {
         return;
@@ -8445,25 +8578,72 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
         size_t scanout_size;
         uint32_t screen_stride;
 
+        /* If Screen Objects take over during a register-mode transition, their
+         * existing handoff code has already seeded from the currently visible
+         * mirror.  From here on screen_base belongs to that Screen path. */
+        vmsvga_legacy_handoff_reset_state(s);
+
         if (!vmsvga_screen_scanout_storage(
                 s, &scanout, &scanout_size, &screen_stride) ||
             screen_stride != s->active_stride) {
             return;
         }
         (void)scanout_size;
+        stride = s->active_stride;
+        display_depth = s->active_depth;
     } else {
-        scanout = vmsvga_svga_vram_ptr(s);
-    }
+        uint8_t *bar1 = vmsvga_svga_vram_ptr(s);
+        bool transition;
 
-    stride = s->active_stride;
+        stride = s->active_stride;
+        display_depth = s->active_depth;
+
+        transition = vmsvga_legacy_handoff_candidate(s);
+
+        if (s->legacy_handoff_active &&
+            (s->active_depth != 32 || s->screen_base == NULL)) {
+            s->legacy_handoff_rebind = true;
+        }
+
+        if (!s->legacy_handoff_active && !s->legacy_handoff_rebind &&
+            transition) {
+            if (s->legacy_handoff_write_overflow) {
+                /* Exact write provenance was lost before the mirror could be
+                 * armed.  Preserve correctness by falling back to BAR1. */
+                vmsvga_legacy_handoff_reset_tracking(s);
+            } else if (s->screen_preseed_base == NULL &&
+                       s->screen_frontend_hold_frames == 0 &&
+                       !s->screen_direct_active &&
+                       s->active_width <= UINT32_MAX / 4U &&
+                       vmsvga_screen_handoff_seed(
+                           s, surface, s->active_width, s->active_height,
+                           s->active_width * 4U)) {
+                /* vmsvga_screen_handoff_seed() safely rotates a visible
+                 * screen_base/screen_retired_base generation, so a retained
+                 * Screen Object mirror is a valid source for this transition. */
+                s->screen_destroyed_reuse_valid = false;
+                s->legacy_handoff_active = true;
+            }
+        }
+
+        if (s->legacy_handoff_active && !s->legacy_handoff_rebind) {
+            scanout = s->screen_base;
+            stride = s->screen_stride;
+            display_depth = 32;
+            register_handoff_scanout = true;
+        } else {
+            scanout = bar1;
+            release_register_handoff = s->legacy_handoff_rebind;
+        }
+    }
 
     if (!s->svga_surface_bound ||
         s->active_width != surface_width(surface) ||
         s->active_height != surface_height(surface) ||
         stride != surface_stride(surface) ||
-        s->active_depth != surface_bits_per_pixel(surface) ||
+        display_depth != surface_bits_per_pixel(surface) ||
         surface_data(surface) != scanout) {
-        pixman_format_code_t format = vmsvga_pixman_format(s->active_depth);
+        pixman_format_code_t format = vmsvga_pixman_format(display_depth);
 #ifdef VERBOSE
         int old_width = surface_width(surface);
         int old_height = surface_height(surface);
@@ -8473,24 +8653,33 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
         VMVGA_QEMU_TRACE(
             TRACE_VMWARE_SETMODE,
             trace_vmware_setmode(s->active_width, s->active_height,
-                                 s->active_depth));
+                                 display_depth));
         surface = qemu_create_displaysurface_from(
             s->active_width, s->active_height, format, stride, scanout);
 #ifdef CONFIG_PIXMAN
-        if (s->active_depth == 8) {
+        if (!register_handoff_scanout && s->active_depth == 8) {
             pixman_image_set_indexed(surface->image, &s->indexed_palette);
         }
 #endif
         VPRINT("vmsvga_check_size: old_width: %u, old_height: %u, old_depth: %u, "
                "old_stride: %u, active_width: %u, active_height: %u, "
-               "active_depth: %u, new_format: %u, active_stride: %u\n",
+               "active_depth: %u, display_depth: %u, new_format: %u, "
+               "active_stride: %u, display_stride: %u\n",
                old_width, old_height, old_depth, old_stride, s->active_width,
-               s->active_height, s->active_depth, format, stride);
+               s->active_height, s->active_depth, display_depth, format,
+               s->active_stride, stride);
 
         vmvga_console_set_surface(s->vga.con, surface);
 
         s->svga_surface_bound = true;
         vmsvga_invalidate(s, "scanout-bind");
+
+        if (release_register_handoff) {
+            /* The frontend now points at BAR1, so the host transition mirror is
+             * no longer needed. */
+            vmsvga_legacy_handoff_reset_state(s);
+            vmsvga_screen_base_clear(s);
+        }
 
         if (vmsvga_trace_flight_enabled()) {
             uint8_t *backing = NULL;
@@ -8502,13 +8691,16 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
             fprintf(stderr,
                     "VMVGA-SCANOUT-DIAG source=%s surface=%p data=%p scanout=%p "
                     "backing=%p surface-scanout-match=%u "
-                    "surface-backing-match=%u handoff=%u stride=%u size=%ux%u\n",
-                    s->screen_defined ? "screen" : "bar1", (void *)surface,
-                    (void *)surface_data(surface), (void *)scanout, (void *)backing,
+                    "surface-backing-match=%u handoff=%u reg-handoff=%u "
+                    "stride=%u size=%ux%u\n",
+                    s->screen_defined ? "screen" :
+                    register_handoff_scanout ? "reg-handoff" : "bar1",
+                    (void *)surface, (void *)surface_data(surface),
+                    (void *)scanout, (void *)backing,
                     surface_data(surface) == scanout,
                     backing != NULL && surface_data(surface) == backing,
-                    s->screen_handoff_active, stride, s->active_width,
-                    s->active_height);
+                    s->screen_handoff_active, register_handoff_scanout,
+                    stride, s->active_width, s->active_height);
         }
 
         /* A newly bound surface does not necessarily trigger a frontend redraw.
@@ -8524,10 +8716,12 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
                            surface_height(surface), surface_stride(surface),
                            scanout);
 
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
-                           "SCANOUT source=%s width=%u height=%u depth=%u stride=%u",
-                           s->screen_defined ? "screen" : "bar1", s->active_width,
-                           s->active_height, s->active_depth, stride);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_STATE,
+            "SCANOUT source=%s width=%u height=%u depth=%u stride=%u",
+            s->screen_defined ? "screen" :
+            register_handoff_scanout ? "reg-handoff" : "bar1",
+            s->active_width, s->active_height, display_depth, stride);
     }
 }
 
@@ -9108,24 +9302,19 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           bool was_enabled = s->enable;
           bool was_hidden = s->hidden;
           bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
-
-          if (!was_enabled) {
-              vmsvga_legacy_handoff_capture(s);
-          }
           if (!was_enabled && enabled) {
               /*
                * Firmware/GOP can leave QEMU's console surface stale even
                * though the VGA/VBE registers already describe the final boot
-               * mode.  Realize that VBE state synchronously before SVGA takes
-               * display ownership.  Do not do this for classic VGA: XP's boot
-               * image already lives in the frontend, and forcing a generic VGA
-               * rebuild here replaces it with black immediately before the
-               * legacy handoff.
+               * mode.  Several SVGA registers fall back to the console surface
+               * before an SVGA mode is committed, so make generic VGA realize
+               * its current VBE state before SVGA takes display ownership.
+               *
+               * This is intentionally synchronous: the guest can read those
+               * SVGA registers immediately after setting ENABLE.
                */
-              if (s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE] & 0x01) {
-                  s->vga.hw_ops->invalidate(&s->vga);
-                  s->vga.hw_ops->gfx_update(&s->vga);
-              }
+              s->vga.hw_ops->invalidate(&s->vga);
+              s->vga.hw_ops->gfx_update(&s->vga);
               vmsvga_trace_vga_state(s, "svga-enable-before");
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {
@@ -9145,7 +9334,9 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
               }
               vmsvga_fifo_discard_pending(s);
               vmsvga_legacy_vga_leave(s);
-              vmsvga_legacy_handoff_clear(s);
+              if (s->legacy_handoff_active) {
+                  s->legacy_handoff_rebind = true;
+              }
               vmsvga_trace_vga_state(s, "svga-disable-after");
           }
           s->enable = enabled;
@@ -9632,9 +9823,29 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
         s->svga_surface_bound = false;
 #if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
-        return vmsvga_legacy_vga_gfx_update(s);
+        {
+            bool updated = vmsvga_legacy_vga_gfx_update(s);
+
+            if (s->legacy_handoff_rebind && !s->screen_defined &&
+                s->screen_base != NULL) {
+                DisplaySurface *surface = qemu_console_surface(s->vga.con);
+                if (surface == NULL || surface_data(surface) != s->screen_base) {
+                    vmsvga_legacy_handoff_reset_state(s);
+                    vmsvga_screen_base_clear(s);
+                }
+            }
+            return updated;
+        }
 #else
         vmsvga_legacy_vga_gfx_update(s);
+        if (s->legacy_handoff_rebind && !s->screen_defined &&
+            s->screen_base != NULL) {
+            DisplaySurface *surface = qemu_console_surface(s->vga.con);
+            if (surface == NULL || surface_data(surface) != s->screen_base) {
+                vmsvga_legacy_handoff_reset_state(s);
+                vmsvga_screen_base_clear(s);
+            }
+        }
         return;
 #endif
     }
@@ -9715,9 +9926,15 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
 
     if (scan_dirty) {
         struct vmsvga_damage_rect_s explicit_damage[VMSVGA_DAMAGE_RECTS];
-        uint32_t explicit_count = s->damage_count;
+        bool handoff_tracking = vmsvga_legacy_handoff_tracking(s);
+        uint32_t explicit_count = handoff_tracking
+                                      ? s->legacy_handoff_write_damage_count
+                                      : s->damage_count;
+        const struct vmsvga_damage_rect_s *explicit_source = handoff_tracking
+                                      ? s->legacy_handoff_write_damage
+                                      : s->damage;
         if (explicit_count != 0) {
-            memcpy(explicit_damage, s->damage,
+            memcpy(explicit_damage, explicit_source,
                    explicit_count * sizeof(explicit_damage[0]));
         }
         vmsvga_scan_vram_dirty(
@@ -9725,6 +9942,9 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     }
 
     if (s->invalidated) {
+        /* Invalidation requests a full frontend repaint, but register handoff
+         * write provenance still has to reach the transition mirror first. */
+        vmsvga_legacy_handoff_sync_damage(s);
         s->damage_count = 0;
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_DRAW,
                            "DAMAGE_FULL x=0 y=0 w=%u h=%u",
@@ -9783,6 +10003,7 @@ static void vmsvga_reset(DeviceState *dev)
     vmsvga3d_reset(s);
     vmsvga_gmr_reset(s);
     vmsvga_screen_reset(s);
+    vmsvga_legacy_handoff_reset_state(s);
 
     s->index = 0;
     s->scratch_size = VMSVGA_SCRATCH_SIZE;
@@ -9850,7 +10071,6 @@ static void vmsvga_reset(DeviceState *dev)
 
     vmsvga_trace_display_path_reset(s);
     s->legacy_vga_size = 0;
-    vmsvga_legacy_handoff_clear(s);
 
     memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));
     memset(s->legacy_vga_ptr, 0, VMSVGA_VGA_FB_BACKUP_SIZE);
@@ -9944,10 +10164,10 @@ static int vmsvga_pre_load(void *opaque)
     s->svga_surface_bound = false;
     s->hidden = false;
     s->legacy_vga_size = 0;
-    vmsvga_legacy_handoff_clear(s);
 
     vmsvga_screen_base_clear(s);
     vmsvga_screen_preseed_clear(s);
+    vmsvga_legacy_handoff_reset_state(s);
 
     s->screen_base_migration_size = 0;
 
@@ -9975,6 +10195,24 @@ static int vmsvga_pre_save(void *opaque)
         if (!vmsvga3d_screen_target_quiesce_live(s) ||
             !vmsvga_screen_direct_materialize(s, "pre-save")) {
             return -EINVAL;
+        }
+    }
+
+    if (!s->screen_defined &&
+        (s->legacy_handoff_active || s->legacy_handoff_rebind ||
+         vmsvga_legacy_handoff_candidate(s))) {
+        /* The transition mirror is host-only state.  Never discard it or copy
+         * it over guest BAR1 merely to make migration possible.  A completed
+         * provenance-tracked handoff can be rebound safely; otherwise defer the
+         * migration until the short transition has finished. */
+        vmsvga_legacy_handoff_sync_damage(s);
+        if (s->legacy_handoff_rebind) {
+            s->svga_surface_bound = false;
+            vmsvga_check_size(s);
+        }
+        if (s->legacy_handoff_active || s->legacy_handoff_rebind ||
+            vmsvga_legacy_handoff_candidate(s)) {
+            return -EBUSY;
         }
     }
 
@@ -10345,6 +10583,7 @@ static int vmsvga_post_load(void *opaque, int version_id)
         s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
     }
 
+    vmsvga_legacy_handoff_reset_state(s);
     s->cursor_dirty = true;
     s->damage_count = 0;
     s->invalidated = s->enable && s->active_valid;
@@ -10630,12 +10869,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->dirty_log_enabled = true;
     s->legacy_vga_ptr = g_malloc0(VMSVGA_VGA_FB_BACKUP_SIZE);
     s->legacy_vga_size = 0;
-    s->legacy_handoff_ptr = NULL;
-    s->legacy_handoff_size = 0;
-    s->legacy_handoff_width = 0;
-    s->legacy_handoff_height = 0;
-    s->legacy_handoff_stride = 0;
-    s->legacy_handoff_capture_attempted = false;
+    vmsvga_legacy_handoff_reset_state(s);
 
     memory_region_init_io(&s->legacy_vga_mem, OBJECT(dev),
                           &vmsvga_legacy_vga_ops, s, "vmsvga.vga-lowmem",
@@ -10905,7 +11139,6 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     g_clear_pointer(&s->chip.d3d_payload_scratch, g_free);
     s->chip.d3d_payload_scratch_capacity = 0;
     s->chip.d3d_payload_scratch_in_use = false;
-    vmsvga_legacy_handoff_clear(&s->chip);
     g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
 
     if (s->chip.debug) {

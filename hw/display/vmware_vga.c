@@ -623,6 +623,7 @@ struct vmsvga_state_s {
     uint32_t legacy_handoff_width;
     uint32_t legacy_handoff_height;
     uint32_t legacy_handoff_stride;
+    bool legacy_handoff_capture_attempted;
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMVGA, "vmvga")
 
@@ -1295,21 +1296,31 @@ static void vmsvga_legacy_handoff_clear(struct vmsvga_state_s *s)
     s->legacy_handoff_width = 0;
     s->legacy_handoff_height = 0;
     s->legacy_handoff_stride = 0;
+    s->legacy_handoff_capture_attempted = false;
 }
 
 static void vmsvga_legacy_handoff_capture(struct vmsvga_state_s *s)
 {
     DisplaySurface *surface;
     const uint8_t *data;
+    uint8_t *snapshot;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
     uint64_t size;
 
-    vmsvga_legacy_handoff_clear(s);
-
     /*
-     * VBE/GOP handoffs already have their own synchronization path.  This
-     * snapshot exists only for the classic VGA -> register-mode SVGA transfer
-     * used by legacy Windows drivers such as XP's XPDM driver.
+     * Capture exactly once at the first SVGA_REG_ENABLE access while SVGA is
+     * still disabled.  This is early enough to retain the visible classic-VGA
+     * boot frame before the legacy miniport starts changing display ownership,
+     * and avoids any per-refresh framebuffer scanning or copying.
      */
+    if (s->legacy_handoff_capture_attempted) {
+        return;
+    }
+    s->legacy_handoff_capture_attempted = true;
+
+    /* VBE/GOP handoffs already have their own synchronization path. */
     if (s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE] & 0x01) {
         return;
     }
@@ -1321,18 +1332,23 @@ static void vmsvga_legacy_handoff_capture(struct vmsvga_state_s *s)
         return;
     }
 
-    size = (uint64_t)surface_stride(surface) * surface_height(surface);
+    width = (uint32_t)surface_width(surface);
+    height = (uint32_t)surface_height(surface);
+    stride = (uint32_t)surface_stride(surface);
+    size = (uint64_t)stride * height;
     if (size == 0 || size > UINT32_MAX || size > VMSVGA_MAX_PRIMARY_MEM_SIZE) {
         return;
     }
 
     data = surface_data(surface);
-    s->legacy_handoff_ptr = g_malloc((size_t)size);
-    memcpy(s->legacy_handoff_ptr, data, (size_t)size);
+    snapshot = g_malloc((size_t)size);
+    memcpy(snapshot, data, (size_t)size);
+
+    s->legacy_handoff_ptr = snapshot;
     s->legacy_handoff_size = (uint32_t)size;
-    s->legacy_handoff_width = (uint32_t)surface_width(surface);
-    s->legacy_handoff_height = (uint32_t)surface_height(surface);
-    s->legacy_handoff_stride = (uint32_t)surface_stride(surface);
+    s->legacy_handoff_width = width;
+    s->legacy_handoff_height = height;
+    s->legacy_handoff_stride = stride;
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_STATE,
@@ -9092,6 +9108,10 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           bool was_enabled = s->enable;
           bool was_hidden = s->hidden;
           bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
+
+          if (!was_enabled) {
+              vmsvga_legacy_handoff_capture(s);
+          }
           if (!was_enabled && enabled) {
               /*
                * Firmware/GOP can leave QEMU's console surface stale even
@@ -9106,7 +9126,6 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
                   s->vga.hw_ops->invalidate(&s->vga);
                   s->vga.hw_ops->gfx_update(&s->vga);
               }
-              vmsvga_legacy_handoff_capture(s);
               vmsvga_trace_vga_state(s, "svga-enable-before");
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {
@@ -9612,7 +9631,12 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     if (!s->enable || !s->config) {
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
         s->svga_surface_bound = false;
+#if QEMU_VERSION_MAJOR == 11 && QEMU_VERSION_MINOR >= 1
         return vmsvga_legacy_vga_gfx_update(s);
+#else
+        vmsvga_legacy_vga_gfx_update(s);
+        return;
+#endif
     }
 
     if (s->hidden) {
@@ -10611,6 +10635,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->legacy_handoff_width = 0;
     s->legacy_handoff_height = 0;
     s->legacy_handoff_stride = 0;
+    s->legacy_handoff_capture_attempted = false;
 
     memory_region_init_io(&s->legacy_vga_mem, OBJECT(dev),
                           &vmsvga_legacy_vga_ops, s, "vmsvga.vga-lowmem",

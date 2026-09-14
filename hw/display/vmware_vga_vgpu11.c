@@ -1477,6 +1477,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         SVGA3dCmdDXDefineUAView command;
         VMSVGA3DD3D11UAVDefinePlan plan;
         SVGACOTableDXUAViewEntry *entry;
+        uint32_t slot;
 
         if (size < sizeof(command)) {
             return false;
@@ -1491,12 +1492,28 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
 
         entry = vmsvga3d_dx_cotable_entry_ptr(
             s, cid, SVGA_COTABLE_UAVIEW, plan.view_id);
-        if (entry == NULL) {
+        if (entry == NULL ||
+            !vmsvga3d_dxvk_d3d11_unordered_access_view_destroy(
+                s->dxvk, cid, plan.view_id)) {
             return false;
         }
 
-        /* VirtualBox overwrites the COTable entry and leaves native creation
-         * lazy; redefining an already-created UAV does not destroy it here. */
+        /* Native UAVs are cached by guest view id.  Redefinition must drop
+         * the old native view, then replay every graphics/compute slot that
+         * still refers to that id so the replacement descriptor takes effect. */
+        for (slot = 0; slot < context->uav_max_bound; slot++) {
+            if (context->shadow.uaViewIds[slot] == plan.view_id) {
+                context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+                break;
+            }
+        }
+        for (slot = 0; slot < context->cs_uav_max_bound; slot++) {
+            if (context->shadow.csuaViewIds[slot] == plan.view_id) {
+                context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_CSTARGET;
+                break;
+            }
+        }
+
         *entry = plan.entry;
         return vmsvga3d_d3d11_uav_define_live(
                    s->dxvk, cid, plan.view_id, entry) !=
@@ -1507,6 +1524,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         SVGA3dCmdDXDestroyUAView command;
         VMSVGA3DD3D11UAVDestroyPlan plan;
         SVGACOTableDXUAViewEntry *entry;
+        bool graphics_bound = false;
+        bool compute_bound = false;
+        uint32_t slot;
 
         if (size < sizeof(command)) {
             return false;
@@ -1523,15 +1543,33 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             s, cid, SVGA_COTABLE_UAVIEW, plan.view_id);
         if (entry == NULL ||
             vmsvga3d_d3d11_uav_destroy_entry(entry) ==
+                VMSVGA3D_D3D11_LEVEL_INVALID ||
+            vmsvga3d_d3d11_uav_destroy_live(
+                s->dxvk, cid, plan.view_id) ==
                 VMSVGA3D_D3D11_LEVEL_INVALID) {
             return false;
         }
 
-        /* VirtualBox clears the guest entry before asking the backend to
-         * release the lazily-created native view. */
-        return vmsvga3d_d3d11_uav_destroy_live(
-                   s->dxvk, cid, plan.view_id) !=
-               VMSVGA3D_D3D11_LEVEL_INVALID;
+        for (slot = 0; slot < context->uav_max_bound; slot++) {
+            if (context->shadow.uaViewIds[slot] == plan.view_id) {
+                context->shadow.uaViewIds[slot] = SVGA3D_INVALID_ID;
+                graphics_bound = true;
+            }
+        }
+        for (slot = 0; slot < context->cs_uav_max_bound; slot++) {
+            if (context->shadow.csuaViewIds[slot] == plan.view_id) {
+                context->shadow.csuaViewIds[slot] = SVGA3D_INVALID_ID;
+                compute_bound = true;
+            }
+        }
+        if (graphics_bound) {
+            context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+        }
+        if (compute_bound) {
+            context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_CSTARGET;
+        }
+
+        return true;
     }
 
     case SVGA_3D_CMD_DX_CLEAR_UA_VIEW_UINT: {

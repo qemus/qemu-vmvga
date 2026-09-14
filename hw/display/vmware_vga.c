@@ -1307,7 +1307,9 @@ static inline bool vmsvga_legacy_handoff_candidate(
      * equally lossless conversion/update path.
      */
     if (s == NULL || s->screen_defined || !s->enable || !s->config ||
-        !s->active_valid || s->active_depth != 32) {
+        !s->active_valid || s->active_depth != 32 ||
+        s->active_width > VMSVGA_LEGACY_MAX_WIDTH ||
+        s->active_height > VMSVGA_LEGACY_MAX_HEIGHT) {
         return false;
     }
 
@@ -1327,7 +1329,9 @@ static inline bool vmsvga_legacy_handoff_candidate(
 static inline bool vmsvga_legacy_handoff_tracking(
     const struct vmsvga_state_s *s)
 {
-    return s != NULL &&
+    return s != NULL && s->active_valid &&
+           s->active_width <= VMSVGA_LEGACY_MAX_WIDTH &&
+           s->active_height <= VMSVGA_LEGACY_MAX_HEIGHT &&
            (s->legacy_handoff_active || vmsvga_legacy_handoff_candidate(s));
 }
 
@@ -1734,6 +1738,8 @@ static inline void vmsvga_legacy_handoff_track_full_width_rows(
     uint32_t row;
 
     if (!s->active_valid || s->active_width == 0 || s->active_height == 0 ||
+        s->active_width > VMSVGA_LEGACY_MAX_WIDTH ||
+        s->active_height > VMSVGA_LEGACY_MAX_HEIGHT ||
         x != 0 || w < s->active_width || y >= s->active_height) {
         return;
     }
@@ -8601,7 +8607,10 @@ static inline void vmsvga_check_size(struct vmsvga_state_s *s)
         transition = vmsvga_legacy_handoff_candidate(s);
 
         if (s->legacy_handoff_active &&
-            (s->active_depth != 32 || s->screen_base == NULL)) {
+            (s->active_depth != 32 ||
+             s->active_width > VMSVGA_LEGACY_MAX_WIDTH ||
+             s->active_height > VMSVGA_LEGACY_MAX_HEIGHT ||
+             s->screen_base == NULL)) {
             s->legacy_handoff_rebind = true;
         }
 

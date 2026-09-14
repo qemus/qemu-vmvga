@@ -621,6 +621,11 @@ struct vmsvga_state_s {
     /* Host-only state for the generic VGA -> indexed-register SVGA handoff.
      * The transition pixels themselves reuse screen_base, the same mirror
      * storage used by the existing Screen Object handoff. */
+    uint8_t *legacy_handoff_preseed_base;
+    size_t legacy_handoff_preseed_size;
+    uint32_t legacy_handoff_preseed_width;
+    uint32_t legacy_handoff_preseed_height;
+    uint32_t legacy_handoff_preseed_stride;
     bool legacy_handoff_active;
     bool legacy_handoff_rebind;
 };
@@ -1319,9 +1324,20 @@ static inline bool vmsvga_legacy_handoff_candidate(
            surface_stride(surface) != s->active_stride;
 }
 
+static inline void vmsvga_legacy_handoff_preseed_clear(
+    struct vmsvga_state_s *s)
+{
+    g_clear_pointer(&s->legacy_handoff_preseed_base, g_free);
+    s->legacy_handoff_preseed_size = 0;
+    s->legacy_handoff_preseed_width = 0;
+    s->legacy_handoff_preseed_height = 0;
+    s->legacy_handoff_preseed_stride = 0;
+}
+
 static inline void vmsvga_legacy_handoff_reset_state(
     struct vmsvga_state_s *s)
 {
+    vmsvga_legacy_handoff_preseed_clear(s);
     s->legacy_handoff_active = false;
     s->legacy_handoff_rebind = false;
 }
@@ -5020,6 +5036,41 @@ static SVGACBStatus vmsvga_command_buffer_process(
 #include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
 
+static bool vmsvga_legacy_handoff_preseed_capture(
+    struct vmsvga_state_s *s, DisplaySurface *surface)
+{
+    if (s == NULL) {
+        return false;
+    }
+
+    vmsvga_legacy_handoff_preseed_clear(s);
+
+    /*
+     * Keep the modern Screen Object/ScreenTarget preseed independent.  The
+     * legacy snapshot is taken before VGA is force-refreshed during SVGA
+     * enable, while modern Windows captures its own preseed at its existing
+     * protocol-specific transition point.
+     */
+    if (s->screen_preseed_base != NULL ||
+        !vmsvga_screen_preseed_capture(s, surface, "legacy-register-enable")) {
+        return false;
+    }
+
+    s->legacy_handoff_preseed_base = s->screen_preseed_base;
+    s->legacy_handoff_preseed_size = s->screen_preseed_size;
+    s->legacy_handoff_preseed_width = s->screen_preseed_width;
+    s->legacy_handoff_preseed_height = s->screen_preseed_height;
+    s->legacy_handoff_preseed_stride = s->screen_preseed_stride;
+
+    s->screen_preseed_base = NULL;
+    s->screen_preseed_size = 0;
+    s->screen_preseed_width = 0;
+    s->screen_preseed_height = 0;
+    s->screen_preseed_stride = 0;
+
+    return true;
+}
+
 static void vmsvga_trace_frontend_snapshot(struct vmsvga_state_s *s,
                                            const char *phase)
 {
@@ -8458,9 +8509,36 @@ static bool vmsvga_legacy_handoff_arm(struct vmsvga_state_s *s)
         return false;
     }
 
+    if (s->legacy_handoff_preseed_base != NULL) {
+        s->screen_preseed_base = s->legacy_handoff_preseed_base;
+        s->screen_preseed_size = s->legacy_handoff_preseed_size;
+        s->screen_preseed_width = s->legacy_handoff_preseed_width;
+        s->screen_preseed_height = s->legacy_handoff_preseed_height;
+        s->screen_preseed_stride = s->legacy_handoff_preseed_stride;
+
+        s->legacy_handoff_preseed_base = NULL;
+        s->legacy_handoff_preseed_size = 0;
+        s->legacy_handoff_preseed_width = 0;
+        s->legacy_handoff_preseed_height = 0;
+        s->legacy_handoff_preseed_stride = 0;
+    }
+
     if (!vmsvga_screen_handoff_seed(
             s, surface, s->active_width, s->active_height,
             s->active_width * 4U)) {
+        if (s->screen_preseed_base != NULL) {
+            s->legacy_handoff_preseed_base = s->screen_preseed_base;
+            s->legacy_handoff_preseed_size = s->screen_preseed_size;
+            s->legacy_handoff_preseed_width = s->screen_preseed_width;
+            s->legacy_handoff_preseed_height = s->screen_preseed_height;
+            s->legacy_handoff_preseed_stride = s->screen_preseed_stride;
+
+            s->screen_preseed_base = NULL;
+            s->screen_preseed_size = 0;
+            s->screen_preseed_width = 0;
+            s->screen_preseed_height = 0;
+            s->screen_preseed_stride = 0;
+        }
         return false;
     }
 
@@ -9259,6 +9337,14 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           bool was_hidden = s->hidden;
           bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
           if (!was_enabled && enabled) {
+              /*
+               * Capture the last frontend image before the forced VGA refresh
+               * below can rebuild that surface from framebuffer state which the
+               * guest is already tearing down for SVGA takeover.
+               */
+              (void)vmsvga_legacy_handoff_preseed_capture(
+                  s, qemu_console_surface(s->vga.con));
+
               /*
                * Firmware/GOP can leave QEMU's console surface stale even
                * though the VGA/VBE registers already describe the final boot
@@ -11057,6 +11143,7 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     vmsvga3d_reset(&s->chip);
     vmsvga3d_renderer_unrealize(&s->chip);
     vmsvga_screen_reset(&s->chip);
+    vmsvga_legacy_handoff_reset_state(&s->chip);
     vmsvga_migration_buffers_clear(&s->chip);
     vmsvga_cursor_cache_clear(&s->chip);
     vmsvga_cursor_source_clear(&s->chip);

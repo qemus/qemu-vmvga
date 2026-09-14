@@ -618,6 +618,11 @@ struct vmsvga_state_s {
     MemoryRegion legacy_vga_mem;
     uint8_t *legacy_vga_ptr;
     uint32_t legacy_vga_size;
+    uint8_t *legacy_handoff_ptr;
+    uint32_t legacy_handoff_size;
+    uint32_t legacy_handoff_width;
+    uint32_t legacy_handoff_height;
+    uint32_t legacy_handoff_stride;
 };
 DECLARE_INSTANCE_CHECKER(struct pci_vmsvga_state_s, VMVGA, "vmvga")
 
@@ -1281,6 +1286,59 @@ static inline size_t vmsvga_legacy_vga_backup_size(
 static inline uint8_t *vmsvga_svga_vram_ptr(struct vmsvga_state_s *s)
 {
     return memory_region_get_ram_ptr(&s->vga.vram);
+}
+
+static void vmsvga_legacy_handoff_clear(struct vmsvga_state_s *s)
+{
+    g_clear_pointer(&s->legacy_handoff_ptr, g_free);
+    s->legacy_handoff_size = 0;
+    s->legacy_handoff_width = 0;
+    s->legacy_handoff_height = 0;
+    s->legacy_handoff_stride = 0;
+}
+
+static void vmsvga_legacy_handoff_capture(struct vmsvga_state_s *s)
+{
+    DisplaySurface *surface;
+    const uint8_t *data;
+    uint64_t size;
+
+    vmsvga_legacy_handoff_clear(s);
+
+    /*
+     * VBE/GOP handoffs already have their own synchronization path.  This
+     * snapshot exists only for the classic VGA -> register-mode SVGA transfer
+     * used by legacy Windows drivers such as XP's XPDM driver.
+     */
+    if (s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE] & 0x01) {
+        return;
+    }
+
+    surface = qemu_console_surface(s->vga.con);
+    if (surface == NULL || surface_data(surface) == NULL ||
+        surface_width(surface) <= 0 || surface_height(surface) <= 0 ||
+        surface_stride(surface) <= 0 || surface_bits_per_pixel(surface) != 32) {
+        return;
+    }
+
+    size = (uint64_t)surface_stride(surface) * surface_height(surface);
+    if (size == 0 || size > UINT32_MAX || size > VMSVGA_MAX_PRIMARY_MEM_SIZE) {
+        return;
+    }
+
+    data = surface_data(surface);
+    s->legacy_handoff_ptr = g_malloc((size_t)size);
+    memcpy(s->legacy_handoff_ptr, data, (size_t)size);
+    s->legacy_handoff_size = (uint32_t)size;
+    s->legacy_handoff_width = (uint32_t)surface_width(surface);
+    s->legacy_handoff_height = (uint32_t)surface_height(surface);
+    s->legacy_handoff_stride = (uint32_t)surface_stride(surface);
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_STATE,
+        "LEGACY_HANDOFF capture src=%ux%u stride=%u size=%u",
+        s->legacy_handoff_width, s->legacy_handoff_height,
+        s->legacy_handoff_stride, s->legacy_handoff_size);
 }
 
 static inline bool vmsvga_legacy_vga_shadow_rendering(
@@ -7560,11 +7618,10 @@ static inline uint32_t vmsvga_stride(struct vmsvga_state_s *s)
     return s->active_valid ? s->active_stride : 0;
 }
 
-static inline void vmsvga_legacy_mode_handoff_seed(
+static inline bool vmsvga_legacy_mode_handoff_seed(
     struct vmsvga_state_s *s, uint32_t width, uint32_t height,
     uint32_t depth, uint32_t stride)
 {
-    DisplaySurface *surface;
     const uint8_t *src;
     uint8_t *dst;
     uint32_t src_width;
@@ -7581,46 +7638,35 @@ static inline void vmsvga_legacy_mode_handoff_seed(
     uint64_t framebuffer_size;
 
     /*
-     * XP switches directly from the classic 640x480 VGA boot screen to a
-     * larger register-mode SVGA framebuffer.  The driver only redraws changing
-     * regions (notably the progress bar), so retain the visible VGA image in
-     * BAR1 before the new register mode becomes the scanout.
-     *
-     * Restrict this to the classic-VGA shadow path.  VBE/GOP and Screen Object
-     * handoffs already have their own synchronization/preservation paths.
+     * The visible classic-VGA frame is captured at the VGA -> SVGA ownership
+     * transition, before vmsvga_legacy_vga_enter() replaces the shadow from
+     * BAR1.  Consume that snapshot when the first valid register mode exists,
+     * even if its tuple was already committed while SVGA was disabled.
      */
-    if (!vmsvga_legacy_vga_shadow_rendering(s) || s->screen_defined ||
-        s->svga_surface_bound || depth != 32 || width == 0 || height == 0 ||
-        stride < width * 4U) {
-        return;
+    if (s->legacy_handoff_ptr == NULL || s->legacy_handoff_size == 0 ||
+        s->screen_defined || s->svga_surface_bound || depth != 32 ||
+        width == 0 || height == 0 || stride < width * 4U) {
+        return false;
     }
 
-    surface = qemu_console_surface(s->vga.con);
-    if (surface == NULL || surface_width(surface) <= 0 ||
-        surface_height(surface) <= 0 || surface_stride(surface) <= 0 ||
-        surface_bits_per_pixel(surface) != 32) {
-        return;
-    }
-
-    src = surface_data(surface);
+    src = s->legacy_handoff_ptr;
     dst = vmsvga_svga_vram_ptr(s);
-    if (src == NULL || dst == NULL || src == dst) {
-        return;
-    }
-
-    src_width = (uint32_t)surface_width(surface);
-    src_height = (uint32_t)surface_height(surface);
-    src_stride = (uint32_t)surface_stride(surface);
+    src_width = s->legacy_handoff_width;
+    src_height = s->legacy_handoff_height;
+    src_stride = s->legacy_handoff_stride;
     framebuffer_size = (uint64_t)stride * height;
-    if (framebuffer_size == 0 || framebuffer_size > s->vga.vram_size) {
-        return;
+
+    if (src_width == 0 || src_height == 0 || src_stride == 0 ||
+        (uint64_t)src_stride * src_height > s->legacy_handoff_size ||
+        framebuffer_size == 0 || framebuffer_size > s->vga.vram_size) {
+        return false;
     }
 
     copy_width = MIN(src_width, width);
     copy_height = MIN(src_height, height);
     row_bytes = (size_t)copy_width * 4U;
     if (row_bytes > src_stride || row_bytes > stride) {
-        return;
+        return false;
     }
 
     src_x = (src_width - copy_width) / 2U;
@@ -7641,6 +7687,9 @@ static inline void vmsvga_legacy_mode_handoff_seed(
         VMVGA_TRACE_STATE,
         "LEGACY_HANDOFF seed src=%ux%u dst=%ux%u offset=%u,%u stride=%u",
         src_width, src_height, width, height, dst_x, dst_y, stride);
+
+    vmsvga_legacy_handoff_clear(s);
+    return true;
 }
 
 static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
@@ -7657,9 +7706,10 @@ static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
               s->active_height != s->new_height ||
               s->active_depth != s->new_depth || s->active_stride != stride;
 
-    if (changed) {
+    if (s->enable &&
         vmsvga_legacy_mode_handoff_seed(
-            s, s->new_width, s->new_height, s->new_depth, stride);
+            s, s->new_width, s->new_height, s->new_depth, stride)) {
+        vmsvga_invalidate(s, "legacy-mode-handoff");
     }
 
     s->active_valid = true;
@@ -9056,6 +9106,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
                   s->vga.hw_ops->invalidate(&s->vga);
                   s->vga.hw_ops->gfx_update(&s->vga);
               }
+              vmsvga_legacy_handoff_capture(s);
               vmsvga_trace_vga_state(s, "svga-enable-before");
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {
@@ -9075,6 +9126,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
               }
               vmsvga_fifo_discard_pending(s);
               vmsvga_legacy_vga_leave(s);
+              vmsvga_legacy_handoff_clear(s);
               vmsvga_trace_vga_state(s, "svga-disable-after");
           }
           s->enable = enabled;
@@ -9774,6 +9826,7 @@ static void vmsvga_reset(DeviceState *dev)
 
     vmsvga_trace_display_path_reset(s);
     s->legacy_vga_size = 0;
+    vmsvga_legacy_handoff_clear(s);
 
     memset(s->svgapalettebase, 0, sizeof(s->svgapalettebase));
     memset(s->legacy_vga_ptr, 0, VMSVGA_VGA_FB_BACKUP_SIZE);
@@ -9867,6 +9920,7 @@ static int vmsvga_pre_load(void *opaque)
     s->svga_surface_bound = false;
     s->hidden = false;
     s->legacy_vga_size = 0;
+    vmsvga_legacy_handoff_clear(s);
 
     vmsvga_screen_base_clear(s);
     vmsvga_screen_preseed_clear(s);
@@ -10552,6 +10606,11 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->dirty_log_enabled = true;
     s->legacy_vga_ptr = g_malloc0(VMSVGA_VGA_FB_BACKUP_SIZE);
     s->legacy_vga_size = 0;
+    s->legacy_handoff_ptr = NULL;
+    s->legacy_handoff_size = 0;
+    s->legacy_handoff_width = 0;
+    s->legacy_handoff_height = 0;
+    s->legacy_handoff_stride = 0;
 
     memory_region_init_io(&s->legacy_vga_mem, OBJECT(dev),
                           &vmsvga_legacy_vga_ops, s, "vmsvga.vga-lowmem",
@@ -10821,6 +10880,7 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     g_clear_pointer(&s->chip.d3d_payload_scratch, g_free);
     s->chip.d3d_payload_scratch_capacity = 0;
     s->chip.d3d_payload_scratch_in_use = false;
+    vmsvga_legacy_handoff_clear(&s->chip);
     g_clear_pointer(&s->chip.legacy_vga_ptr, g_free);
 
     if (s->chip.debug) {

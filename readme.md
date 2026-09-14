@@ -47,6 +47,10 @@ The implementation provides the full legacy 2D command stack used by VMware disp
 
 These commands provide substantially improved compatibility with legacy VMware display drivers and enable accelerated desktop rendering, particularly when QEMU's VNC output is used.
 
+## Download 📦
+
+You can download a [pre-built binary](https://github.com/qemus/qemu-vmvga/releases/latest/download/qemu-system-x86_64) based on QEMU 11.1.1 from the [Releases](https://github.com/qemus/qemu-vmvga/releases) page.
+
 ## Building 🔨
 
 The source is designed to be overlaid onto a QEMU source tree before QEMU is built. Downstream projects can therefore fetch or vendor this repository, copy the files into their QEMU source tree, and then run their existing QEMU build process.

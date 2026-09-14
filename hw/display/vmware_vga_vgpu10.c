@@ -5931,14 +5931,36 @@ static void vmsvga3d_d3d10_pipeline_output_targets_live(
             }
         }
 
-        (void)vmsvga3d_d3d11_graphics_uav_bind_live(
-            s->dxvk, cid, context->render_target_count,
-            context->shadow.renderState.renderTargetViewIds,
-            context->shadow.renderState.depthStencilViewId,
-            context->shadow.uavSpliceIndex, uav_count,
-            context->shadow.uaViewIds,
-            (const SVGACOTableDXUAViewEntry *)uav_table->host,
-            uav_table->capacity_entries);
+        /* Do not route ordinary RTV/DSV-only draws through
+         * OMSetRenderTargetsAndUnorderedAccessViews.  D3D11 requires the UAV
+         * start slot to be at or beyond the RTV range when UAVs are present,
+         * while a freshly initialized SVGA context has uavSpliceIndex == 0.
+         */
+        if (uav_count == 0) {
+            (void)vmsvga3d_dxvk_d3d11_set_render_targets(
+                s->dxvk, cid, context->render_target_count,
+                context->shadow.renderState.renderTargetViewIds,
+                context->shadow.renderState.depthStencilViewId,
+                context->shadow.uavSpliceIndex);
+        } else if (uav_count <= SVGA3D_MAX_UAVIEWS &&
+                   context->shadow.uavSpliceIndex >=
+                       context->render_target_count &&
+                   context->shadow.uavSpliceIndex <=
+                       SVGA3D_MAX_UAVIEWS - uav_count) {
+            (void)vmsvga3d_d3d11_graphics_uav_bind_live(
+                s->dxvk, cid, context->render_target_count,
+                context->shadow.renderState.renderTargetViewIds,
+                context->shadow.renderState.depthStencilViewId,
+                context->shadow.uavSpliceIndex, uav_count,
+                context->shadow.uaViewIds,
+                (const SVGACOTableDXUAViewEntry *)uav_table->host,
+                uav_table->capacity_entries);
+        } else {
+            /* Keep the state dirty so a malformed/overlapping UAV splice does
+             * not silently become the accepted renderer state.
+             */
+            context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+        }
     } else {
         (void)vmsvga3d_dxvk_d3d11_set_render_targets(
             s->dxvk, cid, context->render_target_count,

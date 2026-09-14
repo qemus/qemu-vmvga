@@ -3573,7 +3573,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     uint32_t i;
     bool scene_started = false;
     bool success = false;
-    bool full_replay = true;
+    bool full_replay = false;
     bool trace = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
     const char *failure_stage = NULL;
     uint32_t failure_range = UINT32_MAX;
@@ -3693,7 +3693,16 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         goto out;
     }
 
-    if (!vmsvga3d_dxvk_reset_state(s->dxvk)) {
+    /* Re-establish a canonical native D3D9 state at structural pipeline
+     * boundaries. Render-target changes have native viewport/scissor and
+     * backend-derived side effects, while shader changes switch the pipeline
+     * interpretation of otherwise persistent legacy state. Between those
+     * boundaries, keep #364's cheap dirty-state replay. */
+    full_replay = context->legacy_full_replay ||
+                  s->svga3d->active_legacy_context_id != cid ||
+                  context->legacy_target_dirty != 0 ||
+                  context->legacy_shader_dirty != 0;
+    if (full_replay && !vmsvga3d_dxvk_reset_state(s->dxvk)) {
         failure_stage = "reset-state-before";
         goto out;
     }
@@ -3969,15 +3978,17 @@ out:
         (void)vmsvga3d_dxvk_end_scene(s->dxvk);
     }
 
-    context->legacy_full_replay = true;
-    s->svga3d->active_legacy_context_id = SVGA3D_INVALID_ID;
-    if (!vmsvga3d_dxvk_reset_state(s->dxvk)) {
-        if (trace) {
+    if (success) {
+        context->legacy_full_replay = false;
+        s->svga3d->active_legacy_context_id = cid;
+    } else {
+        context->legacy_full_replay = true;
+        s->svga3d->active_legacy_context_id = SVGA3D_INVALID_ID;
+        if (!vmsvga3d_dxvk_reset_state(s->dxvk) && trace) {
             fprintf(stderr,
                     "VMVGA-D3D9-DRAW fail cid=%u stage=reset-state-after\n",
                     cid);
         }
-        success = false;
     }
 
     if (declaration != NULL) {

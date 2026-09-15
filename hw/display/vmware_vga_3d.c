@@ -400,6 +400,10 @@ typedef struct vmsvga3d_surface_s {
 static bool vmsvga3d_d3d10_copy_surface_materialize_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DD3D10ResourceCreateKind create_kind);
+static void vmsvga3d_legacy_surface_evict(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface);
+static bool vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
+    struct vmsvga_state_s *s, SVGA3dSurfaceId sid);
 static bool vmsvga3d_surface_readback_to_shadow(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DSurfaceImage *image, uint32_t subresource);
@@ -8716,6 +8720,8 @@ static bool vmsvga3d_handle_intra_surface_copy(
 
     if (valid && clipped.w != 0 && clipped.h != 0 && clipped.d != 0) {
         if (d3d11_resident) {
+            bool upload_ok;
+
             if (surface->format == SVGA3D_BUFFER) {
                 VMSVGA3DD3D10Box native_box = {
                     .left = clipped.x,
@@ -8729,18 +8735,67 @@ static bool vmsvga3d_handle_intra_surface_copy(
                 valid = clipped.y == 0 && clipped.z == 0 &&
                         clipped.h == 1 && clipped.d == 1 &&
                         clipped.x <= image->data_size &&
-                        clipped.w <= image->data_size - clipped.x &&
-                        vmsvga3d_dxvk_d3d11_update_subresource(
-                            s->dxvk, surface->dxvk_surface, subresource,
-                            &native_box, image->data + clipped.x,
-                            image->pitch, image->plane_size);
+                        clipped.w <= image->data_size - clipped.x;
+                upload_ok = valid &&
+                    vmsvga3d_dxvk_d3d11_update_subresource(
+                        s->dxvk, surface->dxvk_surface, subresource,
+                        &native_box, image->data + clipped.x,
+                        image->pitch, image->plane_size);
             } else {
-                valid = vmsvga3d_surface_dma_d3d11_upload_box(
+                upload_ok = vmsvga3d_surface_dma_d3d11_upload_box(
                     s, surface, image, subresource, &clipped);
             }
+
+            if (valid && !upload_ok) {
+                uint32_t active_cid = s->svga3d->active_dx_context_id;
+
+                /* The canonical CPU shadow already contains the completed
+                 * copy.  Drop the stale native resource rather than allowing a
+                 * later GPU readback to overwrite those new contents.  Native
+                 * views are destroyed by eviction, so force the active DX
+                 * context to rebuild its pipeline bindings before the next
+                 * draw. */
+                if (active_cid != SVGA3D_INVALID_ID &&
+                    active_cid < SVGA3D_MAX_CONTEXT_IDS) {
+                    VMSVGA3DDXContext *context =
+                        vmsvga3d_dx_context(s, active_cid);
+
+                    if (context != NULL) {
+                        context->renderer_dirty |=
+                            VMSVGA3D_DX_CTX_F_STATE_ALL;
+                    }
+                }
+                vmsvga3d_legacy_surface_evict(s, surface);
+            }
         } else if (d3d9_resident) {
-            vmsvga3d_d3d9_runtime_sync_surface_from_cpu(s, surface);
+            VMSVGA3DD3D9AccelResult upload_result;
+            uint32_t upload_offset = 0;
+            uint32_t upload_size = image->data_size;
+
+            /* Only this image was read back before the copy.  Uploading the
+             * whole D3D9 surface here would push potentially stale CPU shadows
+             * for untouched mips/cube faces over newer GPU contents.  The
+             * existing image helper updates just this subresource; buffers can
+             * additionally limit the upload to the changed destination range. */
+            if (surface->format == SVGA3D_BUFFER) {
+                upload_offset = clipped.x;
+                upload_size = clipped.w;
+            }
+            upload_result = vmsvga3d_d3d9_runtime_upload_surface_image(
+                s, surface, image, subresource, upload_offset, upload_size);
+            if (upload_result != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                /* Preserve the completed CPU-shadow copy as authoritative if
+                 * the resident D3D9 resource cannot be updated. */
+                vmsvga3d_legacy_surface_evict(s, surface);
+            }
         }
+    }
+
+    if (valid && clipped.w != 0 && clipped.h != 0 && clipped.d != 0 &&
+        subresource == 0 &&
+        !vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
+            s, body->surface.sid)) {
+        valid = false;
     }
 
     if (valid && clipped.w != 0 && clipped.h != 0 && clipped.d != 0) {

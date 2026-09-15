@@ -108,7 +108,7 @@ bool vmsvga3d_dxvk_d3d11_supports_multisample(
 /* Highest ForcedSampleCount that the live FL11.0 D3D11.1 backend can
  * honestly expose through the VMware SM5 devcap. */
 uint32_t vmsvga3d_dxvk_d3d11_max_forced_sample_count(
-    const VMSVGA3DDxvk *dxvk);
+    VMSVGA3DDxvk *dxvk);
 
 /* Guest surface lifetime is tracked immediately; D3D9 residency is lazy. */
 VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,

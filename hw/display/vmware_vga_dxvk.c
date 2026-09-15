@@ -60,6 +60,7 @@ struct vmsvga3d_dxvk_s {
     uint32_t d3d9_bound_depth_stencil_level;
     bool d3d9_bound_depth_stencil_valid;
     void *d3d11_device;
+    void *d3d11_device1;
     void *d3d11_context;
     void *d3d11_context1;
     VMSVGA3DDxvkQuery *d3d11_queries;
@@ -174,13 +175,17 @@ struct vmsvga3d_dxvk_shader_s {
     VMSVGA3DDxvkShader *next;
 };
 
-/* VirtualBox resolves a stream-output declaration only when a GS first uses
- * the SO id.  The resolved declaration is then cached per SO id until the
- * entry is redefined, destroyed, or replayed from a COTable.
+/* Stream-output declarations use D3D11 semantic names/indices even though
+ * the guest object names output registers.  Cache the resolved declaration
+ * together with the shader output signature it was resolved against; the same
+ * SO id may legally be paired with another compatible shader later.
  */
 struct vmsvga3d_dxvk_stream_output_s {
     uint32_t cid;
     uint32_t stream_output_id;
+    uint32_t output_count;
+    VMSVGA3DD3D10ShaderOutputSemantic
+        outputs[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
     VMSVGA3DD3D10StreamOutputPlan plan;
     VMSVGA3DDxvkStreamOutput *next;
 };
@@ -409,6 +414,8 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_PREDICATE 25u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CHECK_FORMAT_SUPPORT 29u
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CHECK_MULTISAMPLE_QUALITY_LEVELS 30u
+#define VMSVGA3D_DXVK_ID3D11DEVICE1_CREATE_BLEND_STATE1 45u
+#define VMSVGA3D_DXVK_ID3D11DEVICE1_CREATE_RASTERIZER_STATE1 46u
 #define VMSVGA3D_DXVK_DXGI_FORMAT_R8G8B8A8_UNORM 28u
 #define VMSVGA3D_DXVK_DXGI_FORMAT_D24_UNORM_S8_UINT 45u
 #define VMSVGA3D_DXVK_D3D11_FORMAT_SUPPORT_BUFFER 0x00000001u
@@ -884,10 +891,14 @@ typedef int32_t (*VMSVGA3DDxvkD3D11CreateGeometryShaderWithSO)(
     void *class_linkage, void **shader);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateBlendState)(
     void *device, const VMSVGA3DD3D10BlendDesc *desc, void **state);
+typedef int32_t (*VMSVGA3DDxvkD3D11CreateBlendState1)(
+    void *device, const VMSVGA3DD3D11BlendDesc *desc, void **state);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateDepthStencilState)(
     void *device, const VMSVGA3DD3D10DepthStencilDesc *desc, void **state);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateRasterizerState)(
     void *device, const VMSVGA3DD3D10RasterizerDesc *desc, void **state);
+typedef int32_t (*VMSVGA3DDxvkD3D11CreateRasterizerState1)(
+    void *device, const VMSVGA3DD3D11RasterizerDesc *desc, void **state);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateSamplerState)(
     void *device, const VMSVGA3DD3D10SamplerDesc *desc, void **state);
 typedef int32_t (*VMSVGA3DDxvkD3D11CreateQuery)(
@@ -1087,10 +1098,14 @@ _Static_assert(sizeof(VMSVGA3DDxvkD3D11InputElementDesc) ==
                "D3D11_INPUT_ELEMENT_DESC ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DD3D10BlendDesc) == 264,
                "D3D11_BLEND_DESC ABI mismatch");
+_Static_assert(sizeof(VMSVGA3DD3D11BlendDesc) == 328,
+               "D3D11_BLEND_DESC1 ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DD3D10DepthStencilDesc) == 52,
                "D3D11_DEPTH_STENCIL_DESC ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DD3D10RasterizerDesc) == 40,
                "D3D11_RASTERIZER_DESC ABI mismatch");
+_Static_assert(sizeof(VMSVGA3DD3D11RasterizerDesc) == 44,
+               "D3D11_RASTERIZER_DESC1 ABI mismatch");
 _Static_assert(sizeof(VMSVGA3DD3D10SamplerDesc) == 52,
                "D3D11_SAMPLER_DESC ABI mismatch");
 _Static_assert(sizeof(SVGA3dViewport) == 6 * sizeof(float) &&
@@ -1331,6 +1346,39 @@ static bool vmsvga3d_dxvk_capture_pristine_state(VMSVGA3DDxvk *dxvk)
     return vmsvga3d_dxvk_succeeded(result) && dxvk->d3d9_pristine_state != NULL;
 }
 
+static bool vmsvga3d_dxvk_d3d11_device1_acquire(VMSVGA3DDxvk *dxvk)
+{
+    static const VMSVGA3DDxvkGuid iid_d3d11_device1 = {
+        0xa04bfb29, 0x08ef, 0x43d6,
+        { 0xa4, 0x9c, 0xa9, 0xbd, 0xbd, 0xcb, 0xe6, 0x86 },
+    };
+    VMSVGA3DDxvkQueryInterface query_interface = NULL;
+    int32_t result;
+
+    if (dxvk == NULL || dxvk->d3d11_device == NULL) {
+        return false;
+    }
+
+    if (dxvk->d3d11_device1 != NULL) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device, VMSVGA3D_DXVK_IUNKNOWN_QUERY_INTERFACE,
+            &query_interface, sizeof(query_interface))) {
+        return false;
+    }
+
+    result = query_interface(dxvk->d3d11_device, &iid_d3d11_device1,
+                             &dxvk->d3d11_device1);
+    if (!vmsvga3d_dxvk_succeeded(result) || dxvk->d3d11_device1 == NULL) {
+        dxvk->d3d11_device1 = NULL;
+        return false;
+    }
+
+    return true;
+}
+
 bool vmsvga3d_dxvk_d3d11_context1_acquire(VMSVGA3DDxvk *dxvk)
 {
     static const VMSVGA3DDxvkGuid iid_d3d11_device_context1 = {
@@ -1430,6 +1478,12 @@ fail:
         vmsvga3d_dxvk_release(dxvk->d3d11_context,
                               VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         dxvk->d3d11_context = NULL;
+    }
+
+    if (dxvk->d3d11_device1 != NULL) {
+        vmsvga3d_dxvk_release(dxvk->d3d11_device1,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        dxvk->d3d11_device1 = NULL;
     }
 
     if (dxvk->d3d11_device != NULL) {
@@ -2345,6 +2399,12 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk)
         vmsvga3d_dxvk_release(dxvk->d3d11_context,
                               VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         dxvk->d3d11_context = NULL;
+    }
+
+    if (dxvk->d3d11_device1 != NULL) {
+        vmsvga3d_dxvk_release(dxvk->d3d11_device1,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        dxvk->d3d11_device1 = NULL;
     }
 
     if (dxvk->d3d11_device != NULL) {
@@ -4417,7 +4477,18 @@ bool vmsvga3d_dxvk_d3d11_set_shader_resources(
             views[i] = vmsvga3d_dxvk_d3d11_view_object(
                 dxvk, VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE, cid, view_ids[i]);
             if (views[i] == NULL) {
-                return false;
+                /* The guest still names this SRV, but native realization may
+                 * have failed after a cached view was retired.  Submit a NULL
+                 * for this slot so D3D11 cannot retain the stale COM binding.
+                 * This mirrors the input-layout path: failed lazy realization
+                 * produces an explicit NULL native bind rather than preserving
+                 * an obsolete object.
+                 */
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "DX-SRV-BIND cid=%u stage=%u slot=%u srvid=%u "
+                    "native=0 result=NULL",
+                    cid, stage_index, start_slot + i, view_ids[i]);
             }
         }
     }
@@ -4516,19 +4587,13 @@ bool vmsvga3d_dxvk_d3d11_set_constant_buffers(
 #endif
 }
 
-bool vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
-    VMSVGA3DDxvk *dxvk, uint32_t stage_index, uint32_t slot,
-    uint32_t first_constant, uint32_t num_constants)
+bool vmsvga3d_dxvk_d3d11_constant_buffer_mark_pending(
+    VMSVGA3DDxvk *dxvk, uint32_t stage_index, uint32_t slot)
 {
     if (dxvk == NULL || stage_index >= SVGA3D_NUM_SHADERTYPE ||
         slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
         return false;
     }
-
-    dxvk->d3d11_bound_constant_buffer_first_constant[stage_index][slot] =
-        first_constant;
-    dxvk->d3d11_bound_constant_buffer_num_constants[stage_index][slot] =
-        num_constants;
 
     if (dxvk->d3d11_constant_buffer_num_buffers[stage_index] == 0) {
         dxvk->d3d11_constant_buffer_start_slot[stage_index] = slot;
@@ -4552,6 +4617,24 @@ bool vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
     }
 
     return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_constant_buffer_range_set(
+    VMSVGA3DDxvk *dxvk, uint32_t stage_index, uint32_t slot,
+    uint32_t first_constant, uint32_t num_constants)
+{
+    if (dxvk == NULL || stage_index >= SVGA3D_NUM_SHADERTYPE ||
+        slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+        return false;
+    }
+
+    dxvk->d3d11_bound_constant_buffer_first_constant[stage_index][slot] =
+        first_constant;
+    dxvk->d3d11_bound_constant_buffer_num_constants[stage_index][slot] =
+        num_constants;
+
+    return vmsvga3d_dxvk_d3d11_constant_buffer_mark_pending(
+        dxvk, stage_index, slot);
 }
 
 bool vmsvga3d_dxvk_d3d11_constant_buffers1_flush(
@@ -5487,6 +5570,46 @@ bool vmsvga3d_dxvk_d3d11_dispatch(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_dispatch_indirect(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11DispatchIndirect dispatch_indirect = NULL;
+    void *buffer = NULL;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+        return false;
+    }
+
+    if (args_buffer != NULL) {
+        if (!args_buffer->d3d11_resident ||
+            args_buffer->d3d11_resource == NULL ||
+            !args_buffer->d3d11_desc.valid ||
+            args_buffer->d3d11_desc.resource_dimension !=
+                VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
+            return false;
+        }
+        buffer = args_buffer->d3d11_resource;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_DISPATCH_INDIRECT,
+            &dispatch_indirect, sizeof(dispatch_indirect))) {
+        return false;
+    }
+
+    dispatch_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
+    return true;
+#else
+    (void)dxvk;
+    (void)args_buffer;
+    (void)aligned_byte_offset;
+    return false;
+#endif
+}
+
 void vmsvga3d_dxvk_d3d11_constant_buffer_context_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid)
 {
@@ -5677,6 +5800,61 @@ bool vmsvga3d_dxvk_d3d11_blend_state_define(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_blend_state1_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
+    const struct vmsvga3d_d3d11_blend_desc_s *desc)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CreateBlendState1 create_state = NULL;
+    void *state = NULL;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || desc == NULL ||
+        !vmsvga3d_dxvk_d3d11_device1_acquire(dxvk)) {
+        return false;
+    }
+
+    if (vmsvga3d_dxvk_d3d11_state_find(
+            dxvk, VMSVGA3D_DXVK_STATE_BLEND, cid, state_id, NULL) != NULL) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device1,
+            VMSVGA3D_DXVK_ID3D11DEVICE1_CREATE_BLEND_STATE1,
+            &create_state, sizeof(create_state))) {
+        return false;
+    }
+
+    result = create_state(dxvk->d3d11_device1, desc, &state);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-BLEND1-REALIZE cid=%u id=%u hr=0x%08x native=%u result=%s",
+        cid, state_id, (uint32_t)result, state != NULL ? 1u : 0u,
+        vmsvga3d_dxvk_succeeded(result) && state != NULL ? "OK" : "FAIL");
+    if (!vmsvga3d_dxvk_succeeded(result) || state == NULL) {
+        if (state != NULL) {
+            vmsvga3d_dxvk_release(state, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        }
+        return false;
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_state_store(
+            dxvk, VMSVGA3D_DXVK_STATE_BLEND, cid, state_id, state)) {
+        vmsvga3d_dxvk_release(state, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        return false;
+    }
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)state_id;
+    (void)desc;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_blend_state_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id)
 {
@@ -5777,6 +5955,61 @@ bool vmsvga3d_dxvk_d3d11_rasterizer_state_define(
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-RASTER-REALIZE cid=%u id=%u hr=0x%08x native=%u result=%s",
+        cid, state_id, (uint32_t)result, state != NULL ? 1u : 0u,
+        vmsvga3d_dxvk_succeeded(result) && state != NULL ? "OK" : "FAIL");
+    if (!vmsvga3d_dxvk_succeeded(result) || state == NULL) {
+        if (state != NULL) {
+            vmsvga3d_dxvk_release(state, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        }
+        return false;
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_state_store(
+            dxvk, VMSVGA3D_DXVK_STATE_RASTERIZER, cid, state_id, state)) {
+        vmsvga3d_dxvk_release(state, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        return false;
+    }
+
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)state_id;
+    (void)desc;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_rasterizer_state1_define(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t state_id,
+    const struct vmsvga3d_d3d11_rasterizer_desc_s *desc)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CreateRasterizerState1 create_state = NULL;
+    void *state = NULL;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || desc == NULL ||
+        !vmsvga3d_dxvk_d3d11_device1_acquire(dxvk)) {
+        return false;
+    }
+
+    if (vmsvga3d_dxvk_d3d11_state_find(
+            dxvk, VMSVGA3D_DXVK_STATE_RASTERIZER, cid, state_id, NULL) != NULL) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device1,
+            VMSVGA3D_DXVK_ID3D11DEVICE1_CREATE_RASTERIZER_STATE1,
+            &create_state, sizeof(create_state))) {
+        return false;
+    }
+
+    result = create_state(dxvk->d3d11_device1, desc, &state);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-RASTER1-REALIZE cid=%u id=%u hr=0x%08x native=%u result=%s",
         cid, state_id, (uint32_t)result, state != NULL ? 1u : 0u,
         vmsvga3d_dxvk_succeeded(result) && state != NULL ? "OK" : "FAIL");
     if (!vmsvga3d_dxvk_succeeded(result) || state == NULL) {
@@ -5977,12 +6210,12 @@ bool vmsvga3d_dxvk_d3d11_set_cs_unordered_access_views(
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CSSetUnorderedAccessViews set_views = NULL;
-    void *views[SVGA3D_MAX_UAVIEWS] = { NULL };
+    void *views[SVGA3D_DX11_1_MAX_UAVIEWS] = { NULL };
     uint32_t i;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
-        start_slot > SVGA3D_MAX_UAVIEWS ||
-        view_count > SVGA3D_MAX_UAVIEWS - start_slot ||
+        start_slot > SVGA3D_DX11_1_MAX_UAVIEWS ||
+        view_count > SVGA3D_DX11_1_MAX_UAVIEWS - start_slot ||
         (view_count != 0 &&
          (view_ids == NULL || initial_counts == NULL))) {
         return false;
@@ -6034,14 +6267,14 @@ bool vmsvga3d_dxvk_d3d11_set_render_targets_and_uavs(
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11OMSetRenderTargetsAndUAVs set_targets = NULL;
     void *render_targets[SVGA3D_MAX_RENDER_TARGETS] = { NULL };
-    void *unordered_access_views[SVGA3D_MAX_UAVIEWS] = { NULL };
+    void *unordered_access_views[SVGA3D_DX11_1_MAX_UAVIEWS] = { NULL };
     void *depth_stencil = NULL;
     uint32_t i;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
         render_target_count > SVGA3D_MAX_RENDER_TARGETS ||
-        uav_start_slot > SVGA3D_MAX_UAVIEWS ||
-        uav_count > SVGA3D_MAX_UAVIEWS - uav_start_slot ||
+        uav_start_slot > SVGA3D_DX11_1_MAX_UAVIEWS ||
+        uav_count > SVGA3D_DX11_1_MAX_UAVIEWS - uav_start_slot ||
         (render_target_count != 0 && render_target_ids == NULL) ||
         (uav_count != 0 &&
          (uav_ids == NULL || initial_counts == NULL))) {
@@ -7172,6 +7405,11 @@ bool vmsvga3d_dxvk_d3d11_shader_bind_info(
      * retains the backend shader record itself.
      */
     vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
+    /* A rebind replaces the shader program.  Any remembered GS/SO pairing
+     * belongs to the old native program and must not make a later plain GS
+     * look like the requested CreateGeometryShaderWithStreamOutput variant.
+     */
+    shader->stream_output_id = SVGA3D_INVALID_ID;
     if (shader->bytecode != NULL) {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
         if (shader->shader != NULL) {
@@ -7278,23 +7516,60 @@ static VMSVGA3DDxvkStreamOutput *vmsvga3d_dxvk_d3d11_stream_output_find(
     return NULL;
 }
 
+static bool vmsvga3d_dxvk_d3d11_stream_output_signature_equal(
+    const VMSVGA3DDxvkStreamOutput *stream_output,
+    const VMSVGA3DD3D10ShaderOutputSemantic *outputs, uint32_t output_count)
+{
+    uint32_t i;
+
+    if (stream_output == NULL || output_count != stream_output->output_count ||
+        output_count > VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES ||
+        (output_count != 0 && outputs == NULL)) {
+        return false;
+    }
+
+    for (i = 0; i < output_count; i++) {
+        const VMSVGA3DD3D10ShaderOutputSemantic *cached =
+            &stream_output->outputs[i];
+        const VMSVGA3DD3D10ShaderOutputSemantic *current = &outputs[i];
+
+        if (cached->register_index != current->register_index ||
+            cached->mask != current->mask ||
+            cached->semantic_index != current->semantic_index ||
+            (cached->semantic_name == NULL) != (current->semantic_name == NULL) ||
+            (cached->semantic_name != NULL &&
+             strcmp(cached->semantic_name, current->semantic_name) != 0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool vmsvga3d_dxvk_d3d11_stream_output_cached(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stream_output_id,
+    const VMSVGA3DD3D10ShaderOutputSemantic *outputs, uint32_t output_count,
     VMSVGA3DD3D10StreamOutputPlan *plan)
 {
     VMSVGA3DDxvkStreamOutput *stream_output;
 
-    if (dxvk == NULL || plan == NULL) {
+    if (dxvk == NULL || plan == NULL ||
+        output_count > VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES ||
+        (output_count != 0 && outputs == NULL)) {
         return false;
     }
 
     stream_output = vmsvga3d_dxvk_d3d11_stream_output_find(
         dxvk, cid, stream_output_id, NULL);
 
-    /* dxDefineStreamOutput uses cDeclarationEntry == 0 as its cache test.
-     * Therefore an empty declaration is intentionally rebuilt every time.
+    /* An empty declaration is intentionally rebuilt every time, matching the
+     * original cDeclarationEntry == 0 cache behavior.  A non-empty cached
+     * declaration is reusable only with the exact shader output semantics it
+     * was resolved against.
      */
-    if (stream_output == NULL || stream_output->plan.declaration_count == 0) {
+    if (stream_output == NULL || stream_output->plan.declaration_count == 0 ||
+        !vmsvga3d_dxvk_d3d11_stream_output_signature_equal(
+            stream_output, outputs, output_count)) {
         return false;
     }
 
@@ -7305,11 +7580,14 @@ bool vmsvga3d_dxvk_d3d11_stream_output_cached(
 
 bool vmsvga3d_dxvk_d3d11_stream_output_cache(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stream_output_id,
+    const VMSVGA3DD3D10ShaderOutputSemantic *outputs, uint32_t output_count,
     const VMSVGA3DD3D10StreamOutputPlan *plan)
 {
     VMSVGA3DDxvkStreamOutput *stream_output;
 
-    if (dxvk == NULL || plan == NULL) {
+    if (dxvk == NULL || plan == NULL ||
+        output_count > VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES ||
+        (output_count != 0 && outputs == NULL)) {
         return false;
     }
 
@@ -7327,6 +7605,12 @@ bool vmsvga3d_dxvk_d3d11_stream_output_cache(
         dxvk->d3d11_stream_outputs = stream_output;
     }
 
+    stream_output->output_count = output_count;
+    memset(stream_output->outputs, 0, sizeof(stream_output->outputs));
+    if (output_count != 0) {
+        memcpy(stream_output->outputs, outputs,
+               output_count * sizeof(stream_output->outputs[0]));
+    }
     stream_output->plan = *plan;
     return true;
 }
@@ -7354,9 +7638,22 @@ bool vmsvga3d_dxvk_d3d11_stream_output_destroy(
 
         for (shader = dxvk->d3d11_shaders; shader != NULL;
              shader = shader->next) {
-            if (shader->cid == cid &&
-                shader->stream_output_proxy_id == stream_output_id) {
+            if (shader->cid != cid) {
+                continue;
+            }
+            if (shader->stream_output_proxy_id == stream_output_id) {
                 vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
+            }
+            if (shader->shader_type == SVGA3D_SHADERTYPE_GS &&
+                shader->stream_output_id == stream_output_id) {
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+                if (shader->shader != NULL) {
+                    vmsvga3d_dxvk_release(
+                        shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+                    shader->shader = NULL;
+                }
+#endif
+                shader->stream_output_id = SVGA3D_INVALID_ID;
             }
         }
     }
@@ -8024,7 +8321,7 @@ bool vmsvga3d_dxvk_d3d11_input_layout_destroy(
     return true;
 }
 
-void vmsvga3d_dxvk_d3d11_input_layout_context_destroy(
+void vmsvga3d_dxvk_d3d11_input_layout_context_invalidate(
     VMSVGA3DDxvk *dxvk, uint32_t cid)
 {
     VMSVGA3DDxvkInputLayout **link;
@@ -8045,6 +8342,12 @@ void vmsvga3d_dxvk_d3d11_input_layout_context_destroy(
         *link = layout->next;
         vmsvga3d_dxvk_d3d11_input_layout_free(layout);
     }
+}
+
+void vmsvga3d_dxvk_d3d11_input_layout_context_destroy(
+    VMSVGA3DDxvk *dxvk, uint32_t cid)
+{
+    vmsvga3d_dxvk_d3d11_input_layout_context_invalidate(dxvk, cid);
 }
 
 void vmsvga3d_dxvk_d3d11_shader_context_destroy(

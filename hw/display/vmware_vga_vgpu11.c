@@ -399,6 +399,19 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
+VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_indirect_plan(
+    const SVGA3dCmdDXDispatchIndirect *src,
+    VMSVGA3DD3D11DispatchIndirectPlan *plan)
+{
+    if (!src || !plan) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    plan->args_buffer_sid = src->argsBufferSid;
+    plan->aligned_byte_offset = src->byteOffsetForArgs;
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
 VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_plan(
     uint32_t slot, SVGA3dShaderType type, SVGA3dSurfaceId sid,
     uint32_t offset_in_bytes, uint32_t size_in_bytes, bool surface_available,
@@ -695,10 +708,10 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_graphics_uav_bind_live(
     const SVGA3dUAViewId *uav_ids,
     const SVGACOTableDXUAViewEntry *uav_entries, uint32_t cotable_count)
 {
-    uint32_t initial_counts[SVGA3D_MAX_UAVIEWS];
+    uint32_t initial_counts[SVGA3D_DX11_1_MAX_UAVIEWS];
     uint32_t i;
 
-    if (!dxvk || uav_count > SVGA3D_MAX_UAVIEWS ||
+    if (!dxvk || uav_count > SVGA3D_DX11_1_MAX_UAVIEWS ||
         (uav_count != 0 && (!uav_ids || !uav_entries))) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
@@ -729,10 +742,10 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_bind_live(
     const SVGA3dUAViewId *uav_ids,
     const SVGACOTableDXUAViewEntry *uav_entries, uint32_t cotable_count)
 {
-    uint32_t initial_counts[SVGA3D_MAX_UAVIEWS];
+    uint32_t initial_counts[SVGA3D_DX11_1_MAX_UAVIEWS];
     uint32_t i;
 
-    if (!dxvk || uav_count > SVGA3D_MAX_UAVIEWS ||
+    if (!dxvk || uav_count > SVGA3D_DX11_1_MAX_UAVIEWS ||
         (uav_count != 0 && (!uav_ids || !uav_entries))) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
@@ -810,6 +823,18 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_live(
     if (!dxvk || !vmsvga3d_dxvk_d3d11_dispatch(
                      dxvk, thread_group_count_x, thread_group_count_y,
                      thread_group_count_z)) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    return VMSVGA3D_D3D11_LEVEL_11_0;
+}
+
+VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_indirect_live(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset)
+{
+    if (!dxvk || !vmsvga3d_dxvk_d3d11_dispatch_indirect(
+                     dxvk, args_buffer, aligned_byte_offset)) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
 
@@ -1209,8 +1234,7 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_desc(
         }
         break;
     case SVGA3D_RESOURCE_TEXTURE3D:
-        /* Preserve the zero-initialized dimension for this 3D-texture path. */
-        dst->view_dimension = D3D11_UAV_UNKNOWN;
+        dst->view_dimension = D3D11_UAV_TEXTURE3D;
         dst->mip_slice = src->desc.tex3D.mipSlice;
         dst->first_w_slice = src->desc.tex3D.firstW;
         dst->w_size = src->desc.tex3D.wSize;
@@ -1292,8 +1316,12 @@ static bool vmsvga3d_d3d11_copy_structure_destination_live(
     }
 
     surface = s->svga3d->surfaces[sid];
+    /* CopyStructureCount destinations are generic D3D11 buffers.  They need
+     * not carry the vGPU10 vertex/index bind flags required by the IA buffer
+     * materializer (DRAWINDIRECT_ARGS-only buffers are valid here). */
     if (surface == NULL || surface->dxvk_surface == NULL ||
-        !vmsvga3d_d3d10_buffer_materialize_live(s, sid)) {
+        !vmsvga3d_d3d10_copy_surface_materialize_live(
+            s, surface, VMSVGA3D_D3D10_CREATE_BUFFER)) {
         return false;
     }
 
@@ -1325,8 +1353,12 @@ static bool vmsvga3d_d3d11_indirect_args_buffer_live(
     }
 
     surface = s->svga3d->surfaces[sid];
+    /* Indirect argument buffers are generic D3D11 buffers and commonly have
+     * only SVGA3D_SURFACE_DRAWINDIRECT_ARGS.  Do not route them through the
+     * vGPU10 IA-buffer materializer, which requires vertex/index bind flags. */
     if (surface == NULL || surface->dxvk_surface == NULL ||
-        !vmsvga3d_d3d10_buffer_materialize_live(s, sid)) {
+        !vmsvga3d_d3d10_copy_surface_materialize_live(
+            s, surface, VMSVGA3D_D3D10_CREATE_BUFFER)) {
         return false;
     }
 
@@ -1857,6 +1889,32 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         success = vmsvga3d_d3d11_dispatch_live(
                       s->dxvk, plan.thread_group_count_x,
                       plan.thread_group_count_y, plan.thread_group_count_z) !=
+                  VMSVGA3D_D3D11_LEVEL_INVALID;
+        vmsvga3d_dx_post_draw_live(s, cid);
+        return success;
+    }
+
+    case SVGA_3D_CMD_DX_DISPATCH_INDIRECT: {
+        SVGA3dCmdDXDispatchIndirect command;
+        VMSVGA3DD3D11DispatchIndirectPlan plan;
+        VMSVGA3DDxvkSurface *args_buffer;
+        bool success;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (vmsvga3d_d3d11_dispatch_indirect_plan(&command, &plan) ==
+                VMSVGA3D_D3D11_LEVEL_INVALID ||
+            !vmsvga3d_d3d11_indirect_args_buffer_live(
+                s, plan.args_buffer_sid, &args_buffer)) {
+            return false;
+        }
+
+        vmsvga3d_dx_pipeline_setup_live(s, cid);
+        success = vmsvga3d_d3d11_dispatch_indirect_live(
+                      s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;
         vmsvga3d_dx_post_draw_live(s, cid);
         return success;

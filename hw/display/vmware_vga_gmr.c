@@ -638,19 +638,20 @@ static void vmsvga_gmr_reset(struct vmsvga_state_s *s)
 }
 
 /*
- * Screen Object v1 belongs with the modern 2D/GMR transport.  Keep it in
- * this module so renderer backends (D3D9, D3D10/11, etc.) remain independent
- * of screen-object state and GMRFB handling.
+ * Screen Objects belong with the modern 2D/GMR transport.  Keep them in this
+ * module so renderer backends (D3D9, D3D10/11, etc.) remain independent of
+ * screen-object state and GMRFB handling.
  */
 
 /*
  * VMware SVGA Screen Object support.
  *
- * Cubey currently implements one screen (ID 0). With the original
- * SVGA_FIFO_CAP_SCREEN_OBJECT capability the backingStore fields are optional.
- * Preserve the existing direct-backed compatibility path when a supplied
- * backingStore satisfies our 32-bpp BAR1 requirements, but fall back to the
- * host-owned v1 base layer when an optional backingStore cannot be used.
+ * Cubey currently implements one screen (ID 0) and advertises both the original
+ * SVGA_FIFO_CAP_SCREEN_OBJECT capability and SCREEN_OBJECT_2.  Per the protocol,
+ * retaining the original capability keeps backingStore optional even when v2 is
+ * also present.  Preserve the existing direct-backed compatibility path when a
+ * supplied backingStore satisfies our 32-bpp BAR1 requirements, but fall back
+ * to the host-owned v1 base layer when an optional backingStore cannot be used.
  */
 
 #define VMSVGA_SCREEN_V1_ID 0u
@@ -1500,18 +1501,58 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
     bool duplicate_handoff_define;
     bool duplicate_active_define;
     bool reuse_destroyed_frontend;
+    bool screen_object_v2;
+    bool backing_required;
+    bool v2_noop;
     DisplaySurface *surface;
     uint32_t supported_flags = SVGA_SCREEN_MUST_BE_SET |
                                SVGA_SCREEN_IS_PRIMARY |
-                               SVGA_SCREEN_FULLSCREEN_HINT;
+                               SVGA_SCREEN_FULLSCREEN_HINT |
+                               SVGA_SCREEN_DEACTIVATE |
+                               SVGA_SCREEN_BLANKING;
+
+    screen_object_v2 = (s->fc & SVGA_FIFO_CAP_SCREEN_OBJECT_2) != 0;
+    backing_required = screen_object_v2 &&
+                       !(s->fc & SVGA_FIFO_CAP_SCREEN_OBJECT);
+    v2_noop = (flags & (SVGA_SCREEN_DEACTIVATE |
+                        SVGA_SCREEN_BLANKING)) != 0;
 
     if (id != VMSVGA_SCREEN_V1_ID || !(flags & SVGA_SCREEN_MUST_BE_SET) ||
-        (flags & ~supported_flags) != 0 || width == 0 || height == 0 ||
-        width > VMSVGA_MAX_WIDTH || height > VMSVGA_MAX_HEIGHT) {
+        (flags & ~supported_flags) != 0 ||
+        (!v2_noop && (width == 0 || height == 0)) ||
+        width > VMSVGA_MAX_WIDTH || height > VMSVGA_MAX_HEIGHT ||
+        (v2_noop && !screen_object_v2)) {
         VMSVGA_SCREEN_REJECT(
             "define reason=parameters id=%u flags=0x%08x size=%ux%u root=%d,%d",
             id, flags, width, height, root_x, root_y);
         return false;
+    }
+
+    /*
+     * SCREEN_OBJECT_2 adds DEACTIVATE and BLANKING state transitions.  Keep
+     * them deliberately non-destructive for now: accepting the definitions
+     * is enough for guests which use them for display power transitions, while
+     * preserving the current scanout avoids disturbing the mature v1 handoff
+     * and direct-backing paths.  A later implementation can add the required
+     * black/deactivated frontend behavior without changing command acceptance.
+     */
+    if (v2_noop) {
+        if (vmsvga_trace_flight_enabled()) {
+            fprintf(stderr,
+                    "VMVGA-SCREEN-V2-NOOP id=%u flags=0x%08x size=%ux%u "
+                    "root=%d,%d backing=%u:%08x pitch=%u clone=%u\n",
+                    id, flags, width, height, root_x, root_y,
+                    backing_present ? backing_gmr_id : SVGA_GMR_NULL,
+                    backing_present ? backing_offset : 0,
+                    backing_present ? backing_pitch : 0, clone_count);
+            s->trace_now.screen_defines++;
+            s->trace_activity_seq++;
+        }
+        VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,
+                           "SCREEN_DEFINE_V2_NOOP id=%u flags=0x%08x "
+                           "width=%u height=%u root=%d,%d",
+                           id, flags, width, height, root_x, root_y);
+        return true;
     }
 
     stride = (uint64_t)width * 4;
@@ -1533,10 +1574,17 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         backing_pitch = (uint32_t)stride;
     }
 
+    if (!backing_present && backing_required) {
+        VMSVGA_SCREEN_REJECT(
+            "define reason=backing-required id=%u size=%ux%u", id, width,
+            height);
+        return false;
+    }
+
     if (backing_present &&
         !vmsvga_screen_backing_validate(s, width, height, backing_gmr_id,
                                         backing_offset, backing_pitch)) {
-        if (s->fc & SVGA_FIFO_CAP_SCREEN_OBJECT_2) {
+        if (backing_required) {
             VMSVGA_SCREEN_REJECT(
                 "define reason=backing id=%u gmr=%u offset=0x%08x pitch=%u "
                 "size=%ux%u",
@@ -1546,9 +1594,10 @@ static bool vmsvga_screen_define(struct vmsvga_state_s *s, uint32_t id,
         }
 
         /*
-         * SCREEN_OBJECT v1 makes backingStore optional.  Some older drivers
-         * still fill these fields with their current GFB layout (for example
-         * a 16-bpp pitch), which is not a valid 32-bpp Screen backingStore.
+         * Keeping SVGA_FIFO_CAP_SCREEN_OBJECT together with SCREEN_OBJECT_2
+         * makes backingStore optional by protocol definition.  Some older
+         * drivers also fill these fields with their current GFB layout (for
+         * example a 16-bpp pitch), which is not a valid 32-bpp Screen backing.
          * Keep the modern direct-backed path for valid tuples, but gracefully
          * ignore an unusable optional tuple and use the host-owned v1 base.
          */

@@ -196,6 +196,10 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_define(struct vms
     context->cid = cid;
     vmsvga3d_state_dx_context_init_shadow(&context->shadow);
     context->renderer_dirty = VMSVGA3D_DX_CTX_F_STATE_ALL;
+    context->index_buffer_size = UINT64_MAX;
+    for (uint32_t slot = 0; slot < SVGA3D_DX_MAX_VERTEXBUFFERS; slot++) {
+        context->vertex_buffer_size[slot] = UINT64_MAX;
+    }
 
     for (uint32_t type = 0; type < SVGA_COTABLE_MAX; type++) {
         context->cotables[type].mobid = SVGA3D_INVALID_ID;
@@ -234,6 +238,24 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_bind(
     }
 
     if (valid_contents != NULL) {
+        for (uint32_t slot = 0; slot < SVGA3D_DX_MAX_VERTEXBUFFERS; slot++) {
+            SVGA3dSurfaceId new_sid =
+                valid_contents->inputAssembly.vertexBuffers[slot].bufferId;
+
+            if (new_sid == SVGA3D_INVALID_ID) {
+                context->vertex_buffer_size[slot] = 0;
+            } else {
+                context->vertex_buffer_size[slot] = UINT64_MAX;
+                if (context->vertex_buffer_max_bound <= slot) {
+                    context->vertex_buffer_max_bound = slot + 1u;
+                }
+            }
+        }
+
+        context->index_buffer_size =
+            valid_contents->inputAssembly.indexBufferSid == SVGA3D_INVALID_ID
+                ? 0 : UINT64_MAX;
+
         memcpy(&context->shadow, valid_contents, sizeof(context->shadow));
     }
 

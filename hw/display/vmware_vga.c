@@ -8986,10 +8986,14 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
 #else
         ret = s->svga3d_dx_capable
                   ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2 |
-                     SVGA_CAP2_GB_MEMSIZE_2)
+                     SVGA_CAP2_GB_MEMSIZE_2 |
+                     SVGA_CAP2_OTABLE_PTDEPTH_2 |
+                     SVGA_CAP2_CB_MAX_SIZE_4MB)
                   : (vmsvga_vgpu9_modern_3d_capable(s)
                          ? (SVGA_CAP2_GROW_OTABLE |
-                            SVGA_CAP2_GB_MEMSIZE_2)
+                            SVGA_CAP2_GB_MEMSIZE_2 |
+                            SVGA_CAP2_OTABLE_PTDEPTH_2 |
+                            SVGA_CAP2_CB_MAX_SIZE_4MB)
                          : SVGA_CAP2_NONE);
         if (s->svga3d_dx_capable &&
             s->vgpu_generation == VMSVGA_VGPU_11) {

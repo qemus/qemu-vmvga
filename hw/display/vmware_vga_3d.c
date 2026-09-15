@@ -8420,6 +8420,18 @@ static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
 #endif
 }
 
+static uint32_t vmsvga3d_command_buffer_max_size(
+    const struct vmsvga_state_s *s)
+{
+    if (s != NULL &&
+        (s->svga3d_dx_capable ||
+         (s->vgpu_generation == VMSVGA_VGPU_9 && s->svga3d_capable))) {
+        return SVGA_CB_MAX_SIZE_4MB;
+    }
+
+    return SVGA_CB_MAX_SIZE;
+}
+
 static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
                                            uint32_t command_low,
                                            uint32_t command_high,
@@ -8518,8 +8530,8 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
                           SVGA_CB_FLAG_MOB)) != 0 ||
         ((header.flags & SVGA_CB_FLAG_MOB) != 0 &&
          !vmsvga_guest_backed_objects_capable(s)) ||
-        header.length > SVGA_CB_MAX_SIZE || header.offset > header.length ||
-        reserved_nonzero) {
+        header.length > vmsvga3d_command_buffer_max_size(s) ||
+        header.offset > header.length || reserved_nonzero) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "CB-HEADER kind=%s header=0x%016" PRIx64
@@ -13338,7 +13350,7 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
       [SVGA3D_DEVCAP_MAX_FRAGMENT_SHADER_INSTRUCTIONS] = 0x0000ffff,
       [SVGA3D_DEVCAP_MAX_VERTEX_SHADER_TEMPS] = 0x00000020,
       [SVGA3D_DEVCAP_MAX_FRAGMENT_SHADER_TEMPS] = 0x00000020,
-      [SVGA3D_DEVCAP_TEXTURE_OPS] = 0x03ffdfff, /* All except DSDT. */
+      [SVGA3D_DEVCAP_TEXTURE_OPS] = 0x03ffffff, /* All texture combiners. */
       [SVGA3D_DEVCAP_SURFACEFMT_X8R8G8B8] = 0x0018ec1f,
       [SVGA3D_DEVCAP_SURFACEFMT_A8R8G8B8] = 0x0018e11f,
       [SVGA3D_DEVCAP_SURFACEFMT_A2R10G10B10] = 0x0008601f,
@@ -13389,8 +13401,8 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
       [SVGA3D_DEVCAP_SURFACEFMT_Z_DF16] = 0x000040c5,
       [SVGA3D_DEVCAP_SURFACEFMT_Z_DF24] = 0x000040c5,
       [SVGA3D_DEVCAP_SURFACEFMT_Z_D24S8_INT] = 0x000040c5,
-      [SVGA3D_DEVCAP_SURFACEFMT_ATI1] = 0x00002005,
-      [SVGA3D_DEVCAP_SURFACEFMT_ATI2] = 0x00002005,
+      [SVGA3D_DEVCAP_SURFACEFMT_ATI1] = 0x00006005,
+      [SVGA3D_DEVCAP_SURFACEFMT_ATI2] = 0x00006005,
       [SVGA3D_DEVCAP_DEAD1] = 0x00000000,
       [SVGA3D_DEVCAP_DEAD8] = 0x00000000,
       [SVGA3D_DEVCAP_DEAD9] = 0x00000000,
@@ -13412,15 +13424,15 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
       [SVGA3D_DEVCAP_DXFMT_R5G6B5] = 0x000002f7,
       [SVGA3D_DEVCAP_DXFMT_X1R5G5B5] = 0x000000f7,
       [SVGA3D_DEVCAP_DXFMT_A1R5G5B5] = 0x000000f7,
-      [SVGA3D_DEVCAP_DXFMT_A4R4G4B4] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_Z_D32] = 0x00000000,
+      [SVGA3D_DEVCAP_DXFMT_A4R4G4B4] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_Z_D32] = 0x00000001,
       [SVGA3D_DEVCAP_DXFMT_Z_D16] = 0x0000026b,
       [SVGA3D_DEVCAP_DXFMT_Z_D24S8] = 0x0000026b,
-      [SVGA3D_DEVCAP_DXFMT_Z_D15S1] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_LUMINANCE8] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_LUMINANCE4_ALPHA4] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_LUMINANCE16] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_LUMINANCE8_ALPHA8] = 0x00000000,
+      [SVGA3D_DEVCAP_DXFMT_Z_D15S1] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_LUMINANCE8] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_LUMINANCE4_ALPHA4] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_LUMINANCE16] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_LUMINANCE8_ALPHA8] = 0x00000001,
       [SVGA3D_DEVCAP_DXFMT_DXT1] = 0x00000063,
       [SVGA3D_DEVCAP_DXFMT_DXT2] = 0x00000063,
       [SVGA3D_DEVCAP_DXFMT_DXT3] = 0x00000063,
@@ -13428,16 +13440,16 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
       [SVGA3D_DEVCAP_DXFMT_DXT5] = 0x00000063,
       [SVGA3D_DEVCAP_DXFMT_BUMPU8V8] = 0x000000e3,
       [SVGA3D_DEVCAP_DXFMT_BUMPL6V5U5] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_BUMPX8L8V8U8] = 0x00000000,
+      [SVGA3D_DEVCAP_DXFMT_BUMPX8L8V8U8] = 0x00000001,
       [SVGA3D_DEVCAP_DXFMT_FORMAT_DEAD1] = 0x00000000,
       [SVGA3D_DEVCAP_DXFMT_ARGB_S10E5] = 0x000003f7,
       [SVGA3D_DEVCAP_DXFMT_ARGB_S23E8] = 0x000003f7,
       [SVGA3D_DEVCAP_DXFMT_A2R10G10B10] = 0x000003f7,
       [SVGA3D_DEVCAP_DXFMT_V8U8] = 0x000000e3,
       [SVGA3D_DEVCAP_DXFMT_Q8W8V8U8] = 0x00000063,
-      [SVGA3D_DEVCAP_DXFMT_CxV8U8] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_X8L8V8U8] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_A2W10V10U10] = 0x00000000,
+      [SVGA3D_DEVCAP_DXFMT_CxV8U8] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_X8L8V8U8] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_A2W10V10U10] = 0x00000001,
       [SVGA3D_DEVCAP_DXFMT_ALPHA8] = 0x000000f7,
       [SVGA3D_DEVCAP_DXFMT_R_S10E5] = 0x000003f7,
       [SVGA3D_DEVCAP_DXFMT_R_S23E8] = 0x000003f7,
@@ -13448,9 +13460,9 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
       [SVGA3D_DEVCAP_DXFMT_V16U16] = 0x000001e3,
       [SVGA3D_DEVCAP_DXFMT_G16R16] = 0x000003f7,
       [SVGA3D_DEVCAP_DXFMT_A16B16G16R16] = 0x000001f7,
-      [SVGA3D_DEVCAP_DXFMT_UYVY] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_YUY2] = 0x00000000,
-      [SVGA3D_DEVCAP_DXFMT_NV12] = 0x00000000,
+      [SVGA3D_DEVCAP_DXFMT_UYVY] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_YUY2] = 0x00000001,
+      [SVGA3D_DEVCAP_DXFMT_NV12] = 0x00000001,
       [SVGA3D_DEVCAP_FORMAT_DEAD2] = 0x00000000,
       [SVGA3D_DEVCAP_DXFMT_R32G32B32A32_TYPELESS] = 0x000002e1,
       [SVGA3D_DEVCAP_DXFMT_R32G32B32A32_UINT] = 0x000003e7,
@@ -13503,7 +13515,7 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
       [SVGA3D_DEVCAP_DXFMT_R8_UINT] = 0x000003e7,
       [SVGA3D_DEVCAP_DXFMT_R8_SNORM] = 0x000003f7,
       [SVGA3D_DEVCAP_DXFMT_R8_SINT] = 0x000003e7,
-      [SVGA3D_DEVCAP_DXFMT_P8] = 0x00000000,
+      [SVGA3D_DEVCAP_DXFMT_P8] = 0x00000001,
       [SVGA3D_DEVCAP_DXFMT_R9G9B9E5_SHAREDEXP] = 0x000000e3,
       [SVGA3D_DEVCAP_DXFMT_R8G8_B8G8_UNORM] = 0x000000e3,
       [SVGA3D_DEVCAP_DXFMT_G8R8_G8B8_UNORM] = 0x000000e3,
@@ -13527,7 +13539,7 @@ static uint32_t vmsvga3d_devcap[SVGA3D_DEVCAP_MAX] = {
       [SVGA3D_DEVCAP_DXFMT_Z_DF16] = 0x0000006b,
       [SVGA3D_DEVCAP_DXFMT_Z_DF24] = 0x0000006b,
       [SVGA3D_DEVCAP_DXFMT_Z_D24S8_INT] = 0x0000006b,
-      [SVGA3D_DEVCAP_DXFMT_YV12] = 0x00000000,
+      [SVGA3D_DEVCAP_DXFMT_YV12] = 0x00000001,
       [SVGA3D_DEVCAP_DXFMT_R32G32B32A32_FLOAT] = 0x000003f7,
       [SVGA3D_DEVCAP_DXFMT_R16G16B16A16_FLOAT] = 0x000003f7,
       [SVGA3D_DEVCAP_DXFMT_R16G16B16A16_UNORM] = 0x000003f7,
@@ -13779,58 +13791,66 @@ static SVGA3dSurfaceFormat vmsvga3d_dx_devcap_format(uint32_t index)
     return index < ARRAY_SIZE(formats) ? formats[index] : SVGA3D_FORMAT_INVALID;
 }
 
-static bool vmsvga3d_vbox_dx11_devcap_format_unknown(
-    SVGA3dSurfaceFormat format)
+static bool vmsvga3d_dx_devcap_definition_supported(uint32_t index)
 {
-    /* Match VirtualBox's DX11 devcap format conversion exactly. */
-    switch (format) {
-    case SVGA3D_A4R4G4B4:
-    case SVGA3D_Z_D32:
-    case SVGA3D_Z_D15S1:
-    case SVGA3D_LUMINANCE8:
-    case SVGA3D_LUMINANCE4_ALPHA4:
-    case SVGA3D_LUMINANCE16:
-    case SVGA3D_LUMINANCE8_ALPHA8:
-    case SVGA3D_DXT1:
-    case SVGA3D_DXT2:
-    case SVGA3D_DXT3:
-    case SVGA3D_DXT4:
-    case SVGA3D_DXT5:
-    case SVGA3D_BUMPU8V8:
-    case SVGA3D_BUMPL6V5U5:
-    case SVGA3D_BUMPX8L8V8U8:
-    case SVGA3D_FORMAT_DEAD1:
-    case SVGA3D_ARGB_S10E5:
-    case SVGA3D_ARGB_S23E8:
-    case SVGA3D_A2R10G10B10:
-    case SVGA3D_V8U8:
-    case SVGA3D_Q8W8V8U8:
-    case SVGA3D_CxV8U8:
-    case SVGA3D_X8L8V8U8:
-    case SVGA3D_A2W10V10U10:
-    case SVGA3D_ALPHA8:
-    case SVGA3D_R_S10E5:
-    case SVGA3D_R_S23E8:
-    case SVGA3D_RG_S10E5:
-    case SVGA3D_RG_S23E8:
-    case SVGA3D_BUFFER:
-    case SVGA3D_Z_D24X8:
-    case SVGA3D_V16U16:
-    case SVGA3D_G16R16:
-    case SVGA3D_A16B16G16R16:
-    case SVGA3D_UYVY:
-    case SVGA3D_YUY2:
-    case SVGA3D_NV12:
-    case SVGA3D_FORMAT_DEAD2:
-    case SVGA3D_P8:
-    case SVGA3D_ATI1:
-    case SVGA3D_ATI2:
-    case SVGA3D_Z_DF16:
-    case SVGA3D_Z_DF24:
-    case SVGA3D_YV12:
+    /* These formats are valid SVGA surface definitions even when the live
+     * D3D11 backend has no native DXGI representation for them.  The common
+     * surface layer owns their guest/CPU storage and transfer layout, so keep
+     * the base SUPPORTED bit independent of native shader/render support. */
+    switch (index) {
+    case SVGA3D_DEVCAP_DXFMT_A4R4G4B4:
+    case SVGA3D_DEVCAP_DXFMT_Z_D32:
+    case SVGA3D_DEVCAP_DXFMT_Z_D15S1:
+    case SVGA3D_DEVCAP_DXFMT_LUMINANCE8:
+    case SVGA3D_DEVCAP_DXFMT_LUMINANCE4_ALPHA4:
+    case SVGA3D_DEVCAP_DXFMT_LUMINANCE16:
+    case SVGA3D_DEVCAP_DXFMT_LUMINANCE8_ALPHA8:
+    case SVGA3D_DEVCAP_DXFMT_BUMPX8L8V8U8:
+    case SVGA3D_DEVCAP_DXFMT_CxV8U8:
+    case SVGA3D_DEVCAP_DXFMT_X8L8V8U8:
+    case SVGA3D_DEVCAP_DXFMT_A2W10V10U10:
+    case SVGA3D_DEVCAP_DXFMT_UYVY:
+    case SVGA3D_DEVCAP_DXFMT_YUY2:
+    case SVGA3D_DEVCAP_DXFMT_NV12:
+    case SVGA3D_DEVCAP_DXFMT_P8:
+    case SVGA3D_DEVCAP_DXFMT_R10G10B10_XR_BIAS_A2_UNORM:
+    case SVGA3D_DEVCAP_DXFMT_YV12:
         return true;
     default:
         return false;
+    }
+}
+
+static uint32_t vmsvga3d_dx_devcap_canonical_caps(
+    const struct vmsvga_state_s *s, uint32_t index)
+{
+    uint32_t value = vmsvga3d_devcap[index];
+
+    /* vGPU11 is the vGPU10 DXFMT profile plus the SM5 block-compressed
+     * formats.  Keep the VMware capability mask as the upper bound and let
+     * the shared D3D11 qualifier remove operations unsupported by the live
+     * backend. */
+    if (s == NULL || s->vgpu_generation != VMSVGA_VGPU_11) {
+        return value;
+    }
+
+    switch (index) {
+    case SVGA3D_DEVCAP_DXFMT_YUY2:
+    case SVGA3D_DEVCAP_DXFMT_NV12:
+        return SVGA3D_DXFMT_SUPPORTED | SVGA3D_DXFMT_ARRAY;
+    case SVGA3D_DEVCAP_DXFMT_BC6H_TYPELESS:
+    case SVGA3D_DEVCAP_DXFMT_BC7_TYPELESS:
+        return SVGA3D_DXFMT_SUPPORTED | SVGA3D_DXFMT_MIPS |
+               SVGA3D_DXFMT_ARRAY | SVGA3D_DXFMT_VOLUME;
+    case SVGA3D_DEVCAP_DXFMT_BC6H_UF16:
+    case SVGA3D_DEVCAP_DXFMT_BC6H_SF16:
+    case SVGA3D_DEVCAP_DXFMT_BC7_UNORM:
+    case SVGA3D_DEVCAP_DXFMT_BC7_UNORM_SRGB:
+        return SVGA3D_DXFMT_SUPPORTED | SVGA3D_DXFMT_SHADER_SAMPLE |
+               SVGA3D_DXFMT_MIPS | SVGA3D_DXFMT_ARRAY |
+               SVGA3D_DXFMT_VOLUME;
+    default:
+        return value;
     }
 }
 
@@ -13860,6 +13880,14 @@ static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
         return s != NULL && s->vgpu_generation == VMSVGA_VGPU_11 ? 1 : 0;
     }
 
+    if (index == SVGA3D_DEVCAP_MAX_FORCED_SAMPLE_COUNT) {
+        if (s == NULL || s->vgpu_generation != VMSVGA_VGPU_11 ||
+            s->dxvk == NULL) {
+            return 0;
+        }
+        return vmsvga3d_dxvk_d3d11_max_forced_sample_count(s->dxvk);
+    }
+
     if (index == SVGA3D_DEVCAP_MULTISAMPLE_2X ||
         index == SVGA3D_DEVCAP_MULTISAMPLE_4X ||
         (index == SVGA3D_DEVCAP_MULTISAMPLE_8X &&
@@ -13884,24 +13912,28 @@ static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
 
     format = vmsvga3d_dx_devcap_format(index);
 
-    if (format != SVGA3D_FORMAT_INVALID && s != NULL && s->dxvk != NULL &&
-        s->vgpu_generation == VMSVGA_VGPU_11) {
-        if (vmsvga3d_vbox_dx11_devcap_format_unknown(format)) {
+    if (format != SVGA3D_FORMAT_INVALID && s != NULL && s->dxvk != NULL) {
+        bool include_8x = s->vgpu_generation == VMSVGA_VGPU_11;
+        VMSVGA3DD3D10Level max_level = include_8x
+            ? VMSVGA3D_D3D10_LEVEL_11_0
+            : VMSVGA3D_D3D10_LEVEL_10_1;
+
+        dx_format = vmsvga3d_d3d10_surface_format(format);
+        value = vmsvga3d_dx_devcap_canonical_caps(s, index);
+        if (dx_format.min_level > max_level) {
             value = 0;
         } else {
-            dx_format = vmsvga3d_d3d10_surface_format(format);
-            value = vmsvga3d_dxvk_d3d11_format_caps(
-                s->dxvk, dx_format.dxgi_format);
+            value = vmsvga3d_dxvk_d3d11_qualify_format_caps(
+                s->dxvk, dx_format.dxgi_format, include_8x, value);
         }
-    } else if (format != SVGA3D_FORMAT_INVALID && s != NULL &&
-               s->dxvk != NULL) {
-        dx_format = vmsvga3d_d3d10_surface_format(format);
-        value = vmsvga3d_dxvk_d3d11_qualify_format_caps(
-            s->dxvk, dx_format.dxgi_format, false, value);
-    } else if (index == SVGA3D_DEVCAP_DXFMT_BUFFER &&
-               s != NULL && s->dxvk != NULL) {
-        value = vmsvga3d_dxvk_d3d11_qualify_format_caps(
-            s->dxvk, 0, true, value);
+
+        /* Native qualification may remove every operation bit for formats
+         * that the SVGA core can still define and store correctly.  Preserve
+         * only the ABI's base definition bit; do not invent shader/render
+         * capabilities that require a native backend representation. */
+        if (vmsvga3d_dx_devcap_definition_supported(index)) {
+            value |= SVGA3D_DXFMT_SUPPORTED;
+        }
     }
 
     return value;

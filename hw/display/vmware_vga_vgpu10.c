@@ -1874,7 +1874,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_index_buffer_set_plan(
 
 static void vmsvga3d_d3d10_vertex_buffer_sizes_update(
     VMSVGA3DDXContext *context, uint32_t start_buffer, uint32_t count,
-    const uint32_t *sizes)
+    const uint64_t *sizes)
 {
     uint32_t i;
 
@@ -1896,7 +1896,7 @@ static void vmsvga3d_d3d10_vertex_buffer_sizes_update(
 }
 
 static void vmsvga3d_d3d10_index_buffer_size_update(
-    VMSVGA3DDXContext *context, uint32_t size)
+    VMSVGA3DDXContext *context, uint64_t size)
 {
     if (context != NULL && context->index_buffer_size != size) {
         context->index_buffer_size = size;
@@ -1905,21 +1905,22 @@ static void vmsvga3d_d3d10_index_buffer_size_update(
 }
 
 static bool vmsvga3d_d3d10_buffer_binding_range(
-    uint32_t surface_bytes, uint32_t offset, uint32_t size,
+    uint32_t surface_bytes, uint32_t offset, uint64_t size,
     uint32_t *range_end)
 {
-    uint32_t effective_size;
+    uint64_t effective_size;
 
     if (range_end == NULL || offset > surface_bytes) {
         return false;
     }
 
-    effective_size = size == UINT32_MAX ? surface_bytes - offset : size;
-    if (effective_size == 0 || effective_size > surface_bytes - offset) {
+    effective_size = size == UINT64_MAX ? surface_bytes - offset : size;
+    if (effective_size == 0 ||
+        effective_size > (uint64_t)(surface_bytes - offset)) {
         return false;
     }
 
-    *range_end = offset + effective_size;
+    *range_end = offset + (uint32_t)effective_size;
     return true;
 }
 
@@ -6294,7 +6295,7 @@ static void vmsvga3d_d3d10_pipeline_index_buffer_live(
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-IA-INDEX-BIND cid=%u sid=%u svga-format=%u dxgi=%u "
-            "offset=%u size=%u native=%u result=%s",
+            "offset=%u size=%" PRIu64 " native=%u result=%s",
             cid, context->shadow.inputAssembly.indexBufferSid,
             context->shadow.inputAssembly.indexBufferFormat, dxgi_format,
             offset, context->index_buffer_size,
@@ -12994,11 +12995,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           if (count != 0) {
-              uint32_t sizes[SVGA3D_DX_MAX_VERTEXBUFFERS];
+              uint64_t sizes[SVGA3D_DX_MAX_VERTEXBUFFERS];
 
               for (uint32_t i = 0; i < count; i++) {
                   sizes[i] = buffers[i].sid == SVGA3D_INVALID_ID
-                                 ? 0u : UINT32_MAX;
+                                 ? 0u : UINT64_MAX;
               }
               vmsvga3d_d3d10_vertex_buffer_sizes_update(
                   context, command.startBuffer, count, sizes);
@@ -13054,7 +13055,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           if (count != 0) {
-              uint32_t sizes[SVGA3D_DX_MAX_VERTEXBUFFERS];
+              uint64_t sizes[SVGA3D_DX_MAX_VERTEXBUFFERS];
 
               for (i = 0; i < count; i++) {
                   sizes[i] = buffers_v2[i].sid == SVGA3D_INVALID_ID
@@ -13116,7 +13117,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           if (count != 0) {
-              uint32_t sizes[SVGA3D_DX_MAX_VERTEXBUFFERS];
+              uint64_t sizes[SVGA3D_DX_MAX_VERTEXBUFFERS];
 
               for (i = 0; i < count; i++) {
                   sizes[i] = buffers[i].sid == SVGA3D_INVALID_ID
@@ -13152,7 +13153,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           vmsvga3d_d3d10_index_buffer_size_update(
-              context, command.sid == SVGA3D_INVALID_ID ? 0u : UINT32_MAX);
+              context, command.sid == SVGA3D_INVALID_ID ? 0u : UINT64_MAX);
           return true;
       }
 

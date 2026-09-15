@@ -195,6 +195,11 @@ typedef struct vmsvga3d_d3d11_dispatch_plan_s {
     uint32_t thread_group_count_z;
 } VMSVGA3DD3D11DispatchPlan;
 
+typedef struct vmsvga3d_d3d11_dispatch_indirect_plan_s {
+    SVGA3dSurfaceId args_buffer_sid;
+    uint32_t aligned_byte_offset;
+} VMSVGA3DD3D11DispatchIndirectPlan;
+
 typedef struct vmsvga3d_d3d11_constant_buffer_plan_s {
     SVGA3dShaderType shader_type;
     uint32_t stage_index;
@@ -277,6 +282,9 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_instanced_indirect_plan(
     VMSVGA3DD3D11DrawInstancedIndirectPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_plan(
     const SVGA3dCmdDXDispatch *src, VMSVGA3DD3D11DispatchPlan *plan);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_indirect_plan(
+    const SVGA3dCmdDXDispatchIndirect *src,
+    VMSVGA3DD3D11DispatchIndirectPlan *plan);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_constant_buffer_plan(
     uint32_t slot, SVGA3dShaderType type, SVGA3dSurfaceId sid,
     uint32_t offset_in_bytes, uint32_t size_in_bytes, bool surface_available,
@@ -346,6 +354,9 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_copy_structure_count_live(
 VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_live(
     VMSVGA3DDxvk *dxvk, uint32_t thread_group_count_x,
     uint32_t thread_group_count_y, uint32_t thread_group_count_z);
+VMSVGA3DD3D11Level vmsvga3d_d3d11_dispatch_indirect_live(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
+    uint32_t aligned_byte_offset);
 VMSVGA3DD3D11Level vmsvga3d_d3d11_draw_indexed_instanced_indirect_live(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
     uint32_t aligned_byte_offset);

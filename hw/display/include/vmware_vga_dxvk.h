@@ -97,16 +97,18 @@ uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
     const VMSVGA3DDxvk *dxvk, uint32_t format, uint32_t caps);
 /* True when the live D3D9 adapter supports the INTZ depth texture format. */
 bool vmsvga3d_dxvk_d3d9_supports_intz(const VMSVGA3DDxvk *dxvk);
-/* Keep a canonical VMware DXFMT mask only if the live D3D11 adapter can use it. */
+/* Keep a canonical VMware DXFMT mask only if the live D3D11 adapter can use it.
+ * vGPU11 includes 8x in the globally advertised MSAA set; vGPU10 does not. */
 uint32_t vmsvga3d_dxvk_d3d11_qualify_format_caps(
-    const VMSVGA3DDxvk *dxvk, uint32_t format, bool buffer, uint32_t caps);
-/* Translate live D3D11 CheckFormatSupport bits to VMware DXFMT caps. */
-uint32_t vmsvga3d_dxvk_d3d11_format_caps(
-    const VMSVGA3DDxvk *dxvk, uint32_t format);
+    const VMSVGA3DDxvk *dxvk, uint32_t format, bool include_8x, uint32_t caps);
 /* True when the live D3D11 adapter supports standard MSAA for both
  * representative color and depth targets at this sample count. */
 bool vmsvga3d_dxvk_d3d11_supports_multisample(
     const VMSVGA3DDxvk *dxvk, uint32_t sample_count);
+/* Highest ForcedSampleCount that the live FL11.0 D3D11.1 backend can
+ * honestly expose through the VMware SM5 devcap. */
+uint32_t vmsvga3d_dxvk_d3d11_max_forced_sample_count(
+    const VMSVGA3DDxvk *dxvk);
 
 /* Guest surface lifetime is tracked immediately; D3D9 residency is lazy. */
 VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,

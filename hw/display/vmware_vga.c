@@ -1550,6 +1550,25 @@ static inline bool vmsvga_fifo_has_reg(struct vmsvga_state_s *s,
 static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
                                         uint32_t id);
 
+static inline bool vmsvga_cursor_frontend_visible(struct vmsvga_state_s *s)
+{
+    return s->enable && s->config && !s->hidden &&
+           s->active_cursor_on != SVGA_CURSOR_ON_HIDE &&
+           s->active_cursor_position_valid;
+}
+
+static inline void vmsvga_cursor_hide_frontend(struct vmsvga_state_s *s)
+{
+    QEMUCursor *qc = cursor_builtin_hidden();
+
+    if (qc != NULL) {
+        vmvga_console_set_cursor(s->vga.con, qc);
+        vmvga_cursor_unref(qc);
+    }
+    vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
+                            s->active_cursor_y, SVGA_CURSOR_ON_HIDE);
+}
+
 static inline void vmsvga_cursor_apply(struct vmsvga_state_s *s)
 {
     if (!s->cursor_dirty) {
@@ -1557,24 +1576,19 @@ static inline void vmsvga_cursor_apply(struct vmsvga_state_s *s)
     }
 
     /*
-     * The SVGA cursor belongs to the SVGA display path. Hide it as soon as
-     * that path no longer owns the console, even if no valid cursor position
-     * has been committed yet; otherwise the frontend can retain a stale
-     * hardware cursor over the VGA fallback surface.
+     * The SVGA cursor belongs to the SVGA display path. Some frontends retain
+     * and replay the last cursor definition independently of mouse visibility,
+     * so publish a transparent cursor whenever there is no displayable SVGA
+     * cursor. This also prevents a stale hardware cursor from surviving a
+     * switch back to the VGA fallback surface.
      */
-    if (!s->enable || !s->config || s->hidden ||
-        s->active_cursor_on == SVGA_CURSOR_ON_HIDE) {
-        vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
-                                s->active_cursor_y, SVGA_CURSOR_ON_HIDE);
+    if (!vmsvga_cursor_frontend_visible(s)) {
+        vmsvga_cursor_hide_frontend(s);
         s->cursor_dirty = false;
         return;
     }
 
-    if (!s->active_cursor_position_valid) {
-        s->cursor_dirty = false;
-        return;
-    }
-
+    vmsvga_cursor_select(s, s->active_cursor);
     vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
                             s->active_cursor_y, SVGA_CURSOR_ON_SHOW);
     s->cursor_dirty = false;
@@ -1628,16 +1642,18 @@ static inline bool vmsvga_cursor_bypass3_fetch(struct vmsvga_state_s *s,
 
     /* Bypass 3 replaces the indexed position/visibility commit with a FIFO
      * generation. There is no FIFO cursor-ID register, so consume the current
-     * pending indexed ID together with that generation. */
-    if (s->active_cursor != s->cursor) {
-        s->active_cursor = s->cursor;
-        vmsvga_cursor_select(s, s->active_cursor);
-        s->cursor_dirty = true;
-    }
-
+     * pending indexed ID together with that generation. Apply visibility first
+     * so a simultaneous hide plus cursor-ID change cannot republish the real
+     * cursor before the transparent cursor is installed. */
     if (s->active_cursor_on !=
         (on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE)) {
         s->active_cursor_on = on ? SVGA_CURSOR_ON_SHOW : SVGA_CURSOR_ON_HIDE;
+        s->cursor_dirty = true;
+    }
+
+    if (s->active_cursor != s->cursor) {
+        s->active_cursor = s->cursor;
+        vmsvga_cursor_select(s, s->active_cursor);
         s->cursor_dirty = true;
     }
 
@@ -4301,8 +4317,13 @@ static inline QEMUCursor *vmsvga_cursor_cache_get(struct vmsvga_state_s *s,
 static inline void vmsvga_cursor_select(struct vmsvga_state_s *s,
                                         uint32_t id)
 {
-    QEMUCursor *qc = vmsvga_cursor_cache_get(s, id);
+    QEMUCursor *qc;
 
+    if (!vmsvga_cursor_frontend_visible(s)) {
+        return;
+    }
+
+    qc = vmsvga_cursor_cache_get(s, id);
     if (qc != NULL) {
         vmvga_console_set_cursor(s->vga.con, qc);
     }
@@ -4353,7 +4374,7 @@ static inline void vmsvga_cursor_cache_put(struct vmsvga_state_s *s,
     s->cursor_cache[id] = qc;
 
     if (s->active_cursor == id) {
-        vmvga_console_set_cursor(s->vga.con, qc);
+        vmsvga_cursor_select(s, id);
     }
 }
 
@@ -9314,9 +9335,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
                * falling back to VGA even if its last position was never made
                * valid, otherwise the frontend can retain a stale cursor.
                */
-              vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
-                                      s->active_cursor_y,
-                                      SVGA_CURSOR_ON_HIDE);
+              vmsvga_cursor_hide_frontend(s);
               /* VGA needs dirty logging before selecting its isolated framebuffer. */
               vmsvga_set_dirty_log(s, true);
               if (s->fifo_bh != NULL) {
@@ -9975,8 +9994,7 @@ static void vmsvga_reset(DeviceState *dev)
      * Reset invalidates all SVGA cursor state. Hide any cursor already
      * presented by the frontend before clearing its last coordinates.
      */
-    vmvga_console_mouse_set(s->vga.con, s->active_cursor_x,
-                            s->active_cursor_y, SVGA_CURSOR_ON_HIDE);
+    vmsvga_cursor_hide_frontend(s);
 
     if (s->screen_direct_active) {
         (void)vmsvga_screen_direct_detach(s, "device-reset");

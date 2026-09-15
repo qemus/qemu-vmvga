@@ -10220,6 +10220,7 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXPredCopyRegion *command)
 {
+    VMSVGA3DDXContext *context;
     VMSVGA3DSurface *source;
     VMSVGA3DSurface *destination;
     VMSVGA3DD3D10CopySubresourcePlan plan;
@@ -10227,9 +10228,13 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
-        vmsvga3d_dx_context(s, cid) == NULL ||
         command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
         command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    context = vmsvga3d_dx_context(s, cid);
+    if (context == NULL) {
         return false;
     }
 
@@ -10296,8 +10301,14 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
             .d = plan.region.clipped_box.d,
         };
 
-        (void)vmsvga3d_surface_changed_live(
-            s, command->dstSid, plan.destination_subresource, &dirty);
+        /* With an active predicate the host cannot know whether this copy
+         * executed without synchronously resolving the query.  Do not claim
+         * ScreenTarget write provenance in that case; a disabled predicate is
+         * equivalent to an unconditional copy and can be tracked normally. */
+        if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
+            (void)vmsvga3d_surface_changed_live(
+                s, command->dstSid, plan.destination_subresource, &dirty);
+        }
     }
     return true;
 }
@@ -10306,6 +10317,7 @@ static bool vmsvga3d_d3d10_pred_copy_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXPredCopy *command)
 {
+    VMSVGA3DDXContext *context;
     VMSVGA3DSurface *source;
     VMSVGA3DSurface *destination;
     VMSVGA3DD3D10CopyResourcePlan plan;
@@ -10313,9 +10325,13 @@ static bool vmsvga3d_d3d10_pred_copy_live(
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
-        vmsvga3d_dx_context(s, cid) == NULL ||
         command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
         command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    context = vmsvga3d_dx_context(s, cid);
+    if (context == NULL) {
         return false;
     }
 
@@ -10352,13 +10368,20 @@ static bool vmsvga3d_d3d10_pred_copy_live(
         return false;
     }
 
-    (void)vmsvga3d_d3d10_surface_changed_full_live(s, command->dstSid, 0);
+    /* Native D3D11 predication is asynchronous.  If a predicate is bound,
+     * successful submission does not prove that CopyResource actually wrote
+     * the destination, so do not establish ScreenTarget content/coverage from
+     * that submission alone. */
+    if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
+        (void)vmsvga3d_d3d10_surface_changed_full_live(
+            s, command->dstSid, 0);
+    }
     return true;
 }
 
 static bool vmsvga3d_d3d10_resolve_copy_live(
     struct vmsvga_state_s *s, uint32_t cid,
-    const SVGA3dCmdDXResolveCopy *command)
+    const SVGA3dCmdDXResolveCopy *command, bool write_proven)
 {
     VMSVGA3DSurface *source;
     VMSVGA3DSurface *destination;
@@ -10396,8 +10419,14 @@ static bool vmsvga3d_d3d10_resolve_copy_live(
         return false;
     }
 
-    (void)vmsvga3d_d3d10_surface_changed_full_live(
-        s, command->dstSid, command->dstSubResource);
+    /* Predicated resolve submission does not tell the CPU whether the write
+     * actually happened.  Keep normal RESOLVE_COPY provenance, but let the
+     * predicated caller suppress the stronger ScreenTarget readiness/coverage
+     * claim while the predicate result is unresolved. */
+    if (write_proven) {
+        (void)vmsvga3d_d3d10_surface_changed_full_live(
+            s, command->dstSid, command->dstSubResource);
+    }
     return true;
 }
 
@@ -12562,7 +12591,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                          command.copyFormat) ==
                      VMSVGA3D_D3D9_ACCEL_COMPLETE;
           }
-          return vmsvga3d_d3d10_resolve_copy_live(s, cid, &command);
+          return vmsvga3d_d3d10_resolve_copy_live(s, cid, &command, true);
       }
 
     case SVGA_3D_CMD_DX_GENMIPS: {

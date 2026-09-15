@@ -1366,6 +1366,43 @@ static bool vmsvga3d_d3d11_indirect_args_buffer_live(
     return true;
 }
 
+static bool vmsvga3d_d3d11_native_predication_suspend(
+    struct vmsvga_state_s *s, uint32_t cid, VMSVGA3DDXContext *context,
+    bool *was_enabled)
+{
+    if (s == NULL || s->dxvk == NULL || context == NULL ||
+        was_enabled == NULL) {
+        return false;
+    }
+
+    *was_enabled =
+        context->shadow.predication.queryID != SVGA3D_INVALID_ID;
+    if (!*was_enabled) {
+        return true;
+    }
+
+    /* Change only the native D3D11 binding.  The guest shadow remains the
+     * authoritative state and is used to restore the predicate afterwards. */
+    return vmsvga3d_dxvk_d3d11_set_predication(
+        s->dxvk, cid, SVGA3D_INVALID_ID, false, false);
+}
+
+static bool vmsvga3d_d3d11_native_predication_restore(
+    struct vmsvga_state_s *s, uint32_t cid, VMSVGA3DDXContext *context,
+    bool was_enabled)
+{
+    if (!was_enabled) {
+        return true;
+    }
+    if (s == NULL || s->dxvk == NULL || context == NULL) {
+        return false;
+    }
+
+    return vmsvga3d_dxvk_d3d11_set_predication(
+        s->dxvk, cid, context->shadow.predication.queryID, true,
+        context->shadow.predication.value != 0);
+}
+
 static bool vmsvga3d_d3d11_staging_readback_live(
     struct vmsvga_state_s *s, SVGA3dSurfaceId sid)
 {
@@ -1477,7 +1514,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         resolve.srcSubResource = command.srcSubResource;
         resolve.copyFormat = command.copyFormat;
 
-        if (!vmsvga3d_d3d10_resolve_copy_live(s, cid, &resolve)) {
+        if (!vmsvga3d_d3d10_resolve_copy_live(
+                s, cid, &resolve,
+                context->shadow.predication.queryID == SVGA3D_INVALID_ID)) {
             return false;
         }
 
@@ -1492,6 +1531,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     case SVGA_3D_CMD_DX_STAGING_BUFFER_COPY: {
         SVGA3dCmdDXStagingBufferCopy command;
         SVGA3dCmdDXBufferCopy copy;
+        bool predicate_enabled;
+        bool operation_ok;
+        bool restore_ok;
 
         if (size < sizeof(command)) {
             return false;
@@ -1508,24 +1550,31 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         copy.srcX = command.srcX;
         copy.width = command.width;
 
-        if (!vmsvga3d_d3d10_buffer_copy_live(s, &copy)) {
+        /* STAGING_BUFFER_COPY is explicitly non-predicated.  Its helper first
+         * refreshes the source through CopySubresourceRegion and later updates
+         * the destination, both of which are affected by D3D11 predication.
+         * Keep the native predicate disabled for the entire operation,
+         * including optional MOB readback, and restore it on every exit path. */
+        if (!vmsvga3d_d3d11_native_predication_suspend(
+                s, cid, context, &predicate_enabled)) {
             return false;
         }
 
-        /* The buffer copy path already performs the synchronization required
-         * to consume the source and update the resident destination.  Treat
-         * 'unsynchronized' as the same host-side hint as the staging region
-         * command.  When requested, make the destination's MOB backing
-         * coherent after the copy through the existing readback path. */
-        if (command.readback != 0) {
+        operation_ok = vmsvga3d_d3d10_buffer_copy_live(s, &copy);
+        if (operation_ok && command.readback != 0) {
             SVGA3dCmdDXReadbackSubResource readback = {
                 .sid = command.dest,
                 .subResource = 0,
             };
 
-            if (!vmsvga3d_d3d10_readback_subresource_live(s, &readback)) {
-                return false;
-            }
+            operation_ok =
+                vmsvga3d_d3d10_readback_subresource_live(s, &readback);
+        }
+
+        restore_ok = vmsvga3d_d3d11_native_predication_restore(
+            s, cid, context, predicate_enabled);
+        if (!operation_ok || !restore_ok) {
+            return false;
         }
 
         VMVGA_TRACE_LOCAL(
@@ -1541,6 +1590,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     case SVGA_3D_CMD_DX_PRED_STAGING_COPY: {
         SVGA3dCmdDXPredStagingCopy command;
         SVGA3dCmdDXPredCopy copy;
+        bool predicate_enabled;
+        bool readback_ok;
+        bool restore_ok;
 
         if (size < sizeof(command)) {
             return false;
@@ -1562,9 +1614,21 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
-        if (command.readback != 0 &&
-            !vmsvga3d_d3d11_staging_readback_live(s, command.dstSid)) {
-            return false;
+        if (command.readback != 0) {
+            /* The copy itself is predicated, but readback is a coherence step
+             * and must observe the destination even when the predicate rejected
+             * the write.  Temporarily clear only the native predicate. */
+            if (!vmsvga3d_d3d11_native_predication_suspend(
+                    s, cid, context, &predicate_enabled)) {
+                return false;
+            }
+            readback_ok =
+                vmsvga3d_d3d11_staging_readback_live(s, command.dstSid);
+            restore_ok = vmsvga3d_d3d11_native_predication_restore(
+                s, cid, context, predicate_enabled);
+            if (!readback_ok || !restore_ok) {
+                return false;
+            }
         }
 
         VMVGA_TRACE_LOCAL(
@@ -1580,8 +1644,8 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         SVGA3dCmdDXStagingCopy command;
         SVGA3dCmdDXPredCopy copy;
         bool predicate_enabled;
-        bool copy_ok;
-        bool restore_ok = true;
+        bool operation_ok;
+        bool restore_ok;
 
         if (size < sizeof(command)) {
             return false;
@@ -1595,31 +1659,32 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         copy.dstSid = command.dstSid;
         copy.srcSid = command.srcSid;
 
-        /* Unlike PRED_STAGING_COPY, this command must not inherit the current
-         * D3D11 predicate.  CopyResource itself is predicated, so temporarily
-         * clear only the native binding while preserving the guest shadow.
-         */
-        predicate_enabled =
-            context->shadow.predication.queryID != SVGA3D_INVALID_ID;
-        if (predicate_enabled &&
-            !vmsvga3d_dxvk_d3d11_set_predication(
-                s->dxvk, cid, SVGA3D_INVALID_ID, false, false)) {
+        /* Unlike PRED_STAGING_COPY, this command is unconditional.  Keep the
+         * native predicate disabled through both CopyResource and optional
+         * readback, then restore the guest predicate even after a failure. */
+        if (!vmsvga3d_d3d11_native_predication_suspend(
+                s, cid, context, &predicate_enabled)) {
             return false;
         }
 
-        copy_ok = vmsvga3d_d3d10_pred_copy_live(s, cid, &copy);
-
-        if (predicate_enabled) {
-            restore_ok = vmsvga3d_dxvk_d3d11_set_predication(
-                s->dxvk, cid, context->shadow.predication.queryID, true,
-                context->shadow.predication.value != 0);
+        operation_ok = vmsvga3d_d3d10_pred_copy_live(s, cid, &copy);
+        if (operation_ok && predicate_enabled) {
+            /* pred_copy_live conservatively suppresses ScreenTarget provenance
+             * whenever the guest shadow has an active predicate.  This command
+             * disabled that predicate natively, so its successful write is
+             * proven and must be recorded explicitly.  Match the ordinary copy
+             * helpers by treating display bookkeeping as non-fatal. */
+            (void)vmsvga3d_d3d10_surface_changed_full_live(
+                s, command.dstSid, 0);
         }
-        if (!copy_ok || !restore_ok) {
-            return false;
+        if (operation_ok && command.readback != 0) {
+            operation_ok =
+                vmsvga3d_d3d11_staging_readback_live(s, command.dstSid);
         }
 
-        if (command.readback != 0 &&
-            !vmsvga3d_d3d11_staging_readback_live(s, command.dstSid)) {
+        restore_ok = vmsvga3d_d3d11_native_predication_restore(
+            s, cid, context, predicate_enabled);
+        if (!operation_ok || !restore_ok) {
             return false;
         }
 
@@ -1635,6 +1700,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     case SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION: {
         SVGA3dCmdDXPredStagingCopyRegion command;
         SVGA3dCmdDXPredCopyRegion copy;
+        bool predicate_enabled;
+        bool readback_ok;
+        bool restore_ok;
 
         if (size < sizeof(command)) {
             return false;
@@ -1666,7 +1734,18 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
                 .subResource = command.dstSubResource,
             };
 
-            if (!vmsvga3d_d3d10_readback_subresource_live(s, &readback)) {
+            /* As with whole-resource PRED_STAGING_COPY, only the copy is
+             * predicated.  The readback must synchronize whichever destination
+             * contents actually exist after that conditional operation. */
+            if (!vmsvga3d_d3d11_native_predication_suspend(
+                    s, cid, context, &predicate_enabled)) {
+                return false;
+            }
+            readback_ok =
+                vmsvga3d_d3d10_readback_subresource_live(s, &readback);
+            restore_ok = vmsvga3d_d3d11_native_predication_restore(
+                s, cid, context, predicate_enabled);
+            if (!readback_ok || !restore_ok) {
                 return false;
             }
         }

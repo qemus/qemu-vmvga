@@ -97,7 +97,9 @@
 #define VMSVGA_GMR_MAX_DESCRIPTOR_LENGTH 0x100000U
 #define VMSVGA_GMR_MAX_PAGES 0x100000U
 #define VMSVGA_CURSOR_MAX_BYTE_SIZE \
-  (VMSVGA_CURSOR_MAX_DIMENSION * VMSVGA_CURSOR_MAX_DIMENSION * 8)
+  (sizeof(SVGAGBCursorHeader) + \
+   VMSVGA_CURSOR_MAX_DIMENSION * VMSVGA_CURSOR_MAX_DIMENSION * 8)
+#define VMSVGA_CURSOR_MOB_CACHE_ID 0
 #define SVGA_REG_PALETTE_MAX \
   (SVGA_REG_PALETTE_MIN + SVGA_PALETTE_SIZE - 1)
 #define SVGA_REG_PALETTE_MIN 1024
@@ -5066,6 +5068,155 @@ static SVGACBStatus vmsvga_command_buffer_process(
 #include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
 
+_Static_assert(sizeof(SVGAGBCursorHeader) == 32,
+               "SVGAGBCursorHeader wire size");
+
+static bool vmsvga_cursor_mob_submit(struct vmsvga_state_s *s,
+                                     SVGAMobId mobid)
+{
+    SVGAGBCursorHeader raw;
+    struct vmsvga_cursor_definition_s cursor = {0};
+    VMSVGA3DMob *mob;
+    SVGAGBCursorType type;
+    uint32_t payload_size;
+    uint64_t total_size;
+    bool alpha;
+    bool success = false;
+
+    if (s == NULL || !vmsvga_guest_backed_objects_capable(s) ||
+        mobid == SVGA3D_INVALID_ID) {
+        return false;
+    }
+
+    mob = vmsvga3d_mob_get(s, mobid);
+    if (mob == NULL || mob->gbo.size < sizeof(raw) ||
+        !vmsvga3d_mob_read(s, mob, 0, &raw, sizeof(raw))) {
+        return false;
+    }
+
+    type = (SVGAGBCursorType)le32_to_cpu((uint32_t)raw.type);
+    payload_size = le32_to_cpu(raw.sizeInBytes);
+    total_size = (uint64_t)sizeof(raw) + payload_size;
+    if (payload_size == 0 || total_size > VMSVGA_CURSOR_MAX_BYTE_SIZE ||
+        total_size > mob->gbo.size) {
+        return false;
+    }
+
+    cursor.id = VMSVGA_CURSOR_MOB_CACHE_ID;
+    switch (type) {
+    case SVGA_ALPHA_CURSOR: {
+          const SVGAGBAlphaCursorHeader *header = &raw.header.alphaHeader;
+          uint64_t expected_size;
+
+          alpha = true;
+          cursor.hot_x = le32_to_cpu(header->hotspotX);
+          cursor.hot_y = le32_to_cpu(header->hotspotY);
+          cursor.width = le32_to_cpu(header->width);
+          cursor.height = le32_to_cpu(header->height);
+          cursor.and_mask_bpp = 0;
+          cursor.xor_mask_bpp = 32;
+
+          if (cursor.width == 0 || cursor.height == 0 ||
+              cursor.width > VMSVGA_CURSOR_MAX_DIMENSION ||
+              cursor.height > VMSVGA_CURSOR_MAX_DIMENSION ||
+              cursor.hot_x >= cursor.width || cursor.hot_y >= cursor.height) {
+              goto out;
+          }
+
+          expected_size = (uint64_t)vmsvga_cursor_row_bytes(cursor.width, 32) *
+                          cursor.height;
+          if (expected_size != payload_size ||
+              expected_size / sizeof(uint32_t) > UINT32_MAX) {
+              goto out;
+          }
+
+          cursor.xor_words = expected_size / sizeof(uint32_t);
+          cursor.xor_mask = g_try_malloc(payload_size);
+          if (cursor.xor_mask == NULL ||
+              !vmsvga3d_mob_read(s, mob, sizeof(raw), cursor.xor_mask,
+                                 payload_size)) {
+              goto out;
+          }
+          break;
+      }
+    case SVGA_COLOR_CURSOR: {
+          const SVGAGBColorCursorHeader *header = &raw.header.colorHeader;
+          uint64_t and_size;
+          uint64_t xor_size;
+          uint64_t expected_size;
+
+          alpha = false;
+          cursor.hot_x = le32_to_cpu(header->hotspotX);
+          cursor.hot_y = le32_to_cpu(header->hotspotY);
+          cursor.width = le32_to_cpu(header->width);
+          cursor.height = le32_to_cpu(header->height);
+          cursor.and_mask_bpp = le32_to_cpu(header->andMaskDepth);
+          cursor.xor_mask_bpp = le32_to_cpu(header->xorMaskDepth);
+
+          if (cursor.width == 0 || cursor.height == 0 ||
+              cursor.width > VMSVGA_CURSOR_MAX_DIMENSION ||
+              cursor.height > VMSVGA_CURSOR_MAX_DIMENSION ||
+              cursor.hot_x >= cursor.width || cursor.hot_y >= cursor.height ||
+              (cursor.and_mask_bpp != 1 &&
+               cursor.and_mask_bpp != vmsvga_active_depth(s)) ||
+              (cursor.xor_mask_bpp != 1 &&
+               cursor.xor_mask_bpp != vmsvga_active_depth(s))) {
+              goto out;
+          }
+
+          and_size = (uint64_t)vmsvga_cursor_row_bytes(
+                         cursor.width, cursor.and_mask_bpp) * cursor.height;
+          xor_size = (uint64_t)vmsvga_cursor_row_bytes(
+                         cursor.width, cursor.xor_mask_bpp) * cursor.height;
+          expected_size = and_size + xor_size;
+          if (expected_size != payload_size ||
+              and_size / sizeof(uint32_t) > UINT32_MAX ||
+              xor_size / sizeof(uint32_t) > UINT32_MAX) {
+              goto out;
+          }
+
+          cursor.and_words = and_size / sizeof(uint32_t);
+          cursor.xor_words = xor_size / sizeof(uint32_t);
+          cursor.and_mask = g_try_malloc((size_t)and_size);
+          cursor.xor_mask = g_try_malloc((size_t)xor_size);
+          if ((and_size != 0 && cursor.and_mask == NULL) ||
+              (xor_size != 0 && cursor.xor_mask == NULL) ||
+              !vmsvga3d_mob_read(s, mob, sizeof(raw), cursor.and_mask,
+                                 (uint32_t)and_size) ||
+              !vmsvga3d_mob_read(s, mob, sizeof(raw) + (uint32_t)and_size,
+                                 cursor.xor_mask, (uint32_t)xor_size)) {
+              goto out;
+          }
+          break;
+      }
+    default:
+        goto out;
+    }
+
+    if (!vmsvga_cursor_source_set(s, &cursor, alpha)) {
+        goto out;
+    }
+
+    /* CURSOR_MOB carries no indexed cursor ID.  Keep one host cache slot for
+     * the snapshotted definition and make it the current definition without
+     * changing guest-controlled visibility or position. */
+    s->cursor = VMSVGA_CURSOR_MOB_CACHE_ID;
+    s->active_cursor = VMSVGA_CURSOR_MOB_CACHE_ID;
+    vmsvga_cursor_select(s, s->active_cursor);
+    s->cursor_dirty = true;
+    vmsvga_cursor_apply(s);
+    success = true;
+
+out:
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_STATE,
+        "CURSOR-MOB mobid=%u type=%u bytes=%u size=%ux%u hotspot=%u,%u result=%s",
+        mobid, (uint32_t)type, payload_size, cursor.width, cursor.height,
+        cursor.hot_x, cursor.hot_y, success ? "OK" : "REJECT");
+    vmsvga_cursor_definition_clear(&cursor);
+    return success;
+}
+
 static void vmsvga_trace_frontend_snapshot(struct vmsvga_state_s *s,
                                            const char *phase)
 {
@@ -8081,7 +8232,7 @@ static uint32_t vmsvga_get_capabilities(struct vmsvga_state_s *s)
            SVGA_CAP_OFFSCREEN_1 | SVGA_CAP_ALPHA_BLEND | SVGA_CAP_3D |
            SVGA_CAP_GMR | SVGA_CAP_GMR2 | SVGA_CAP_SCREEN_OBJECT_2 |
            SVGA_CAP_EXTENDED_FIFO | SVGA_CAP_PITCHLOCK | SVGA_CAP_IRQMASK |
-           SVGA_CAP_TRACES;
+           SVGA_CAP_TRACES | SVGA_CAP_NO_BB_RESTRICTION;
 #ifdef CONFIG_PIXMAN
     caps |= SVGA_CAP_8BIT_EMULATION;
 #endif
@@ -9022,9 +9173,9 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
          * implement overlap-safe INTRA_SURFACE_COPY.  Advertise it on every
          * configuration which exposes the CAP2/GBO command transport. */
         if (vmsvga_guest_backed_objects_capable(s)) {
-            ret |= SVGA_CAP2_INTRA_SURFACE_COPY;
+            ret |= SVGA_CAP2_INTRA_SURFACE_COPY | SVGA_CAP2_CURSOR_MOB;
         } else {
-            ret &= ~SVGA_CAP2_INTRA_SURFACE_COPY;
+            ret &= ~(SVGA_CAP2_INTRA_SURFACE_COPY | SVGA_CAP2_CURSOR_MOB);
         }
         VPRINT("SVGA_REG_CAP2 register %u with the return of %u\n", s->index, ret);
         break;
@@ -9237,20 +9388,20 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
                ret);
         break;
     case SVGA_REG_CURSOR_MAX_DIMENSION:
-        /* These registers describe the newer cursor-MOB path, which we do not
-         * advertise. VirtualBox returns zero for both while retaining the legacy
-         * cursor capability and its separate command limits. */
-        ret = 0;
+        ret = vmsvga_guest_backed_objects_capable(s)
+                  ? VMSVGA_CURSOR_MAX_DIMENSION : 0;
         VPRINT("SVGA_REG_CURSOR_MAX_DIMENSION register %u with the return of %u\n",
                s->index, ret);
         break;
     case SVGA_REG_CURSOR_MAX_BYTE_SIZE:
-        ret = 0;
+        ret = vmsvga_guest_backed_objects_capable(s)
+                  ? VMSVGA_CURSOR_MAX_BYTE_SIZE : 0;
         VPRINT("SVGA_REG_CURSOR_MAX_BYTE_SIZE register %u with the return of %u\n",
                s->index, ret);
         break;
     case SVGA_REG_CURSOR_MOBID:
-        ret = -1;
+        /* Submission register: the cursor image is snapshotted on write. */
+        ret = SVGA3D_INVALID_ID;
         VPRINT("SVGA_REG_CURSOR_MOBID register %u with the return of %u\n",
                s->index, ret);
         break;
@@ -9553,6 +9704,11 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       }
       VPRINT("SVGA_REG_CURSOR_ON register %u with the value of %u\n", s->index,
              value);
+      break;
+  case SVGA_REG_CURSOR_MOBID:
+      if (!vmsvga_cursor_mob_submit(s, value)) {
+          VPRINT("SVGA_REG_CURSOR_MOBID rejected MOB %u\n", value);
+      }
       break;
   case SVGA_REG_BYTES_PER_LINE:
       VPRINT("SVGA_REG_BYTES_PER_LINE register %u is read-only\n", s->index);

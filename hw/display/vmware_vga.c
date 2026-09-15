@@ -9005,7 +9005,8 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
         ret = s->svga3d_dx_capable
                   ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2 |
                      SVGA_CAP2_GB_MEMSIZE_2 |
-                     SVGA_CAP2_OTABLE_PTDEPTH_2)
+                     SVGA_CAP2_OTABLE_PTDEPTH_2 |
+                     SVGA_CAP2_CB_MAX_SIZE_4MB)
                   : (vmsvga_guest_backed_objects_capable(s)
                          ? (SVGA_CAP2_GROW_OTABLE |
                             SVGA_CAP2_GB_MEMSIZE_2 |

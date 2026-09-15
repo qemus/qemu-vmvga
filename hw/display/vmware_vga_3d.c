@@ -320,6 +320,8 @@ typedef struct vmsvga3d_dx_context_s {
     uint64_t renderer_dirty;
     uint32_t vertex_buffer_max_bound;
     uint64_t vertex_buffer_modified;
+    uint64_t vertex_buffer_size[SVGA3D_DX_MAX_VERTEXBUFFERS];
+    uint64_t index_buffer_size;
     uint32_t constant_buffer_max_bound[SVGA3D_NUM_SHADERTYPE];
     uint32_t constant_buffer_start_slot[SVGA3D_NUM_SHADERTYPE];
     uint32_t constant_buffer_num_buffers[SVGA3D_NUM_SHADERTYPE];

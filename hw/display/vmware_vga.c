@@ -5047,13 +5047,13 @@ static bool vmsvga_legacy_handoff_preseed_capture(
 
     /*
      * Keep the modern Screen Object/ScreenTarget preseed independent.  The
-     * legacy snapshot is taken at the disabled preparation write before the
-     * later forced VGA refresh, while modern Windows captures its own preseed
-     * at its existing protocol-specific transition point.
+     * legacy snapshot is taken when a disabled guest negotiates SVGA_REG_ID,
+     * before the later initialization writes can tear down the VGA image.
+     * Repeated valid ID negotiations refresh this private snapshot.
      */
     if (s->screen_preseed_base != NULL ||
         !vmsvga_screen_preseed_capture(
-            s, surface, "legacy-register-disable-init")) {
+            s, surface, "legacy-register-id")) {
         return false;
     }
 
@@ -9314,6 +9314,17 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
     case SVGA_REG_ID:
         if (value == SVGA_ID_0 || value == SVGA_ID_1 || value == SVGA_ID_2) {
             s->svgaid = value;
+            if (!s->enable) {
+                /*
+                 * Legacy drivers negotiate the SVGA ID during adapter probe,
+                 * before their later ENABLE/CONFIG_DONE initialization tears
+                 * down the outgoing VGA image.  Refresh the private legacy
+                 * preseed on each valid disabled negotiation so a later OS
+                 * probe supersedes an earlier firmware probe.
+                 */
+                (void)vmsvga_legacy_handoff_preseed_capture(
+                    s, qemu_console_surface(s->vga.con));
+            }
         }
         VPRINT("SVGA_REG_ID register %u with the value of %u\n", s->index, value);
         break;
@@ -9337,19 +9348,6 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           bool was_enabled = s->enable;
           bool was_hidden = s->hidden;
           bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
-          if (!was_enabled && !enabled) {
-              /*
-               * Legacy drivers begin takeover by explicitly writing DISABLE
-               * while SVGA is already disabled.  Snapshot the outgoing VGA
-               * frontend before the normal enable-register invalidation below
-               * can refresh it from framebuffer state being torn down for the
-               * upcoming SVGA mode.  A later preparation write simply refreshes
-               * this snapshot, so the most recent pre-enable VGA image wins.
-               */
-              (void)vmsvga_legacy_handoff_preseed_capture(
-                  s, qemu_console_surface(s->vga.con));
-          }
-
           if (!was_enabled && enabled) {
               /*
                * Firmware/GOP can leave QEMU's console surface stale even

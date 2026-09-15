@@ -637,14 +637,16 @@ static inline bool vmsvga_command_buffers_capable(
     const struct vmsvga_state_s *s)
 {
     return s != NULL &&
-           (s->svga3d_dx_capable || vmsvga_vgpu9_modern_3d_capable(s));
+           (!s->svga3d_capable || s->svga3d_dx_capable ||
+            vmsvga_vgpu9_modern_3d_capable(s));
 }
 
 static inline bool vmsvga_guest_backed_objects_capable(
     const struct vmsvga_state_s *s)
 {
     return s != NULL &&
-           (s->svga3d_dx_capable || vmsvga_vgpu9_modern_3d_capable(s));
+           (!s->svga3d_capable || s->svga3d_dx_capable ||
+            vmsvga_vgpu9_modern_3d_capable(s));
 }
 
 struct pci_vmsvga_state_s {
@@ -7414,6 +7416,12 @@ static SVGACBStatus vmsvga_command_buffer_process(
     s->fifo_stop = fifo_min;
     memset(&s->fifo_upload, 0, sizeof(s->fifo_upload));
 
+    if (!s->svga3d_capable && dx_context != SVGA3D_INVALID_ID) {
+        /* Pure 2D advertises command buffers but not SVGA_CAP_DX.  Reject
+         * DX-context metadata rather than entering renderer context state. */
+        status = SVGA_CB_STATUS_COMMAND_ERROR;
+        goto restore;
+    }
     if (dx_context != SVGA3D_INVALID_ID &&
         !vmsvga3d_d3d10_context_switch_live(s, dx_context)) {
         status = SVGA_CB_STATUS_COMMAND_ERROR;
@@ -8070,12 +8078,17 @@ static uint32_t vmsvga_get_capabilities(struct vmsvga_state_s *s)
         caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
                 SVGA_CAP_GBOBJECTS;
         caps &= ~SVGA_CAP_DX;
+    } else if (!s->svga3d_capable) {
+        /* Pure 2D supports the guest-backed resource model and modern
+         * command-buffer transports, but deliberately keeps DX disabled. */
+        caps |= SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
+                SVGA_CAP_GBOBJECTS;
+        caps &= ~SVGA_CAP_DX;
     } else {
         caps &= ~(SVGA_CAP_COMMAND_BUFFERS | SVGA_CAP_CMD_BUFFERS_2 |
                   SVGA_CAP_GBOBJECTS | SVGA_CAP_DX);
     }
-    if (s->svga3d_dx_capable ||
-        s->vgpu_generation == VMSVGA_VGPU_9) {
+    if (vmsvga_guest_backed_objects_capable(s)) {
         caps |= SVGA_CAP_CAP2_REGISTER;
     } else {
         caps &= ~SVGA_CAP_CAP2_REGISTER;
@@ -8958,23 +8971,37 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
 #ifdef EXPCAPS
         ret = s->svga3d_dx_capable
                   ? 0xffffffff
-                  : SVGA_CAP2_NONE;
+                  : (!s->svga3d_capable
+                         ? (SVGA_CAP2_GROW_OTABLE |
+                            SVGA_CAP2_GB_MEMSIZE_2 |
+                            SVGA_CAP2_OTABLE_PTDEPTH_2)
+                         : SVGA_CAP2_NONE);
         if (s->vgpu_generation != VMSVGA_VGPU_11) {
             ret &= ~SVGA_CAP2_DX3;
         }
 #else
         ret = s->svga3d_dx_capable
                   ? (SVGA_CAP2_GROW_OTABLE | SVGA_CAP2_DX2 |
-                     SVGA_CAP2_GB_MEMSIZE_2)
-                  : (vmsvga_vgpu9_modern_3d_capable(s)
+                     SVGA_CAP2_GB_MEMSIZE_2 |
+                     SVGA_CAP2_OTABLE_PTDEPTH_2)
+                  : (vmsvga_guest_backed_objects_capable(s)
                          ? (SVGA_CAP2_GROW_OTABLE |
-                            SVGA_CAP2_GB_MEMSIZE_2)
+                            SVGA_CAP2_GB_MEMSIZE_2 |
+                            SVGA_CAP2_OTABLE_PTDEPTH_2)
                          : SVGA_CAP2_NONE);
         if (s->svga3d_dx_capable &&
             s->vgpu_generation == VMSVGA_VGPU_11) {
             ret |= SVGA_CAP2_DX3;
         }
 #endif
+        /* INTRA_SURFACE_COPY is implemented only by the pure-2D GB path.
+         * Keep it explicitly masked in every 3D configuration, including
+         * EXPCAPS builds where the DX branch otherwise starts at all bits. */
+        if (!s->svga3d_capable && vmsvga_guest_backed_objects_capable(s)) {
+            ret |= SVGA_CAP2_INTRA_SURFACE_COPY;
+        } else {
+            ret &= ~SVGA_CAP2_INTRA_SURFACE_COPY;
+        }
         VPRINT("SVGA_REG_CAP2 register %u with the return of %u\n", s->index, ret);
         break;
     case SVGA_REG_GUEST_DRIVER_ID:

@@ -5047,12 +5047,13 @@ static bool vmsvga_legacy_handoff_preseed_capture(
 
     /*
      * Keep the modern Screen Object/ScreenTarget preseed independent.  The
-     * legacy snapshot is taken before VGA is force-refreshed during SVGA
-     * enable, while modern Windows captures its own preseed at its existing
-     * protocol-specific transition point.
+     * legacy snapshot is taken at the disabled preparation write before the
+     * later forced VGA refresh, while modern Windows captures its own preseed
+     * at its existing protocol-specific transition point.
      */
     if (s->screen_preseed_base != NULL ||
-        !vmsvga_screen_preseed_capture(s, surface, "legacy-register-enable")) {
+        !vmsvga_screen_preseed_capture(
+            s, surface, "legacy-register-disable-init")) {
         return false;
     }
 
@@ -9336,15 +9337,20 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
           bool was_enabled = s->enable;
           bool was_hidden = s->hidden;
           bool enabled = !!(value & SVGA_REG_ENABLE_ENABLE);
-          if (!was_enabled && enabled) {
+          if (!was_enabled && !enabled) {
               /*
-               * Capture the last frontend image before the forced VGA refresh
-               * below can rebuild that surface from framebuffer state which the
-               * guest is already tearing down for SVGA takeover.
+               * Legacy drivers begin takeover by explicitly writing DISABLE
+               * while SVGA is already disabled.  Snapshot the outgoing VGA
+               * frontend before the normal enable-register invalidation below
+               * can refresh it from framebuffer state being torn down for the
+               * upcoming SVGA mode.  A later preparation write simply refreshes
+               * this snapshot, so the most recent pre-enable VGA image wins.
                */
               (void)vmsvga_legacy_handoff_preseed_capture(
                   s, qemu_console_surface(s->vga.con));
+          }
 
+          if (!was_enabled && enabled) {
               /*
                * Firmware/GOP can leave QEMU's console surface stale even
                * though the VGA/VBE registers already describe the final boot

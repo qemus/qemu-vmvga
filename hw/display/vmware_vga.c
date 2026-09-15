@@ -9018,10 +9018,10 @@ static uint32_t vmsvga_value_read(void *opaque, uint32_t address)
             ret |= SVGA_CAP2_DX3;
         }
 #endif
-        /* INTRA_SURFACE_COPY is implemented only by the pure-2D GB path.
-         * Keep it explicitly masked in every 3D configuration, including
-         * EXPCAPS builds where the DX branch otherwise starts at all bits. */
-        if (!s->svga3d_capable && vmsvga_guest_backed_objects_capable(s)) {
+        /* The renderer-independent 3D handler and the pure-2D GB handler both
+         * implement overlap-safe INTRA_SURFACE_COPY.  Advertise it on every
+         * configuration which exposes the CAP2/GBO command transport. */
+        if (vmsvga_guest_backed_objects_capable(s)) {
             ret |= SVGA_CAP2_INTRA_SURFACE_COPY;
         } else {
             ret &= ~SVGA_CAP2_INTRA_SURFACE_COPY;

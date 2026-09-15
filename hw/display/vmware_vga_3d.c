@@ -320,6 +320,8 @@ typedef struct vmsvga3d_dx_context_s {
     uint64_t renderer_dirty;
     uint32_t vertex_buffer_max_bound;
     uint64_t vertex_buffer_modified;
+    uint32_t vertex_buffer_size[SVGA3D_DX_MAX_VERTEXBUFFERS];
+    uint32_t index_buffer_size;
     uint32_t constant_buffer_max_bound[SVGA3D_NUM_SHADERTYPE];
     uint32_t constant_buffer_start_slot[SVGA3D_NUM_SHADERTYPE];
     uint32_t constant_buffer_num_buffers[SVGA3D_NUM_SHADERTYPE];
@@ -12936,25 +12938,6 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
     bool trace_3d;
 
     if (!s->svga3d_capable) {
-        /*
-         * SCREEN_DMA belongs to SCREEN_OBJECT_2 even though its command ID is
-         * in the SVGA3D namespace; the protocol explicitly does not require
-         * SVGA_CAP_3D for it.  Consume it as a deliberate no-op until the DMA
-         * semantics are implemented so a 2D v2 guest cannot stall the FIFO.
-         */
-        if (cmd == SVGA_3D_CMD_SCREEN_DMA &&
-            (s->fc & SVGA_FIFO_CAP_SCREEN_OBJECT_2)) {
-            if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
-                fprintf(stderr,
-                        "VMVGA-SCREEN-V2-NOOP command=SCREEN_DMA "
-                        "fifo=0x%08x words=%d\n",
-                        fifo_start, *len);
-            }
-            if (!vmsvga3d_fifo_discard_packet(s, len, fifo_start)) {
-                VPRINT("rewind command %u in SVGA command FIFO\n", cmd);
-            }
-            return true;
-        }
         return false;
     }
 

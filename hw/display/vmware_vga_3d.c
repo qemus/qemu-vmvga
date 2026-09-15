@@ -2985,7 +2985,7 @@ static void vmsvga3d_surface_install(
         surface->storage_bytes, state->surface_bytes, old_surface != NULL);
 }
 
-static void vmsvga2d_surface_install(
+static VMSVGA3DSurface *vmsvga2d_surface_prepare(
     struct vmsvga_state_s *s, uint32_t sid,
     SVGA3dSurfaceAllFlags surface_flags, SVGA3dSurfaceFormat format,
     const SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES],
@@ -3003,9 +3003,9 @@ static void vmsvga2d_surface_install(
     uint32_t i;
 
     /*
-     * Pure 2D GB surfaces keep only the CPU shadow.  Renderer-backed state is
-     * deliberately not created here so the established vGPU9/10/11 surface
-     * lifecycle remains isolated in vmsvga3d_surface_install().
+     * Pure 2D GB surfaces keep only the CPU shadow.  Build the replacement
+     * completely before publishing its OTable entry so a failed definition
+     * cannot leave guest-visible metadata describing missing host state.
      */
 
     if (sid >= SVGA3D_MAX_SURFACE_IDS) {
@@ -3013,7 +3013,7 @@ static void vmsvga2d_surface_install(
                           "2D-SURFACE result=REJECT reason=SID_RANGE sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
-        return;
+        return NULL;
     }
 
     if (!vmsvga3d_surface_faces_valid(surface_flags, face, array_elements,
@@ -3022,7 +3022,7 @@ static void vmsvga2d_surface_install(
                           "2D-SURFACE result=REJECT reason=FACES sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
-        return;
+        return NULL;
     }
 
     if (!vmsvga3d_surface_sizes_valid(surface_flags, format, face, mip_sizes,
@@ -3031,7 +3031,7 @@ static void vmsvga2d_surface_install(
                           "2D-SURFACE result=REJECT reason=SIZES sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
-        return;
+        return NULL;
     }
 
     surface = g_try_new0(VMSVGA3DSurface, 1);
@@ -3040,7 +3040,7 @@ static void vmsvga2d_surface_install(
                           "2D-SURFACE result=REJECT reason=ALLOC_SURFACE sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
-        return;
+        return NULL;
     }
 
     surface->mips = g_try_new0(VMSVGA3DSurfaceImage, mip_count);
@@ -3050,7 +3050,7 @@ static void vmsvga2d_surface_install(
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
         g_free(surface);
-        return;
+        return NULL;
     }
 
     surface->sid = sid;
@@ -3076,7 +3076,7 @@ static void vmsvga2d_surface_install(
                 sid, format, surface_flags, i, mip_sizes[i].width,
                 mip_sizes[i].height, mip_sizes[i].depth, multisample_count);
             vmsvga3d_surface_free(surface);
-            return;
+            return NULL;
         }
         storage_bytes += surface->mips[i].data_size;
         if (storage_bytes > SIZE_MAX) {
@@ -3086,7 +3086,7 @@ static void vmsvga2d_surface_install(
                 "format=%u flags=0x%016" PRIx64 " mip=%u bytes=%" PRIu64,
                 sid, format, surface_flags, i, storage_bytes);
             vmsvga3d_surface_free(surface);
-            return;
+            return NULL;
         }
     }
     surface->storage_bytes = (size_t)storage_bytes;
@@ -3098,7 +3098,7 @@ static void vmsvga2d_surface_install(
                           "format=%u flags=0x%016" PRIx64 " bytes=%zu",
                           sid, format, surface_flags, surface->storage_bytes);
         vmsvga3d_surface_free(surface);
-        return;
+        return NULL;
     }
 
     old_surface = state->surfaces[sid];
@@ -3114,7 +3114,7 @@ static void vmsvga2d_surface_install(
             sid, format, surface_flags, surface->storage_bytes,
             state->surface_bytes, old_bytes, limit);
         vmsvga3d_surface_free(surface);
-        return;
+        return NULL;
     }
 
     for (i = 0; i < mip_count; i++) {
@@ -3126,10 +3126,13 @@ static void vmsvga2d_surface_install(
                 "flags=0x%016" PRIx64 " mip=%u bytes=%u",
                 sid, format, surface_flags, i, surface->mips[i].data_size);
             vmsvga3d_surface_free(surface);
-            return;
+            return NULL;
         }
     }
 
+    /* Complete every fallible transition before the OTable commit.  If the
+     * later write fails, the old surface remains installed and its CPU shadow
+     * is coherent even if it had been scanned out directly from a MOB. */
     if (old_surface != NULL && sid == state->active_screen_target_sid &&
         !vmsvga2d_screen_target_quiesce_live(s)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
@@ -3137,14 +3140,29 @@ static void vmsvga2d_surface_install(
                           "sid=%u",
                           sid);
         vmsvga3d_surface_free(surface);
-        return;
+        return NULL;
     }
-    if (old_surface != NULL && sid == state->active_screen_target_sid) {
-        if (s->screen_direct_active && s->screen_direct_sid == sid &&
-            !vmsvga_screen_direct_detach(s, "surface-redefine")) {
-            vmsvga3d_surface_free(surface);
-            return;
-        }
+    if (old_surface != NULL && sid == state->active_screen_target_sid &&
+        s->screen_direct_active && s->screen_direct_sid == sid &&
+        !vmsvga2d_screen_direct_materialize_mob_shadow_live(
+            s, "surface-redefine")) {
+        vmsvga3d_surface_free(surface);
+        return NULL;
+    }
+
+    return surface;
+}
+
+static void vmsvga2d_surface_commit(struct vmsvga_state_s *s,
+                                    VMSVGA3DSurface *surface)
+{
+    struct vmsvga3d_state_s *state = s->svga3d;
+    uint32_t sid = surface->sid;
+    VMSVGA3DSurface *old_surface = state->surfaces[sid];
+    size_t old_bytes = old_surface != NULL ? old_surface->storage_bytes : 0;
+    bool redefined = old_surface != NULL;
+
+    if (sid == state->active_screen_target_sid) {
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
@@ -3157,11 +3175,13 @@ static void vmsvga2d_surface_install(
         VMVGA_TRACE_3D,
         "2D-SURFACE result=OK sid=%u format=%u flags=0x%016" PRIx64 " mips=%u "
         "arrays=%u size=%ux%ux%u samples=%u bytes=%zu total=%zu redefined=%u",
-        sid, format, surface_flags, mip_count, array_elements,
-        mip_count != 0 ? mip_sizes[0].width : 0,
-        mip_count != 0 ? mip_sizes[0].height : 0,
-        mip_count != 0 ? mip_sizes[0].depth : 0, multisample_count,
-        surface->storage_bytes, state->surface_bytes, old_surface != NULL);
+        sid, surface->format, surface->surface_flags, surface->mip_count,
+        surface->array_elements,
+        surface->mip_count != 0 ? surface->mips[0].size.width : 0,
+        surface->mip_count != 0 ? surface->mips[0].size.height : 0,
+        surface->mip_count != 0 ? surface->mips[0].size.depth : 0,
+        surface->multisample_count, surface->storage_bytes,
+        state->surface_bytes, redefined ? 1u : 0u);
 }
 
 static bool vmsvga3d_gb_surface_define_live(
@@ -3302,6 +3322,7 @@ static bool vmsvga2d_gb_surface_define_live(
 {
     SVGAOTableSurfaceEntry entry;
     SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES] = {{0}};
+    VMSVGA3DSurface *surface;
     SVGA3dSize *mip_sizes;
     uint32_t array_elements;
     uint32_t mip_count;
@@ -3323,34 +3344,6 @@ static bool vmsvga2d_gb_surface_define_live(
     multisample_quality = MIN(MAX(multisample_quality,
                                   (uint32_t)SVGA3D_MS_QUALITY_MIN),
                                   (uint32_t)SVGA3D_MS_QUALITY_MAX);
-
-    memset(&entry, 0, sizeof(entry));
-
-    entry.format = cpu_to_le32(format);
-    entry.surface1Flags = cpu_to_le32((uint32_t)surface_flags);
-    entry.numMipLevels = cpu_to_le32(num_mip_levels);
-    entry.multisampleCount = cpu_to_le32(multisample_count);
-    entry.autogenFilter = cpu_to_le32(autogen_filter);
-    entry.size.width = cpu_to_le32(base_size->width);
-    entry.size.height = cpu_to_le32(base_size->height);
-    entry.size.depth = cpu_to_le32(base_size->depth);
-    entry.mobid = cpu_to_le32(SVGA3D_INVALID_ID);
-    entry.arraySize = cpu_to_le32(array_size);
-    entry.surface2Flags = cpu_to_le32((uint32_t)(surface_flags >> 32));
-    entry.multisamplePattern = (uint8_t)multisample_pattern;
-    entry.qualityLevel = (uint8_t)multisample_quality;
-    entry.bufferByteStride = cpu_to_le16((uint16_t)buffer_byte_stride);
-
-    if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, sid, sizeof(entry),
-                                &entry, sizeof(entry))) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "2D-GB-SURFACE result=REJECT reason=OTABLE sid=%u format=%u "
-            "flags=0x%016" PRIx64 " mips=%u arrays=%u size=%ux%ux%u",
-            sid, format, surface_flags, num_mip_levels, array_size,
-            base_size->width, base_size->height, base_size->depth);
-        return false;
-    }
 
     if (sid >= SVGA3D_MAX_SURFACE_IDS || num_mip_levels == 0 ||
         num_mip_levels > VMSVGA3D_MAX_MIP_LEVELS ||
@@ -3382,7 +3375,6 @@ static bool vmsvga2d_gb_surface_define_live(
     mip_count = num_mip_levels * array_elements;
 
     mip_sizes = g_try_new(SVGA3dSize, mip_count);
-
     if (mip_sizes == NULL) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
@@ -3406,18 +3398,49 @@ static bool vmsvga2d_gb_surface_define_live(
         }
     }
 
-    vmsvga2d_surface_install(s, sid, surface_flags, format, face,
-                             multisample_count, multisample_pattern,
-                             autogen_filter, array_elements,
-                             mip_sizes, mip_count);
-    if (sid < SVGA3D_MAX_SURFACE_IDS && s->svga3d != NULL &&
-        s->svga3d->surfaces[sid] != NULL) {
-        s->svga3d->surfaces[sid]->multisample_quality = multisample_quality;
-        s->svga3d->surfaces[sid]->buffer_byte_stride =
-            (uint16_t)buffer_byte_stride;
-    }
+    surface = vmsvga2d_surface_prepare(
+        s, sid, surface_flags, format, face, multisample_count,
+        multisample_pattern, autogen_filter, array_elements, mip_sizes,
+        mip_count);
     g_free(mip_sizes);
+    if (surface == NULL) {
+        return false;
+    }
 
+    surface->multisample_quality = multisample_quality;
+    surface->buffer_byte_stride = (uint16_t)buffer_byte_stride;
+
+    memset(&entry, 0, sizeof(entry));
+    entry.format = cpu_to_le32(format);
+    entry.surface1Flags = cpu_to_le32((uint32_t)surface_flags);
+    entry.numMipLevels = cpu_to_le32(num_mip_levels);
+    entry.multisampleCount = cpu_to_le32(multisample_count);
+    entry.autogenFilter = cpu_to_le32(autogen_filter);
+    entry.size.width = cpu_to_le32(base_size->width);
+    entry.size.height = cpu_to_le32(base_size->height);
+    entry.size.depth = cpu_to_le32(base_size->depth);
+    entry.mobid = cpu_to_le32(SVGA3D_INVALID_ID);
+    entry.arraySize = cpu_to_le32(array_size);
+    entry.surface2Flags = cpu_to_le32((uint32_t)(surface_flags >> 32));
+    entry.multisamplePattern = (uint8_t)multisample_pattern;
+    entry.qualityLevel = (uint8_t)multisample_quality;
+    entry.bufferByteStride = cpu_to_le16((uint16_t)buffer_byte_stride);
+
+    if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, sid, sizeof(entry),
+                                &entry, sizeof(entry))) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "2D-GB-SURFACE result=REJECT reason=OTABLE sid=%u format=%u "
+            "flags=0x%016" PRIx64 " mips=%u arrays=%u size=%ux%ux%u",
+            sid, format, surface_flags, num_mip_levels, array_size,
+            base_size->width, base_size->height, base_size->depth);
+        vmsvga3d_surface_free(surface);
+        return false;
+    }
+
+    /* All failure points are complete.  Publishing host state after the OTable
+     * write is now a non-failing pointer/accounting swap. */
+    vmsvga2d_surface_commit(s, surface);
     return true;
 }
 
@@ -3505,8 +3528,8 @@ static void vmsvga3d_surface_destroy_view_live(
     memset(binding->host + offset, 0, binding->entry_size);
 }
 
-static bool vmsvga2d_surface_destroy_live(struct vmsvga_state_s *s,
-                                          uint32_t sid)
+static bool vmsvga2d_surface_destroy_prepare_live(
+    struct vmsvga_state_s *s, uint32_t sid)
 {
     struct vmsvga3d_state_s *state = s != NULL ? s->svga3d : NULL;
     VMSVGA3DSurface *surface;
@@ -3536,6 +3559,20 @@ static bool vmsvga2d_surface_destroy_live(struct vmsvga_state_s *s,
                           "reason=DIRECT_DETACH sid=%u", sid);
         return false;
     }
+
+    return true;
+}
+
+static void vmsvga2d_surface_destroy_commit_live(struct vmsvga_state_s *s,
+                                                  uint32_t sid)
+{
+    struct vmsvga3d_state_s *state = s->svga3d;
+    VMSVGA3DSurface *surface = state->surfaces[sid];
+
+    if (surface == NULL) {
+        return;
+    }
+
     if (sid == state->active_screen_target_sid) {
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
@@ -3551,7 +3588,6 @@ static bool vmsvga2d_surface_destroy_live(struct vmsvga_state_s *s,
 
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
                       "2D-SURFACE-DESTROY sid=%u result=OK", sid);
-    return true;
 }
 
 static void vmsvga3d_surface_destroy_live(struct vmsvga_state_s *s,
@@ -10615,27 +10651,6 @@ static bool vmsvga2d_screen_direct_attach_mob_live(
     return true;
 }
 
-static void vmsvga2d_surface_mark_mob_authoritative_live(
-    struct vmsvga_state_s *s, VMSVGA3DSurface *surface)
-{
-    SVGAOTableSurfaceEntry entry;
-    SVGAMobId mobid;
-
-    if (s == NULL || surface == NULL ||
-        !vmsvga3d_otable_read(s, SVGA_OTABLE_SURFACE, surface->sid,
-                              sizeof(entry), &entry, sizeof(entry))) {
-        return;
-    }
-
-    mobid = le32_to_cpu(entry.mobid);
-    if (mobid == SVGA3D_INVALID_ID || vmsvga3d_mob_get(s, mobid) == NULL) {
-        return;
-    }
-
-    surface->vmsvga2d_mobid = mobid;
-    surface->vmsvga2d_mob_authoritative = true;
-}
-
 static bool vmsvga2d_gb_update_image_live(
     struct vmsvga_state_s *s, const SVGA3dSurfaceImageId *image_id,
     const SVGA3dBox *box)
@@ -13439,10 +13454,6 @@ static bool vmsvga2d_screen_target_flush_live(struct vmsvga_state_s *s)
         }
     }
 
-    if (full_refresh && handoff_coverage_full) {
-        vmsvga2d_surface_mark_mob_authoritative_live(s, surface);
-    }
-
     if (!s->screen_handoff_active && !s->screen_frontend_deferred) {
         if (!vmsvga2d_screen_direct_attach_mob_live(s, surface)) {
             (void)vmsvga2d_screen_direct_attach_cpu_shadow(s, surface, sid);
@@ -14548,14 +14559,24 @@ static bool vmsvga2d_handle_destroy_gb_surface(struct vmsvga_state_s *s,
 
     if (size >= sizeof(*body)) {
         body = payload;
-        if (!vmsvga2d_surface_destroy_live(s, body->sid)) {
+        if (!vmsvga2d_surface_destroy_prepare_live(s, body->sid)) {
             vmsvga3d_fifo_release_payload(s, payload);
             return true;
         }
         memset(&entry, 0, sizeof(entry));
         entry.mobid = cpu_to_le32(SVGA3D_INVALID_ID);
-        (void)vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, body->sid,
-                                    sizeof(entry), &entry, sizeof(entry));
+        if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, body->sid,
+                                   sizeof(entry), &entry, sizeof(entry))) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "2D-SURFACE-DESTROY result=REJECT reason=OTABLE sid=%u",
+                body->sid);
+            vmsvga3d_fifo_release_payload(s, payload);
+            return true;
+        }
+        /* The fallible quiesce/materialize work completed before the OTable
+         * commit, so host destruction after this point cannot fail. */
+        vmsvga2d_surface_destroy_commit_live(s, body->sid);
     }
 
     vmsvga3d_fifo_release_payload(s, payload);
@@ -15670,9 +15691,10 @@ static bool vmsvga3d_2d_gb_command_allowed(uint32_t cmd)
      * GB surface maintenance is admitted here.  Context, shader, query, draw
      * and DX commands must continue to require svga3d_capable.
      *
-     * This execution whitelist is intentionally independent of capability
-     * advertisement.  SVGA_CAP_GBOBJECTS remains disabled in pure 2D until
-     * the CPU-only GB surface path is ready.
+     * This execution whitelist is intentionally narrower than capability
+     * advertisement.  Pure 2D advertises SVGA_CAP_GBOBJECTS, but only the
+     * renderer-independent GB commands admitted below may execute without
+     * svga3d_capable.
      */
     switch (cmd) {
     case SVGA_3D_CMD_SET_OTABLE_BASE:

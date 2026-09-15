@@ -2587,7 +2587,7 @@ bool vmsvga3d_dxvk_d3d11_supports_multisample(
 }
 
 uint32_t vmsvga3d_dxvk_d3d11_max_forced_sample_count(
-    const VMSVGA3DDxvk *dxvk)
+    VMSVGA3DDxvk *dxvk)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkComFunction entry;
@@ -2595,7 +2595,9 @@ uint32_t vmsvga3d_dxvk_d3d11_max_forced_sample_count(
     VMSVGA3DDxvkD3D11FeatureDataOptions options = {0};
     int32_t result;
 
-    if (dxvk == NULL || !dxvk->d3d11_ready || dxvk->d3d11_device == NULL) {
+    if (dxvk == NULL || !dxvk->d3d11_ready ||
+        dxvk->d3d11_device == NULL ||
+        !vmsvga3d_dxvk_d3d11_device1_acquire(dxvk)) {
         return 0;
     }
 

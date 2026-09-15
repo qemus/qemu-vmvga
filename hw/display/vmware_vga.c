@@ -621,11 +621,6 @@ struct vmsvga_state_s {
     /* Host-only state for the generic VGA -> indexed-register SVGA handoff.
      * The transition pixels themselves reuse screen_base, the same mirror
      * storage used by the existing Screen Object handoff. */
-    uint8_t *legacy_handoff_preseed_base;
-    size_t legacy_handoff_preseed_size;
-    uint32_t legacy_handoff_preseed_width;
-    uint32_t legacy_handoff_preseed_height;
-    uint32_t legacy_handoff_preseed_stride;
     bool legacy_handoff_active;
     bool legacy_handoff_rebind;
 };
@@ -1324,20 +1319,9 @@ static inline bool vmsvga_legacy_handoff_candidate(
            surface_stride(surface) != s->active_stride;
 }
 
-static inline void vmsvga_legacy_handoff_preseed_clear(
-    struct vmsvga_state_s *s)
-{
-    g_clear_pointer(&s->legacy_handoff_preseed_base, g_free);
-    s->legacy_handoff_preseed_size = 0;
-    s->legacy_handoff_preseed_width = 0;
-    s->legacy_handoff_preseed_height = 0;
-    s->legacy_handoff_preseed_stride = 0;
-}
-
 static inline void vmsvga_legacy_handoff_reset_state(
     struct vmsvga_state_s *s)
 {
-    vmsvga_legacy_handoff_preseed_clear(s);
     s->legacy_handoff_active = false;
     s->legacy_handoff_rebind = false;
 }
@@ -1350,7 +1334,7 @@ static inline bool vmsvga_legacy_vga_shadow_rendering(
      * linear-framebuffer mode is active, generic VGA must keep rendering from
      * BAR1 instead of the 512 KiB low-memory shadow.
      */
-    return s->enable && s->legacy_vga_size != 0 &&
+    return s->legacy_vga_size != 0 &&
            !(s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE] & 0x01);
 }
 
@@ -1374,20 +1358,42 @@ vmsvga_legacy_vga_gfx_update(struct vmsvga_state_s *s)
 #endif
 }
 
+static void vmsvga_legacy_vga_prime(struct vmsvga_state_s *s)
+{
+    size_t backup_size;
+
+    if (s == NULL || s->legacy_vga_size != 0) {
+        return;
+    }
+
+    backup_size = vmsvga_legacy_vga_backup_size(s);
+
+    /*
+     * Legacy drivers can map and clear BAR1 during adapter discovery while
+     * classic VGA still owns the display.  Split the classic VGA backing from
+     * BAR1 at the first valid SVGA ID negotiation so those SVGA writes cannot
+     * erase the still-live VGA boot screen.  VGA aperture writes and generic
+     * VGA rendering use this shadow from this point onward.
+     */
+    memcpy(s->legacy_vga_ptr, vmsvga_svga_vram_ptr(s), backup_size);
+    s->legacy_vga_size = (uint32_t)backup_size;
+
+    VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW prime backup=%zu",
+                       backup_size);
+}
+
 static void vmsvga_legacy_vga_enter(struct vmsvga_state_s *s)
 {
     size_t backup_size = vmsvga_legacy_vga_backup_size(s);
-    uint8_t *svga_ptr = vmsvga_svga_vram_ptr(s);
 
     /*
-     * Refresh the isolated legacy VGA framebuffer on every VGA -> SVGA
-     * transition.  VGACommonState itself always keeps the full VRAM mapping as
-     * its backing store; only legacy aperture accesses are redirected to the
-     * shadow while SVGA is enabled.
+     * The shadow may already have been primed during SVGA ID negotiation.
+     * Never refresh it from BAR1 here: the guest may have deliberately cleared
+     * BAR1 during adapter discovery while VGA continued rendering from the
+     * isolated shadow.
      */
-    memcpy(s->legacy_vga_ptr, svga_ptr, backup_size);
-    s->legacy_vga_size = (uint32_t)backup_size;
-    s->vga.vram_ptr = svga_ptr;
+    vmsvga_legacy_vga_prime(s);
+    s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
     s->svga_surface_bound = false;
 
     VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE, "VGA_SHADOW enter backup=%zu",
@@ -1411,6 +1417,7 @@ static void vmsvga_legacy_vga_leave(struct vmsvga_state_s *s)
         memory_region_set_dirty(&s->vga.vram, 0, restore_size);
     }
 
+    s->legacy_vga_size = 0;
     s->vga.vram_ptr = svga_ptr;
     s->svga_surface_bound = false;
 
@@ -1501,7 +1508,7 @@ static uint64_t vmsvga_legacy_vga_read(void *opaque, hwaddr addr,
 
     (void)size;
 
-    if (s->enable) {
+    if (s->legacy_vga_size != 0) {
         s->vga.vram_ptr = s->legacy_vga_ptr;
     }
 
@@ -1518,7 +1525,7 @@ static void vmsvga_legacy_vga_write(void *opaque, hwaddr addr, uint64_t data,
     uint8_t *vram_ptr = s->vga.vram_ptr;
     (void)size;
 
-    if (s->enable) {
+    if (s->legacy_vga_size != 0) {
         s->vga.vram_ptr = s->legacy_vga_ptr;
     }
 
@@ -5036,42 +5043,6 @@ static SVGACBStatus vmsvga_command_buffer_process(
 #include "vmware_vga_gmr.c"
 #include "vmware_vga_3d.c"
 
-static bool vmsvga_legacy_handoff_preseed_capture(
-    struct vmsvga_state_s *s, DisplaySurface *surface)
-{
-    if (s == NULL) {
-        return false;
-    }
-
-    vmsvga_legacy_handoff_preseed_clear(s);
-
-    /*
-     * Keep the modern Screen Object/ScreenTarget preseed independent.  The
-     * legacy snapshot is taken when a disabled guest negotiates SVGA_REG_ID,
-     * before the later initialization writes can tear down the VGA image.
-     * Repeated valid ID negotiations refresh this private snapshot.
-     */
-    if (s->screen_preseed_base != NULL ||
-        !vmsvga_screen_preseed_capture(
-            s, surface, "legacy-register-id")) {
-        return false;
-    }
-
-    s->legacy_handoff_preseed_base = s->screen_preseed_base;
-    s->legacy_handoff_preseed_size = s->screen_preseed_size;
-    s->legacy_handoff_preseed_width = s->screen_preseed_width;
-    s->legacy_handoff_preseed_height = s->screen_preseed_height;
-    s->legacy_handoff_preseed_stride = s->screen_preseed_stride;
-
-    s->screen_preseed_base = NULL;
-    s->screen_preseed_size = 0;
-    s->screen_preseed_width = 0;
-    s->screen_preseed_height = 0;
-    s->screen_preseed_stride = 0;
-
-    return true;
-}
-
 static void vmsvga_trace_frontend_snapshot(struct vmsvga_state_s *s,
                                            const char *phase)
 {
@@ -8510,36 +8481,9 @@ static bool vmsvga_legacy_handoff_arm(struct vmsvga_state_s *s)
         return false;
     }
 
-    if (s->legacy_handoff_preseed_base != NULL) {
-        s->screen_preseed_base = s->legacy_handoff_preseed_base;
-        s->screen_preseed_size = s->legacy_handoff_preseed_size;
-        s->screen_preseed_width = s->legacy_handoff_preseed_width;
-        s->screen_preseed_height = s->legacy_handoff_preseed_height;
-        s->screen_preseed_stride = s->legacy_handoff_preseed_stride;
-
-        s->legacy_handoff_preseed_base = NULL;
-        s->legacy_handoff_preseed_size = 0;
-        s->legacy_handoff_preseed_width = 0;
-        s->legacy_handoff_preseed_height = 0;
-        s->legacy_handoff_preseed_stride = 0;
-    }
-
     if (!vmsvga_screen_handoff_seed(
             s, surface, s->active_width, s->active_height,
             s->active_width * 4U)) {
-        if (s->screen_preseed_base != NULL) {
-            s->legacy_handoff_preseed_base = s->screen_preseed_base;
-            s->legacy_handoff_preseed_size = s->screen_preseed_size;
-            s->legacy_handoff_preseed_width = s->screen_preseed_width;
-            s->legacy_handoff_preseed_height = s->screen_preseed_height;
-            s->legacy_handoff_preseed_stride = s->screen_preseed_stride;
-
-            s->screen_preseed_base = NULL;
-            s->screen_preseed_size = 0;
-            s->screen_preseed_width = 0;
-            s->screen_preseed_height = 0;
-            s->screen_preseed_stride = 0;
-        }
         return false;
     }
 
@@ -9316,14 +9260,13 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
             s->svgaid = value;
             if (!s->enable) {
                 /*
-                 * Legacy drivers negotiate the SVGA ID during adapter probe,
-                 * before their later ENABLE/CONFIG_DONE initialization tears
-                 * down the outgoing VGA image.  Refresh the private legacy
-                 * preseed on each valid disabled negotiation so a later OS
-                 * probe supersedes an earlier firmware probe.
+                 * Adapter discovery may touch or clear BAR1 before SVGA is
+                 * enabled.  Prime the isolated classic-VGA backing before the
+                 * first such operation can destroy the still-visible VGA
+                 * screen.  Once primed, later ID negotiations must not copy
+                 * BAR1 back over the live shadow.
                  */
-                (void)vmsvga_legacy_handoff_preseed_capture(
-                    s, qemu_console_surface(s->vga.con));
+                vmsvga_legacy_vga_prime(s);
             }
         }
         VPRINT("SVGA_REG_ID register %u with the value of %u\n", s->index, value);
@@ -9360,7 +9303,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
                * SVGA registers immediately after setting ENABLE.
                */
               s->vga.hw_ops->invalidate(&s->vga);
-              s->vga.hw_ops->gfx_update(&s->vga);
+              vmsvga_legacy_vga_gfx_update(s);
               vmsvga_trace_vga_state(s, "svga-enable-before");
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {
@@ -10159,7 +10102,7 @@ static void vmsvga_text_update(void *opaque, uint32_t *chardata)
     uint8_t *vram_ptr = s->vga.vram_ptr;
 
     if (s->vga.hw_ops->text_update) {
-        if (s->enable && s->legacy_vga_size != 0) {
+        if (s->legacy_vga_size != 0) {
             s->vga.vram_ptr = s->legacy_vga_ptr;
         }
         s->vga.hw_ops->text_update(&s->vga, chardata);
@@ -10596,9 +10539,11 @@ static int vmsvga_post_load(void *opaque, int version_id)
 
     if (s->enable) {
         vmsvga_legacy_vga_enter(s);
-    } else if (s->legacy_vga_size != 0) {
-        vmsvga_legacy_vga_leave(s);
     } else {
+        /* A disabled migration can legitimately carry a pre-enable live VGA
+         * shadow primed during SVGA ID negotiation.  Keep it isolated from
+         * BAR1; the aperture and VGA renderer select it through
+         * legacy_vga_size while VGACommonState retains the full BAR1 mapping. */
         s->vga.vram_ptr = vmsvga_svga_vram_ptr(s);
     }
 

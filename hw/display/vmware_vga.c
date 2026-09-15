@@ -10983,7 +10983,7 @@ static bool vmsvga_vgpu_parse(struct vmsvga_state_s *s, Error **errp)
     const char *vgpu = s->vgpu != NULL ? s->vgpu : "auto";
 
     if (!strcmp(vgpu, "auto")) {
-        s->vgpu_generation = VMSVGA_VGPU_10;
+        s->vgpu_generation = VMSVGA_VGPU_11;
     } else if (!strcmp(vgpu, "9")) {
         s->vgpu_generation = VMSVGA_VGPU_9;
     } else if (!strcmp(vgpu, "10")) {

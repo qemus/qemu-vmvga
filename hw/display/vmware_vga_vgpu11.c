@@ -1366,6 +1366,38 @@ static bool vmsvga3d_d3d11_indirect_args_buffer_live(
     return true;
 }
 
+static bool vmsvga3d_d3d11_staging_readback_live(
+    struct vmsvga_state_s *s, SVGA3dSurfaceId sid)
+{
+    VMSVGA3DSurface *surface;
+    uint32_t subresource;
+
+    if (s == NULL || s->svga3d == NULL || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[sid];
+    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
+        return false;
+    }
+
+    /* Whole-resource staging copies cover every flattened mip/array
+     * subresource.  Mirror that scope when the guest requests readback.
+     */
+    for (subresource = 0; subresource < surface->mip_count; subresource++) {
+        SVGA3dCmdDXReadbackSubResource readback = {
+            .sid = sid,
+            .subResource = subresource,
+        };
+
+        if (!vmsvga3d_d3d10_readback_subresource_live(s, &readback)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
                                       uint32_t cid, uint32_t cmd,
                                       const void *payload, uint32_t size)
@@ -1426,6 +1458,180 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     }
 
     switch (cmd) {
+    case SVGA_3D_CMD_DX_PRED_RESOLVE_COPY: {
+        SVGA3dCmdDXPredResolveCopy command;
+        SVGA3dCmdDXResolveCopy resolve;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        /* ResolveSubresource is one of the D3D11 resource operations affected
+         * by the currently bound predicate.  Reuse the normal resolve path so
+         * resource realization, format translation and dirty tracking remain
+         * identical; the native context supplies the predication semantics. */
+        resolve.dstSid = command.dstSid;
+        resolve.dstSubResource = command.dstSubResource;
+        resolve.srcSid = command.srcSid;
+        resolve.srcSubResource = command.srcSubResource;
+        resolve.copyFormat = command.copyFormat;
+
+        if (!vmsvga3d_d3d10_resolve_copy_live(s, cid, &resolve)) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-PRED-RESOLVE cid=%u src=%u:%u dst=%u:%u format=%u result=OK",
+            cid, command.srcSid, command.srcSubResource, command.dstSid,
+            command.dstSubResource, command.copyFormat);
+        return true;
+    }
+
+    case SVGA_3D_CMD_DX_STAGING_BUFFER_COPY: {
+        SVGA3dCmdDXStagingBufferCopy command;
+        SVGA3dCmdDXBufferCopy copy;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (command.mustBeZero[0] != 0 || command.mustBeZero[1] != 0) {
+            return false;
+        }
+
+        copy.dest = command.dest;
+        copy.src = command.src;
+        copy.destX = command.destX;
+        copy.srcX = command.srcX;
+        copy.width = command.width;
+
+        if (!vmsvga3d_d3d10_buffer_copy_live(s, &copy)) {
+            return false;
+        }
+
+        /* The buffer copy path already performs the synchronization required
+         * to consume the source and update the resident destination.  Treat
+         * 'unsynchronized' as the same host-side hint as the staging region
+         * command.  When requested, make the destination's MOB backing
+         * coherent after the copy through the existing readback path. */
+        if (command.readback != 0) {
+            SVGA3dCmdDXReadbackSubResource readback = {
+                .sid = command.dest,
+                .subResource = 0,
+            };
+
+            if (!vmsvga3d_d3d10_readback_subresource_live(s, &readback)) {
+                return false;
+            }
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-STAGING-BUFFER-COPY cid=%u src=%u+%u dst=%u+%u bytes=%u "
+            "readback=%u unsynchronized=%u result=OK",
+            cid, command.src, command.srcX, command.dest, command.destX,
+            command.width, command.readback != 0,
+            command.unsynchronized != 0);
+        return true;
+    }
+
+    case SVGA_3D_CMD_DX_PRED_STAGING_COPY: {
+        SVGA3dCmdDXPredStagingCopy command;
+        SVGA3dCmdDXPredCopy copy;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (command.mustBeZero[0] != 0 || command.mustBeZero[1] != 0) {
+            return false;
+        }
+
+        copy.dstSid = command.dstSid;
+        copy.srcSid = command.srcSid;
+
+        /* The PRED form deliberately inherits the native D3D11 predicate.
+         * CopyResource is a predicated resource-manipulation command, so the
+         * existing whole-resource copy path supplies the required behavior.
+         */
+        if (!vmsvga3d_d3d10_pred_copy_live(s, cid, &copy)) {
+            return false;
+        }
+
+        if (command.readback != 0 &&
+            !vmsvga3d_d3d11_staging_readback_live(s, command.dstSid)) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-PRED-STAGING-COPY cid=%u src=%u dst=%u readback=%u "
+            "unsynchronized=%u result=OK",
+            cid, command.srcSid, command.dstSid, command.readback != 0,
+            command.unsynchronized != 0);
+        return true;
+    }
+
+    case SVGA_3D_CMD_DX_STAGING_COPY: {
+        SVGA3dCmdDXStagingCopy command;
+        SVGA3dCmdDXPredCopy copy;
+        bool predicate_enabled;
+        bool copy_ok;
+        bool restore_ok = true;
+
+        if (size < sizeof(command)) {
+            return false;
+        }
+        memcpy(&command, payload, sizeof(command));
+
+        if (command.mustBeZero[0] != 0 || command.mustBeZero[1] != 0) {
+            return false;
+        }
+
+        copy.dstSid = command.dstSid;
+        copy.srcSid = command.srcSid;
+
+        /* Unlike PRED_STAGING_COPY, this command must not inherit the current
+         * D3D11 predicate.  CopyResource itself is predicated, so temporarily
+         * clear only the native binding while preserving the guest shadow.
+         */
+        predicate_enabled =
+            context->shadow.predication.queryID != SVGA3D_INVALID_ID;
+        if (predicate_enabled &&
+            !vmsvga3d_dxvk_d3d11_set_predication(
+                s->dxvk, cid, SVGA3D_INVALID_ID, false, false)) {
+            return false;
+        }
+
+        copy_ok = vmsvga3d_d3d10_pred_copy_live(s, cid, &copy);
+
+        if (predicate_enabled) {
+            restore_ok = vmsvga3d_dxvk_d3d11_set_predication(
+                s->dxvk, cid, context->shadow.predication.queryID, true,
+                context->shadow.predication.value != 0);
+        }
+        if (!copy_ok || !restore_ok) {
+            return false;
+        }
+
+        if (command.readback != 0 &&
+            !vmsvga3d_d3d11_staging_readback_live(s, command.dstSid)) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-STAGING-COPY cid=%u src=%u dst=%u readback=%u "
+            "unsynchronized=%u result=OK",
+            cid, command.srcSid, command.dstSid, command.readback != 0,
+            command.unsynchronized != 0);
+        return true;
+    }
+
     case SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION: {
         SVGA3dCmdDXPredStagingCopyRegion command;
         SVGA3dCmdDXPredCopyRegion copy;

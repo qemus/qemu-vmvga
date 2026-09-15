@@ -9352,6 +9352,7 @@ static bool vmsvga3d_dx_cotable_set_or_grow(
         uint8_t *old_host = binding->host;
 
         binding->mobid = mob != NULL ? mob->mobid : SVGA3D_INVALID_ID;
+        context->shadow.cotables[type].mobid = binding->mobid;
         binding->valid_size = valid_size;
         binding->entry_size = entry_size;
         binding->capacity_entries = capacity_entries;

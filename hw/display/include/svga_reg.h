@@ -418,6 +418,7 @@ struct SVGAGuestPtr {
  */
 
 #define SVGA_CB_MAX_SIZE (512 * 1024)  // 512 KB
+#define SVGA_CB_MAX_SIZE_4MB (4 * 1024 * 1024) // 4 MB
 #define SVGA_CB_MAX_QUEUED_PER_CONTEXT 32
 #define SVGA_CB_MAX_COMMAND_SIZE (32 * 1024) // 32 KB
 

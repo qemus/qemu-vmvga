@@ -6043,7 +6043,13 @@ static void vmsvga3d_d3d10_pipeline_output_targets_live(
      */
     context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
 
-    if (s->vgpu_generation == VMSVGA_VGPU_11) {
+    /* A vgpu11 context with no graphics-UAV history has ordinary RTV/DSV
+     * state.  Using OMSetRenderTargetsAndUnorderedAccessViews here would
+     * pass the default uavSpliceIndex (zero), which overlaps any bound RTVs.
+     * Keep the UAV-aware path once a graphics UAV has actually been bound.
+     */
+    if (s->vgpu_generation == VMSVGA_VGPU_11 &&
+        context->uav_max_bound != 0) {
         uint32_t uav_count = 0;
         uint32_t slot;
         VMSVGA3DDXCOTable *uav_table =

@@ -1610,7 +1610,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
          * CopyResource is a predicated resource-manipulation command, so the
          * existing whole-resource copy path supplies the required behavior.
          */
-        if (!vmsvga3d_d3d10_pred_copy_live(s, cid, &copy, false)) {
+        if (!vmsvga3d_d3d10_pred_copy_live(s, cid, &copy)) {
             return false;
         }
 
@@ -1667,7 +1667,16 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
-        operation_ok = vmsvga3d_d3d10_pred_copy_live(s, cid, &copy, true);
+        operation_ok = vmsvga3d_d3d10_pred_copy_live(s, cid, &copy);
+        if (operation_ok && predicate_enabled) {
+            /* pred_copy_live conservatively suppresses ScreenTarget provenance
+             * whenever the guest shadow has an active predicate.  This command
+             * disabled that predicate natively, so its successful write is
+             * proven and must be recorded explicitly.  Match the ordinary copy
+             * helpers by treating display bookkeeping as non-fatal. */
+            (void)vmsvga3d_d3d10_surface_changed_full_live(
+                s, command.dstSid, 0);
+        }
         if (operation_ok && command.readback != 0) {
             operation_ok =
                 vmsvga3d_d3d11_staging_readback_live(s, command.dstSid);
@@ -1710,7 +1719,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         copy.srcSubResource = command.srcSubResource;
         copy.box = command.box;
 
-        if (!vmsvga3d_d3d10_pred_copy_region_live(s, cid, &copy, false)) {
+        if (!vmsvga3d_d3d10_pred_copy_region_live(s, cid, &copy)) {
             return false;
         }
 
@@ -2109,10 +2118,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         success = vmsvga3d_d3d11_draw_indexed_instanced_indirect_live(
                       s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;
-        if (success && vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk)) {
-            vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
-            vmsvga3d_dx_post_draw_live(s, cid);
-        }
+        vmsvga3d_dx_post_draw_live(s, cid);
         return success;
     }
 
@@ -2141,10 +2147,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         success = vmsvga3d_d3d11_draw_instanced_indirect_live(
                       s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;
-        if (success && vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk)) {
-            vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
-            vmsvga3d_dx_post_draw_live(s, cid);
-        }
+        vmsvga3d_dx_post_draw_live(s, cid);
         return success;
     }
 

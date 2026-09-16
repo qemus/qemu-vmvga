@@ -4295,7 +4295,10 @@ static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
         elements[i].name_offset = name_offset;
         elements[i].semantic_index = semantic[i].semantic_index;
         elements[i].system_value = shader_system_value(signature[i].semanticName);
-        elements[i].component_type = signature[i].componentType;
+        elements[i].component_type =
+            signature[i].componentType == VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN
+            ? VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32
+            : signature[i].componentType;
         elements[i].register_index = signature[i].registerIndex;
 
         /*

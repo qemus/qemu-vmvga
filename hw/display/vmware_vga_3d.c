@@ -6695,7 +6695,7 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
             if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
                     s->dxvk, dst_surface->dxvk_surface, dst_subresource,
                     clipped.x, clipped.y, clipped.z, src_surface->dxvk_surface,
-                    src_subresource, &src_box, true)) {
+                    src_subresource, &src_box)) {
                 valid = false;
             }
         }

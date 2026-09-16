@@ -70,14 +70,6 @@ struct vmsvga3d_dxvk_s {
     VMSVGA3DDxvkInputLayout *d3d11_input_layouts;
     VMSVGA3DDxvkConstantBuffer *d3d11_constant_buffers;
     VMSVGA3DDxvkView *d3d11_views;
-    VMSVGA3DDxvkSurface *d3d11_bound_stream_output_targets[SVGA3D_DX_MAX_SOTARGETS];
-    uint32_t d3d11_bound_stream_output_offsets[SVGA3D_DX_MAX_SOTARGETS];
-    bool d3d11_bound_rasterized_stream_output_unsupported;
-    bool d3d11_bound_stream_output_shader_active;
-    uint32_t d3d11_bound_rasterized_stream_output;
-    bool d3d11_rasterized_stream_output_supported;
-    bool d3d11_last_draw_submitted;
-    bool d3d11_last_copy_submitted;
     void *d3d11_bound_constant_buffers[SVGA3D_NUM_SHADERTYPE]
                                         [SVGA3D_DX_MAX_CONSTBUFFERS];
     bool d3d11_bound_constant_buffer_valid[SVGA3D_NUM_SHADERTYPE]
@@ -104,6 +96,7 @@ struct vmsvga3d_dxvk_s {
     void *d3d11_blit_rasterizer_state;
     void *d3d11_blit_blend_state;
     bool d3d11_blitter_initialized;
+    uint32_t d3d11_native_version;
     bool ready;
     bool d3d11_ready;
 };
@@ -254,7 +247,6 @@ struct vmsvga3d_dxvk_surface_s {
     uint32_t d3d11_present_rtv_subresource;
     uint32_t d3d11_present_rtv_format;
     bool d3d11_resident;
-    bool d3d11_stream_output_readback_unsafe;
 };
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -548,8 +540,6 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ 0x00020000u
 #define VMSVGA3D_DXVK_D3D11_MAP_READ 1u
 #define VMSVGA3D_DXVK_D3D11_MAP_WRITE_DISCARD 4u
-#define VMSVGA3D_DXVK_RASTERIZED_SO_MIN_VERSION 30000u
-#define VMSVGA3D_DXVK_RASTERIZED_SO_ENV "VMVGA_DXVK_RASTERIZED_SO"
 #define VMSVGA3D_DXVK_D3D11_FILTER_ANISOTROPIC 0x55u
 #define VMSVGA3D_DXVK_D3D11_TEXTURE_ADDRESS_WRAP 1u
 #define VMSVGA3D_DXVK_D3D11_COMPARISON_ALWAYS 8u
@@ -1447,40 +1437,9 @@ bool vmsvga3d_dxvk_d3d11_context1_acquire(VMSVGA3DDxvk *dxvk)
     return true;
 }
 
-static bool vmsvga3d_dxvk_env_bool(const char *name, bool *value)
-{
-    const char *setting;
-
-    if (name == NULL || value == NULL) {
-        return false;
-    }
-
-    setting = g_getenv(name);
-    if (setting == NULL || setting[0] == '\0') {
-        return false;
-    }
-
-    if (!g_ascii_strcasecmp(setting, "1") ||
-        !g_ascii_strcasecmp(setting, "true") ||
-        !g_ascii_strcasecmp(setting, "yes") ||
-        !g_ascii_strcasecmp(setting, "on")) {
-        *value = true;
-        return true;
-    }
-    if (!g_ascii_strcasecmp(setting, "0") ||
-        !g_ascii_strcasecmp(setting, "false") ||
-        !g_ascii_strcasecmp(setting, "no") ||
-        !g_ascii_strcasecmp(setting, "off")) {
-        *value = false;
-        return true;
-    }
-
-    return false;
-}
-
 static uint32_t vmsvga3d_dxvk_native_version(void *entry)
 {
-    Dl_info info = {0};
+    Dl_info info = { 0 };
     g_autofree char *resolved = NULL;
     const char *path;
     const char *suffix;
@@ -1507,9 +1466,7 @@ static uint32_t vmsvga3d_dxvk_native_version(void *entry)
         return 0;
     }
 
-    /* Meson normally emits 0.MMmmpp (for example 0.020600).  Accept a
-     * conventional 0.M.m.p suffix too so distro/custom native builds can
-     * still auto-select the compatibility path. */
+    /* DXVK-native normally uses 0.MMmmpp, but accept 0.M.m.p too. */
     if (first >= 10000u) {
         return first;
     }
@@ -1518,20 +1475,6 @@ static uint32_t vmsvga3d_dxvk_native_version(void *entry)
     }
 
     return 0;
-}
-
-static bool vmsvga3d_dxvk_rasterized_stream_output_supported(void *entry)
-{
-    bool override;
-    uint32_t version;
-
-    if (vmsvga3d_dxvk_env_bool(VMSVGA3D_DXVK_RASTERIZED_SO_ENV,
-                               &override)) {
-        return override;
-    }
-
-    version = vmsvga3d_dxvk_native_version(entry);
-    return version >= VMSVGA3D_DXVK_RASTERIZED_SO_MIN_VERSION;
 }
 
 static bool vmsvga3d_dxvk_create_d3d11(VMSVGA3DDxvk *dxvk, Error **errp)
@@ -1558,19 +1501,13 @@ static bool vmsvga3d_dxvk_create_d3d11(VMSVGA3DDxvk *dxvk, Error **errp)
     entry = dlsym(dxvk->d3d11_library, "D3D11CreateDevice");
     memcpy(&create_device, &entry, sizeof(create_device));
 
+    dxvk->d3d11_native_version = vmsvga3d_dxvk_native_version(entry);
+
     if (create_device == NULL) {
         error_setg(errp, "%s has no D3D11CreateDevice entry point",
                    VMSVGA3D_DXVK_D3D11_SONAME);
         goto fail;
     }
-
-    dxvk->d3d11_rasterized_stream_output_supported =
-        vmsvga3d_dxvk_rasterized_stream_output_supported(entry);
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "DXVK-COMPAT rasterized-stream-output=%u native-version=%u",
-        dxvk->d3d11_rasterized_stream_output_supported ? 1u : 0u,
-        vmsvga3d_dxvk_native_version(entry));
 
     /*
      * Treat feature level 11.0 as one all-or-nothing vGPU10 host bundle.
@@ -2298,16 +2235,6 @@ static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
     dxvk->d3d11_bound_index_format = 0;
     dxvk->d3d11_bound_index_offset = 0;
     dxvk->d3d11_bound_index_buffer_valid = false;
-    memset(dxvk->d3d11_bound_stream_output_targets, 0,
-           sizeof(dxvk->d3d11_bound_stream_output_targets));
-    memset(dxvk->d3d11_bound_stream_output_offsets, 0,
-           sizeof(dxvk->d3d11_bound_stream_output_offsets));
-    dxvk->d3d11_bound_rasterized_stream_output_unsupported = false;
-    dxvk->d3d11_bound_stream_output_shader_active = false;
-    dxvk->d3d11_bound_rasterized_stream_output =
-        SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
-    dxvk->d3d11_last_draw_submitted = false;
-    dxvk->d3d11_last_copy_submitted = false;
 }
 
 static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
@@ -2987,6 +2914,14 @@ bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk)
     return dxvk != NULL && dxvk->ready && dxvk->d3d11_ready;
 }
 
+bool vmsvga3d_dxvk_d3d11_rasterized_stream_output_supported(
+    const VMSVGA3DDxvk *dxvk)
+{
+    /* Unknown/custom native builds keep the full capability profile. */
+    return dxvk == NULL || dxvk->d3d11_native_version == 0 ||
+           dxvk->d3d11_native_version >= 30000u;
+}
+
 static VMSVGA3DDxvkView *vmsvga3d_dxvk_d3d11_view_find(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkViewKind kind, uint32_t cid,
     uint32_t view_id, VMSVGA3DDxvkView ***link_out)
@@ -3328,18 +3263,8 @@ static void vmsvga3d_dxvk_surface_evict_d3d9(
 static void vmsvga3d_dxvk_surface_evict_d3d11(
     VMSVGA3DDxvkSurface *surface)
 {
-    uint32_t i;
-
     if (surface == NULL) {
         return;
-    }
-
-    if (surface->owner != NULL) {
-        for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-            if (surface->owner->d3d11_bound_stream_output_targets[i] == surface) {
-                surface->owner->d3d11_bound_stream_output_targets[i] = NULL;
-            }
-        }
     }
 
     vmsvga3d_dxvk_d3d11_view_surface_destroy(surface);
@@ -3360,7 +3285,6 @@ static void vmsvga3d_dxvk_surface_evict_d3d11(
     surface->d3d11_readback_staging_height = 0;
     memset(&surface->d3d11_desc, 0, sizeof(surface->d3d11_desc));
     surface->d3d11_resident = false;
-    surface->d3d11_stream_output_readback_unsafe = false;
 }
 
 void vmsvga3d_dxvk_surface_evict(VMSVGA3DDxvkSurface *surface)
@@ -4980,65 +4904,27 @@ bool vmsvga3d_dxvk_d3d11_set_vertex_buffers(
 #endif
 }
 
-static bool vmsvga3d_dxvk_d3d11_has_stream_output_target(
-    const VMSVGA3DDxvk *dxvk)
-{
-    uint32_t i;
-
-    if (dxvk == NULL) {
-        return false;
-    }
-
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (dxvk->d3d11_bound_stream_output_targets[i] != NULL) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static bool vmsvga3d_dxvk_d3d11_stream_output_should_suppress(
-    const VMSVGA3DDxvk *dxvk)
-{
-    if (dxvk == NULL || dxvk->d3d11_rasterized_stream_output_supported ||
-        !dxvk->d3d11_bound_stream_output_shader_active) {
-        return false;
-    }
-
-    /* DXVK 2.x is unsafe for rasterized SO even without a capture target.
-     * Pure transform-feedback SO is allowed only while no guest SO target is
-     * bound; once capture is possible, suppress the host workload as well. */
-    return dxvk->d3d11_bound_rasterized_stream_output !=
-               SVGA3D_DX_SO_NO_RASTERIZED_STREAM ||
-           vmsvga3d_dxvk_d3d11_has_stream_output_target(dxvk);
-}
-
-static bool vmsvga3d_dxvk_d3d11_apply_stream_output_targets(
-    VMSVGA3DDxvk *dxvk)
+bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
+    VMSVGA3DDxvk *dxvk,
+    VMSVGA3DDxvkSurface *const surfaces[SVGA3D_DX_MAX_SOTARGETS],
+    const uint32_t offsets[SVGA3D_DX_MAX_SOTARGETS])
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11SOSetTargets set_targets = NULL;
     void *buffers[SVGA3D_DX_MAX_SOTARGETS] = { NULL };
-    uint32_t suppressed_offsets[SVGA3D_DX_MAX_SOTARGETS] = { 0 };
-    const uint32_t *offsets;
-    bool suppress;
     uint32_t i;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        surfaces == NULL || offsets == NULL) {
         return false;
     }
 
-    suppress = dxvk->d3d11_bound_rasterized_stream_output_unsupported;
-    if (!suppress) {
-        for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-            if (dxvk->d3d11_bound_stream_output_targets[i] != NULL &&
-                !vmsvga3d_dxvk_d3d11_buffer_binding(
-                    dxvk->d3d11_bound_stream_output_targets[i],
-                    VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT,
-                    &buffers[i])) {
-                return false;
-            }
+    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+        if (surfaces[i] != NULL &&
+            !vmsvga3d_dxvk_d3d11_buffer_binding(
+                surfaces[i], VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT,
+                &buffers[i])) {
+            return false;
         }
     }
 
@@ -5049,69 +4935,9 @@ static bool vmsvga3d_dxvk_d3d11_apply_stream_output_targets(
         return false;
     }
 
-    offsets = suppress ? suppressed_offsets :
-                         dxvk->d3d11_bound_stream_output_offsets;
+    /* VirtualBox always rebinds the complete four-target SO table. */
     set_targets(dxvk->d3d11_context, SVGA3D_DX_MAX_SOTARGETS,
                 buffers, offsets);
-
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "DX-SO-COMPAT host-targets mode=%s",
-        suppress ? "unbind" : "guest");
-    return true;
-#else
-    (void)dxvk;
-    return false;
-#endif
-}
-
-bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
-    VMSVGA3DDxvk *dxvk,
-    VMSVGA3DDxvkSurface *const surfaces[SVGA3D_DX_MAX_SOTARGETS],
-    const uint32_t offsets[SVGA3D_DX_MAX_SOTARGETS])
-{
-#if defined(CONFIG_LINUX) && defined(__ELF__)
-    void *buffer = NULL;
-    bool changed = false;
-    uint32_t i;
-
-    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
-        surfaces == NULL || offsets == NULL) {
-        return false;
-    }
-
-    /* Validate all guest bindings before changing the saved state. */
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (surfaces[i] != NULL &&
-            !vmsvga3d_dxvk_d3d11_buffer_binding(
-                surfaces[i], VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT,
-                &buffer)) {
-            return false;
-        }
-        changed |= dxvk->d3d11_bound_stream_output_targets[i] != surfaces[i] ||
-                   dxvk->d3d11_bound_stream_output_offsets[i] != offsets[i];
-    }
-
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        dxvk->d3d11_bound_stream_output_targets[i] = surfaces[i];
-        dxvk->d3d11_bound_stream_output_offsets[i] = offsets[i];
-    }
-
-    /* Keep the guest's logical SO table intact while the DXVK 2.x
-     * compatibility path suppresses host SO.  Non-rasterized SO becomes
-     * unsafe only once at least one capture target is bound, so a target-table
-     * change can itself enter or leave suppression. */
-    if (changed) {
-        bool old_suppress =
-            dxvk->d3d11_bound_rasterized_stream_output_unsupported;
-        bool new_suppress =
-            vmsvga3d_dxvk_d3d11_stream_output_should_suppress(dxvk);
-
-        dxvk->d3d11_bound_rasterized_stream_output_unsupported = new_suppress;
-        if (old_suppress != new_suppress || !new_suppress) {
-            return vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk);
-        }
-    }
 
     return true;
 #else
@@ -5543,75 +5369,10 @@ static void vmsvga3d_dxvk_d3d11_trace_draw_state(VMSVGA3DDxvk *dxvk,
 #endif
 }
 
-static void vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(
-    VMSVGA3DDxvk *dxvk)
-{
-    uint32_t i;
-
-    if (dxvk == NULL ||
-        !dxvk->d3d11_bound_rasterized_stream_output_unsupported) {
-        return;
-    }
-
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        VMSVGA3DDxvkSurface *surface =
-            dxvk->d3d11_bound_stream_output_targets[i];
-
-        if (surface != NULL) {
-            surface->d3d11_stream_output_readback_unsafe = true;
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
-                "DX-SO-COMPAT mark-unsafe sid=%u slot=%u",
-                surface->sid, i);
-        }
-    }
-}
-
-static bool vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(
-    VMSVGA3DDxvk *dxvk)
-{
-    const char *reason;
-
-    if (dxvk == NULL ||
-        !dxvk->d3d11_bound_rasterized_stream_output_unsupported) {
-        return false;
-    }
-
-    /* On DXVK 2.x, rasterized SO can poison later synchronization even with
-     * host targets unbound.  logs40 also demonstrates the same failure for a
-     * non-rasterized SO draw when a capture target is actually bound.  Omit
-     * both unsafe workload classes; no-target transform-feedback shaders and
-     * DXVK 3.0+ remain on the normal path. */
-    reason = dxvk->d3d11_bound_rasterized_stream_output ==
-                 SVGA3D_DX_SO_NO_RASTERIZED_STREAM
-             ? "legacy-so-capture"
-             : "legacy-rasterized-so";
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "DX-SO-COMPAT draw-skip rasterized=%u reason=%s",
-        dxvk->d3d11_bound_rasterized_stream_output, reason);
-    return true;
-}
-
-bool vmsvga3d_dxvk_d3d11_last_copy_submitted(
-    const VMSVGA3DDxvk *dxvk)
-{
-    return dxvk != NULL && dxvk->d3d11_last_copy_submitted;
-}
-
-bool vmsvga3d_dxvk_d3d11_last_draw_submitted(
-    const VMSVGA3DDxvk *dxvk)
-{
-    return dxvk != NULL && dxvk->d3d11_last_draw_submitted;
-}
-
 bool vmsvga3d_dxvk_d3d11_draw(
     VMSVGA3DDxvk *dxvk, uint32_t vertex_count,
     uint32_t start_vertex_location)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_draw_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11Draw draw = NULL;
 
@@ -5622,12 +5383,7 @@ bool vmsvga3d_dxvk_d3d11_draw(
         return false;
     }
 
-    vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
-        return true;
-    }
     draw(dxvk->d3d11_context, vertex_count, start_vertex_location);
-    dxvk->d3d11_last_draw_submitted = true;
     return true;
 #else
     (void)dxvk;
@@ -5641,9 +5397,6 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed(
     VMSVGA3DDxvk *dxvk, uint32_t index_count,
     uint32_t start_index_location, int32_t base_vertex_location)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_draw_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawIndexed draw_indexed = NULL;
 
@@ -5655,13 +5408,8 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed(
         return false;
     }
 
-    vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
-        return true;
-    }
     draw_indexed(dxvk->d3d11_context, index_count, start_index_location,
                  base_vertex_location);
-    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5678,9 +5426,6 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced(
     uint32_t instance_count, uint32_t start_vertex_location,
     uint32_t start_instance_location)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_draw_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawInstanced draw_instanced = NULL;
 
@@ -5692,14 +5437,9 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced(
         return false;
     }
 
-    vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
-        return true;
-    }
     draw_instanced(dxvk->d3d11_context, vertex_count_per_instance,
                    instance_count, start_vertex_location,
                    start_instance_location);
-    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5717,9 +5457,6 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced(
     uint32_t instance_count, uint32_t start_index_location,
     int32_t base_vertex_location, uint32_t start_instance_location)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_draw_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawIndexedInstanced draw_indexed_instanced = NULL;
 
@@ -5731,14 +5468,9 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced(
         return false;
     }
 
-    vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
-        return true;
-    }
     draw_indexed_instanced(dxvk->d3d11_context, index_count_per_instance,
                            instance_count, start_index_location,
                            base_vertex_location, start_instance_location);
-    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5756,9 +5488,6 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced_indirect(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
     uint32_t aligned_byte_offset)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_draw_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawIndexedInstancedIndirect draw_indirect = NULL;
     void *buffer = NULL;
@@ -5785,12 +5514,7 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced_indirect(
         return false;
     }
 
-    vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
-        return true;
-    }
     draw_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
-    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5805,9 +5529,6 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
     uint32_t aligned_byte_offset)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_draw_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawInstancedIndirect draw_indirect = NULL;
     void *buffer = NULL;
@@ -5834,12 +5555,7 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
         return false;
     }
 
-    vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
-        return true;
-    }
     draw_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
-    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5852,9 +5568,6 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
 
 bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_draw_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawAuto draw_auto = NULL;
 
@@ -5865,12 +5578,7 @@ bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk)
         return false;
     }
 
-    vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
-        return true;
-    }
     draw_auto(dxvk->d3d11_context);
-    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -8088,29 +7796,25 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
 
     if (shader->shader_type == SVGA3D_SHADERTYPE_GS &&
         stream_output_id != SVGA3D_INVALID_ID) {
-        bool rasterized_so_fallback;
-
-        if (stream_output == NULL) {
+        if (stream_output == NULL ||
+            !vmsvga3d_dxvk_get_method(
+                dxvk->d3d11_device,
+                VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO,
+                &create_gs_so, sizeof(create_gs_so))) {
             return false;
         }
-
-        rasterized_so_fallback =
-            !dxvk->d3d11_rasterized_stream_output_supported &&
-            stream_output->rasterized_stream !=
-                SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
 
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-SO-REALIZE cid=%u shid=%u guest-type=%u program-type=%u "
             "soid=%u decls=%u stride-count=%u explicit=%u rasterized=%u "
-            "resolved=%u fallback=%u",
+            "resolved=%u",
             cid, shader_id, shader->shader_type, shader->info.program_type,
             stream_output_id, stream_output->declaration_count,
             stream_output->stride_count,
             stream_output->use_explicit_strides ? 1u : 0u,
             stream_output->rasterized_stream,
-            stream_output->all_semantics_resolved ? 1u : 0u,
-            rasterized_so_fallback ? 1u : 0u);
+            stream_output->all_semantics_resolved ? 1u : 0u);
         for (i = 0; i < stream_output->declaration_count; i++) {
             const VMSVGA3DD3D10StreamOutputDecl *decl =
                 &stream_output->declarations[i];
@@ -8126,42 +7830,12 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
                 decl->component_count, decl->output_slot);
         }
 
-        if (rasterized_so_fallback) {
-            /* DXVK-native 2.x accepts this combination but drops the
-             * rasterized stream, and submitting the corresponding draw can
-             * later terminate the process when it is synchronized.  Realize
-             * the ordinary geometry shader only to keep guest shader binding
-             * state coherent; the draw path suppresses every unsupported
-             * rasterized-SO draw.  Keep stream_output_id below so bound SO
-             * targets are still marked stale for guest readback. */
-            if (!vmsvga3d_dxvk_get_method(
-                    dxvk->d3d11_device, method,
-                    &create_shader, sizeof(create_shader))) {
-                return false;
-            }
-            result = create_shader(dxvk->d3d11_device, shader->bytecode,
-                                   shader->bytecode_size, NULL, &native_shader);
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
-                "DX-SO-COMPAT realize-fallback cid=%u shid=%u soid=%u "
-                "mode=plain-gs hr=0x%08x native=%u",
-                cid, shader_id, stream_output_id, (uint32_t)result,
-                native_shader != NULL ? 1u : 0u);
-        } else {
-            if (!vmsvga3d_dxvk_get_method(
-                    dxvk->d3d11_device,
-                    VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO,
-                    &create_gs_so, sizeof(create_gs_so))) {
-                return false;
-            }
-            result = create_gs_so(
-                dxvk->d3d11_device, shader->bytecode, shader->bytecode_size,
-                stream_output->declarations, stream_output->declaration_count,
-                stream_output->use_explicit_strides ?
-                    stream_output->strides : NULL,
-                stream_output->stride_count, stream_output->rasterized_stream,
-                NULL, &native_shader);
-        }
+        result = create_gs_so(
+            dxvk->d3d11_device, shader->bytecode, shader->bytecode_size,
+            stream_output->declarations, stream_output->declaration_count,
+            stream_output->use_explicit_strides ? stream_output->strides : NULL,
+            stream_output->stride_count, stream_output->rasterized_stream,
+            NULL, &native_shader);
     } else {
         if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device, method,
                                        &create_shader, sizeof(create_shader))) {
@@ -8230,44 +7904,6 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
     if (shader == NULL || shader->shader_type != SVGA3D_SHADERTYPE_VS ||
         shader->bytecode == NULL || shader->bytecode_size == 0) {
         return false;
-    }
-
-    if (!dxvk->d3d11_rasterized_stream_output_supported &&
-        stream_output->rasterized_stream !=
-            SVGA3D_DX_SO_NO_RASTERIZED_STREAM) {
-        /* A VS-based SO object normally uses a generated pass-through GS.
-         * On DXVK 2.x, omit that SO proxy entirely and keep the guest binding
-         * state coherent with no GS.  The draw path suppresses every affected
-         * rasterized-SO draw, including stream 0, before native submission. */
-        vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
-        if (!vmsvga3d_dxvk_get_method(
-                dxvk->d3d11_context,
-                VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER,
-                &set_shader, sizeof(set_shader))) {
-            return false;
-        }
-        set_shader(dxvk->d3d11_context, NULL, NULL, 0);
-        {
-            bool old_suppress =
-                dxvk->d3d11_bound_rasterized_stream_output_unsupported;
-
-            dxvk->d3d11_bound_stream_output_shader_active = true;
-            dxvk->d3d11_bound_rasterized_stream_output =
-                stream_output->rasterized_stream;
-            dxvk->d3d11_bound_rasterized_stream_output_unsupported =
-                vmsvga3d_dxvk_d3d11_stream_output_should_suppress(dxvk);
-            if (old_suppress !=
-                    dxvk->d3d11_bound_rasterized_stream_output_unsupported &&
-                !vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
-                return false;
-            }
-        }
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-SO-COMPAT proxy-fallback cid=%u source-shid=%u soid=%u "
-            "mode=vs-rasterize-no-so",
-            cid, source_shader_id, stream_output_id);
-        return true;
     }
 
     if (shader->stream_output_proxy == NULL ||
@@ -8341,21 +7977,6 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
     }
 
     set_shader(dxvk->d3d11_context, shader->stream_output_proxy, NULL, 0);
-    {
-        bool old_suppress =
-            dxvk->d3d11_bound_rasterized_stream_output_unsupported;
-
-        dxvk->d3d11_bound_stream_output_shader_active = true;
-        dxvk->d3d11_bound_rasterized_stream_output =
-            stream_output->rasterized_stream;
-        dxvk->d3d11_bound_rasterized_stream_output_unsupported =
-            vmsvga3d_dxvk_d3d11_stream_output_should_suppress(dxvk);
-        if (old_suppress !=
-                dxvk->d3d11_bound_rasterized_stream_output_unsupported &&
-            !vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
-            return false;
-        }
-    }
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-SO-PROXY-BIND cid=%u source-shid=%u soid=%u native=1 result=OK",
@@ -8428,35 +8049,6 @@ bool vmsvga3d_dxvk_d3d11_shader_set(
      * including NULL to explicitly unbind an inactive stage.
      */
     set_shader(dxvk->d3d11_context, native_shader, NULL, 0);
-
-    if (shader_type == SVGA3D_SHADERTYPE_GS) {
-        bool old_suppress =
-            dxvk->d3d11_bound_rasterized_stream_output_unsupported;
-
-        dxvk->d3d11_bound_stream_output_shader_active = false;
-        dxvk->d3d11_bound_rasterized_stream_output =
-            SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
-        if (shader != NULL &&
-            shader->stream_output_id != SVGA3D_INVALID_ID) {
-            VMSVGA3DDxvkStreamOutput *stream_output =
-                vmsvga3d_dxvk_d3d11_stream_output_find(
-                    dxvk, cid, shader->stream_output_id, NULL);
-
-            if (stream_output != NULL) {
-                dxvk->d3d11_bound_stream_output_shader_active = true;
-                dxvk->d3d11_bound_rasterized_stream_output =
-                    stream_output->plan.rasterized_stream;
-            }
-        }
-
-        dxvk->d3d11_bound_rasterized_stream_output_unsupported =
-            vmsvga3d_dxvk_d3d11_stream_output_should_suppress(dxvk);
-        if (old_suppress !=
-                dxvk->d3d11_bound_rasterized_stream_output_unsupported &&
-            !vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
-            return false;
-        }
-    }
 
     return true;
 #else
@@ -9883,11 +9475,8 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     uint32_t destination_subresource, uint32_t destination_x,
     uint32_t destination_y, uint32_t destination_z,
     VMSVGA3DDxvkSurface *source, uint32_t source_subresource,
-    const struct vmsvga3d_d3d10_box_s *source_box, bool write_proven)
+    const struct vmsvga3d_d3d10_box_s *source_box)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_copy_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
     const VMSVGA3DD3D10Box *box = source_box;
@@ -9911,34 +9500,10 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     native.bottom = box->bottom;
     native.back = box->back;
 
-    if (source->d3d11_stream_output_readback_unsafe) {
-        destination->d3d11_stream_output_readback_unsafe = true;
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-SO-COMPAT copy-skip src=%u dst=%u kind=region result=STALE",
-            source->sid, destination->sid);
-        return true;
-    }
-
     copy_region(dxvk->d3d11_context, destination->d3d11_resource,
                 destination_subresource, destination_x, destination_y,
                 destination_z, source->d3d11_resource, source_subresource,
                 &native);
-    dxvk->d3d11_last_copy_submitted = true;
-
-    /* A partial safe write cannot prove that bytes outside the copied range no
-     * longer contain unsafe SO-derived contents.  Clear the resource-wide bit
-     * only for a proven full-buffer overwrite. */
-    if (write_proven && destination->d3d11_desc.valid &&
-        destination->d3d11_desc.resource_dimension ==
-            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER &&
-        destination_subresource == 0 && destination_x == 0 &&
-        destination_y == 0 && destination_z == 0 &&
-        native.top == 0 && native.front == 0 && native.bottom == 1 &&
-        native.back == 1 && native.right >= native.left &&
-        native.right - native.left == destination->d3d11_desc.byte_width) {
-        destination->d3d11_stream_output_readback_unsafe = false;
-    }
 
     return true;
 #else
@@ -9951,18 +9516,14 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     (void)source;
     (void)source_subresource;
     (void)source_box;
-    (void)write_proven;
     return false;
 #endif
 }
 
 bool vmsvga3d_dxvk_d3d11_copy_resource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
-    VMSVGA3DDxvkSurface *source, bool write_proven)
+    VMSVGA3DDxvkSurface *source)
 {
-    if (dxvk != NULL) {
-        dxvk->d3d11_last_copy_submitted = false;
-    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CopyResource copy_resource = NULL;
 
@@ -9976,54 +9537,14 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
         return false;
     }
 
-    if (source->d3d11_stream_output_readback_unsafe) {
-        destination->d3d11_stream_output_readback_unsafe = true;
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-SO-COMPAT copy-skip src=%u dst=%u kind=resource result=STALE",
-            source->sid, destination->sid);
-        return true;
-    }
-
-    if (source->d3d11_desc.resource_dimension ==
-            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER &&
-        destination->d3d11_desc.resource_dimension ==
-            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-COPY-RESOURCE phase=before src=%u dst=%u src-usage=%u "
-            "dst-usage=%u src-bytes=%u dst-bytes=%u",
-            source->sid, destination->sid, source->d3d11_desc.usage,
-            destination->d3d11_desc.usage, source->d3d11_desc.byte_width,
-            destination->d3d11_desc.byte_width);
-    }
-
     copy_resource(dxvk->d3d11_context, destination->d3d11_resource,
                   source->d3d11_resource);
-    dxvk->d3d11_last_copy_submitted = true;
-
-    /* Predicated CopyResource may not execute.  Preserve an existing
-     * unsafe destination marker unless the caller knows the write occurred. */
-    if (write_proven) {
-        destination->d3d11_stream_output_readback_unsafe = false;
-    }
-
-    if (source->d3d11_desc.resource_dimension ==
-            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER &&
-        destination->d3d11_desc.resource_dimension ==
-            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-COPY-RESOURCE phase=after src=%u dst=%u",
-            source->sid, destination->sid);
-    }
 
     return true;
 #else
     (void)dxvk;
     (void)destination;
     (void)source;
-    (void)write_proven;
     return false;
 #endif
 }
@@ -10142,8 +9663,6 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     const VMSVGA3DD3D10CreateDesc *desc;
     void *staging = NULL;
     bool staging_transient = true;
-    bool direct_staging_buffer = false;
-    bool texture_readback = false;
     uint32_t mip_level;
     uint64_t max_subresources;
     uint32_t z;
@@ -10164,34 +9683,8 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
         return true;
     }
 
-    if (surface->d3d11_resource == NULL || !surface->d3d11_desc.valid) {
-        return false;
-    }
-
-    desc = &surface->d3d11_desc;
-
-    /* DXVK-native before 3.0 can leave stream-output work in a state where
-     * synchronizing an SO-derived buffer terminates the process.  This is seen
-     * both for rasterized SO and for non-rasterized transform-feedback capture
-     * with a target bound.  Preserve VM uptime by leaving the guest shadow
-     * unchanged for buffers proven to descend from a suppressed legacy SO path.
-     * DXVK 3.0+ bypasses this compatibility path. */
-    if (!dxvk->d3d11_rasterized_stream_output_supported &&
-        surface->d3d11_stream_output_readback_unsafe &&
-        desc->resource_dimension ==
-            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
-        if (source_box != NULL || subresource != 0 || row_count != 1 ||
-            depth_count != 1 || row_bytes > desc->byte_width) {
-            return false;
-        }
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-SO-COMPAT readback-skip sid=%u bytes=%u usage=%u result=STALE",
-            surface->sid, row_bytes, desc->usage);
-        return true;
-    }
-
-    if (!vmsvga3d_dxvk_get_method(
+    if (surface->d3d11_resource == NULL || !surface->d3d11_desc.valid ||
+        !vmsvga3d_dxvk_get_method(
             dxvk->d3d11_context,
             VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION,
             &copy_region, sizeof(copy_region)) ||
@@ -10203,6 +9696,8 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
             &unmap, sizeof(unmap))) {
         return false;
     }
+
+    desc = &surface->d3d11_desc;
 
     switch (desc->resource_dimension) {
     case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER: {
@@ -10224,7 +9719,6 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
                VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ) != 0) {
               staging = surface->d3d11_resource;
               staging_transient = false;
-              direct_staging_buffer = true;
               VMVGA_TRACE_LOCAL(
                   VMVGA_TRACE_3D,
                   "DX-READBACK-BUFFER path=direct-staging sid=%u bytes=%u",
@@ -10274,35 +9768,13 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
           staging_desc.format = desc->format;
           staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
           staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
-          texture_readback = true;
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=create-before sid=%u dim=1 "
-              "subresource=%u format=%u width=%u height=1 depth=1",
-              surface->sid, subresource, staging_desc.format,
-              staging_desc.width);
           result = create_texture1d(dxvk->d3d11_device, &staging_desc, NULL,
                                     &staging);
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=create-after sid=%u dim=1 "
-              "subresource=%u hr=0x%08x staging=%p",
-              surface->sid, subresource, (uint32_t)result, staging);
           if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
               return false;
           }
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=copy-before sid=%u dim=1 "
-              "subresource=%u box=full",
-              surface->sid, subresource);
           copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
                       surface->d3d11_resource, subresource, NULL);
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=copy-after sid=%u dim=1 "
-              "subresource=%u box=full",
-              surface->sid, subresource);
           break;
       }
     case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
@@ -10354,7 +9826,6 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
           staging_desc.sample_desc.count = 1;
           staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
           staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
-          texture_readback = true;
 
           /* Boxed readbacks are frequent on the screen path.  Retain the
            * largest staging texture seen for this surface; full-subresource
@@ -10371,21 +9842,8 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
                   staging_desc.height = MAX(
                       staging_desc.height,
                       surface->d3d11_readback_staging_height);
-                  VMVGA_TRACE_LOCAL(
-                      VMVGA_TRACE_3D,
-                      "DX-READBACK-TEXTURE phase=create-before sid=%u dim=2 "
-                      "subresource=%u format=%u width=%u height=%u depth=1 "
-                      "boxed=1 cached=1",
-                      surface->sid, subresource, staging_desc.format,
-                      staging_desc.width, staging_desc.height);
                   result = create_texture2d(dxvk->d3d11_device, &staging_desc,
                                             NULL, &new_staging);
-                  VMVGA_TRACE_LOCAL(
-                      VMVGA_TRACE_3D,
-                      "DX-READBACK-TEXTURE phase=create-after sid=%u dim=2 "
-                      "subresource=%u hr=0x%08x staging=%p boxed=1 cached=1",
-                      surface->sid, subresource, (uint32_t)result,
-                      new_staging);
                   if (!vmsvga3d_dxvk_succeeded(result) ||
                       new_staging == NULL) {
                       if (new_staging != NULL) {
@@ -10407,46 +9865,15 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
 
               staging = surface->d3d11_readback_staging_2d;
               staging_transient = false;
-              VMVGA_TRACE_LOCAL(
-                  VMVGA_TRACE_3D,
-                  "DX-READBACK-TEXTURE phase=create-reuse sid=%u dim=2 "
-                  "subresource=%u staging=%p width=%u height=%u boxed=1 cached=1",
-                  surface->sid, subresource, staging,
-                  surface->d3d11_readback_staging_width,
-                  surface->d3d11_readback_staging_height);
           } else {
-              VMVGA_TRACE_LOCAL(
-                  VMVGA_TRACE_3D,
-                  "DX-READBACK-TEXTURE phase=create-before sid=%u dim=2 "
-                  "subresource=%u format=%u width=%u height=%u depth=1 "
-                  "boxed=0 cached=0",
-                  surface->sid, subresource, staging_desc.format,
-                  staging_desc.width, staging_desc.height);
               result = create_texture2d(dxvk->d3d11_device, &staging_desc, NULL,
                                         &staging);
-              VMVGA_TRACE_LOCAL(
-                  VMVGA_TRACE_3D,
-                  "DX-READBACK-TEXTURE phase=create-after sid=%u dim=2 "
-                  "subresource=%u hr=0x%08x staging=%p boxed=0 cached=0",
-                  surface->sid, subresource, (uint32_t)result, staging);
               if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
                   return false;
               }
           }
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=copy-before sid=%u dim=2 "
-              "subresource=%u box=%s staging=%p",
-              surface->sid, subresource, copy_box != NULL ? "partial" : "full",
-              staging);
           copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
                       surface->d3d11_resource, subresource, copy_box);
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=copy-after sid=%u dim=2 "
-              "subresource=%u box=%s staging=%p",
-              surface->sid, subresource, copy_box != NULL ? "partial" : "full",
-              staging);
           break;
       }
     case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
@@ -10467,91 +9894,28 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
           staging_desc.format = desc->format;
           staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
           staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
-          texture_readback = true;
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=create-before sid=%u dim=3 "
-              "subresource=%u format=%u width=%u height=%u depth=%u",
-              surface->sid, subresource, staging_desc.format,
-              staging_desc.width, staging_desc.height, staging_desc.depth);
           result = create_texture3d(dxvk->d3d11_device, &staging_desc, NULL,
                                     &staging);
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=create-after sid=%u dim=3 "
-              "subresource=%u hr=0x%08x staging=%p",
-              surface->sid, subresource, (uint32_t)result, staging);
           if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
               return false;
           }
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=copy-before sid=%u dim=3 "
-              "subresource=%u box=full",
-              surface->sid, subresource);
           copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
                       surface->d3d11_resource, subresource, NULL);
-          VMVGA_TRACE_LOCAL(
-              VMVGA_TRACE_3D,
-              "DX-READBACK-TEXTURE phase=copy-after sid=%u dim=3 "
-              "subresource=%u box=full",
-              surface->sid, subresource);
           break;
       }
     default:
         return false;
     }
 
-    if (direct_staging_buffer) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-READBACK-MAP phase=before sid=%u subresource=%u bytes=%u",
-            surface->sid, subresource, row_bytes);
-    } else if (texture_readback) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-READBACK-TEXTURE phase=map-before sid=%u dim=%u "
-            "subresource=%u staging=%p bytes=%u rows=%u depth=%u",
-            surface->sid, (unsigned)desc->resource_dimension, subresource, staging,
-            row_bytes, row_count, depth_count);
-    }
     result = map(dxvk->d3d11_context, staging, 0,
                  VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
-    if (direct_staging_buffer) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-READBACK-MAP phase=after sid=%u subresource=%u bytes=%u "
-            "hr=0x%08x data=%p row-pitch=%u depth-pitch=%u",
-            surface->sid, subresource, row_bytes, (uint32_t)result,
-            mapped.data, mapped.row_pitch, mapped.depth_pitch);
-    } else if (texture_readback) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-READBACK-TEXTURE phase=map-after sid=%u dim=%u "
-            "subresource=%u hr=0x%08x data=%p row-pitch=%u depth-pitch=%u",
-            surface->sid, (unsigned)desc->resource_dimension, subresource,
-            (uint32_t)result, mapped.data, mapped.row_pitch,
-            mapped.depth_pitch);
-    }
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
         goto out;
     }
 
     if (desc->resource_dimension ==
         VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
-        if (direct_staging_buffer) {
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
-                "DX-READBACK-BUFFER phase=cpu-copy-before sid=%u bytes=%u",
-                surface->sid, row_bytes);
-        }
         memcpy(data, mapped.data, row_bytes);
-        if (direct_staging_buffer) {
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
-                "DX-READBACK-BUFFER phase=cpu-copy-after sid=%u bytes=%u",
-                surface->sid, row_bytes);
-        }
     } else {
         if (mapped.row_pitch < row_bytes ||
             (depth_count > 1 && mapped.depth_pitch == 0)) {
@@ -10571,17 +9935,7 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
         }
     }
 
-    if (direct_staging_buffer) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-READBACK-UNMAP phase=before sid=%u", surface->sid);
-    }
     unmap(dxvk->d3d11_context, staging, 0);
-    if (direct_staging_buffer) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-READBACK-UNMAP phase=after sid=%u", surface->sid);
-    }
     success = true;
 
 out:

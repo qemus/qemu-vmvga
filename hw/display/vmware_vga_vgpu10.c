@@ -7019,7 +7019,6 @@ static bool vmsvga3d_d3d10_draw_live(
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     bool success;
-    bool submitted = false;
 
     if (s == NULL || s->dxvk == NULL || context == NULL) {
         return false;
@@ -7118,7 +7117,6 @@ static bool vmsvga3d_d3d10_draw_live(
                 s->dxvk, index_count, 0, (int32_t)start_vertex_location)) {
             success = false;
         }
-        submitted = vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
 
         /* VirtualBox restores TRIANGLESTRIP explicitly for emulated fans. */
         if (!vmsvga3d_dxvk_d3d11_set_primitive_topology(
@@ -7136,14 +7134,12 @@ static bool vmsvga3d_d3d10_draw_live(
     } else {
         success = vmsvga3d_dxvk_d3d11_draw(
             s->dxvk, vertex_count, start_vertex_location);
-        submitted = success &&
-                    vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
     }
 
-    if (submitted) {
+    if (success) {
         vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
-        vmsvga3d_d3d10_post_draw_live(context);
     }
+    vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
 
@@ -7219,7 +7215,6 @@ static bool vmsvga3d_d3d10_draw_indexed_triangle_fan_live(
         s->dxvk, D3D10_TOPOLOGY_TRIANGLELIST);
     (void)vmsvga3d_dxvk_d3d11_draw_indexed(
         s->dxvk, generated_count, 0, base_vertex_location);
-    success = vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
 
     /* VirtualBox restores TRIANGLESTRIP explicitly, then the exact saved
      * native index-buffer binding.
@@ -7229,6 +7224,7 @@ static bool vmsvga3d_d3d10_draw_indexed_triangle_fan_live(
     (void)vmsvga3d_dxvk_d3d11_set_native_index_buffer(
         s->dxvk, saved_binding.buffer, saved_binding.format,
         saved_binding.offset);
+    success = true;
 
 out:
     vmsvga3d_dxvk_d3d11_release_index_buffer(index_buffer);
@@ -7247,7 +7243,6 @@ static bool vmsvga3d_d3d10_draw_indexed_live(
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     bool success;
-    bool submitted;
 
     if (s == NULL || s->dxvk == NULL || context == NULL) {
         return false;
@@ -7256,23 +7251,19 @@ static bool vmsvga3d_d3d10_draw_indexed_live(
     vmsvga3d_d3d10_pipeline_setup_live(s, cid);
     if (context->shadow.inputAssembly.topology ==
         SVGA3D_PRIMITIVE_TRIANGLEFAN) {
-        /* VirtualBox ignores every error from dxDrawIndexedTriangleFan, but
-         * post-draw bookkeeping must still reflect whether a native draw was
-         * actually submitted. */
-        submitted = vmsvga3d_d3d10_draw_indexed_triangle_fan_live(
+        /* VirtualBox ignores every error from dxDrawIndexedTriangleFan. */
+        (void)vmsvga3d_d3d10_draw_indexed_triangle_fan_live(
             s, index_count, start_index_location, base_vertex_location);
         success = true;
     } else {
         success = vmsvga3d_dxvk_d3d11_draw_indexed(
             s->dxvk, index_count, start_index_location, base_vertex_location);
-        submitted = success &&
-                    vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
     }
 
-    if (submitted) {
+    if (success) {
         vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
-        vmsvga3d_d3d10_post_draw_live(context);
     }
+    vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
 
@@ -7283,7 +7274,6 @@ static bool vmsvga3d_d3d10_draw_instanced_live(
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     bool success;
-    bool submitted;
 
     if (s == NULL || s->dxvk == NULL || context == NULL) {
         return false;
@@ -7299,12 +7289,10 @@ static bool vmsvga3d_d3d10_draw_instanced_live(
         s->dxvk, vertex_count_per_instance, instance_count,
         start_vertex_location, start_instance_location);
 
-    submitted = success &&
-                vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
-    if (submitted) {
+    if (success) {
         vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
-        vmsvga3d_d3d10_post_draw_live(context);
     }
+    vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
 
@@ -7316,7 +7304,6 @@ static bool vmsvga3d_d3d10_draw_indexed_instanced_live(
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     bool success;
-    bool submitted;
 
     if (s == NULL || s->dxvk == NULL || context == NULL) {
         return false;
@@ -7330,12 +7317,10 @@ static bool vmsvga3d_d3d10_draw_indexed_instanced_live(
         s->dxvk, index_count_per_instance, instance_count,
         start_index_location, base_vertex_location, start_instance_location);
 
-    submitted = success &&
-                vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
-    if (submitted) {
+    if (success) {
         vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
-        vmsvga3d_d3d10_post_draw_live(context);
     }
+    vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
 
@@ -7344,7 +7329,6 @@ static bool vmsvga3d_d3d10_draw_auto_live(
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     bool success;
-    bool submitted;
 
     if (s == NULL || s->dxvk == NULL || context == NULL) {
         return false;
@@ -7356,12 +7340,10 @@ static bool vmsvga3d_d3d10_draw_auto_live(
      */
     success = vmsvga3d_dxvk_d3d11_draw_auto(s->dxvk);
 
-    submitted = success &&
-                vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
-    if (submitted) {
+    if (success) {
         vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
-        vmsvga3d_d3d10_post_draw_live(context);
     }
+    vmsvga3d_d3d10_post_draw_live(context);
     return success;
 }
 
@@ -10326,15 +10308,13 @@ static bool vmsvga3d_d3d10_transfer_from_buffer_live(
 
 static bool vmsvga3d_d3d10_pred_copy_region_live(
     struct vmsvga_state_s *s, uint32_t cid,
-    const SVGA3dCmdDXPredCopyRegion *command, bool unconditional)
+    const SVGA3dCmdDXPredCopyRegion *command)
 {
     VMSVGA3DDXContext *context;
     VMSVGA3DSurface *source;
     VMSVGA3DSurface *destination;
     VMSVGA3DD3D10CopySubresourcePlan plan;
     VMSVGA3DD3D10Level level;
-    bool write_proven;
-    bool copy_submitted;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -10347,8 +10327,6 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     if (context == NULL) {
         return false;
     }
-    write_proven = unconditional ||
-        context->shadow.predication.queryID == SVGA3D_INVALID_ID;
 
     source = s->svga3d->surfaces[command->srcSid];
     destination = s->svga3d->surfaces[command->dstSid];
@@ -10399,10 +10377,9 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
             s->dxvk, destination->dxvk_surface, plan.destination_subresource,
             plan.region.destination_x, plan.region.destination_y,
             plan.region.destination_z, source->dxvk_surface,
-            plan.source_subresource, &plan.region.source_box, write_proven)) {
+            plan.source_subresource, &plan.region.source_box)) {
         return false;
     }
-    copy_submitted = vmsvga3d_dxvk_d3d11_last_copy_submitted(s->dxvk);
 
     {
         SVGA3dBox dirty = {
@@ -10415,12 +10392,10 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         };
 
         /* With an active predicate the host cannot know whether this copy
-         * executed without synchronously resolving the query.  Likewise, the
-         * legacy-DXVK SO containment can intentionally suppress the native
-         * copy while still completing the guest command.  Establish display
-         * provenance only when the write is proven and a native copy was
-         * actually submitted. */
-        if (write_proven && copy_submitted) {
+         * executed without synchronously resolving the query.  Do not claim
+         * ScreenTarget write provenance in that case; a disabled predicate is
+         * equivalent to an unconditional copy and can be tracked normally. */
+        if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
             (void)vmsvga3d_surface_changed_live(
                 s, command->dstSid, plan.destination_subresource, &dirty);
         }
@@ -10430,15 +10405,13 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
 
 static bool vmsvga3d_d3d10_pred_copy_live(
     struct vmsvga_state_s *s, uint32_t cid,
-    const SVGA3dCmdDXPredCopy *command, bool unconditional)
+    const SVGA3dCmdDXPredCopy *command)
 {
     VMSVGA3DDXContext *context;
     VMSVGA3DSurface *source;
     VMSVGA3DSurface *destination;
     VMSVGA3DD3D10CopyResourcePlan plan;
     VMSVGA3DD3D10Level level;
-    bool write_proven;
-    bool copy_submitted;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -10451,8 +10424,6 @@ static bool vmsvga3d_d3d10_pred_copy_live(
     if (context == NULL) {
         return false;
     }
-    write_proven = unconditional ||
-        context->shadow.predication.queryID == SVGA3D_INVALID_ID;
 
     source = s->svga3d->surfaces[command->srcSid];
     destination = s->svga3d->surfaces[command->dstSid];
@@ -10483,17 +10454,15 @@ static bool vmsvga3d_d3d10_pred_copy_live(
         plan.source_create_kind, plan.destination_create_kind);
 
     if (!vmsvga3d_dxvk_d3d11_copy_resource(
-            s->dxvk, destination->dxvk_surface, source->dxvk_surface,
-            write_proven)) {
+            s->dxvk, destination->dxvk_surface, source->dxvk_surface)) {
         return false;
     }
-    copy_submitted = vmsvga3d_dxvk_d3d11_last_copy_submitted(s->dxvk);
 
-    /* Native D3D11 predication is asynchronous, and the legacy-DXVK SO
-     * containment may intentionally complete this helper without issuing a
-     * native CopyResource.  Establish ScreenTarget provenance only when the
-     * write is proven and a native copy was actually submitted. */
-    if (write_proven && copy_submitted) {
+    /* Native D3D11 predication is asynchronous.  If a predicate is bound,
+     * successful submission does not prove that CopyResource actually wrote
+     * the destination, so do not establish ScreenTarget content/coverage from
+     * that submission alone. */
+    if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
         (void)vmsvga3d_d3d10_surface_changed_full_live(
             s, command->dstSid, 0);
     }
@@ -11248,7 +11217,7 @@ static bool vmsvga3d_d3d10_present_blt_live(
                 command->destSubResource, destination_box.x,
                 destination_box.y, destination_box.z,
                 source_dxvk, command->srcSubResource,
-                &direct_source_box, true)) {
+                &direct_source_box)) {
             goto present_complete;
         }
     }
@@ -12683,7 +12652,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
-          return vmsvga3d_d3d10_pred_copy_region_live(s, cid, &command, false);
+          return vmsvga3d_d3d10_pred_copy_region_live(s, cid, &command);
       }
 
     case SVGA_3D_CMD_DX_PRED_COPY: {
@@ -12694,7 +12663,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
-          return vmsvga3d_d3d10_pred_copy_live(s, cid, &command, false);
+          return vmsvga3d_d3d10_pred_copy_live(s, cid, &command);
       }
 
     case SVGA_3D_CMD_DX_RESOLVE_COPY: {

@@ -10044,15 +10044,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
              s->index, value);
       break;
   case SVGA_REG_DEV_CAP:
-      if (s->svga3d_capable) {
-          s->devcap_val = vmsvga3d_get_devcap(s, value);
-      } else if (vmsvga_guest_backed_objects_capable(s) &&
-                 (value == SVGA3D_DEVCAP_MAX_TEXTURE_WIDTH ||
-                  value == SVGA3D_DEVCAP_MAX_TEXTURE_HEIGHT)) {
-          s->devcap_val = 0x00001000;
-      } else {
-          s->devcap_val = 0;
-      }
+      s->devcap_val = s->svga3d_capable ? vmsvga3d_get_devcap(s, value) : 0;
       if (vmsvga_trace_devcap_enabled()) {
           vmsvga_trace_devcap(s, value, s->devcap_val,
                                vmsvga3d_devcap_name(value));

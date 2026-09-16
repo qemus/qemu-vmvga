@@ -5526,19 +5526,18 @@ static bool vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(
 {
     if (dxvk == NULL ||
         !dxvk->d3d11_bound_rasterized_stream_output_unsupported ||
-        dxvk->d3d11_bound_rasterized_stream_output == 0 ||
         dxvk->d3d11_bound_rasterized_stream_output ==
             SVGA3D_DX_SO_NO_RASTERIZED_STREAM) {
         return false;
     }
 
-    /* DXVK 2.x cannot select streams 1-3 for rasterization without the
-     * stream-output shader path that is unsafe on this backend.  Submitting a
-     * plain GS would incorrectly rasterize stream 0, so degrade by omitting the
-     * draw instead of displaying the wrong stream or queuing unsafe work. */
+    /* DXVK 2.x rasterized stream-output work is unsafe on this backend even
+     * when host SO targets are suppressed.  The queued draw can poison later
+     * synchronization, so preserve VM uptime by omitting the native draw for
+     * every unsupported rasterized stream.  DXVK 3.0+ never enters this path. */
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "DX-SO-COMPAT draw-skip rasterized=%u reason=nonzero-stream",
+        "DX-SO-COMPAT draw-skip rasterized=%u reason=legacy-rasterized-so",
         dxvk->d3d11_bound_rasterized_stream_output);
     return true;
 }
@@ -8072,14 +8071,12 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
 
         if (rasterized_so_fallback) {
             /* DXVK-native 2.x accepts this combination but drops the
-             * rasterized stream.  More importantly, the resulting SO work can
-             * later terminate the process when it is synchronized.  For
-             * rasterized stream 0, the ordinary geometry shader preserves the
-             * visible rasterization path while deliberately omitting SO
-             * capture.  Nonzero rasterized streams cannot be represented by
-             * plain CreateGeometryShader and are suppressed at draw time.
-             * Keep stream_output_id below so bound SO targets are still marked
-             * stale for guest readback. */
+             * rasterized stream, and submitting the corresponding draw can
+             * later terminate the process when it is synchronized.  Realize
+             * the ordinary geometry shader only to keep guest shader binding
+             * state coherent; the draw path suppresses every unsupported
+             * rasterized-SO draw.  Keep stream_output_id below so bound SO
+             * targets are still marked stale for guest readback. */
             if (!vmsvga3d_dxvk_get_method(
                     dxvk->d3d11_device, method,
                     &create_shader, sizeof(create_shader))) {
@@ -8182,9 +8179,9 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
         stream_output->rasterized_stream !=
             SVGA3D_DX_SO_NO_RASTERIZED_STREAM) {
         /* A VS-based SO object normally uses a generated pass-through GS.
-         * On DXVK 2.x, binding no GS safely preserves rasterized stream 0 while
-         * omitting SO capture.  Streams 1-3 cannot be selected this way and
-         * are suppressed by the draw path instead of rendering the wrong stream. */
+         * On DXVK 2.x, omit that SO proxy entirely and keep the guest binding
+         * state coherent with no GS.  The draw path suppresses every affected
+         * rasterized-SO draw, including stream 0, before native submission. */
         vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
         if (!vmsvga3d_dxvk_get_method(
                 dxvk->d3d11_context,

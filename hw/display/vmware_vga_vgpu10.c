@@ -7019,7 +7019,7 @@ static bool vmsvga3d_d3d10_draw_live(
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     bool success;
-    bool submitted;
+    bool submitted = false;
 
     if (s == NULL || s->dxvk == NULL || context == NULL) {
         return false;
@@ -7118,6 +7118,7 @@ static bool vmsvga3d_d3d10_draw_live(
                 s->dxvk, index_count, 0, (int32_t)start_vertex_location)) {
             success = false;
         }
+        submitted = vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
 
         /* VirtualBox restores TRIANGLESTRIP explicitly for emulated fans. */
         if (!vmsvga3d_dxvk_d3d11_set_primitive_topology(
@@ -7135,9 +7136,10 @@ static bool vmsvga3d_d3d10_draw_live(
     } else {
         success = vmsvga3d_dxvk_d3d11_draw(
             s->dxvk, vertex_count, start_vertex_location);
+        submitted = success &&
+                    vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
     }
 
-    submitted = vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
     if (submitted) {
         vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
         vmsvga3d_d3d10_post_draw_live(context);
@@ -10332,6 +10334,7 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     VMSVGA3DD3D10CopySubresourcePlan plan;
     VMSVGA3DD3D10Level level;
     bool write_proven;
+    bool copy_submitted;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -10399,6 +10402,7 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
             plan.source_subresource, &plan.region.source_box, write_proven)) {
         return false;
     }
+    copy_submitted = vmsvga3d_dxvk_d3d11_last_copy_submitted(s->dxvk);
 
     {
         SVGA3dBox dirty = {
@@ -10411,10 +10415,12 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         };
 
         /* With an active predicate the host cannot know whether this copy
-         * executed without synchronously resolving the query.  Do not claim
-         * ScreenTarget write provenance in that case; a disabled predicate is
-         * equivalent to an unconditional copy and can be tracked normally. */
-        if (write_proven) {
+         * executed without synchronously resolving the query.  Likewise, the
+         * legacy-DXVK SO containment can intentionally suppress the native
+         * copy while still completing the guest command.  Establish display
+         * provenance only when the write is proven and a native copy was
+         * actually submitted. */
+        if (write_proven && copy_submitted) {
             (void)vmsvga3d_surface_changed_live(
                 s, command->dstSid, plan.destination_subresource, &dirty);
         }
@@ -10432,6 +10438,7 @@ static bool vmsvga3d_d3d10_pred_copy_live(
     VMSVGA3DD3D10CopyResourcePlan plan;
     VMSVGA3DD3D10Level level;
     bool write_proven;
+    bool copy_submitted;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -10480,12 +10487,13 @@ static bool vmsvga3d_d3d10_pred_copy_live(
             write_proven)) {
         return false;
     }
+    copy_submitted = vmsvga3d_dxvk_d3d11_last_copy_submitted(s->dxvk);
 
-    /* Native D3D11 predication is asynchronous.  If a predicate is bound,
-     * successful submission does not prove that CopyResource actually wrote
-     * the destination, so do not establish ScreenTarget content/coverage from
-     * that submission alone. */
-    if (write_proven) {
+    /* Native D3D11 predication is asynchronous, and the legacy-DXVK SO
+     * containment may intentionally complete this helper without issuing a
+     * native CopyResource.  Establish ScreenTarget provenance only when the
+     * write is proven and a native copy was actually submitted. */
+    if (write_proven && copy_submitted) {
         (void)vmsvga3d_d3d10_surface_changed_full_live(
             s, command->dstSid, 0);
     }

@@ -76,6 +76,7 @@ struct vmsvga3d_dxvk_s {
     uint32_t d3d11_bound_rasterized_stream_output;
     bool d3d11_rasterized_stream_output_supported;
     bool d3d11_last_draw_submitted;
+    bool d3d11_last_copy_submitted;
     void *d3d11_bound_constant_buffers[SVGA3D_NUM_SHADERTYPE]
                                         [SVGA3D_DX_MAX_CONSTBUFFERS];
     bool d3d11_bound_constant_buffer_valid[SVGA3D_NUM_SHADERTYPE]
@@ -2304,6 +2305,7 @@ static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
     dxvk->d3d11_bound_rasterized_stream_output =
         SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
     dxvk->d3d11_last_draw_submitted = false;
+    dxvk->d3d11_last_copy_submitted = false;
 }
 
 static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
@@ -5540,6 +5542,12 @@ static bool vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(
         "DX-SO-COMPAT draw-skip rasterized=%u reason=legacy-rasterized-so",
         dxvk->d3d11_bound_rasterized_stream_output);
     return true;
+}
+
+bool vmsvga3d_dxvk_d3d11_last_copy_submitted(
+    const VMSVGA3DDxvk *dxvk)
+{
+    return dxvk != NULL && dxvk->d3d11_last_copy_submitted;
 }
 
 bool vmsvga3d_dxvk_d3d11_last_draw_submitted(
@@ -9827,6 +9835,9 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     VMSVGA3DDxvkSurface *source, uint32_t source_subresource,
     const struct vmsvga3d_d3d10_box_s *source_box, bool write_proven)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_copy_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
     const VMSVGA3DD3D10Box *box = source_box;
@@ -9863,6 +9874,7 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
                 destination_subresource, destination_x, destination_y,
                 destination_z, source->d3d11_resource, source_subresource,
                 &native);
+    dxvk->d3d11_last_copy_submitted = true;
 
     /* A partial safe write cannot prove that bytes outside the copied range no
      * longer contain unsafe SO-derived contents.  Clear the resource-wide bit
@@ -9898,6 +9910,9 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
     VMSVGA3DDxvkSurface *source, bool write_proven)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_copy_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CopyResource copy_resource = NULL;
 
@@ -9935,6 +9950,7 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
 
     copy_resource(dxvk->d3d11_context, destination->d3d11_resource,
                   source->d3d11_resource);
+    dxvk->d3d11_last_copy_submitted = true;
 
     /* Predicated CopyResource may not execute.  Preserve an existing
      * unsafe destination marker unless the caller knows the write occurred. */

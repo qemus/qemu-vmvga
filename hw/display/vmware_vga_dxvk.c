@@ -539,6 +539,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ 0x00020000u
 #define VMSVGA3D_DXVK_D3D11_MAP_READ 1u
 #define VMSVGA3D_DXVK_D3D11_MAP_WRITE_DISCARD 4u
+#define VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT 0x00100000u
 #define VMSVGA3D_DXVK_D3D11_FILTER_ANISOTROPIC 0x55u
 #define VMSVGA3D_DXVK_D3D11_TEXTURE_ADDRESS_WRAP 1u
 #define VMSVGA3D_DXVK_D3D11_COMPARISON_ALWAYS 8u
@@ -9916,11 +9917,14 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     if (direct_staging_buffer) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
-            "DX-READBACK-MAP phase=before sid=%u subresource=%u bytes=%u",
+            "DX-READBACK-MAP phase=before sid=%u subresource=%u bytes=%u "
+            "flags=DO_NOT_WAIT",
             surface->sid, subresource, row_bytes);
     }
-    result = map(dxvk->d3d11_context, staging, 0,
-                 VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
+    result = map(
+        dxvk->d3d11_context, staging, 0, VMSVGA3D_DXVK_D3D11_MAP_READ,
+        direct_staging_buffer ? VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT : 0,
+        &mapped);
     if (direct_staging_buffer) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,

@@ -540,6 +540,9 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3D11_MAP_READ 1u
 #define VMSVGA3D_DXVK_D3D11_MAP_WRITE_DISCARD 4u
 #define VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT 0x00100000u
+#define VMSVGA3D_DXVK_DXGI_ERROR_WAS_STILL_DRAWING ((int32_t)0x887a000aU)
+#define VMSVGA3D_DXVK_READBACK_MAP_RETRY_COUNT 250u
+#define VMSVGA3D_DXVK_READBACK_MAP_RETRY_DELAY_US 1000u
 #define VMSVGA3D_DXVK_D3D11_FILTER_ANISOTROPIC 0x55u
 #define VMSVGA3D_DXVK_D3D11_TEXTURE_ADDRESS_WRAP 1u
 #define VMSVGA3D_DXVK_D3D11_COMPARISON_ALWAYS 8u
@@ -9630,7 +9633,6 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     VMSVGA3DDxvkD3D11CreateTexture2D create_texture2d = NULL;
     VMSVGA3DDxvkD3D11CreateTexture3D create_texture3d = NULL;
     VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
-    VMSVGA3DDxvkD3D11Flush flush = NULL;
     VMSVGA3DDxvkD3D11Map map = NULL;
     VMSVGA3DDxvkD3D11Unmap unmap = NULL;
     VMSVGA3DDxvkD3D11MappedSubresource mapped = {0};
@@ -9642,6 +9644,7 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     uint64_t max_subresources;
     uint32_t z;
     uint32_t y;
+    uint32_t map_attempts = 0;
     int32_t result;
     bool success = false;
 
@@ -9883,55 +9886,45 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
         return false;
     }
 
-    /* The direct staging-buffer path is where the Windows D3D10 test can
-     * terminate QEMU after a stream-output copy.  Flush explicitly here only
-     * for diagnostic separation: if the trace stops before flush-after, the
-     * queued GPU work/submission is implicated; if it reaches map-before and
-     * stops there, the synchronous Map/readback path is implicated instead.
-     * Flush does not alter resource contents, but it does make submission
-     * timing explicit, so keep this narrowly scoped to direct staging buffers.
-     */
-    if (direct_staging_buffer) {
-        if (!vmsvga3d_dxvk_get_method(
-                dxvk->d3d11_context,
-                VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_FLUSH,
-                &flush, sizeof(flush))) {
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
-                "DX-READBACK-BUFFER phase=flush-method-missing sid=%u bytes=%u",
-                surface->sid, row_bytes);
-            goto out;
-        }
-
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-READBACK-BUFFER phase=flush-before sid=%u bytes=%u",
-            surface->sid, row_bytes);
-        flush(dxvk->d3d11_context);
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-READBACK-BUFFER phase=flush-after sid=%u bytes=%u",
-            surface->sid, row_bytes);
-    }
-
     if (direct_staging_buffer) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-READBACK-MAP phase=before sid=%u subresource=%u bytes=%u "
-            "flags=DO_NOT_WAIT",
-            surface->sid, subresource, row_bytes);
-    }
-    result = map(
-        dxvk->d3d11_context, staging, 0, VMSVGA3D_DXVK_D3D11_MAP_READ,
-        direct_staging_buffer ? VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT : 0,
-        &mapped);
-    if (direct_staging_buffer) {
+            "flags=DO_NOT_WAIT retries=%u delay-us=%u",
+            surface->sid, subresource, row_bytes,
+            VMSVGA3D_DXVK_READBACK_MAP_RETRY_COUNT,
+            VMSVGA3D_DXVK_READBACK_MAP_RETRY_DELAY_US);
+
+        do {
+            result = map(
+                dxvk->d3d11_context, staging, 0,
+                VMSVGA3D_DXVK_D3D11_MAP_READ,
+                VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+            map_attempts++;
+
+            if (result != VMSVGA3D_DXVK_DXGI_ERROR_WAS_STILL_DRAWING ||
+                map_attempts >= VMSVGA3D_DXVK_READBACK_MAP_RETRY_COUNT) {
+                break;
+            }
+
+            /* A synchronous readback is expected to wait for ordinary GPU
+             * work, but DXVK's blocking Map path can terminate the process for
+             * the problematic stream-output workload.  Poll the documented
+             * nonblocking result for a bounded interval instead: normal copies
+             * still complete synchronously, while a stuck resource fails the
+             * readback without taking down QEMU. */
+            g_usleep(VMSVGA3D_DXVK_READBACK_MAP_RETRY_DELAY_US);
+        } while (true);
+
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-READBACK-MAP phase=after sid=%u subresource=%u bytes=%u "
-            "hr=0x%08x data=%p row-pitch=%u depth-pitch=%u",
+            "hr=0x%08x attempts=%u data=%p row-pitch=%u depth-pitch=%u",
             surface->sid, subresource, row_bytes, (uint32_t)result,
-            mapped.data, mapped.row_pitch, mapped.depth_pitch);
+            map_attempts, mapped.data, mapped.row_pitch, mapped.depth_pitch);
+    } else {
+        result = map(dxvk->d3d11_context, staging, 0,
+                     VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
     }
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
         goto out;

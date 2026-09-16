@@ -731,6 +731,9 @@ struct {
  * SVGA_CAP2_INTRA_SURFACE_COPY --
  *      Allow the IntraSurfaceCopy command.
  *
+ * SVGA_CAP2_CURSOR_MOB --
+ *      Allow the SVGA_REG_CURSOR_MOBID register.
+ *
  * SVGA_CAP2_RESERVED --
  *      Reserve the last bit for extending the SVGA capabilities to some
  *      future mechanisms.
@@ -1540,6 +1543,43 @@ struct {
    uint32 height;
    /* Followed by scanline data */
 } SVGAFifoCmdDefineAlphaCursor;
+
+
+typedef
+struct {
+   uint32 hotspotX;
+   uint32 hotspotY;
+   uint32 width;
+   uint32 height;
+   uint32 andMaskDepth;
+   uint32 xorMaskDepth;
+} SVGAGBColorCursorHeader;
+
+
+typedef
+struct {
+   uint32 hotspotX;
+   uint32 hotspotY;
+   uint32 width;
+   uint32 height;
+} SVGAGBAlphaCursorHeader;
+
+
+typedef enum {
+   SVGA_COLOR_CURSOR = 0,
+   SVGA_ALPHA_CURSOR = 1,
+} SVGAGBCursorType;
+
+
+typedef
+struct {
+   SVGAGBCursorType type;
+   union {
+      SVGAGBColorCursorHeader colorHeader;
+      SVGAGBAlphaCursorHeader alphaHeader;
+   } header;
+   uint32 sizeInBytes;
+} SVGAGBCursorHeader;
 
 
 /*

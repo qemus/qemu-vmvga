@@ -1668,15 +1668,6 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         }
 
         operation_ok = vmsvga3d_d3d10_pred_copy_live(s, cid, &copy, true);
-        if (operation_ok && predicate_enabled) {
-            /* pred_copy_live conservatively suppresses ScreenTarget provenance
-             * whenever the guest shadow has an active predicate.  This command
-             * disabled that predicate natively, so its successful write is
-             * proven and must be recorded explicitly.  Match the ordinary copy
-             * helpers by treating display bookkeeping as non-fatal. */
-            (void)vmsvga3d_d3d10_surface_changed_full_live(
-                s, command.dstSid, 0);
-        }
         if (operation_ok && command.readback != 0) {
             operation_ok =
                 vmsvga3d_d3d11_staging_readback_live(s, command.dstSid);
@@ -2119,6 +2110,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
                       s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;
         if (success && vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk)) {
+            vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
             vmsvga3d_dx_post_draw_live(s, cid);
         }
         return success;
@@ -2150,6 +2142,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
                       s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;
         if (success && vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk)) {
+            vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
             vmsvga3d_dx_post_draw_live(s, cid);
         }
         return success;

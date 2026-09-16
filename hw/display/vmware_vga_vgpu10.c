@@ -1842,12 +1842,13 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_vertex_buffer_pipeline_binding(
 
     /* Ignore the large strides emitted by some guests. */
     pipeline_stride = stride <= 2048u ? stride : 0u;
-    if (pipeline_stride <= surface_bytes &&
-        offset <= surface_bytes - pipeline_stride) {
-        binding->stride = pipeline_stride;
-        binding->offset = offset;
+    if (pipeline_stride > surface_bytes ||
+        offset > surface_bytes - pipeline_stride) {
+        return VMSVGA3D_D3D10_LEVEL_INVALID;
     }
 
+    binding->stride = pipeline_stride;
+    binding->offset = offset;
     return VMSVGA3D_D3D10_LEVEL_10_0;
 }
 
@@ -6215,18 +6216,23 @@ static void vmsvga3d_d3d10_pipeline_vertex_buffers_live(
                     surface->mips != NULL && surface->mip_count != 0 &&
                     vmsvga3d_d3d10_buffer_materialize_live(s, binding->bufferId)) {
                     VMSVGA3DD3D10VertexBufferPipelineBinding pipeline_binding;
+                    VMSVGA3DD3D10Level level;
 
                     /* V2 sizeInBytes is guest binding metadata, not a D3D11
                      * IASetVertexBuffers range.  VMware's WDDM driver can keep
                      * the same size while advancing the offset through a ring
                      * buffer, so rejecting offset + size past the allocation
-                     * incorrectly turns otherwise valid bindings into NULL. */
-                    surfaces[slot] = surface->dxvk_surface;
-                    (void)vmsvga3d_d3d10_vertex_buffer_pipeline_binding(
+                     * incorrectly turns otherwise valid bindings into NULL.
+                     * Still reject a physically invalid offset/effective stride
+                     * before exposing the native surface to D3D11. */
+                    level = vmsvga3d_d3d10_vertex_buffer_pipeline_binding(
                         true, surface->mips[0].data_size, binding->stride,
                         binding->offset, &pipeline_binding);
-                    strides[slot] = pipeline_binding.stride;
-                    offsets[slot] = pipeline_binding.offset;
+                    if (level != VMSVGA3D_D3D10_LEVEL_INVALID) {
+                        surfaces[slot] = surface->dxvk_surface;
+                        strides[slot] = pipeline_binding.stride;
+                        offsets[slot] = pipeline_binding.offset;
+                    }
                 }
             }
 

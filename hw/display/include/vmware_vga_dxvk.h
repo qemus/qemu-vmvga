@@ -91,8 +91,7 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk);
 /* vGPU10/DX is an optional upgrade and is never attempted before D3D9. */
 bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk);
-/* DXVK 3.0 added the rasterized stream-output behavior used by the newer
- * VMware WDDM capability profile. Unknown/custom versions stay enabled. */
+/* DXVK 3.0 added support for rasterized stream-output shaders. */
 bool vmsvga3d_dxvk_d3d11_rasterized_stream_output_supported(
     const VMSVGA3DDxvk *dxvk);
 void vmsvga3d_dxvk_d3d11_flush(VMSVGA3DDxvk *dxvk);

@@ -96,9 +96,9 @@ struct vmsvga3d_dxvk_s {
     void *d3d11_blit_rasterizer_state;
     void *d3d11_blit_blend_state;
     bool d3d11_blitter_initialized;
-    uint32_t d3d11_native_version;
     bool ready;
     bool d3d11_ready;
+    uint32_t d3d11_native_version;
 };
 
 struct vmsvga3d_dxvk_d3d9_query_s {
@@ -1500,7 +1500,6 @@ static bool vmsvga3d_dxvk_create_d3d11(VMSVGA3DDxvk *dxvk, Error **errp)
 
     entry = dlsym(dxvk->d3d11_library, "D3D11CreateDevice");
     memcpy(&create_device, &entry, sizeof(create_device));
-
     dxvk->d3d11_native_version = vmsvga3d_dxvk_native_version(entry);
 
     if (create_device == NULL) {
@@ -7791,33 +7790,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         }
         memcpy(shader->bytecode, dxbc.data, dxbc.size);
         shader->bytecode_size = dxbc.size;
-        if ((shader_id == 1 &&
-             shader->shader_type == SVGA3D_SHADERTYPE_VS) ||
-            (shader_id == 17 &&
-             shader->shader_type == SVGA3D_SHADERTYPE_PS)) {
-            g_autofree char *path = g_strdup_printf(
-                "/storage/vmvga-cid%u-shid%u-type%u.dxbc",
-                cid, shader_id, shader->shader_type);
-            g_autoptr(GError) dump_error = NULL;
-
-            if (g_file_set_contents(path, (const char *)shader->bytecode,
-                                    shader->bytecode_size, &dump_error)) {
-                VMVGA_TRACE_LOCAL(
-                    VMVGA_TRACE_3D,
-                    "DX-SHADER-DUMP cid=%u shid=%u type=%u dxbc=%u "
-                    "path=%s result=OK",
-                    cid, shader_id, shader->shader_type,
-                    shader->bytecode_size, path);
-            } else {
-                VMVGA_TRACE_LOCAL(
-                    VMVGA_TRACE_3D,
-                    "DX-SHADER-DUMP cid=%u shid=%u type=%u dxbc=%u "
-                    "path=%s result=FAIL reason=%s",
-                    cid, shader_id, shader->shader_type,
-                    shader->bytecode_size, path,
-                    dump_error != NULL ? dump_error->message : "unknown");
-            }
-        }
         vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
     }
 

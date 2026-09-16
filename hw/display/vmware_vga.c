@@ -8397,12 +8397,6 @@ vmsvga_scan_vram_dirty(struct vmsvga_state_s *s,
     g_free(snap);
 }
 
-static bool vmsvga_screen_object_2_compatible(struct vmsvga_state_s *s)
-{
-    return !s->svga3d_dx_capable ||
-           vmsvga3d_dxvk_d3d11_rasterized_stream_output_supported(s->dxvk);
-}
-
 static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s)
 {
 #ifdef EXPCAPS
@@ -8415,9 +8409,6 @@ static inline void vmsvga_set_fifo_capabilities(struct vmsvga_state_s *s)
             SVGA_FIFO_CAP_RESERVE | SVGA_FIFO_CAP_SCREEN_OBJECT |
             SVGA_FIFO_CAP_GMR2 | SVGA_FIFO_CAP_SCREEN_OBJECT_2;
 #endif
-    if (!vmsvga_screen_object_2_compatible(s)) {
-        s->fc &= ~SVGA_FIFO_CAP_SCREEN_OBJECT_2;
-    }
 
 }
 
@@ -8440,9 +8431,6 @@ static uint32_t vmsvga_get_capabilities(struct vmsvga_state_s *s)
     caps |= SVGA_CAP_8BIT_EMULATION;
 #endif
 #endif
-    if (!vmsvga_screen_object_2_compatible(s)) {
-        caps &= ~SVGA_CAP_SCREEN_OBJECT_2;
-    }
     if (!s->svga3d_capable) {
         caps &= ~SVGA_CAP_3D;
     }
@@ -11612,9 +11600,6 @@ static void pci_vmsvga_realize(PCIDevice *dev, Error **errp)
                 pci_address_space_io(dev));
     vmsvga3d_renderer_realize(&s->chip);
     vmsvga_vgpu_apply(&s->chip);
-    /* vmsvga_init() populated FIFO caps before the renderer was known.
-     * Refresh them now so DXVK < 3.0 keeps the pre-Screen-Object-v2 profile. */
-    vmsvga_set_fifo_capabilities(&s->chip);
     if (!vmport_register_svga_capability_provider(
             vmsvga_vmport_get_capabilities, &s->chip)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_STATE,

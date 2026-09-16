@@ -73,6 +73,7 @@ struct vmsvga3d_dxvk_s {
     VMSVGA3DDxvkSurface *d3d11_bound_stream_output_targets[SVGA3D_DX_MAX_SOTARGETS];
     uint32_t d3d11_bound_stream_output_offsets[SVGA3D_DX_MAX_SOTARGETS];
     bool d3d11_bound_rasterized_stream_output_unsupported;
+    bool d3d11_bound_stream_output_shader_active;
     uint32_t d3d11_bound_rasterized_stream_output;
     bool d3d11_rasterized_stream_output_supported;
     bool d3d11_last_draw_submitted;
@@ -2302,6 +2303,7 @@ static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
     memset(dxvk->d3d11_bound_stream_output_offsets, 0,
            sizeof(dxvk->d3d11_bound_stream_output_offsets));
     dxvk->d3d11_bound_rasterized_stream_output_unsupported = false;
+    dxvk->d3d11_bound_stream_output_shader_active = false;
     dxvk->d3d11_bound_rasterized_stream_output =
         SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
     dxvk->d3d11_last_draw_submitted = false;
@@ -4978,6 +4980,40 @@ bool vmsvga3d_dxvk_d3d11_set_vertex_buffers(
 #endif
 }
 
+static bool vmsvga3d_dxvk_d3d11_has_stream_output_target(
+    const VMSVGA3DDxvk *dxvk)
+{
+    uint32_t i;
+
+    if (dxvk == NULL) {
+        return false;
+    }
+
+    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+        if (dxvk->d3d11_bound_stream_output_targets[i] != NULL) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool vmsvga3d_dxvk_d3d11_stream_output_should_suppress(
+    const VMSVGA3DDxvk *dxvk)
+{
+    if (dxvk == NULL || dxvk->d3d11_rasterized_stream_output_supported ||
+        !dxvk->d3d11_bound_stream_output_shader_active) {
+        return false;
+    }
+
+    /* DXVK 2.x is unsafe for rasterized SO even without a capture target.
+     * Pure transform-feedback SO is allowed only while no guest SO target is
+     * bound; once capture is possible, suppress the host workload as well. */
+    return dxvk->d3d11_bound_rasterized_stream_output !=
+               SVGA3D_DX_SO_NO_RASTERIZED_STREAM ||
+           vmsvga3d_dxvk_d3d11_has_stream_output_target(dxvk);
+}
+
 static bool vmsvga3d_dxvk_d3d11_apply_stream_output_targets(
     VMSVGA3DDxvk *dxvk)
 {
@@ -5062,14 +5098,22 @@ bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
     }
 
     /* Keep the guest's logical SO table intact while the DXVK 2.x
-     * rasterized-SO fallback temporarily unbinds all host SO targets.  If the
-     * host is already suppressed, changing guest targets does not change the
-     * effective native bindings; they will be restored when suppression ends. */
-    if (!changed || dxvk->d3d11_bound_rasterized_stream_output_unsupported) {
-        return true;
+     * compatibility path suppresses host SO.  Non-rasterized SO becomes
+     * unsafe only once at least one capture target is bound, so a target-table
+     * change can itself enter or leave suppression. */
+    if (changed) {
+        bool old_suppress =
+            dxvk->d3d11_bound_rasterized_stream_output_unsupported;
+        bool new_suppress =
+            vmsvga3d_dxvk_d3d11_stream_output_should_suppress(dxvk);
+
+        dxvk->d3d11_bound_rasterized_stream_output_unsupported = new_suppress;
+        if (old_suppress != new_suppress || !new_suppress) {
+            return vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk);
+        }
     }
 
-    return vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk);
+    return true;
 #else
     (void)dxvk;
     (void)surfaces;
@@ -5523,24 +5567,29 @@ static void vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(
     }
 }
 
-static bool vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(
+static bool vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(
     VMSVGA3DDxvk *dxvk)
 {
+    const char *reason;
+
     if (dxvk == NULL ||
-        !dxvk->d3d11_bound_rasterized_stream_output_unsupported ||
-        dxvk->d3d11_bound_rasterized_stream_output ==
-            SVGA3D_DX_SO_NO_RASTERIZED_STREAM) {
+        !dxvk->d3d11_bound_rasterized_stream_output_unsupported) {
         return false;
     }
 
-    /* DXVK 2.x rasterized stream-output work is unsafe on this backend even
-     * when host SO targets are suppressed.  The queued draw can poison later
-     * synchronization, so preserve VM uptime by omitting the native draw for
-     * every unsupported rasterized stream.  DXVK 3.0+ never enters this path. */
+    /* On DXVK 2.x, rasterized SO can poison later synchronization even with
+     * host targets unbound.  logs40 also demonstrates the same failure for a
+     * non-rasterized SO draw when a capture target is actually bound.  Omit
+     * both unsafe workload classes; no-target transform-feedback shaders and
+     * DXVK 3.0+ remain on the normal path. */
+    reason = dxvk->d3d11_bound_rasterized_stream_output ==
+                 SVGA3D_DX_SO_NO_RASTERIZED_STREAM
+             ? "legacy-so-capture"
+             : "legacy-rasterized-so";
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "DX-SO-COMPAT draw-skip rasterized=%u reason=legacy-rasterized-so",
-        dxvk->d3d11_bound_rasterized_stream_output);
+        "DX-SO-COMPAT draw-skip rasterized=%u reason=%s",
+        dxvk->d3d11_bound_rasterized_stream_output, reason);
     return true;
 }
 
@@ -5574,7 +5623,7 @@ bool vmsvga3d_dxvk_d3d11_draw(
     }
 
     vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(dxvk)) {
+    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
         return true;
     }
     draw(dxvk->d3d11_context, vertex_count, start_vertex_location);
@@ -5607,7 +5656,7 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed(
     }
 
     vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(dxvk)) {
+    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
         return true;
     }
     draw_indexed(dxvk->d3d11_context, index_count, start_index_location,
@@ -5644,7 +5693,7 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced(
     }
 
     vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(dxvk)) {
+    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
         return true;
     }
     draw_instanced(dxvk->d3d11_context, vertex_count_per_instance,
@@ -5683,7 +5732,7 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced(
     }
 
     vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(dxvk)) {
+    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
         return true;
     }
     draw_indexed_instanced(dxvk->d3d11_context, index_count_per_instance,
@@ -5737,7 +5786,7 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced_indirect(
     }
 
     vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(dxvk)) {
+    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
         return true;
     }
     draw_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
@@ -5786,7 +5835,7 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
     }
 
     vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(dxvk)) {
+    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
         return true;
     }
     draw_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
@@ -5817,7 +5866,7 @@ bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk)
     }
 
     vmsvga3d_dxvk_d3d11_mark_unsafe_stream_output_targets(dxvk);
-    if (vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(dxvk)) {
+    if (vmsvga3d_dxvk_d3d11_skip_unsupported_stream_output_draw(dxvk)) {
         return true;
     }
     draw_auto(dxvk->d3d11_context);
@@ -8198,16 +8247,20 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
             return false;
         }
         set_shader(dxvk->d3d11_context, NULL, NULL, 0);
-        if (!dxvk->d3d11_bound_rasterized_stream_output_unsupported) {
-            dxvk->d3d11_bound_rasterized_stream_output_unsupported = true;
+        {
+            bool old_suppress =
+                dxvk->d3d11_bound_rasterized_stream_output_unsupported;
+
+            dxvk->d3d11_bound_stream_output_shader_active = true;
             dxvk->d3d11_bound_rasterized_stream_output =
                 stream_output->rasterized_stream;
-            if (!vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
+            dxvk->d3d11_bound_rasterized_stream_output_unsupported =
+                vmsvga3d_dxvk_d3d11_stream_output_should_suppress(dxvk);
+            if (old_suppress !=
+                    dxvk->d3d11_bound_rasterized_stream_output_unsupported &&
+                !vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
                 return false;
             }
-        } else {
-            dxvk->d3d11_bound_rasterized_stream_output =
-                stream_output->rasterized_stream;
         }
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
@@ -8291,16 +8344,14 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
     {
         bool old_suppress =
             dxvk->d3d11_bound_rasterized_stream_output_unsupported;
-        bool new_suppress =
-            !dxvk->d3d11_rasterized_stream_output_supported &&
-            stream_output->rasterized_stream !=
-                SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
 
-        dxvk->d3d11_bound_rasterized_stream_output_unsupported = new_suppress;
+        dxvk->d3d11_bound_stream_output_shader_active = true;
         dxvk->d3d11_bound_rasterized_stream_output =
-            new_suppress ? stream_output->rasterized_stream
-                         : SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
-        if (old_suppress != new_suppress &&
+            stream_output->rasterized_stream;
+        dxvk->d3d11_bound_rasterized_stream_output_unsupported =
+            vmsvga3d_dxvk_d3d11_stream_output_should_suppress(dxvk);
+        if (old_suppress !=
+                dxvk->d3d11_bound_rasterized_stream_output_unsupported &&
             !vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
             return false;
         }
@@ -8382,25 +8433,24 @@ bool vmsvga3d_dxvk_d3d11_shader_set(
         bool old_suppress =
             dxvk->d3d11_bound_rasterized_stream_output_unsupported;
 
-        dxvk->d3d11_bound_rasterized_stream_output_unsupported = false;
+        dxvk->d3d11_bound_stream_output_shader_active = false;
         dxvk->d3d11_bound_rasterized_stream_output =
             SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
-        if (!dxvk->d3d11_rasterized_stream_output_supported &&
-            shader != NULL &&
+        if (shader != NULL &&
             shader->stream_output_id != SVGA3D_INVALID_ID) {
             VMSVGA3DDxvkStreamOutput *stream_output =
                 vmsvga3d_dxvk_d3d11_stream_output_find(
                     dxvk, cid, shader->stream_output_id, NULL);
 
-            if (stream_output != NULL &&
-                stream_output->plan.rasterized_stream !=
-                    SVGA3D_DX_SO_NO_RASTERIZED_STREAM) {
-                dxvk->d3d11_bound_rasterized_stream_output_unsupported = true;
+            if (stream_output != NULL) {
+                dxvk->d3d11_bound_stream_output_shader_active = true;
                 dxvk->d3d11_bound_rasterized_stream_output =
                     stream_output->plan.rasterized_stream;
             }
         }
 
+        dxvk->d3d11_bound_rasterized_stream_output_unsupported =
+            vmsvga3d_dxvk_d3d11_stream_output_should_suppress(dxvk);
         if (old_suppress !=
                 dxvk->d3d11_bound_rasterized_stream_output_unsupported &&
             !vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
@@ -10120,13 +10170,12 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
 
     desc = &surface->d3d11_desc;
 
-    /* DXVK-native before 3.0 accepts a rasterized stream-output shader but
-     * silently disables rasterization.  On the affected workload, synchronizing
-     * a buffer written by that stream-output path can terminate the process,
-     * even with a nonblocking Map.  Preserve VM uptime by leaving the guest
-     * shadow unchanged for buffers proven to descend from that unsupported SO
-     * path.  DXVK 3.0+ carries RasterizedStream through its shader/pipeline
-     * state and therefore bypasses this compatibility path. */
+    /* DXVK-native before 3.0 can leave stream-output work in a state where
+     * synchronizing an SO-derived buffer terminates the process.  This is seen
+     * both for rasterized SO and for non-rasterized transform-feedback capture
+     * with a target bound.  Preserve VM uptime by leaving the guest shadow
+     * unchanged for buffers proven to descend from a suppressed legacy SO path.
+     * DXVK 3.0+ bypasses this compatibility path. */
     if (!dxvk->d3d11_rasterized_stream_output_supported &&
         surface->d3d11_stream_output_readback_unsafe &&
         desc->resource_dimension ==

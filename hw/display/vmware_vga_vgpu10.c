@@ -2427,8 +2427,17 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_rasterizer_state(
     dst->slope_scaled_depth_bias = src->slopeScaledDepthBias;
     dst->depth_clip_enable = src->depthClipEnable;
     dst->scissor_enable = src->scissorEnable;
-    dst->multisample_enable = src->multisampleEnable;
+    dst->multisample_enable =
+        src->multisampleEnable == SVGA3D_MULTISAMPLE_RAST_ENABLE;
     dst->antialiased_line_enable = src->antialiasedLineEnable;
+
+    /* DISABLE_LINE is an SVGA extension beyond the Direct3D BOOL range.
+     * At feature level 10.1 and later, MultisampleEnable only selects the
+     * line-rasterization algorithm, so FALSE disables multisampled lines
+     * without disabling MSAA for points and triangles. */
+    if (src->multisampleEnable == SVGA3D_MULTISAMPLE_RAST_DISABLE_LINE) {
+        level = max_level(level, VMSVGA3D_D3D10_LEVEL_10_1);
+    }
 
     /* provokingVertexLast, line width and stipple are intentionally ignored. */
     if (src->forcedSampleCount) {

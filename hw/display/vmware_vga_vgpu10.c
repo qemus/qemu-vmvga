@@ -7137,8 +7137,7 @@ static bool vmsvga3d_d3d10_draw_live(
             s->dxvk, vertex_count, start_vertex_location);
     }
 
-    submitted = success &&
-                vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
+    submitted = vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
     if (submitted) {
         vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
         vmsvga3d_d3d10_post_draw_live(context);
@@ -7218,6 +7217,7 @@ static bool vmsvga3d_d3d10_draw_indexed_triangle_fan_live(
         s->dxvk, D3D10_TOPOLOGY_TRIANGLELIST);
     (void)vmsvga3d_dxvk_d3d11_draw_indexed(
         s->dxvk, generated_count, 0, base_vertex_location);
+    success = vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
 
     /* VirtualBox restores TRIANGLESTRIP explicitly, then the exact saved
      * native index-buffer binding.
@@ -7227,7 +7227,6 @@ static bool vmsvga3d_d3d10_draw_indexed_triangle_fan_live(
     (void)vmsvga3d_dxvk_d3d11_set_native_index_buffer(
         s->dxvk, saved_binding.buffer, saved_binding.format,
         saved_binding.offset);
-    success = true;
 
 out:
     vmsvga3d_dxvk_d3d11_release_index_buffer(index_buffer);
@@ -7255,17 +7254,19 @@ static bool vmsvga3d_d3d10_draw_indexed_live(
     vmsvga3d_d3d10_pipeline_setup_live(s, cid);
     if (context->shadow.inputAssembly.topology ==
         SVGA3D_PRIMITIVE_TRIANGLEFAN) {
-        /* VirtualBox ignores every error from dxDrawIndexedTriangleFan. */
-        (void)vmsvga3d_d3d10_draw_indexed_triangle_fan_live(
+        /* VirtualBox ignores every error from dxDrawIndexedTriangleFan, but
+         * post-draw bookkeeping must still reflect whether a native draw was
+         * actually submitted. */
+        submitted = vmsvga3d_d3d10_draw_indexed_triangle_fan_live(
             s, index_count, start_index_location, base_vertex_location);
         success = true;
     } else {
         success = vmsvga3d_dxvk_d3d11_draw_indexed(
             s->dxvk, index_count, start_index_location, base_vertex_location);
+        submitted = success &&
+                    vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
     }
 
-    submitted = success &&
-                vmsvga3d_dxvk_d3d11_last_draw_submitted(s->dxvk);
     if (submitted) {
         vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
         vmsvga3d_d3d10_post_draw_live(context);

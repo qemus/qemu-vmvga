@@ -1719,7 +1719,26 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         copy.srcSubResource = command.srcSubResource;
         copy.box = command.box;
 
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-STAGING-COPY-REGION-CMD cid=%u predicate=%u:%u "
+            "src=%u:%u@%u,%u,%u dst=%u:%u@%u,%u,%u "
+            "size=%ux%ux%u readback=%u unsynchronized=%u",
+            cid, context->shadow.predication.queryID,
+            (unsigned)(context->shadow.predication.value != 0), command.srcSid,
+            command.srcSubResource, command.box.srcx, command.box.srcy,
+            command.box.srcz, command.dstSid, command.dstSubResource,
+            command.box.x, command.box.y, command.box.z, command.box.w,
+            command.box.h, command.box.d, (unsigned)(command.readback != 0),
+            (unsigned)(command.unsynchronized != 0));
+
         if (!vmsvga3d_d3d10_pred_copy_region_live(s, cid, &copy)) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-STAGING-COPY-REGION-RESULT cid=%u src=%u:%u dst=%u:%u "
+                "result=COPY-FAIL",
+                cid, command.srcSid, command.srcSubResource, command.dstSid,
+                command.dstSubResource);
             return false;
         }
 
@@ -1739,6 +1758,12 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
              * contents actually exist after that conditional operation. */
             if (!vmsvga3d_d3d11_native_predication_suspend(
                     s, cid, context, &predicate_enabled)) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "DX-STAGING-COPY-REGION-RESULT cid=%u src=%u:%u "
+                    "dst=%u:%u result=PRED-SUSPEND-FAIL",
+                    cid, command.srcSid, command.srcSubResource, command.dstSid,
+                    command.dstSubResource);
                 return false;
             }
             readback_ok =
@@ -1746,48 +1771,108 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             restore_ok = vmsvga3d_d3d11_native_predication_restore(
                 s, cid, context, predicate_enabled);
             if (!readback_ok || !restore_ok) {
+                VMVGA_TRACE_LOCAL(
+                    VMVGA_TRACE_3D,
+                    "DX-STAGING-COPY-REGION-RESULT cid=%u src=%u:%u "
+                    "dst=%u:%u readback-ok=%u restore-ok=%u result=FAIL",
+                    cid, command.srcSid, command.srcSubResource, command.dstSid,
+                    command.dstSubResource, (unsigned)readback_ok,
+                    (unsigned)restore_ok);
                 return false;
             }
         }
 
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
-            "DX-STAGING-COPY-REGION cid=%u src=%u:%u dst=%u:%u "
-            "readback=%u unsynchronized=%u result=OK",
-            cid, command.srcSid, command.srcSubResource, command.dstSid,
-            command.dstSubResource, command.readback != 0,
-            command.unsynchronized != 0);
+            "DX-STAGING-COPY-REGION cid=%u src=%u:%u@%u,%u,%u "
+            "dst=%u:%u@%u,%u,%u size=%ux%ux%u readback=%u "
+            "unsynchronized=%u result=OK",
+            cid, command.srcSid, command.srcSubResource, command.box.srcx,
+            command.box.srcy, command.box.srcz, command.dstSid,
+            command.dstSubResource, command.box.x, command.box.y, command.box.z,
+            command.box.w, command.box.h, command.box.d,
+            (unsigned)(command.readback != 0),
+            (unsigned)(command.unsynchronized != 0));
         return true;
     }
 
     case SVGA_3D_CMD_DX_DEFINE_RASTERIZER_STATE_V2: {
         SVGA3dCmdDXDefineRasterizerState_v2 command;
         SVGACOTableDXRasterizerStateEntry *entry;
+        VMSVGA3DD3D11Level level;
+        uint64_t dirty_before;
+        bool bound;
 
         if (size < sizeof(command)) {
             return false;
         }
         memcpy(&command, payload, sizeof(command));
 
+        bound = context->shadow.renderState.rasterizerStateId ==
+                command.rasterizerId;
+        dirty_before = context->renderer_dirty;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-RASTER-V2-CMD cid=%u id=%u fill=%u cull=%u front-ccw=%u "
+            "provoking-last=%u depth-bias=%d depth-bias-clamp=%g "
+            "slope-depth-bias=%g depth-clip=%u scissor=%u multisample=%u "
+            "aa-line=%u line-width=%g stipple=%u stipple-factor=%u "
+            "stipple-pattern=0x%04x forced-samples=%u bound=%u "
+            "dirty-before=0x%016" PRIx64,
+            cid, command.rasterizerId, (unsigned)command.fillMode,
+            (unsigned)command.cullMode,
+            (unsigned)command.frontCounterClockwise,
+            (unsigned)command.provokingVertexLast, command.depthBias,
+            command.depthBiasClamp, command.slopeScaledDepthBias,
+            (unsigned)command.depthClipEnable, (unsigned)command.scissorEnable,
+            (unsigned)command.multisampleEnable,
+            (unsigned)command.antialiasedLineEnable, command.lineWidth,
+            (unsigned)command.lineStippleEnable,
+            (unsigned)command.lineStippleFactor,
+            (unsigned)command.lineStipplePattern, command.forcedSampleCount,
+            (unsigned)bound, dirty_before);
+
         entry = vmsvga3d_dx_cotable_entry_ptr(
             s, cid, SVGA_COTABLE_RASTERIZERSTATE, command.rasterizerId);
-        if (entry == NULL ||
-            !vmsvga3d_dxvk_d3d11_rasterizer_state_destroy(
+        if (entry == NULL) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-RASTER-V2-RESULT cid=%u id=%u result=NO-COTABLE-ENTRY",
+                cid, command.rasterizerId);
+            return false;
+        }
+        if (!vmsvga3d_dxvk_d3d11_rasterizer_state_destroy(
                 s->dxvk, cid, command.rasterizerId)) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-RASTER-V2-RESULT cid=%u id=%u result=DESTROY-FAIL",
+                cid, command.rasterizerId);
             return false;
         }
 
         /* Match VirtualBox: redefining a rasterizer state destroys the
          * native object first, updates the COTable entry, and marks an
          * already-bound state dirty so it is recreated/rebound lazily. */
-        if (context->shadow.renderState.rasterizerStateId ==
-            command.rasterizerId) {
+        if (bound) {
             context->renderer_dirty |=
                 VMSVGA3D_DX_CTX_F_STATE_RASTERIZERSTATE;
         }
 
-        return vmsvga3d_d3d11_rasterizer_define_entry(&command, entry) !=
-               VMSVGA3D_D3D11_LEVEL_INVALID;
+        level = vmsvga3d_d3d11_rasterizer_define_entry(&command, entry);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-RASTER-V2-ENTRY cid=%u id=%u fill=%u cull=%u "
+            "depth-clip=%u scissor=%u multisample=%u aa-line=%u "
+            "forced-samples=%u level=%u bound=%u dirty-after=0x%016" PRIx64
+            " result=%s",
+            cid, command.rasterizerId, (unsigned)entry->fillMode,
+            (unsigned)entry->cullMode, (unsigned)entry->depthClipEnable,
+            (unsigned)entry->scissorEnable, (unsigned)entry->multisampleEnable,
+            (unsigned)entry->antialiasedLineEnable,
+            (unsigned)entry->forcedSampleCount, (unsigned)level,
+            (unsigned)bound, context->renderer_dirty,
+            level != VMSVGA3D_D3D11_LEVEL_INVALID ? "OK" : "INVALID");
+        return level != VMSVGA3D_D3D11_LEVEL_INVALID;
     }
 
     case SVGA_3D_CMD_DX_DEFINE_UA_VIEW: {

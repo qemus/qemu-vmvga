@@ -16756,12 +16756,7 @@ static uint32_t vmsvga3d_get_devcap(struct vmsvga_state_s *s,
     value = vmsvga3d_devcap[index];
 
     if (index == SVGA3D_DEVCAP_SM5) {
-        if (s == NULL || s->vgpu_generation != VMSVGA_VGPU_11) {
-            return 0;
-        }
-        return vmsvga3d_dxvk_d3d11_rasterized_stream_output_supported(s->dxvk)
-                   ? 1
-                   : 0;
+        return s != NULL && s->vgpu_generation == VMSVGA_VGPU_11 ? 1 : 0;
     }
 
     if (index == SVGA3D_DEVCAP_MAX_FORCED_SAMPLE_COUNT) {

@@ -289,6 +289,8 @@ bool vmsvga3d_dxvk_d3d11_read_index_buffer(
 bool vmsvga3d_dxvk_d3d11_set_native_index_buffer(
     VMSVGA3DDxvk *dxvk, void *buffer, uint32_t format, uint32_t offset);
 void vmsvga3d_dxvk_d3d11_release_index_buffer(void *buffer);
+bool vmsvga3d_dxvk_d3d11_last_copy_submitted(
+    const VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_d3d11_last_draw_submitted(
     const VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_d3d11_draw(

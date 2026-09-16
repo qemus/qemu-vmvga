@@ -26,8 +26,6 @@ Together, these improvements provide better VMware driver compatibility, more re
 
 The device supports DirectX acceleration. VMware SVGA 3D commands are processed by the QEMU device and rendered through [DXVK](https://github.com/doitsujin/dxvk), which translates the Direct3D graphics operations to Vulkan on the host.
 
-It requires a Vulkan-capable graphics card, and the `dxvk-native` package to be available on the host, otherwise it automatically falls back to 2D acceleration.
-
 ### 2D acceleration
 
 The implementation provides the full legacy 2D command stack used by VMware display drivers, including:
@@ -59,7 +57,7 @@ Once included in QEMU, a new display device will be available:
 -device vmvga
 ```
 
-3D acceleration requires the official VMware SVGA display drivers to be installed in the guest, on modern Windows versions they will be automatically retrieved via Windows Update.
+3D acceleration requires the VMware SVGA display drivers installed in the guest, but on modern Windows versions they usually will be automatically retrieved via Windows Update. You will also need a Vulkan-capable graphics card, and the `dxvk-native` package to be available on the host, preferably version 3.0 or newer.
 
 Unfortunately KVM raises a general protection exception when the user-mode component of these drivers tries to access the VMware backdoor I/O port, causing the driver to disable 3D acceleration.
 

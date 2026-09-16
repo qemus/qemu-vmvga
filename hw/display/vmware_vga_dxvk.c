@@ -71,6 +71,7 @@ struct vmsvga3d_dxvk_s {
     VMSVGA3DDxvkConstantBuffer *d3d11_constant_buffers;
     VMSVGA3DDxvkView *d3d11_views;
     VMSVGA3DDxvkSurface *d3d11_bound_stream_output_targets[SVGA3D_DX_MAX_SOTARGETS];
+    uint32_t d3d11_bound_stream_output_offsets[SVGA3D_DX_MAX_SOTARGETS];
     bool d3d11_bound_rasterized_stream_output_unsupported;
     bool d3d11_rasterized_stream_output_supported;
     void *d3d11_bound_constant_buffers[SVGA3D_NUM_SHADERTYPE]
@@ -2295,6 +2296,8 @@ static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
     dxvk->d3d11_bound_index_buffer_valid = false;
     memset(dxvk->d3d11_bound_stream_output_targets, 0,
            sizeof(dxvk->d3d11_bound_stream_output_targets));
+    memset(dxvk->d3d11_bound_stream_output_offsets, 0,
+           sizeof(dxvk->d3d11_bound_stream_output_offsets));
     dxvk->d3d11_bound_rasterized_stream_output_unsupported = false;
 }
 
@@ -4968,27 +4971,31 @@ bool vmsvga3d_dxvk_d3d11_set_vertex_buffers(
 #endif
 }
 
-bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
-    VMSVGA3DDxvk *dxvk,
-    VMSVGA3DDxvkSurface *const surfaces[SVGA3D_DX_MAX_SOTARGETS],
-    const uint32_t offsets[SVGA3D_DX_MAX_SOTARGETS])
+static bool vmsvga3d_dxvk_d3d11_apply_stream_output_targets(
+    VMSVGA3DDxvk *dxvk)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11SOSetTargets set_targets = NULL;
     void *buffers[SVGA3D_DX_MAX_SOTARGETS] = { NULL };
+    uint32_t suppressed_offsets[SVGA3D_DX_MAX_SOTARGETS] = { 0 };
+    const uint32_t *offsets;
+    bool suppress;
     uint32_t i;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
-        surfaces == NULL || offsets == NULL) {
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL) {
         return false;
     }
 
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (surfaces[i] != NULL &&
-            !vmsvga3d_dxvk_d3d11_buffer_binding(
-                surfaces[i], VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT,
-                &buffers[i])) {
-            return false;
+    suppress = dxvk->d3d11_bound_rasterized_stream_output_unsupported;
+    if (!suppress) {
+        for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+            if (dxvk->d3d11_bound_stream_output_targets[i] != NULL &&
+                !vmsvga3d_dxvk_d3d11_buffer_binding(
+                    dxvk->d3d11_bound_stream_output_targets[i],
+                    VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT,
+                    &buffers[i])) {
+                return false;
+            }
         }
     }
 
@@ -4999,15 +5006,54 @@ bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
         return false;
     }
 
-    /* VirtualBox always rebinds the complete four-target SO table. */
+    offsets = suppress ? suppressed_offsets :
+                         dxvk->d3d11_bound_stream_output_offsets;
     set_targets(dxvk->d3d11_context, SVGA3D_DX_MAX_SOTARGETS,
                 buffers, offsets);
 
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        dxvk->d3d11_bound_stream_output_targets[i] = surfaces[i];
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-SO-COMPAT host-targets mode=%s",
+        suppress ? "unbind" : "guest");
+    return true;
+#else
+    (void)dxvk;
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
+    VMSVGA3DDxvk *dxvk,
+    VMSVGA3DDxvkSurface *const surfaces[SVGA3D_DX_MAX_SOTARGETS],
+    const uint32_t offsets[SVGA3D_DX_MAX_SOTARGETS])
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    void *buffer = NULL;
+    uint32_t i;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        surfaces == NULL || offsets == NULL) {
+        return false;
     }
 
-    return true;
+    /* Validate all guest bindings before changing the saved state. */
+    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+        if (surfaces[i] != NULL &&
+            !vmsvga3d_dxvk_d3d11_buffer_binding(
+                surfaces[i], VMSVGA3D_DXVK_D3D11_BIND_STREAM_OUTPUT,
+                &buffer)) {
+            return false;
+        }
+    }
+
+    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+        dxvk->d3d11_bound_stream_output_targets[i] = surfaces[i];
+        dxvk->d3d11_bound_stream_output_offsets[i] = offsets[i];
+    }
+
+    /* Keep the guest's logical SO table intact while the DXVK 2.x
+     * rasterized-SO fallback temporarily unbinds all host SO targets. */
+    return vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk);
 #else
     (void)dxvk;
     (void)surfaces;
@@ -8053,6 +8099,9 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
         }
         set_shader(dxvk->d3d11_context, NULL, NULL, 0);
         dxvk->d3d11_bound_rasterized_stream_output_unsupported = true;
+        if (!vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
+            return false;
+        }
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-SO-COMPAT proxy-fallback cid=%u source-shid=%u soid=%u "
@@ -8135,6 +8184,9 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
     dxvk->d3d11_bound_rasterized_stream_output_unsupported =
         !dxvk->d3d11_rasterized_stream_output_supported &&
         stream_output->rasterized_stream != SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
+    if (!vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
+        return false;
+    }
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-SO-PROXY-BIND cid=%u source-shid=%u soid=%u native=1 result=OK",
@@ -8222,6 +8274,10 @@ bool vmsvga3d_dxvk_d3d11_shader_set(
                     SVGA3D_DX_SO_NO_RASTERIZED_STREAM) {
                 dxvk->d3d11_bound_rasterized_stream_output_unsupported = true;
             }
+        }
+
+        if (!vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
+            return false;
         }
     }
 

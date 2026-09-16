@@ -6206,18 +6206,18 @@ static void vmsvga3d_d3d10_pipeline_vertex_buffers_live(
                     surface->mips != NULL && surface->mip_count != 0 &&
                     vmsvga3d_d3d10_buffer_materialize_live(s, binding->bufferId)) {
                     VMSVGA3DD3D10VertexBufferPipelineBinding pipeline_binding;
-                    uint32_t range_end;
 
-                    if (vmsvga3d_d3d10_buffer_binding_range(
-                            surface->mips[0].data_size, binding->offset,
-                            context->vertex_buffer_size[slot], &range_end)) {
-                        surfaces[slot] = surface->dxvk_surface;
-                        (void)vmsvga3d_d3d10_vertex_buffer_pipeline_binding(
-                            true, range_end, binding->stride, binding->offset,
-                            &pipeline_binding);
-                        strides[slot] = pipeline_binding.stride;
-                        offsets[slot] = pipeline_binding.offset;
-                    }
+                    /* V2 sizeInBytes is guest binding metadata, not a D3D11
+                     * IASetVertexBuffers range.  VMware's WDDM driver can keep
+                     * the same size while advancing the offset through a ring
+                     * buffer, so rejecting offset + size past the allocation
+                     * incorrectly turns otherwise valid bindings into NULL. */
+                    surfaces[slot] = surface->dxvk_surface;
+                    (void)vmsvga3d_d3d10_vertex_buffer_pipeline_binding(
+                        true, surface->mips[0].data_size, binding->stride,
+                        binding->offset, &pipeline_binding);
+                    strides[slot] = pipeline_binding.stride;
+                    offsets[slot] = pipeline_binding.offset;
                 }
             }
 

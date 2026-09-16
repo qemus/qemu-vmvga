@@ -7895,25 +7895,29 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
 
     if (shader->shader_type == SVGA3D_SHADERTYPE_GS &&
         stream_output_id != SVGA3D_INVALID_ID) {
-        if (stream_output == NULL ||
-            !vmsvga3d_dxvk_get_method(
-                dxvk->d3d11_device,
-                VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO,
-                &create_gs_so, sizeof(create_gs_so))) {
+        bool rasterized_so_fallback;
+
+        if (stream_output == NULL) {
             return false;
         }
+
+        rasterized_so_fallback =
+            !dxvk->d3d11_rasterized_stream_output_supported &&
+            stream_output->rasterized_stream !=
+                SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
 
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-SO-REALIZE cid=%u shid=%u guest-type=%u program-type=%u "
             "soid=%u decls=%u stride-count=%u explicit=%u rasterized=%u "
-            "resolved=%u",
+            "resolved=%u fallback=%u",
             cid, shader_id, shader->shader_type, shader->info.program_type,
             stream_output_id, stream_output->declaration_count,
             stream_output->stride_count,
             stream_output->use_explicit_strides ? 1u : 0u,
             stream_output->rasterized_stream,
-            stream_output->all_semantics_resolved ? 1u : 0u);
+            stream_output->all_semantics_resolved ? 1u : 0u,
+            rasterized_so_fallback ? 1u : 0u);
         for (i = 0; i < stream_output->declaration_count; i++) {
             const VMSVGA3DD3D10StreamOutputDecl *decl =
                 &stream_output->declarations[i];
@@ -7929,12 +7933,41 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
                 decl->component_count, decl->output_slot);
         }
 
-        result = create_gs_so(
-            dxvk->d3d11_device, shader->bytecode, shader->bytecode_size,
-            stream_output->declarations, stream_output->declaration_count,
-            stream_output->use_explicit_strides ? stream_output->strides : NULL,
-            stream_output->stride_count, stream_output->rasterized_stream,
-            NULL, &native_shader);
+        if (rasterized_so_fallback) {
+            /* DXVK-native 2.x accepts this combination but drops the
+             * rasterized stream.  More importantly, the resulting SO work can
+             * later terminate the process when it is synchronized.  Preserve
+             * visible rendering by creating the ordinary geometry shader and
+             * deliberately omitting SO capture.  Keep stream_output_id below
+             * so bound SO targets are still marked stale for guest readback. */
+            if (!vmsvga3d_dxvk_get_method(
+                    dxvk->d3d11_device, method,
+                    &create_shader, sizeof(create_shader))) {
+                return false;
+            }
+            result = create_shader(dxvk->d3d11_device, shader->bytecode,
+                                   shader->bytecode_size, NULL, &native_shader);
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SO-COMPAT realize-fallback cid=%u shid=%u soid=%u "
+                "mode=plain-gs hr=0x%08x native=%u",
+                cid, shader_id, stream_output_id, (uint32_t)result,
+                native_shader != NULL ? 1u : 0u);
+        } else {
+            if (!vmsvga3d_dxvk_get_method(
+                    dxvk->d3d11_device,
+                    VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO,
+                    &create_gs_so, sizeof(create_gs_so))) {
+                return false;
+            }
+            result = create_gs_so(
+                dxvk->d3d11_device, shader->bytecode, shader->bytecode_size,
+                stream_output->declarations, stream_output->declaration_count,
+                stream_output->use_explicit_strides ?
+                    stream_output->strides : NULL,
+                stream_output->stride_count, stream_output->rasterized_stream,
+                NULL, &native_shader);
+        }
     } else {
         if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device, method,
                                        &create_shader, sizeof(create_shader))) {
@@ -8003,6 +8036,29 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
     if (shader == NULL || shader->shader_type != SVGA3D_SHADERTYPE_VS ||
         shader->bytecode == NULL || shader->bytecode_size == 0) {
         return false;
+    }
+
+    if (!dxvk->d3d11_rasterized_stream_output_supported &&
+        stream_output->rasterized_stream !=
+            SVGA3D_DX_SO_NO_RASTERIZED_STREAM) {
+        /* A VS-based SO object normally uses a generated pass-through GS.
+         * On DXVK 2.x, binding no GS is the closest safe degradation: the VS
+         * continues into rasterization while stream-output capture is omitted. */
+        vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
+        if (!vmsvga3d_dxvk_get_method(
+                dxvk->d3d11_context,
+                VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GS_SET_SHADER,
+                &set_shader, sizeof(set_shader))) {
+            return false;
+        }
+        set_shader(dxvk->d3d11_context, NULL, NULL, 0);
+        dxvk->d3d11_bound_rasterized_stream_output_unsupported = true;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SO-COMPAT proxy-fallback cid=%u source-shid=%u soid=%u "
+            "mode=vs-rasterize-no-so",
+            cid, source_shader_id, stream_output_id);
+        return true;
     }
 
     if (shader->stream_output_proxy == NULL ||
@@ -9619,18 +9675,19 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     native.bottom = box->bottom;
     native.back = box->back;
 
-    copy_region(dxvk->d3d11_context, destination->d3d11_resource,
-                destination_subresource, destination_x, destination_y,
-                destination_z, source->d3d11_resource, source_subresource,
-                &native);
-
     if (source->d3d11_stream_output_readback_unsafe) {
         destination->d3d11_stream_output_readback_unsafe = true;
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
-            "DX-SO-COMPAT propagate-unsafe src=%u dst=%u kind=region",
+            "DX-SO-COMPAT copy-skip src=%u dst=%u kind=region result=STALE",
             source->sid, destination->sid);
+        return true;
     }
+
+    copy_region(dxvk->d3d11_context, destination->d3d11_resource,
+                destination_subresource, destination_x, destination_y,
+                destination_z, source->d3d11_resource, source_subresource,
+                &native);
 
     return true;
 #else
@@ -9664,6 +9721,15 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
         return false;
     }
 
+    if (source->d3d11_stream_output_readback_unsafe) {
+        destination->d3d11_stream_output_readback_unsafe = true;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SO-COMPAT copy-skip src=%u dst=%u kind=resource result=STALE",
+            source->sid, destination->sid);
+        return true;
+    }
+
     if (source->d3d11_desc.resource_dimension ==
             VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER &&
         destination->d3d11_desc.resource_dimension ==
@@ -9680,14 +9746,7 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
     copy_resource(dxvk->d3d11_context, destination->d3d11_resource,
                   source->d3d11_resource);
 
-    destination->d3d11_stream_output_readback_unsafe =
-        source->d3d11_stream_output_readback_unsafe;
-    if (destination->d3d11_stream_output_readback_unsafe) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-SO-COMPAT propagate-unsafe src=%u dst=%u kind=resource",
-            source->sid, destination->sid);
-    }
+    destination->d3d11_stream_output_readback_unsafe = false;
 
     if (source->d3d11_desc.resource_dimension ==
             VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER &&

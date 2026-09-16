@@ -9486,8 +9486,31 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
         return false;
     }
 
+    if (source->d3d11_desc.resource_dimension ==
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER &&
+        destination->d3d11_desc.resource_dimension ==
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-COPY-RESOURCE phase=before src=%u dst=%u src-usage=%u "
+            "dst-usage=%u src-bytes=%u dst-bytes=%u",
+            source->sid, destination->sid, source->d3d11_desc.usage,
+            destination->d3d11_desc.usage, source->d3d11_desc.byte_width,
+            destination->d3d11_desc.byte_width);
+    }
+
     copy_resource(dxvk->d3d11_context, destination->d3d11_resource,
                   source->d3d11_resource);
+
+    if (source->d3d11_desc.resource_dimension ==
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER &&
+        destination->d3d11_desc.resource_dimension ==
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-COPY-RESOURCE phase=after src=%u dst=%u",
+            source->sid, destination->sid);
+    }
 
     return true;
 #else
@@ -9606,12 +9629,14 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     VMSVGA3DDxvkD3D11CreateTexture2D create_texture2d = NULL;
     VMSVGA3DDxvkD3D11CreateTexture3D create_texture3d = NULL;
     VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
+    VMSVGA3DDxvkD3D11Flush flush = NULL;
     VMSVGA3DDxvkD3D11Map map = NULL;
     VMSVGA3DDxvkD3D11Unmap unmap = NULL;
     VMSVGA3DDxvkD3D11MappedSubresource mapped = {0};
     const VMSVGA3DD3D10CreateDesc *desc;
     void *staging = NULL;
     bool staging_transient = true;
+    bool direct_staging_buffer = false;
     uint32_t mip_level;
     uint64_t max_subresources;
     uint32_t z;
@@ -9668,6 +9693,7 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
                VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ) != 0) {
               staging = surface->d3d11_resource;
               staging_transient = false;
+              direct_staging_buffer = true;
               VMVGA_TRACE_LOCAL(
                   VMVGA_TRACE_3D,
                   "DX-READBACK-BUFFER path=direct-staging sid=%u bytes=%u",
@@ -9856,15 +9882,72 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
         return false;
     }
 
+    /* The direct staging-buffer path is where the Windows D3D10 test can
+     * terminate QEMU after a stream-output copy.  Flush explicitly here only
+     * for diagnostic separation: if the trace stops before flush-after, the
+     * queued GPU work/submission is implicated; if it reaches map-before and
+     * stops there, the synchronous Map/readback path is implicated instead.
+     * Flush does not alter resource contents, but it does make submission
+     * timing explicit, so keep this narrowly scoped to direct staging buffers.
+     */
+    if (direct_staging_buffer) {
+        if (!vmsvga3d_dxvk_get_method(
+                dxvk->d3d11_context,
+                VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_FLUSH,
+                &flush, sizeof(flush))) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-READBACK-BUFFER phase=flush-method-missing sid=%u bytes=%u",
+                surface->sid, row_bytes);
+            goto out;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-READBACK-BUFFER phase=flush-before sid=%u bytes=%u",
+            surface->sid, row_bytes);
+        flush(dxvk->d3d11_context);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-READBACK-BUFFER phase=flush-after sid=%u bytes=%u",
+            surface->sid, row_bytes);
+    }
+
+    if (direct_staging_buffer) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-READBACK-MAP phase=before sid=%u subresource=%u bytes=%u",
+            surface->sid, subresource, row_bytes);
+    }
     result = map(dxvk->d3d11_context, staging, 0,
                  VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
+    if (direct_staging_buffer) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-READBACK-MAP phase=after sid=%u subresource=%u bytes=%u "
+            "hr=0x%08x data=%p row-pitch=%u depth-pitch=%u",
+            surface->sid, subresource, row_bytes, (uint32_t)result,
+            mapped.data, mapped.row_pitch, mapped.depth_pitch);
+    }
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
         goto out;
     }
 
     if (desc->resource_dimension ==
         VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_BUFFER) {
+        if (direct_staging_buffer) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-READBACK-BUFFER phase=cpu-copy-before sid=%u bytes=%u",
+                surface->sid, row_bytes);
+        }
         memcpy(data, mapped.data, row_bytes);
+        if (direct_staging_buffer) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-READBACK-BUFFER phase=cpu-copy-after sid=%u bytes=%u",
+                surface->sid, row_bytes);
+        }
     } else {
         if (mapped.row_pitch < row_bytes ||
             (depth_count > 1 && mapped.depth_pitch == 0)) {
@@ -9884,7 +9967,17 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
         }
     }
 
+    if (direct_staging_buffer) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-READBACK-UNMAP phase=before sid=%u", surface->sid);
+    }
     unmap(dxvk->d3d11_context, staging, 0);
+    if (direct_staging_buffer) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-READBACK-UNMAP phase=after sid=%u", surface->sid);
+    }
     success = true;
 
 out:

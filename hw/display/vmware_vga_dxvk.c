@@ -9654,9 +9654,30 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
           VMSVGA3DDxvkD3D11Box native_box;
 
           if (source_box != NULL || subresource != 0 || row_count != 1 ||
-              depth_count != 1 || row_bytes > desc->byte_width ||
-              !vmsvga3d_dxvk_get_method(
-                  dxvk->d3d11_device, VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BUFFER,
+              depth_count != 1 || row_bytes > desc->byte_width) {
+              return false;
+          }
+
+          /* A guest staging buffer is already the CPU-readable resource that
+           * READBACK_SUBRESOURCE ultimately needs.  Mapping it directly avoids
+           * an unnecessary staging-to-staging CopySubresourceRegion, and keeps
+           * the GPU copy issued by PRED_STAGING_COPY/STAGING_COPY as the only
+           * synchronization point before the CPU read. */
+          if (desc->usage == VMSVGA3D_DXVK_D3D11_USAGE_STAGING &&
+              (desc->cpu_access_flags &
+               VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ) != 0) {
+              staging = surface->d3d11_resource;
+              staging_transient = false;
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-READBACK-BUFFER path=direct-staging sid=%u bytes=%u",
+                  surface->sid, row_bytes);
+              break;
+          }
+
+          if (!vmsvga3d_dxvk_get_method(
+                  dxvk->d3d11_device,
+                  VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_BUFFER,
                   &create_buffer, sizeof(create_buffer))) {
               return false;
           }

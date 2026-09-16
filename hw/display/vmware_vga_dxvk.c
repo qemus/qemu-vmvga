@@ -75,6 +75,7 @@ struct vmsvga3d_dxvk_s {
     bool d3d11_bound_rasterized_stream_output_unsupported;
     uint32_t d3d11_bound_rasterized_stream_output;
     bool d3d11_rasterized_stream_output_supported;
+    bool d3d11_last_draw_submitted;
     void *d3d11_bound_constant_buffers[SVGA3D_NUM_SHADERTYPE]
                                         [SVGA3D_DX_MAX_CONSTBUFFERS];
     bool d3d11_bound_constant_buffer_valid[SVGA3D_NUM_SHADERTYPE]
@@ -2302,6 +2303,7 @@ static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
     dxvk->d3d11_bound_rasterized_stream_output_unsupported = false;
     dxvk->d3d11_bound_rasterized_stream_output =
         SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
+    dxvk->d3d11_last_draw_submitted = false;
 }
 
 static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
@@ -5032,6 +5034,7 @@ bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     void *buffer = NULL;
+    bool changed = false;
     uint32_t i;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
@@ -5047,6 +5050,8 @@ bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
                 &buffer)) {
             return false;
         }
+        changed |= dxvk->d3d11_bound_stream_output_targets[i] != surfaces[i] ||
+                   dxvk->d3d11_bound_stream_output_offsets[i] != offsets[i];
     }
 
     for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
@@ -5055,7 +5060,13 @@ bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
     }
 
     /* Keep the guest's logical SO table intact while the DXVK 2.x
-     * rasterized-SO fallback temporarily unbinds all host SO targets. */
+     * rasterized-SO fallback temporarily unbinds all host SO targets.  If the
+     * host is already suppressed, changing guest targets does not change the
+     * effective native bindings; they will be restored when suppression ends. */
+    if (!changed || dxvk->d3d11_bound_rasterized_stream_output_unsupported) {
+        return true;
+    }
+
     return vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk);
 #else
     (void)dxvk;
@@ -5532,10 +5543,19 @@ static bool vmsvga3d_dxvk_d3d11_skip_unsupported_rasterized_stream_draw(
     return true;
 }
 
+bool vmsvga3d_dxvk_d3d11_last_draw_submitted(
+    const VMSVGA3DDxvk *dxvk)
+{
+    return dxvk != NULL && dxvk->d3d11_last_draw_submitted;
+}
+
 bool vmsvga3d_dxvk_d3d11_draw(
     VMSVGA3DDxvk *dxvk, uint32_t vertex_count,
     uint32_t start_vertex_location)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_draw_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11Draw draw = NULL;
 
@@ -5551,6 +5571,7 @@ bool vmsvga3d_dxvk_d3d11_draw(
         return true;
     }
     draw(dxvk->d3d11_context, vertex_count, start_vertex_location);
+    dxvk->d3d11_last_draw_submitted = true;
     return true;
 #else
     (void)dxvk;
@@ -5564,6 +5585,9 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed(
     VMSVGA3DDxvk *dxvk, uint32_t index_count,
     uint32_t start_index_location, int32_t base_vertex_location)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_draw_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawIndexed draw_indexed = NULL;
 
@@ -5581,6 +5605,7 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed(
     }
     draw_indexed(dxvk->d3d11_context, index_count, start_index_location,
                  base_vertex_location);
+    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5597,6 +5622,9 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced(
     uint32_t instance_count, uint32_t start_vertex_location,
     uint32_t start_instance_location)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_draw_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawInstanced draw_instanced = NULL;
 
@@ -5615,6 +5643,7 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced(
     draw_instanced(dxvk->d3d11_context, vertex_count_per_instance,
                    instance_count, start_vertex_location,
                    start_instance_location);
+    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5632,6 +5661,9 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced(
     uint32_t instance_count, uint32_t start_index_location,
     int32_t base_vertex_location, uint32_t start_instance_location)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_draw_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawIndexedInstanced draw_indexed_instanced = NULL;
 
@@ -5650,6 +5682,7 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced(
     draw_indexed_instanced(dxvk->d3d11_context, index_count_per_instance,
                            instance_count, start_index_location,
                            base_vertex_location, start_instance_location);
+    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5667,6 +5700,9 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced_indirect(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
     uint32_t aligned_byte_offset)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_draw_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawIndexedInstancedIndirect draw_indirect = NULL;
     void *buffer = NULL;
@@ -5698,6 +5734,7 @@ bool vmsvga3d_dxvk_d3d11_draw_indexed_instanced_indirect(
         return true;
     }
     draw_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
+    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5712,6 +5749,9 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *args_buffer,
     uint32_t aligned_byte_offset)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_draw_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawInstancedIndirect draw_indirect = NULL;
     void *buffer = NULL;
@@ -5743,6 +5783,7 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
         return true;
     }
     draw_indirect(dxvk->d3d11_context, buffer, aligned_byte_offset);
+    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -5755,6 +5796,9 @@ bool vmsvga3d_dxvk_d3d11_draw_instanced_indirect(
 
 bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk)
 {
+    if (dxvk != NULL) {
+        dxvk->d3d11_last_draw_submitted = false;
+    }
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11DrawAuto draw_auto = NULL;
 
@@ -5770,6 +5814,7 @@ bool vmsvga3d_dxvk_d3d11_draw_auto(VMSVGA3DDxvk *dxvk)
         return true;
     }
     draw_auto(dxvk->d3d11_context);
+    dxvk->d3d11_last_draw_submitted = true;
 
     return true;
 #else
@@ -8148,11 +8193,16 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
             return false;
         }
         set_shader(dxvk->d3d11_context, NULL, NULL, 0);
-        dxvk->d3d11_bound_rasterized_stream_output_unsupported = true;
-        dxvk->d3d11_bound_rasterized_stream_output =
-            stream_output->rasterized_stream;
-        if (!vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
-            return false;
+        if (!dxvk->d3d11_bound_rasterized_stream_output_unsupported) {
+            dxvk->d3d11_bound_rasterized_stream_output_unsupported = true;
+            dxvk->d3d11_bound_rasterized_stream_output =
+                stream_output->rasterized_stream;
+            if (!vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
+                return false;
+            }
+        } else {
+            dxvk->d3d11_bound_rasterized_stream_output =
+                stream_output->rasterized_stream;
         }
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
@@ -8233,15 +8283,22 @@ bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
     }
 
     set_shader(dxvk->d3d11_context, shader->stream_output_proxy, NULL, 0);
-    dxvk->d3d11_bound_rasterized_stream_output_unsupported =
-        !dxvk->d3d11_rasterized_stream_output_supported &&
-        stream_output->rasterized_stream != SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
-    dxvk->d3d11_bound_rasterized_stream_output =
-        dxvk->d3d11_bound_rasterized_stream_output_unsupported
-            ? stream_output->rasterized_stream
-            : SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
-    if (!vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
-        return false;
+    {
+        bool old_suppress =
+            dxvk->d3d11_bound_rasterized_stream_output_unsupported;
+        bool new_suppress =
+            !dxvk->d3d11_rasterized_stream_output_supported &&
+            stream_output->rasterized_stream !=
+                SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
+
+        dxvk->d3d11_bound_rasterized_stream_output_unsupported = new_suppress;
+        dxvk->d3d11_bound_rasterized_stream_output =
+            new_suppress ? stream_output->rasterized_stream
+                         : SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
+        if (old_suppress != new_suppress &&
+            !vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
+            return false;
+        }
     }
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
@@ -8317,6 +8374,9 @@ bool vmsvga3d_dxvk_d3d11_shader_set(
     set_shader(dxvk->d3d11_context, native_shader, NULL, 0);
 
     if (shader_type == SVGA3D_SHADERTYPE_GS) {
+        bool old_suppress =
+            dxvk->d3d11_bound_rasterized_stream_output_unsupported;
+
         dxvk->d3d11_bound_rasterized_stream_output_unsupported = false;
         dxvk->d3d11_bound_rasterized_stream_output =
             SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
@@ -8336,7 +8396,9 @@ bool vmsvga3d_dxvk_d3d11_shader_set(
             }
         }
 
-        if (!vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
+        if (old_suppress !=
+                dxvk->d3d11_bound_rasterized_stream_output_unsupported &&
+            !vmsvga3d_dxvk_d3d11_apply_stream_output_targets(dxvk)) {
             return false;
         }
     }

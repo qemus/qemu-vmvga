@@ -208,10 +208,10 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     uint32_t destination_subresource, uint32_t destination_x,
     uint32_t destination_y, uint32_t destination_z,
     VMSVGA3DDxvkSurface *source, uint32_t source_subresource,
-    const struct vmsvga3d_d3d10_box_s *source_box);
+    const struct vmsvga3d_d3d10_box_s *source_box, bool write_proven);
 bool vmsvga3d_dxvk_d3d11_copy_resource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
-    VMSVGA3DDxvkSurface *source);
+    VMSVGA3DDxvkSurface *source, bool write_proven);
 bool vmsvga3d_dxvk_d3d11_resolve_subresource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *destination,
     uint32_t destination_subresource, VMSVGA3DDxvkSurface *source,
@@ -289,6 +289,8 @@ bool vmsvga3d_dxvk_d3d11_read_index_buffer(
 bool vmsvga3d_dxvk_d3d11_set_native_index_buffer(
     VMSVGA3DDxvk *dxvk, void *buffer, uint32_t format, uint32_t offset);
 void vmsvga3d_dxvk_d3d11_release_index_buffer(void *buffer);
+bool vmsvga3d_dxvk_d3d11_last_draw_submitted(
+    const VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_d3d11_draw(
     VMSVGA3DDxvk *dxvk, uint32_t vertex_count,
     uint32_t start_vertex_location);

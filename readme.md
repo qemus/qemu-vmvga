@@ -59,7 +59,13 @@ Once included in QEMU, a new display device will be available:
 
 3D acceleration requires the VMware SVGA display drivers installed in the guest, a Vulkan-capable graphics card, and the `dxvk-native` package installed on the host.
 
-Unfortunately KVM raises a general protection exception when the user-mode component of these drivers tries to access the VMware backdoor I/O port, causing the driver to disable 3D acceleration.
+Then start the machine with the VMware backdoor port enabled:
+
+```text
+-machine type=xxx,vmport=on
+```
+
+Unfortunately KVM raises a general protection exception when the user-mode component of these drivers tries to access this VMware backdoor I/O port, causing the driver to disable 3D acceleration.
 
 To work around this problem, add the following setting to your host KVM module configuration:
 

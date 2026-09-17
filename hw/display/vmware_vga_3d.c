@@ -10441,44 +10441,14 @@ static const char *vmsvga3d_trace_render_state_name(uint32_t state)
         return "ZENABLE";
     case SVGA3D_RS_ZWRITEENABLE:
         return "ZWRITEENABLE";
-    case SVGA3D_RS_ALPHATESTENABLE:
-        return "ALPHATESTENABLE";
-    case SVGA3D_RS_BLENDENABLE:
-        return "BLENDENABLE";
     case SVGA3D_RS_LIGHTINGENABLE:
         return "LIGHTINGENABLE";
     case SVGA3D_RS_CULLMODE:
         return "CULLMODE";
     case SVGA3D_RS_ZFUNC:
         return "ZFUNC";
-    case SVGA3D_RS_SRCBLEND:
-        return "SRCBLEND";
-    case SVGA3D_RS_DSTBLEND:
-        return "DSTBLEND";
-    case SVGA3D_RS_BLENDEQUATION:
-        return "BLENDEQUATION";
-    case SVGA3D_RS_ALPHAFUNC:
-        return "ALPHAFUNC";
-    case SVGA3D_RS_ALPHAREF:
-        return "ALPHAREF";
     case SVGA3D_RS_COLORWRITEENABLE:
         return "COLORWRITEENABLE";
-    case SVGA3D_RS_BLENDCOLOR:
-        return "BLENDCOLOR";
-    case SVGA3D_RS_COLORWRITEENABLE1:
-        return "COLORWRITEENABLE1";
-    case SVGA3D_RS_COLORWRITEENABLE2:
-        return "COLORWRITEENABLE2";
-    case SVGA3D_RS_COLORWRITEENABLE3:
-        return "COLORWRITEENABLE3";
-    case SVGA3D_RS_SEPARATEALPHABLENDENABLE:
-        return "SEPARATEALPHABLENDENABLE";
-    case SVGA3D_RS_SRCBLENDALPHA:
-        return "SRCBLENDALPHA";
-    case SVGA3D_RS_DSTBLENDALPHA:
-        return "DSTBLENDALPHA";
-    case SVGA3D_RS_BLENDEQUATIONALPHA:
-        return "BLENDEQUATIONALPHA";
     default:
         return NULL;
     }
@@ -10492,25 +10462,10 @@ static void vmsvga3d_trace_gb_context_render_states(
         SVGA3D_RS_CLIPPING,
         SVGA3D_RS_ZENABLE,
         SVGA3D_RS_ZWRITEENABLE,
-        SVGA3D_RS_ALPHATESTENABLE,
-        SVGA3D_RS_BLENDENABLE,
         SVGA3D_RS_LIGHTINGENABLE,
         SVGA3D_RS_CULLMODE,
         SVGA3D_RS_ZFUNC,
-        SVGA3D_RS_SRCBLEND,
-        SVGA3D_RS_DSTBLEND,
-        SVGA3D_RS_BLENDEQUATION,
-        SVGA3D_RS_ALPHAFUNC,
-        SVGA3D_RS_ALPHAREF,
         SVGA3D_RS_COLORWRITEENABLE,
-        SVGA3D_RS_BLENDCOLOR,
-        SVGA3D_RS_COLORWRITEENABLE1,
-        SVGA3D_RS_COLORWRITEENABLE2,
-        SVGA3D_RS_COLORWRITEENABLE3,
-        SVGA3D_RS_SEPARATEALPHABLENDENABLE,
-        SVGA3D_RS_SRCBLENDALPHA,
-        SVGA3D_RS_DSTBLENDALPHA,
-        SVGA3D_RS_BLENDEQUATIONALPHA,
     };
     uint32_t i;
 

@@ -6037,6 +6037,13 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
 
         irq_status = 0;
 
+        if (!vmsvga3d_d3d9_scene_barrier_live(s, cmd)) {
+            s->fifo_stop = fifo_start;
+            s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+            len = 0;
+            break;
+        }
+
         if (!vmsvga3d_legacy_present_fifo_2d_barrier_live(s, cmd)) {
             s->fifo_stop = fifo_start;
             s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
@@ -7601,6 +7608,11 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
 #endif
         }
     }
+
+    /* End a batched legacy D3D9 scene before yielding back to the main loop.
+     * This keeps scene lifetime bounded to one FIFO processing pass while still
+     * allowing multiple consecutive guest draw packets to share one scene. */
+    vmsvga3d_d3d9_scene_finish_fifo_live(s);
 
     if (flush_damage) {
         vmsvga_damage_flush(s);

@@ -1642,7 +1642,12 @@ bool vmsvga3d_d3d9_draw_batch_plan(uint32_t stream_count,
     plan->sync_vertex_buffers = true;
     plan->create_or_reuse_vertex_declaration = true;
     plan->begin_scene = true;
-    plan->end_scene = true;
+    /* Keep the native D3D9 scene open across consecutive guest draw packets.
+     * The FIFO parser closes it before the first non-draw command and at the
+     * end of each bounded FIFO pass, avoiding an EndScene flush hint after
+     * every individual draw packet without extending scene lifetime across
+     * unrelated SVGA commands. */
+    plan->end_scene = false;
     plan->end_scene_after_draw_failure = true;
     plan->stream_count = stream_count;
     plan->reset_stream_sources = true;
@@ -1653,6 +1658,51 @@ bool vmsvga3d_d3d9_draw_batch_plan(uint32_t stream_count,
     plan->track_context_usage_on_success = true;
 
     return true;
+}
+
+static bool vmsvga3d_d3d9_scene_close_live(struct vmsvga_state_s *s)
+{
+    struct vmsvga3d_state_s *state;
+
+    if (s == NULL || s->svga3d == NULL) {
+        return true;
+    }
+
+    state = s->svga3d;
+    if (!state->legacy_scene_open) {
+        return true;
+    }
+
+    /* Clear the host-side lifetime bit before calling into D3D9 so a failed
+     * EndScene can never leave later commands believing that a scene is still
+     * safely open.  Invalidating the active context forces a complete replay
+     * before the next accelerated legacy draw. */
+    state->legacy_scene_open = false;
+    if (vmsvga3d_dxvk_end_scene(s->dxvk)) {
+        return true;
+    }
+
+    state->active_legacy_context_id = SVGA3D_INVALID_ID;
+    (void)vmsvga3d_dxvk_reset_state(s->dxvk);
+    return false;
+}
+
+static bool vmsvga3d_d3d9_scene_barrier_live(struct vmsvga_state_s *s,
+                                               uint32_t cmd)
+{
+    switch (cmd) {
+    case SVGA_3D_CMD_DRAW:
+    case SVGA_3D_CMD_DRAW_INDEXED:
+    case SVGA_3D_CMD_DRAW_PRIMITIVES:
+        return true;
+    default:
+        return vmsvga3d_d3d9_scene_close_live(s);
+    }
+}
+
+static void vmsvga3d_d3d9_scene_finish_fifo_live(struct vmsvga_state_s *s)
+{
+    (void)vmsvga3d_d3d9_scene_close_live(s);
 }
 
 uint32_t vmsvga3d_d3d9_texture_filter(SVGA3dTextureFilter filter)
@@ -3722,6 +3772,14 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
      * pristine native D3D9 state, while a shader binding change replays the
      * complete VMware context without resetting first.  This separates the
      * full-replay requirement from the pristine-state reset. */
+    if (s->svga3d->legacy_scene_open &&
+        s->svga3d->active_legacy_context_id != cid &&
+        !vmsvga3d_d3d9_scene_close_live(s)) {
+        failure_stage = "end-scene-context-switch";
+        goto out;
+    }
+    scene_started = s->svga3d->legacy_scene_open;
+
     reset_state = context->legacy_full_replay ||
                   s->svga3d->active_legacy_context_id != cid;
     full_replay = reset_state || context->legacy_shader_dirty != 0;
@@ -3839,11 +3897,14 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                 batch.stream_count, batch.begin_scene, batch.end_scene,
                 vertex_buffer_bytes);
     }
-    if (batch.begin_scene && !vmsvga3d_dxvk_begin_scene(s->dxvk)) {
-        failure_stage = "begin-scene";
-        goto out;
+    if (batch.begin_scene && !s->svga3d->legacy_scene_open) {
+        if (!vmsvga3d_dxvk_begin_scene(s->dxvk)) {
+            failure_stage = "begin-scene";
+            goto out;
+        }
+        s->svga3d->legacy_scene_open = true;
     }
-    scene_started = batch.begin_scene;
+    scene_started = s->svga3d->legacy_scene_open;
 
     for (i = 0; i < range_count; i++) {
         VMSVGA3DD3D9DrawRangePlan plan;
@@ -3969,7 +4030,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     }
 
     if (batch.end_scene) {
-        if (!vmsvga3d_dxvk_end_scene(s->dxvk)) {
+        if (!vmsvga3d_d3d9_scene_close_live(s)) {
             scene_started = false;
             failure_stage = "end-scene";
             goto out;
@@ -3993,13 +4054,13 @@ out:
         }
     }
 
-    if (scene_started) {
+    if (scene_started && !success) {
         if (trace) {
             fprintf(stderr,
                     "VMVGA-D3D9-DRAW cleanup cid=%u forced-end-scene\n",
                     cid);
         }
-        (void)vmsvga3d_dxvk_end_scene(s->dxvk);
+        (void)vmsvga3d_d3d9_scene_close_live(s);
     }
 
     if (success) {

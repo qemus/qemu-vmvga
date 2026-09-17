@@ -471,6 +471,7 @@ struct vmsvga3d_state_s {
     uint32_t gart_page_count;
     bool gart_enabled;
     uint32_t active_legacy_context_id;
+    bool legacy_scene_open;
     uint32_t active_dx_context_id;
     uint32_t active_screen_target_sid;
     uint32_t screen_target_dirty_sid;

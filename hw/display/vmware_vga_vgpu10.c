@@ -2817,10 +2817,80 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_guest_signatures(
 
 /* VGPU10 token values used by the shader parser. */
 enum {
+    SHADER_OPCODE_ADD = 0,
+    SHADER_OPCODE_AND = 1,
+    SHADER_OPCODE_BREAKC = 3,
+    SHADER_OPCODE_CALLC = 5,
+    SHADER_OPCODE_CASE = 6,
+    SHADER_OPCODE_CONTINUEC = 8,
+    SHADER_OPCODE_DERIV_RTX = 11,
+    SHADER_OPCODE_DERIV_RTY = 12,
+    SHADER_OPCODE_DISCARD = 13,
+    SHADER_OPCODE_DIV = 14,
+    SHADER_OPCODE_DP2 = 15,
+    SHADER_OPCODE_DP3 = 16,
+    SHADER_OPCODE_DP4 = 17,
+    SHADER_OPCODE_EQ = 24,
+    SHADER_OPCODE_EXP = 25,
+    SHADER_OPCODE_FRC = 26,
+    SHADER_OPCODE_FTOI = 27,
+    SHADER_OPCODE_FTOU = 28,
+    SHADER_OPCODE_GE = 29,
+    SHADER_OPCODE_IADD = 30,
+    SHADER_OPCODE_IF = 31,
+    SHADER_OPCODE_IEQ = 32,
+    SHADER_OPCODE_IGE = 33,
+    SHADER_OPCODE_ILT = 34,
+    SHADER_OPCODE_IMAD = 35,
+    SHADER_OPCODE_IMAX = 36,
+    SHADER_OPCODE_IMIN = 37,
+    SHADER_OPCODE_IMUL = 38,
+    SHADER_OPCODE_INE = 39,
+    SHADER_OPCODE_INEG = 40,
+    SHADER_OPCODE_ISHL = 41,
+    SHADER_OPCODE_ISHR = 42,
+    SHADER_OPCODE_ITOF = 43,
+    SHADER_OPCODE_LD = 45,
+    SHADER_OPCODE_LD_MS = 46,
+    SHADER_OPCODE_LOG = 47,
+    SHADER_OPCODE_LT = 49,
+    SHADER_OPCODE_MAD = 50,
+    SHADER_OPCODE_MIN = 51,
+    SHADER_OPCODE_MAX = 52,
     SHADER_OPCODE_CUSTOMDATA = 53,
     SHADER_OPCODE_MOV = 54,
+    SHADER_OPCODE_MOVC = 55,
+    SHADER_OPCODE_MUL = 56,
+    SHADER_OPCODE_NE = 57,
+    SHADER_OPCODE_NOT = 59,
+    SHADER_OPCODE_OR = 60,
+    SHADER_OPCODE_RESINFO = 61,
     SHADER_OPCODE_RET = 62,
+    SHADER_OPCODE_RETC = 63,
+    SHADER_OPCODE_ROUND_NE = 64,
+    SHADER_OPCODE_ROUND_NI = 65,
+    SHADER_OPCODE_ROUND_PI = 66,
+    SHADER_OPCODE_ROUND_Z = 67,
+    SHADER_OPCODE_RSQ = 68,
+    SHADER_OPCODE_SAMPLE = 69,
+    SHADER_OPCODE_SAMPLE_C = 70,
+    SHADER_OPCODE_SAMPLE_CLZ = 71,
+    SHADER_OPCODE_SAMPLE_L = 72,
+    SHADER_OPCODE_SAMPLE_D = 73,
+    SHADER_OPCODE_SAMPLE_B = 74,
+    SHADER_OPCODE_SQRT = 75,
+    SHADER_OPCODE_SWITCH = 76,
+    SHADER_OPCODE_SINCOS = 77,
     SHADER_OPCODE_UDIV = 78,
+    SHADER_OPCODE_ULT = 79,
+    SHADER_OPCODE_UGE = 80,
+    SHADER_OPCODE_UMUL = 81,
+    SHADER_OPCODE_UMAD = 82,
+    SHADER_OPCODE_UMAX = 83,
+    SHADER_OPCODE_UMIN = 84,
+    SHADER_OPCODE_USHR = 85,
+    SHADER_OPCODE_UTOF = 86,
+    SHADER_OPCODE_XOR = 87,
     SHADER_OPCODE_DCL_RESOURCE = 88,
     SHADER_OPCODE_DCL_INDEX_RANGE = 91,
     SHADER_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT = 94,
@@ -2836,7 +2906,32 @@ enum {
     SHADER_OPCODE_DCL_TEMPS = 104,
     SHADER_OPCODE_DCL_INDEXABLE_TEMP = 105,
     SHADER_OPCODE_VMWARE = 107,
+    SHADER_OPCODE_LOD = 108,
+    SHADER_OPCODE_GATHER4 = 109,
+    SHADER_OPCODE_SAMPLE_POS = 110,
+    SHADER_OPCODE_SAMPLE_INFO = 111,
     SHADER_OPCODE_INTERFACE_CALL = 120,
+    SHADER_OPCODE_BUFINFO = 121,
+    SHADER_OPCODE_DERIV_RTX_COARSE = 122,
+    SHADER_OPCODE_DERIV_RTX_FINE = 123,
+    SHADER_OPCODE_DERIV_RTY_COARSE = 124,
+    SHADER_OPCODE_DERIV_RTY_FINE = 125,
+    SHADER_OPCODE_GATHER4_C = 126,
+    SHADER_OPCODE_GATHER4_PO = 127,
+    SHADER_OPCODE_GATHER4_PO_C = 128,
+    SHADER_OPCODE_RCP = 129,
+    SHADER_OPCODE_F32TOF16 = 130,
+    SHADER_OPCODE_F16TOF32 = 131,
+    SHADER_OPCODE_UADDC = 132,
+    SHADER_OPCODE_USUBB = 133,
+    SHADER_OPCODE_COUNTBITS = 134,
+    SHADER_OPCODE_FIRSTBIT_HI = 135,
+    SHADER_OPCODE_FIRSTBIT_LO = 136,
+    SHADER_OPCODE_FIRSTBIT_SHI = 137,
+    SHADER_OPCODE_UBFE = 138,
+    SHADER_OPCODE_IBFE = 139,
+    SHADER_OPCODE_BFI = 140,
+    SHADER_OPCODE_BFREV = 141,
     SHADER_OPCODE_DCL_FUNCTION_BODY = 144,
     SHADER_OPCODE_DCL_FUNCTION_TABLE = 145,
     SHADER_OPCODE_DCL_INTERFACE = 146,
@@ -2849,7 +2944,29 @@ enum {
     SHADER_OPCODE_DCL_TGSM_RAW = 159,
     SHADER_OPCODE_DCL_TGSM_STRUCTURED = 160,
     SHADER_OPCODE_DCL_RESOURCE_STRUCTURED = 162,
+    SHADER_OPCODE_DADD = 191,
+    SHADER_OPCODE_DMAX = 192,
+    SHADER_OPCODE_DMIN = 193,
+    SHADER_OPCODE_DMUL = 194,
+    SHADER_OPCODE_DEQ = 195,
+    SHADER_OPCODE_DGE = 196,
+    SHADER_OPCODE_DLT = 197,
+    SHADER_OPCODE_DNE = 198,
+    SHADER_OPCODE_DMOV = 199,
+    SHADER_OPCODE_DMOVC = 200,
+    SHADER_OPCODE_DTOF = 201,
+    SHADER_OPCODE_FTOD = 202,
+    SHADER_OPCODE_EVAL_SNAPPED = 203,
+    SHADER_OPCODE_EVAL_SAMPLE_INDEX = 204,
+    SHADER_OPCODE_EVAL_CENTROID = 205,
     SHADER_OPCODE_DCL_GS_INSTANCE_COUNT = 206,
+    SHADER_OPCODE_DDIV = 210,
+    SHADER_OPCODE_DFMA = 211,
+    SHADER_OPCODE_DRCP = 212,
+    SHADER_OPCODE_DTOI = 214,
+    SHADER_OPCODE_DTOU = 215,
+    SHADER_OPCODE_ITOD = 216,
+    SHADER_OPCODE_UTOD = 217,
     SHADER_OPCODE_COUNT = 218,
 };
 
@@ -2864,11 +2981,17 @@ enum {
     SHADER_OPERAND_4_COMPONENT = 2,
     SHADER_OPERAND_MASK_MODE = 0,
     SHADER_OPERAND_SELECT_1_MODE = 2,
+    SHADER_OPERAND_TYPE_TEMP = 0,
+    SHADER_OPERAND_TYPE_INPUT = 1,
+    SHADER_OPERAND_TYPE_OUTPUT = 2,
     SHADER_OPERAND_TYPE_IMMEDIATE32 = 4,
     SHADER_OPERAND_TYPE_IMMEDIATE64 = 5,
     SHADER_OPERAND_TYPE_LABEL = 10,
     SHADER_OPERAND_TYPE_INPUT_PRIMITIVEID = 11,
     SHADER_OPERAND_TYPE_OUTPUT_DEPTH = 12,
+    SHADER_OPERAND_TYPE_INPUT_CONTROL_POINT = 25,
+    SHADER_OPERAND_TYPE_OUTPUT_CONTROL_POINT = 26,
+    SHADER_OPERAND_TYPE_INPUT_PATCH_CONSTANT = 27,
     SHADER_OPERAND_TYPE_SM50_MAX = 40,
     SHADER_OPERAND_TYPE_COUNT = 41,
     SHADER_OPERAND_INDEX_0D = 0,
@@ -3481,6 +3604,690 @@ static bool shader_parse_opcode(ShaderTokenReader *reader, ShaderOpcode *opcode)
     opcode->operand_count = operand_count;
 
     return true;
+}
+
+
+/*
+ * DXBC generic I/O declarations do not encode a concrete component type in
+ * VMware shader bytecode.  Native D3D accepts UNKNOWN in an input/output
+ * signature, but some translation backends require UINT/SINT/FLOAT.  Resolve
+ * as much as possible from the shader's own typed instructions before the
+ * generated DXBC signature is serialized.
+ *
+ * Registers in tokenized DXBC are typeless and may be reused, so inference is
+ * deliberately conservative.  Conflicting evidence is left unresolved and
+ * the serializer's compatibility fallback remains the last resort.
+ */
+enum {
+    SHADER_INFER_TYPE_UNKNOWN = 0,
+    SHADER_INFER_TYPE_UINT = VMSVGA3D_D3D10_SHADER_COMPONENT_UINT32,
+    SHADER_INFER_TYPE_SINT = VMSVGA3D_D3D10_SHADER_COMPONENT_SINT32,
+    SHADER_INFER_TYPE_FLOAT = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32,
+    SHADER_INFER_TYPE_INTEGER = 4,
+    SHADER_INFER_TYPE_CONFLICT = 5,
+    SHADER_INFER_MAX_TEMPS = 4096,
+    SHADER_INFER_MAX_PASSES = 32,
+};
+
+typedef struct shader_type_inference_s {
+    uint8_t temp[SHADER_INFER_MAX_TEMPS];
+    uint8_t input[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    uint8_t output[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    uint8_t patch[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    bool input_fixed[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    bool output_fixed[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    bool patch_fixed[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+} ShaderTypeInference;
+
+static bool shader_infer_type_is_concrete(uint32_t type)
+{
+    return type >= SHADER_INFER_TYPE_UINT && type <= SHADER_INFER_TYPE_FLOAT;
+}
+
+static uint8_t shader_infer_type_combine(uint8_t current, uint32_t incoming)
+{
+    if (incoming == SHADER_INFER_TYPE_UNKNOWN ||
+        incoming == SHADER_INFER_TYPE_CONFLICT) {
+        return current;
+    }
+    if (current == SHADER_INFER_TYPE_UNKNOWN) {
+        return (uint8_t)incoming;
+    }
+    if (current == incoming || current == SHADER_INFER_TYPE_CONFLICT) {
+        return current;
+    }
+
+    /* Generic integer operations do not distinguish signed from unsigned. */
+    if (current == SHADER_INFER_TYPE_INTEGER &&
+        (incoming == SHADER_INFER_TYPE_UINT ||
+         incoming == SHADER_INFER_TYPE_SINT)) {
+        return (uint8_t)incoming;
+    }
+    if (incoming == SHADER_INFER_TYPE_INTEGER &&
+        (current == SHADER_INFER_TYPE_UINT ||
+         current == SHADER_INFER_TYPE_SINT)) {
+        return current;
+    }
+
+    return SHADER_INFER_TYPE_CONFLICT;
+}
+
+static bool shader_infer_type_merge(uint8_t *slot, bool fixed,
+                                    uint32_t incoming)
+{
+    uint8_t combined;
+
+    if (slot == NULL || fixed || incoming == SHADER_INFER_TYPE_UNKNOWN ||
+        incoming == SHADER_INFER_TYPE_CONFLICT) {
+        return false;
+    }
+
+    combined = shader_infer_type_combine(*slot, incoming);
+    if (combined == *slot) {
+        return false;
+    }
+    *slot = combined;
+    return true;
+}
+
+static bool shader_infer_operand_register(const ShaderOperand *operand,
+                                          uint32_t *register_index)
+{
+    uint32_t index;
+    uint32_t representation;
+
+    if (operand == NULL || register_index == NULL ||
+        operand->index_dimension == SHADER_OPERAND_INDEX_0D ||
+        operand->index_dimension > SHADER_OPERAND_INDEX_2D) {
+        return false;
+    }
+
+    index = operand->index_dimension - SHADER_OPERAND_INDEX_1D;
+    representation = operand->index[index].representation;
+    if (representation != SHADER_OPERAND_INDEX_IMMEDIATE32 &&
+        representation != SHADER_OPERAND_INDEX_IMMEDIATE64 &&
+        representation != SHADER_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE &&
+        representation != SHADER_OPERAND_INDEX_IMMEDIATE64_PLUS_RELATIVE) {
+        return false;
+    }
+
+    if (operand->index[index].immediate > UINT32_MAX) {
+        return false;
+    }
+    *register_index = (uint32_t)operand->index[index].immediate;
+    return true;
+}
+
+static uint32_t shader_infer_signature_get(
+    const SVGA3dDXShaderSignatureEntry *signature, const uint8_t *types,
+    uint32_t count, uint32_t register_index)
+{
+    uint32_t result = SHADER_INFER_TYPE_UNKNOWN;
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        uint32_t type;
+
+        if (signature[i].registerIndex != register_index) {
+            continue;
+        }
+        type = types[i];
+        if (type == SHADER_INFER_TYPE_UNKNOWN) {
+            continue;
+        }
+        if (result == SHADER_INFER_TYPE_UNKNOWN) {
+            result = type;
+        } else {
+            result = shader_infer_type_combine((uint8_t)result, type);
+        }
+    }
+
+    return result;
+}
+
+static bool shader_infer_signature_set(
+    const SVGA3dDXShaderSignatureEntry *signature, uint8_t *types,
+    const bool *fixed, uint32_t count, uint32_t register_index,
+    uint32_t type)
+{
+    bool changed = false;
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        if (signature[i].registerIndex == register_index) {
+            changed |= shader_infer_type_merge(&types[i], fixed[i], type);
+        }
+    }
+    return changed;
+}
+
+static uint32_t shader_infer_operand_get(const VMSVGA3DD3D10ShaderInfo *info,
+                                         const ShaderTypeInference *state,
+                                         const ShaderOperand *operand)
+{
+    uint32_t register_index;
+
+    if (!shader_infer_operand_register(operand, &register_index)) {
+        return SHADER_INFER_TYPE_UNKNOWN;
+    }
+
+    switch (operand->operand_type) {
+    case SHADER_OPERAND_TYPE_TEMP:
+        return register_index < SHADER_INFER_MAX_TEMPS
+            ? state->temp[register_index] : SHADER_INFER_TYPE_UNKNOWN;
+    case SHADER_OPERAND_TYPE_INPUT:
+    case SHADER_OPERAND_TYPE_INPUT_CONTROL_POINT:
+        return shader_infer_signature_get(info->input_signature, state->input,
+                                          info->input_signature_count,
+                                          register_index);
+    case SHADER_OPERAND_TYPE_OUTPUT:
+    case SHADER_OPERAND_TYPE_OUTPUT_CONTROL_POINT:
+        return shader_infer_signature_get(info->output_signature, state->output,
+                                          info->output_signature_count,
+                                          register_index);
+    case SHADER_OPERAND_TYPE_INPUT_PATCH_CONSTANT:
+        return shader_infer_signature_get(info->patch_signature, state->patch,
+                                          info->patch_signature_count,
+                                          register_index);
+    default:
+        return SHADER_INFER_TYPE_UNKNOWN;
+    }
+}
+
+static bool shader_infer_operand_set(const VMSVGA3DD3D10ShaderInfo *info,
+                                     ShaderTypeInference *state,
+                                     const ShaderOperand *operand,
+                                     uint32_t type)
+{
+    uint32_t register_index;
+
+    if (!shader_infer_operand_register(operand, &register_index)) {
+        return false;
+    }
+
+    switch (operand->operand_type) {
+    case SHADER_OPERAND_TYPE_TEMP:
+        return register_index < SHADER_INFER_MAX_TEMPS &&
+            shader_infer_type_merge(&state->temp[register_index], false, type);
+    case SHADER_OPERAND_TYPE_INPUT:
+    case SHADER_OPERAND_TYPE_INPUT_CONTROL_POINT:
+        return shader_infer_signature_set(
+            info->input_signature, state->input, state->input_fixed,
+            info->input_signature_count, register_index, type);
+    case SHADER_OPERAND_TYPE_OUTPUT:
+    case SHADER_OPERAND_TYPE_OUTPUT_CONTROL_POINT:
+        return shader_infer_signature_set(
+            info->output_signature, state->output, state->output_fixed,
+            info->output_signature_count, register_index, type);
+    case SHADER_OPERAND_TYPE_INPUT_PATCH_CONSTANT:
+        return shader_infer_signature_set(
+            info->patch_signature, state->patch, state->patch_fixed,
+            info->patch_signature_count, register_index, type);
+    default:
+        return false;
+    }
+}
+
+static const ShaderOperand *shader_infer_opcode_operand(const ShaderOpcode *opcode,
+                                                        uint32_t index)
+{
+    if (opcode == NULL || index >= opcode->operand_count || index >= 8) {
+        return NULL;
+    }
+    return &opcode->operands[opcode->operand_index[index]];
+}
+
+static bool shader_infer_operand_type(const VMSVGA3DD3D10ShaderInfo *info,
+                                      ShaderTypeInference *state,
+                                      const ShaderOpcode *opcode,
+                                      uint32_t operand_index, uint32_t type)
+{
+    return shader_infer_operand_set(
+        info, state, shader_infer_opcode_operand(opcode, operand_index), type);
+}
+
+static bool shader_infer_all_operands(const VMSVGA3DD3D10ShaderInfo *info,
+                                      ShaderTypeInference *state,
+                                      const ShaderOpcode *opcode, uint32_t type)
+{
+    bool changed = false;
+    uint32_t i;
+
+    for (i = 0; i < opcode->operand_count; i++) {
+        changed |= shader_infer_operand_type(info, state, opcode, i, type);
+    }
+    return changed;
+}
+
+static bool shader_infer_link_operands(const VMSVGA3DD3D10ShaderInfo *info,
+                                       ShaderTypeInference *state,
+                                       const ShaderOpcode *opcode,
+                                       uint32_t a_index, uint32_t b_index)
+{
+    const ShaderOperand *a = shader_infer_opcode_operand(opcode, a_index);
+    const ShaderOperand *b = shader_infer_opcode_operand(opcode, b_index);
+    uint32_t a_type;
+    uint32_t b_type;
+    bool changed = false;
+
+    if (a == NULL || b == NULL) {
+        return false;
+    }
+
+    a_type = shader_infer_operand_get(info, state, a);
+    b_type = shader_infer_operand_get(info, state, b);
+    if (a_type != SHADER_INFER_TYPE_UNKNOWN &&
+        a_type != SHADER_INFER_TYPE_CONFLICT) {
+        changed |= shader_infer_operand_set(info, state, b, a_type);
+    }
+    if (b_type != SHADER_INFER_TYPE_UNKNOWN &&
+        b_type != SHADER_INFER_TYPE_CONFLICT) {
+        changed |= shader_infer_operand_set(info, state, a, b_type);
+    }
+    return changed;
+}
+
+static bool shader_infer_opcode_types(const VMSVGA3DD3D10ShaderInfo *info,
+                                      ShaderTypeInference *state,
+                                      const ShaderOpcode *opcode)
+{
+    bool changed = false;
+
+    switch (opcode->opcode_type) {
+    /* Floating-point arithmetic. */
+    case SHADER_OPCODE_ADD:
+    case SHADER_OPCODE_DERIV_RTX:
+    case SHADER_OPCODE_DERIV_RTY:
+    case SHADER_OPCODE_DIV:
+    case SHADER_OPCODE_DP2:
+    case SHADER_OPCODE_DP3:
+    case SHADER_OPCODE_DP4:
+    case SHADER_OPCODE_EXP:
+    case SHADER_OPCODE_FRC:
+    case SHADER_OPCODE_LOG:
+    case SHADER_OPCODE_MAD:
+    case SHADER_OPCODE_MIN:
+    case SHADER_OPCODE_MAX:
+    case SHADER_OPCODE_MUL:
+    case SHADER_OPCODE_ROUND_NE:
+    case SHADER_OPCODE_ROUND_NI:
+    case SHADER_OPCODE_ROUND_PI:
+    case SHADER_OPCODE_ROUND_Z:
+    case SHADER_OPCODE_RSQ:
+    case SHADER_OPCODE_SQRT:
+    case SHADER_OPCODE_SINCOS:
+    case SHADER_OPCODE_DERIV_RTX_COARSE:
+    case SHADER_OPCODE_DERIV_RTX_FINE:
+    case SHADER_OPCODE_DERIV_RTY_COARSE:
+    case SHADER_OPCODE_DERIV_RTY_FINE:
+    case SHADER_OPCODE_RCP:
+    case SHADER_OPCODE_DADD:
+    case SHADER_OPCODE_DMAX:
+    case SHADER_OPCODE_DMIN:
+    case SHADER_OPCODE_DMUL:
+    case SHADER_OPCODE_DDIV:
+    case SHADER_OPCODE_DFMA:
+    case SHADER_OPCODE_DRCP:
+        return shader_infer_all_operands(info, state, opcode,
+                                         SHADER_INFER_TYPE_FLOAT);
+
+    /* Floating compares produce a DXBC integer mask. */
+    case SHADER_OPCODE_EQ:
+    case SHADER_OPCODE_GE:
+    case SHADER_OPCODE_LT:
+    case SHADER_OPCODE_NE:
+    case SHADER_OPCODE_DEQ:
+    case SHADER_OPCODE_DGE:
+    case SHADER_OPCODE_DLT:
+    case SHADER_OPCODE_DNE:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_UINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 2,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+
+    /* Explicit conversions. */
+    case SHADER_OPCODE_FTOI:
+    case SHADER_OPCODE_DTOI:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_SINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+    case SHADER_OPCODE_FTOU:
+    case SHADER_OPCODE_DTOU:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_UINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+    case SHADER_OPCODE_ITOF:
+    case SHADER_OPCODE_ITOD:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_SINT);
+        return changed;
+    case SHADER_OPCODE_UTOF:
+    case SHADER_OPCODE_UTOD:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_UINT);
+        return changed;
+    case SHADER_OPCODE_DTOF:
+    case SHADER_OPCODE_FTOD:
+        return shader_infer_all_operands(info, state, opcode,
+                                         SHADER_INFER_TYPE_FLOAT);
+    case SHADER_OPCODE_F32TOF16:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_UINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+    case SHADER_OPCODE_F16TOF32:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_UINT);
+        return changed;
+
+    /* Signed integer operations. */
+    case SHADER_OPCODE_IMAX:
+    case SHADER_OPCODE_IMIN:
+    case SHADER_OPCODE_INEG:
+    case SHADER_OPCODE_ISHR:
+    case SHADER_OPCODE_IBFE:
+    case SHADER_OPCODE_FIRSTBIT_SHI:
+        return shader_infer_all_operands(info, state, opcode,
+                                         SHADER_INFER_TYPE_SINT);
+
+    /* Unsigned integer operations. */
+    case SHADER_OPCODE_UDIV:
+    case SHADER_OPCODE_UMUL:
+    case SHADER_OPCODE_UMAD:
+    case SHADER_OPCODE_UMAX:
+    case SHADER_OPCODE_UMIN:
+    case SHADER_OPCODE_USHR:
+    case SHADER_OPCODE_UADDC:
+    case SHADER_OPCODE_USUBB:
+    case SHADER_OPCODE_COUNTBITS:
+    case SHADER_OPCODE_FIRSTBIT_HI:
+    case SHADER_OPCODE_FIRSTBIT_LO:
+    case SHADER_OPCODE_UBFE:
+        return shader_infer_all_operands(info, state, opcode,
+                                         SHADER_INFER_TYPE_UINT);
+
+    /* Integer operations whose signedness is not encoded by the operation. */
+    case SHADER_OPCODE_AND:
+    case SHADER_OPCODE_IADD:
+    case SHADER_OPCODE_IMAD:
+    case SHADER_OPCODE_IMUL:
+    case SHADER_OPCODE_ISHL:
+    case SHADER_OPCODE_NOT:
+    case SHADER_OPCODE_OR:
+    case SHADER_OPCODE_XOR:
+    case SHADER_OPCODE_BFI:
+    case SHADER_OPCODE_BFREV:
+        return shader_infer_all_operands(info, state, opcode,
+                                         SHADER_INFER_TYPE_INTEGER);
+
+    /* Integer comparisons: result is an unsigned comparison mask. */
+    case SHADER_OPCODE_IEQ:
+    case SHADER_OPCODE_INE:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_UINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_INTEGER);
+        changed |= shader_infer_operand_type(info, state, opcode, 2,
+                                             SHADER_INFER_TYPE_INTEGER);
+        return changed;
+    case SHADER_OPCODE_IGE:
+    case SHADER_OPCODE_ILT:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_UINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_SINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 2,
+                                             SHADER_INFER_TYPE_SINT);
+        return changed;
+    case SHADER_OPCODE_ULT:
+    case SHADER_OPCODE_UGE:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_UINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_UINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 2,
+                                             SHADER_INFER_TYPE_UINT);
+        return changed;
+
+    /* MOV preserves the underlying component type. */
+    case SHADER_OPCODE_MOV:
+    case SHADER_OPCODE_DMOV:
+        return shader_infer_link_operands(info, state, opcode, 0, 1);
+    case SHADER_OPCODE_MOVC:
+    case SHADER_OPCODE_DMOVC:
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_INTEGER);
+        changed |= shader_infer_link_operands(info, state, opcode, 0, 2);
+        changed |= shader_infer_link_operands(info, state, opcode, 0, 3);
+        changed |= shader_infer_link_operands(info, state, opcode, 2, 3);
+        return changed;
+
+    /* Control-flow predicates are integer/boolean bit patterns. */
+    case SHADER_OPCODE_BREAKC:
+    case SHADER_OPCODE_CALLC:
+    case SHADER_OPCODE_CASE:
+    case SHADER_OPCODE_CONTINUEC:
+    case SHADER_OPCODE_DISCARD:
+    case SHADER_OPCODE_IF:
+    case SHADER_OPCODE_RETC:
+    case SHADER_OPCODE_SWITCH:
+        return shader_infer_operand_type(info, state, opcode, 0,
+                                         SHADER_INFER_TYPE_INTEGER);
+
+    /* Texture sampling coordinates and comparison values are floating-point. */
+    case SHADER_OPCODE_SAMPLE:
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+    case SHADER_OPCODE_SAMPLE_C:
+    case SHADER_OPCODE_SAMPLE_CLZ:
+    case SHADER_OPCODE_SAMPLE_L:
+    case SHADER_OPCODE_SAMPLE_B:
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 4,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+    case SHADER_OPCODE_SAMPLE_D:
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 4,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 5,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+    case SHADER_OPCODE_LOD:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+    case SHADER_OPCODE_GATHER4:
+        return shader_infer_operand_type(info, state, opcode, 1,
+                                         SHADER_INFER_TYPE_FLOAT);
+    case SHADER_OPCODE_GATHER4_C:
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 4,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+    case SHADER_OPCODE_GATHER4_PO:
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 2,
+                                             SHADER_INFER_TYPE_SINT);
+        return changed;
+    case SHADER_OPCODE_GATHER4_PO_C:
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 2,
+                                             SHADER_INFER_TYPE_SINT);
+        changed |= shader_infer_operand_type(info, state, opcode, 5,
+                                             SHADER_INFER_TYPE_FLOAT);
+        return changed;
+
+    /* Texture loads use integer coordinates; the loaded value type is resource-defined. */
+    case SHADER_OPCODE_LD:
+        return shader_infer_operand_type(info, state, opcode, 1,
+                                         SHADER_INFER_TYPE_INTEGER);
+    case SHADER_OPCODE_LD_MS:
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_INTEGER);
+        changed |= shader_infer_operand_type(info, state, opcode, 3,
+                                             SHADER_INFER_TYPE_UINT);
+        return changed;
+    case SHADER_OPCODE_SAMPLE_POS:
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             SHADER_INFER_TYPE_FLOAT);
+        changed |= shader_infer_operand_type(info, state, opcode, 2,
+                                             SHADER_INFER_TYPE_UINT);
+        return changed;
+    case SHADER_OPCODE_SAMPLE_INFO:
+    case SHADER_OPCODE_BUFINFO:
+        return shader_infer_operand_type(info, state, opcode, 0,
+                                         SHADER_INFER_TYPE_UINT);
+
+    /* EvaluateAttribute preserves the input component type. */
+    case SHADER_OPCODE_EVAL_SNAPPED:
+    case SHADER_OPCODE_EVAL_SAMPLE_INDEX:
+    case SHADER_OPCODE_EVAL_CENTROID:
+        changed |= shader_infer_link_operands(info, state, opcode, 0, 1);
+        return changed;
+
+    default:
+        return false;
+    }
+}
+
+static void shader_infer_state_init(const VMSVGA3DD3D10ShaderInfo *info,
+                                    ShaderTypeInference *state)
+{
+    uint32_t i;
+
+    memset(state, 0, sizeof(*state));
+    for (i = 0; i < info->input_signature_count; i++) {
+        uint32_t type = info->input_signature[i].componentType;
+        if (shader_infer_type_is_concrete(type)) {
+            state->input[i] = (uint8_t)type;
+            state->input_fixed[i] = true;
+        }
+    }
+    for (i = 0; i < info->output_signature_count; i++) {
+        uint32_t type = info->output_signature[i].componentType;
+        if (shader_infer_type_is_concrete(type)) {
+            state->output[i] = (uint8_t)type;
+            state->output_fixed[i] = true;
+        }
+    }
+    for (i = 0; i < info->patch_signature_count; i++) {
+        uint32_t type = info->patch_signature[i].componentType;
+        if (shader_infer_type_is_concrete(type)) {
+            state->patch[i] = (uint8_t)type;
+            state->patch_fixed[i] = true;
+        }
+    }
+}
+
+static bool shader_infer_run_pass(const VMSVGA3DD3D10ShaderInfo *info,
+                                  ShaderTypeInference *state)
+{
+    const uint32_t *tokens = info->rewritten_bytecode;
+    ShaderTokenReader reader;
+    bool changed = false;
+
+    if (tokens == NULL || info->rewritten_bytecode_size < 8 ||
+        (info->rewritten_bytecode_size & 3u) != 0) {
+        return false;
+    }
+
+    reader.token = &tokens[2];
+    reader.total = info->rewritten_bytecode_size / 4u - 2u;
+    reader.remaining = reader.total;
+
+    while (shader_reader_can_read(&reader, 1)) {
+        ShaderOpcode opcode;
+
+        if (!shader_parse_opcode(&reader, &opcode)) {
+            return changed;
+        }
+        changed |= shader_infer_opcode_types(info, state, &opcode);
+    }
+
+    return changed;
+}
+
+static void shader_infer_apply(VMSVGA3DD3D10ShaderInfo *info,
+                               const ShaderTypeInference *state)
+{
+    uint32_t i;
+
+    for (i = 0; i < info->input_signature_count; i++) {
+        if (info->input_signature[i].componentType ==
+                VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN &&
+            shader_infer_type_is_concrete(state->input[i])) {
+            info->input_signature[i].componentType = state->input[i];
+        }
+    }
+    for (i = 0; i < info->output_signature_count; i++) {
+        if (info->output_signature[i].componentType ==
+                VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN &&
+            shader_infer_type_is_concrete(state->output[i])) {
+            info->output_signature[i].componentType = state->output[i];
+        }
+    }
+    for (i = 0; i < info->patch_signature_count; i++) {
+        if (info->patch_signature[i].componentType ==
+                VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN &&
+            shader_infer_type_is_concrete(state->patch[i])) {
+            info->patch_signature[i].componentType = state->patch[i];
+        }
+    }
+}
+
+VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resolve_component_types(
+    VMSVGA3DD3D10ShaderInfo *info)
+{
+    ShaderTypeInference state;
+    VMSVGA3DD3D10Level level;
+    uint32_t pass;
+
+    if (info == NULL) {
+        return VMSVGA3D_D3D10_LEVEL_INVALID;
+    }
+
+    level = shader_program_level(info->program_type);
+    if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+        return level;
+    }
+
+    /* Internal shaders already provide complete signatures. */
+    if (info->rewritten_bytecode == NULL || info->rewritten_bytecode_size < 8) {
+        return level;
+    }
+
+    shader_infer_state_init(info, &state);
+    for (pass = 0; pass < SHADER_INFER_MAX_PASSES; pass++) {
+        if (!shader_infer_run_pass(info, &state)) {
+            break;
+        }
+    }
+    shader_infer_apply(info, &state);
+
+    return level;
 }
 
 static uint32_t shader_make_opcode(uint32_t opcode, uint32_t length)
@@ -4275,10 +5082,22 @@ static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
         elements[i].name_offset = name_offset;
         elements[i].semantic_index = semantic[i].semantic_index;
         elements[i].system_value = shader_system_value(signature[i].semanticName);
-        elements[i].component_type =
-            signature[i].componentType == VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN
-            ? VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32
-            : signature[i].componentType;
+        if (signature[i].componentType ==
+            VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SIGNATURE-FALLBACK program=%u blob=0x%08x index=%u "
+                "reg=%u semantic=%u name=%s mask=0x%02x fallback=FLOAT32",
+                info != NULL ? info->program_type : UINT32_MAX, blob_type, i,
+                signature[i].registerIndex, signature[i].semanticName,
+                semantic[i].semantic_name != NULL
+                    ? semantic[i].semantic_name : "?",
+                component_mask);
+            elements[i].component_type =
+                VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
+        } else {
+            elements[i].component_type = signature[i].componentType;
+        }
         elements[i].register_index = signature[i].registerIndex;
 
         /*
@@ -4524,7 +5343,7 @@ static bool shader_match_input(VMSVGA3DD3D10ShaderInfo *shader,
     uint32_t i;
 
     for (i = 0; i < shader->input_signature_count; i++) {
-        const SVGA3dDXShaderSignatureEntry *input = &shader->input_signature[i];
+        SVGA3dDXShaderSignatureEntry *input = &shader->input_signature[i];
         VMSVGA3DD3D10ShaderSemantic *semantic = &shader->input_semantic[i];
         int32_t match = -1;
         uint32_t j;
@@ -4560,6 +5379,12 @@ static bool shader_match_input(VMSVGA3DD3D10ShaderInfo *shader,
             }
 
             semantic->semantic_index = output_semantic->semantic_index;
+            if (input->componentType ==
+                    VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN &&
+                output->componentType !=
+                    VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN) {
+                input->componentType = output->componentType;
+            }
         }
     }
     return masks_covered;

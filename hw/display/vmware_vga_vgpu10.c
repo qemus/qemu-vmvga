@@ -3920,14 +3920,6 @@ static uint32_t shader_infer_operand_get_mask(
     }
 }
 
-static uint32_t shader_infer_operand_get(const VMSVGA3DD3D10ShaderInfo *info,
-                                         const ShaderTypeInference *state,
-                                         const ShaderOperand *operand)
-{
-    return shader_infer_operand_get_mask(
-        info, state, operand, shader_infer_operand_component_mask(operand));
-}
-
 static bool shader_infer_operand_set_mask(
     const VMSVGA3DD3D10ShaderInfo *info, ShaderTypeInference *state,
     const ShaderOperand *operand, uint32_t component_mask, uint32_t type)

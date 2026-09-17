@@ -769,17 +769,10 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_bind_live(
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
-static uint32_t vmsvga3d_d3d11_uav_clear_sign_extend(
+static uint32_t vmsvga3d_d3d11_uav_clear_mask_narrow(
     uint32_t value, uint32_t bits)
 {
-    uint32_t sign_bit = UINT32_C(1) << (bits - 1);
-    uint32_t mask = (UINT32_C(1) << bits) - 1;
-
-    value &= mask;
-    if (value & sign_bit) {
-        value |= ~mask;
-    }
-    return value;
+    return value & ((UINT32_C(1) << bits) - 1);
 }
 
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_uint_live(
@@ -827,11 +820,13 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_uint_live(
 
     memcpy(native_values, values, sizeof(native_values));
     for (i = 0; i < component_count; i++) {
-        /* ClearUnorderedAccessViewUint is bit-precise: narrow signed formats
-         * consume the low channel bits without numeric conversion.  Sign
-         * extend those bits before the native call so backends which perform
-         * signed integer conversion still preserve the required bit pattern. */
-        native_values[i] = vmsvga3d_d3d11_uav_clear_sign_extend(
+        /* ClearUnorderedAccessViewUint permits the low channel bits to be
+         * stored directly for narrow signed formats.  The native UINT clear
+         * path numerically clamps full-width values, so sign-extending a
+         * negative narrow value turns it into a large UINT and saturates it
+         * to the channel maximum.  Mask to the guest channel width instead,
+         * preserving the bit-precise behaviour accepted by native drivers. */
+        native_values[i] = vmsvga3d_d3d11_uav_clear_mask_narrow(
             native_values[i], component_bits);
     }
 

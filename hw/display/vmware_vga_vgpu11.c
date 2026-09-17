@@ -2017,6 +2017,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     case SVGA_3D_CMD_DX_COPY_STRUCTURE_COUNT: {
         SVGA3dCmdDXCopyStructureCount command;
         VMSVGA3DD3D11CopyStructureCountPlan plan;
+        VMSVGA3DSurface *destination_surface = NULL;
         VMSVGA3DDxvkSurface *destination;
 
         if (size < sizeof(command)) {
@@ -2030,6 +2031,17 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             !vmsvga3d_d3d11_copy_structure_destination_live(
                 s, plan.destination_sid, &destination)) {
             return false;
+        }
+
+        if (plan.destination_sid != SVGA3D_INVALID_ID) {
+            destination_surface = s->svga3d->surfaces[plan.destination_sid];
+        }
+        /* CopyStructureCount writes only the native D3D11 buffer.  Invalidate
+         * CPU-shadow authority before submission so either success or a
+         * partially executed backend operation cannot leave stale arguments
+         * eligible for the CPU-direct indirect path. */
+        if (destination_surface != NULL) {
+            destination_surface->d3d11_indirect_args_shadow_authoritative = false;
         }
 
         /* Match VirtualBox: unlike clear/setupPipeline, this command does not
@@ -2211,9 +2223,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
 
         /* If a complete guest update established the argument bytes and no
          * tracked resource write has made that shadow stale, the direct call
-         * is exactly equivalent to DrawIndexedInstancedIndirect.  This avoids
-         * the problematic native indexed-indirect + SO path in DXVK 2.x while
-         * preserving native indirect execution for GPU-generated arguments. */
+         * is exactly equivalent to DrawIndexedInstancedIndirect. */
         if (vmsvga3d_d3d11_indexed_indirect_cpu_args_live(
                 s, plan.args_buffer_sid, plan.aligned_byte_offset, cpu_args)) {
             VMVGA_TRACE_LOCAL(

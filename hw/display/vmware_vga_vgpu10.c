@@ -10848,6 +10848,13 @@ static bool vmsvga3d_d3d10_update_subresource_live(
         layout.box.h == image->size.height &&
         layout.box.d == image->size.depth;
 
+    /* The MOB read below mutates the CPU shadow before the native upload.
+     * Clear any previous authority first so an upload failure can never leave
+     * the CPU bytes marked equal to an older native buffer. */
+    if (surface->format == SVGA3D_BUFFER && command->subResource == 0) {
+        surface->d3d11_indirect_args_shadow_authoritative = false;
+    }
+
     /* A partial guest update must not overwrite newer D3D9-rendered pixels
      * outside the box with stale CPU-shadow contents.  Preserve the complete
      * GPU image first, then overlay the requested MOB region below. */
@@ -10974,14 +10981,6 @@ static bool vmsvga3d_d3d10_update_subresource_live(
         return false;
     }
 
-    /* Only a complete guest write proves that every byte consumed by a
-     * later indirect draw is current in the CPU shadow.  Partial updates do
-     * not strengthen an existing stale shadow. */
-    if (surface->format == SVGA3D_BUFFER && command->subResource == 0 &&
-        full_image_update) {
-        surface->d3d11_indirect_args_shadow_authoritative = true;
-    }
-
     if (command->subResource == 0 &&
         !vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
             s, command->sid)) {
@@ -10991,6 +10990,13 @@ static bool vmsvga3d_d3d10_update_subresource_live(
             "result=FAIL",
             command->sid, command->subResource);
         return false;
+    }
+
+    /* Only a successful complete guest write proves that all bytes consumed
+     * by a later indirect draw match the native D3D11 buffer. */
+    if (surface->format == SVGA3D_BUFFER && command->subResource == 0 &&
+        full_image_update) {
+        surface->d3d11_indirect_args_shadow_authoritative = true;
     }
 
     VMVGA_TRACE_LOCAL(
@@ -12485,8 +12491,8 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
             destination, plan.destination_subresource, "pred-copy-region");
     }
-    /* An active predicate may make the native destination differ from the
-     * CPU shadow even when the CPU cannot determine whether the copy ran. */
+    /* Predication may make the native destination diverge even when the CPU
+     * cannot determine whether the copy executed. */
     if (plan.destination_subresource == 0) {
         destination->d3d11_indirect_args_shadow_authoritative = false;
     }

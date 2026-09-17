@@ -10012,6 +10012,24 @@ static void vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
         surface->sid, subresource, reason != NULL ? reason : "write");
 }
 
+static void vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
+    VMSVGA3DSurface *surface, const char *reason)
+{
+    if (surface == NULL || surface->format != SVGA3D_D24_UNORM_S8_UINT ||
+        (surface->surface_flags & SVGA3D_SURFACE_1D) == 0 ||
+        surface->mips == NULL || surface->mip_count == 0 ||
+        surface->mip_count > 64 ||
+        surface->d3d11_1d_d24s8_shadow_valid_mask == 0) {
+        return;
+    }
+
+    surface->d3d11_1d_d24s8_shadow_valid_mask = 0;
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-1D-DS-SHADOW action=invalidate-all sid=%u reason=%s",
+        surface->sid, reason != NULL ? reason : "write");
+}
+
 static bool vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
     struct vmsvga_state_s *s, uint32_t cid,
     SVGA3dDepthStencilViewId view_id, uint32_t clear_flags,
@@ -10128,8 +10146,9 @@ static bool vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
     return true;
 }
 
-static bool vmsvga3d_d3d10_surface_changed_full_live(
-    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource)
+static bool vmsvga3d_d3d10_surface_changed_full_live_internal(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
+    bool invalidate_shadow)
 {
     VMSVGA3DSurface *surface;
     SVGA3dBox box;
@@ -10144,8 +10163,10 @@ static bool vmsvga3d_d3d10_surface_changed_full_live(
         return false;
     }
 
-    vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
-        surface, subresource, "gpu-write");
+    if (invalidate_shadow) {
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
+            surface, subresource, "gpu-write");
+    }
 
     memset(&box, 0, sizeof(box));
     box.w = surface->mips[subresource].size.width;
@@ -10156,6 +10177,13 @@ static bool vmsvga3d_d3d10_surface_changed_full_live(
     }
 
     return vmsvga3d_surface_changed_live(s, sid, subresource, &box);
+}
+
+static bool vmsvga3d_d3d10_surface_changed_full_live(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource)
+{
+    return vmsvga3d_d3d10_surface_changed_full_live_internal(
+        s, sid, subresource, true);
 }
 
 static bool vmsvga3d_d3d10_rtv_changed_live(
@@ -10229,12 +10257,14 @@ static bool vmsvga3d_d3d10_rtv_changed_live(
 }
 
 static bool vmsvga3d_d3d10_dsv_changed_live(
-    struct vmsvga_state_s *s, uint32_t cid, SVGA3dDepthStencilViewId view_id)
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dDepthStencilViewId view_id,
+    bool invalidate_shadow)
 {
     SVGACOTableDXDSViewEntry *entry;
     VMSVGA3DSurface *surface;
-    uint32_t subresource = 0;
     uint32_t levels;
+    uint32_t slice_count;
+    uint32_t slice;
 
     if (view_id == SVGA3D_INVALID_ID) {
         return true;
@@ -10260,19 +10290,34 @@ static bool vmsvga3d_d3d10_dsv_changed_live(
     case SVGA3D_RESOURCE_TEXTURE1D:
     case SVGA3D_RESOURCE_TEXTURE2D:
     case SVGA3D_RESOURCE_TEXTURECUBE:
-        if (levels == 0 ||
-            entry->firstArraySlice > (UINT32_MAX - entry->mipSlice) / levels) {
+        if (levels == 0 || entry->mipSlice >= levels ||
+            entry->firstArraySlice >= surface->array_elements) {
             return false;
         }
-        subresource = entry->firstArraySlice * levels + entry->mipSlice;
-        break;
-    default:
-        subresource = entry->mipSlice;
-        break;
-    }
 
-    return vmsvga3d_d3d10_surface_changed_full_live(
-        s, entry->sid, subresource);
+        slice_count = entry->arraySize != 0 ? entry->arraySize : 1;
+        if (slice_count > surface->array_elements - entry->firstArraySlice) {
+            return false;
+        }
+
+        for (slice = 0; slice < slice_count; slice++) {
+            uint32_t array_slice = entry->firstArraySlice + slice;
+            uint32_t subresource = array_slice * levels + entry->mipSlice;
+
+            if (subresource >= surface->mip_count ||
+                !vmsvga3d_d3d10_surface_changed_full_live_internal(
+                    s, entry->sid, subresource, invalidate_shadow)) {
+                return false;
+            }
+        }
+        return true;
+    default:
+        if (entry->mipSlice >= surface->mip_count) {
+            return false;
+        }
+        return vmsvga3d_d3d10_surface_changed_full_live_internal(
+            s, entry->sid, entry->mipSlice, invalidate_shadow);
+    }
 }
 
 static void vmsvga3d_d3d10_bound_rtvs_changed_live(
@@ -10290,7 +10335,7 @@ static void vmsvga3d_d3d10_bound_rtvs_changed_live(
     }
 
     (void)vmsvga3d_d3d10_dsv_changed_live(
-        s, cid, context->shadow.renderState.depthStencilViewId);
+        s, cid, context->shadow.renderState.depthStencilViewId, true);
 }
 
 static bool vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
@@ -11500,6 +11545,13 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         return false;
     }
 
+    /* Native predication is asynchronous, so successful submission does not
+     * tell the CPU whether the copy executed.  Either outcome means the old
+     * CPU shadow can no longer be proven authoritative: if the copy executed
+     * it is stale, and if it did not we merely lose this readback fast path. */
+    vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
+        destination, plan.destination_subresource, "pred-copy-region");
+
     {
         SVGA3dBox dirty = {
             .x = plan.region.destination_x,
@@ -11576,6 +11628,12 @@ static bool vmsvga3d_d3d10_pred_copy_live(
             s->dxvk, destination->dxvk_surface, source->dxvk_surface)) {
         return false;
     }
+
+    /* CopyResource covers every subresource.  Conservatively invalidate the
+     * entire 1D D24S8 shadow even when a predicate is active and may suppress
+     * the native write; losing the fast path is preferable to stale readback. */
+    vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
+        destination, "pred-copy-resource");
 
     /* Native D3D11 predication is asynchronous.  If a predicate is bound,
      * successful submission does not prove that CopyResource actually wrote
@@ -11737,10 +11795,17 @@ static bool vmsvga3d_d3d10_clear_dsv_live(
         return false;
     }
 
-    (void)vmsvga3d_d3d10_dsv_changed_live(s, cid, clear_plan.view_id);
-    (void)vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
-        s, cid, clear_plan.view_id, command->flags, command->depth,
-        command->stencil);
+    if ((command->flags & (SVGA3D_CLEAR_DEPTH | SVGA3D_CLEAR_STENCIL)) != 0) {
+        /* The clear itself is mirrored into the CPU shadow below.  Record the
+         * native write for normal dirty tracking without first destroying the
+         * pre-clear validity needed to preserve an uncleared depth/stencil
+         * component on partial clears. */
+        (void)vmsvga3d_d3d10_dsv_changed_live(
+            s, cid, clear_plan.view_id, false);
+        (void)vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
+            s, cid, clear_plan.view_id, command->flags, command->depth,
+            command->stencil);
+    }
     return true;
 }
 

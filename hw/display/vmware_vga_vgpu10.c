@@ -5855,7 +5855,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_plan(
     const VMSVGA3DD3D10ShaderOutputSemantic *shader_outputs,
     uint32_t shader_output_count, VMSVGA3DD3D10StreamOutputPlan *plan)
 {
-    uint32_t max_semantic_index = 0;
     uint32_t i;
 
     if (entry == NULL || plan == NULL ||
@@ -5907,10 +5906,14 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_plan(
 
             if (output->register_index == src->registerIndex &&
                 (src->registerMask & ~output->mask) == 0) {
+                uint32_t output_first_bit =
+                    bit_first_set_1based(output->mask & 0x0f);
+
                 dst->semantic_name = output->semantic_name;
                 dst->semantic_index = output->semantic_index;
-                if (dst->semantic_index > max_semantic_index) {
-                    max_semantic_index = dst->semantic_index;
+                if (first_bit != 0 && output_first_bit != 0) {
+                    dst->start_component =
+                        (uint8_t)(first_bit - output_first_bit);
                 }
                 break;
             }
@@ -5919,33 +5922,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_plan(
         if (dst->semantic_name == NULL) {
             /* Keep unresolved declarations for host creation. */
             plan->all_semantics_resolved = false;
-        }
-    }
-
-    for (i = 0; i <= max_semantic_index; i++) {
-        uint32_t min_start_component = UINT32_MAX;
-        uint32_t j;
-
-        for (j = 0; j < plan->declaration_count; j++) {
-            const VMSVGA3DD3D10StreamOutputDecl *decl = &plan->declarations[j];
-
-            if (decl->semantic_index == i &&
-                decl->start_component < min_start_component) {
-                min_start_component = decl->start_component;
-            }
-        }
-
-        if (min_start_component == UINT32_MAX) {
-            continue;
-        }
-
-        for (j = 0; j < plan->declaration_count; j++) {
-            VMSVGA3DD3D10StreamOutputDecl *decl = &plan->declarations[j];
-
-            if (decl->semantic_index == i) {
-                decl->start_component =
-                    (uint8_t)(decl->start_component - min_start_component);
-            }
         }
     }
 
@@ -9077,7 +9053,18 @@ static bool vmsvga3d_dx_resource_plan_live(
 
         /* VirtualBox builds the D3D11 resource flags from the complete SVGA
          * surface flags at creation time.  Keep the existing geometry/format
-         * plan, but replace the native D3D10-era policy with the SM5 one. */
+         * plan, but replace the native D3D10-era policy with the SM5 one.
+         *
+         * The D3D10 resource plan also enables GENERATE_MIPS for mipmapped
+         * textures that can be both shader resources and render targets.
+         * Preserve that capability for the D3D11 backend: GenerateMips is a
+         * no-op if the native resource was not created with this misc flag. */
+        if (texture_resource &&
+            !(surface->surface_flags & SVGA3D_SURFACE_RESOURCE_CLAMP) &&
+            (plan->primary.misc_flags & D3D10_RESOURCE_MISC_GENERATE_MIPS)) {
+            policy.misc_flags |= D3D10_RESOURCE_MISC_GENERATE_MIPS;
+        }
+
         plan->primary.bind_flags = policy.bind_flags;
         plan->primary.misc_flags = policy.misc_flags;
         plan->primary.structure_byte_stride = policy.structure_byte_stride;
@@ -11875,6 +11862,466 @@ static bool vmsvga3d_d3d10_predicate_write_executed_live(
     return false;
 }
 
+static bool vmsvga3d_d3d10_is_bc_copy_format(uint32_t format)
+{
+    return (format >= DXGI_BC1_TYPELESS && format <= DXGI_BC5_SNORM) ||
+           (format >= DXGI_BC6H_TYPELESS && format <= DXGI_BC7_UNORM_SRGB);
+}
+
+static bool vmsvga3d_d3d10_is_uncompressed_bc_copy_format(uint32_t format)
+{
+    return (format >= DXGI_R32G32B32A32_TYPELESS &&
+            format <= DXGI_R32G32B32A32_SINT) ||
+           (format >= DXGI_R16G16B16A16_TYPELESS &&
+            format <= DXGI_R32G32_SINT);
+}
+
+static bool vmsvga3d_d3d10_bc_copy_compatible(
+    const VMSVGA3DSurface *source, const VMSVGA3DSurface *destination,
+    const struct svga3d_surface_desc **source_desc_out,
+    const struct svga3d_surface_desc **destination_desc_out)
+{
+    const struct svga3d_surface_desc *source_desc;
+    const struct svga3d_surface_desc *destination_desc;
+    VMSVGA3DD3D10Format source_format;
+    VMSVGA3DD3D10Format destination_format;
+    bool source_bc;
+    bool destination_bc;
+
+    if (source == NULL || destination == NULL ||
+        source->multisample_count > 1 || destination->multisample_count > 1) {
+        return false;
+    }
+
+    source_format = vmsvga3d_d3d10_surface_format(source->format);
+    destination_format = vmsvga3d_d3d10_surface_format(destination->format);
+    if (source_format.min_level == VMSVGA3D_D3D10_LEVEL_INVALID ||
+        destination_format.min_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+        return false;
+    }
+
+    source_bc = vmsvga3d_d3d10_is_bc_copy_format(source_format.dxgi_format);
+    destination_bc =
+        vmsvga3d_d3d10_is_bc_copy_format(destination_format.dxgi_format);
+    if (source_bc == destination_bc) {
+        return false;
+    }
+
+    if (source_bc) {
+        if (!vmsvga3d_d3d10_is_uncompressed_bc_copy_format(
+                destination_format.dxgi_format)) {
+            return false;
+        }
+    } else if (!vmsvga3d_d3d10_is_uncompressed_bc_copy_format(
+                   source_format.dxgi_format)) {
+        return false;
+    }
+
+    source_desc = svga3dsurface_get_desc(source->format);
+    destination_desc = svga3dsurface_get_desc(destination->format);
+    if (source_desc->format != source->format ||
+        destination_desc->format != destination->format ||
+        source_desc->bytes_per_block == 0 ||
+        source_desc->pitch_bytes_per_block != source_desc->bytes_per_block ||
+        destination_desc->pitch_bytes_per_block !=
+            destination_desc->bytes_per_block ||
+        source_desc->bytes_per_block != destination_desc->bytes_per_block) {
+        return false;
+    }
+
+    if (source_bc) {
+        if (source_desc->block_size.width != 4 ||
+            source_desc->block_size.height != 4 ||
+            source_desc->block_size.depth != 1 ||
+            destination_desc->block_size.width != 1 ||
+            destination_desc->block_size.height != 1 ||
+            destination_desc->block_size.depth != 1) {
+            return false;
+        }
+    } else if (source_desc->block_size.width != 1 ||
+               source_desc->block_size.height != 1 ||
+               source_desc->block_size.depth != 1 ||
+               destination_desc->block_size.width != 4 ||
+               destination_desc->block_size.height != 4 ||
+               destination_desc->block_size.depth != 1) {
+        return false;
+    }
+
+    if (source_desc_out != NULL) {
+        *source_desc_out = source_desc;
+    }
+    if (destination_desc_out != NULL) {
+        *destination_desc_out = destination_desc;
+    }
+    return true;
+}
+
+static bool vmsvga3d_d3d10_raw_copy_compatible(
+    const VMSVGA3DSurface *source, const VMSVGA3DSurface *destination,
+    bool whole_resource,
+    const struct svga3d_surface_desc **source_desc_out,
+    const struct svga3d_surface_desc **destination_desc_out)
+{
+    const struct svga3d_surface_desc *source_desc;
+    const struct svga3d_surface_desc *destination_desc;
+    VMSVGA3DD3D10Format source_format;
+    VMSVGA3DD3D10Format destination_format;
+    uint32_t source_typeless;
+    uint32_t destination_typeless;
+    bool r9g9b9e5_to_r32;
+
+    if (vmsvga3d_d3d10_bc_copy_compatible(
+            source, destination, source_desc_out, destination_desc_out)) {
+        return true;
+    }
+
+    if (source == NULL || destination == NULL ||
+        source->multisample_count > 1 || destination->multisample_count > 1 ||
+        (source->surface_flags & SVGA3D_SURFACE_BIND_DEPTH_STENCIL) ||
+        (destination->surface_flags & SVGA3D_SURFACE_BIND_DEPTH_STENCIL)) {
+        return false;
+    }
+
+    source_format = vmsvga3d_d3d10_surface_format(source->format);
+    destination_format = vmsvga3d_d3d10_surface_format(destination->format);
+    if (source_format.min_level == VMSVGA3D_D3D10_LEVEL_INVALID ||
+        destination_format.min_level == VMSVGA3D_D3D10_LEVEL_INVALID ||
+        source_format.dxgi_format == destination_format.dxgi_format) {
+        return false;
+    }
+
+    source_typeless =
+        vmsvga3d_d3d10_typeless_format(source_format.dxgi_format);
+    destination_typeless =
+        vmsvga3d_d3d10_typeless_format(destination_format.dxgi_format);
+    r9g9b9e5_to_r32 =
+        source_format.dxgi_format == DXGI_R9G9B9E5_SHAREDEXP &&
+        destination_typeless == DXGI_R32_TYPELESS;
+
+    /* Same-type-group CopySubresourceRegion is a raw bit reinterpretation.
+     * Native CopyResource already handles those groups correctly, so keep the
+     * synchronous fallback there only for the D3D10.1 R9G9B9E5 -> R32 case. */
+    if (!r9g9b9e5_to_r32 &&
+        (whole_resource || source_typeless != destination_typeless)) {
+        return false;
+    }
+
+    source_desc = svga3dsurface_get_desc(source->format);
+    destination_desc = svga3dsurface_get_desc(destination->format);
+    if (source_desc->format != source->format ||
+        destination_desc->format != destination->format ||
+        source_desc->bytes_per_block == 0 ||
+        source_desc->pitch_bytes_per_block != source_desc->bytes_per_block ||
+        destination_desc->pitch_bytes_per_block !=
+            destination_desc->bytes_per_block ||
+        source_desc->bytes_per_block != destination_desc->bytes_per_block ||
+        source_desc->block_size.width != 1 ||
+        source_desc->block_size.height != 1 ||
+        source_desc->block_size.depth != 1 ||
+        destination_desc->block_size.width != 1 ||
+        destination_desc->block_size.height != 1 ||
+        destination_desc->block_size.depth != 1) {
+        return false;
+    }
+
+    if (source_desc_out != NULL) {
+        *source_desc_out = source_desc;
+    }
+    if (destination_desc_out != NULL) {
+        *destination_desc_out = destination_desc;
+    }
+    return true;
+}
+
+static bool vmsvga3d_d3d10_raw_copy_subresource_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *source,
+    uint32_t source_subresource, VMSVGA3DSurface *destination,
+    uint32_t destination_subresource, const SVGA3dCopyBox *copy_box,
+    SVGA3dBox *destination_box_out)
+{
+    const struct svga3d_surface_desc *source_desc;
+    const struct svga3d_surface_desc *destination_desc;
+    VMSVGA3DSurfaceImage *source_image;
+    VMSVGA3DSurfaceImage *destination_image;
+    VMSVGA3DD3D10Box destination_box;
+    uint32_t source_block_x;
+    uint32_t source_block_y;
+    uint32_t source_block_z;
+    uint32_t destination_block_x;
+    uint32_t destination_block_y;
+    uint32_t destination_block_z;
+    uint32_t blocks_x;
+    uint32_t blocks_y;
+    uint32_t blocks_z;
+    uint32_t source_blocks_x;
+    uint32_t source_blocks_y;
+    uint32_t source_blocks_z;
+    uint32_t destination_blocks_x;
+    uint32_t destination_blocks_y;
+    uint32_t destination_blocks_z;
+    uint64_t source_offset;
+    uint64_t row_bytes;
+    uint64_t source_end;
+    uint32_t source_right;
+    uint32_t source_bottom;
+    uint32_t source_back;
+    uint32_t destination_right;
+    uint32_t destination_bottom;
+    uint32_t destination_back;
+
+    if (s == NULL || source == NULL || destination == NULL ||
+        source->mips == NULL || destination->mips == NULL ||
+        source_subresource >= source->mip_count ||
+        destination_subresource >= destination->mip_count ||
+        !vmsvga3d_d3d10_raw_copy_compatible(
+            source, destination, copy_box == NULL,
+            &source_desc, &destination_desc)) {
+        return false;
+    }
+
+    source_image = &source->mips[source_subresource];
+    destination_image = &destination->mips[destination_subresource];
+    if (source_image->data == NULL || source_image->pitch == 0 ||
+        source_image->plane_size == 0 || source_image->data_size == 0 ||
+        source_image->plane_size % source_image->pitch != 0 ||
+        source_image->data_size % source_image->plane_size != 0 ||
+        source_image->size.width == 0 || source_image->size.height == 0 ||
+        source_image->size.depth == 0 || destination_image->size.width == 0 ||
+        destination_image->size.height == 0 ||
+        destination_image->size.depth == 0) {
+        return false;
+    }
+
+    source_blocks_x = 1 + (source_image->size.width - 1) /
+                            source_desc->block_size.width;
+    source_blocks_y = 1 + (source_image->size.height - 1) /
+                            source_desc->block_size.height;
+    source_blocks_z = 1 + (source_image->size.depth - 1) /
+                            source_desc->block_size.depth;
+    destination_blocks_x = 1 + (destination_image->size.width - 1) /
+                                 destination_desc->block_size.width;
+    destination_blocks_y = 1 + (destination_image->size.height - 1) /
+                                 destination_desc->block_size.height;
+    destination_blocks_z = 1 + (destination_image->size.depth - 1) /
+                                 destination_desc->block_size.depth;
+
+    if (copy_box == NULL) {
+        if (source_blocks_x != destination_blocks_x ||
+            source_blocks_y != destination_blocks_y ||
+            source_blocks_z != destination_blocks_z) {
+            return false;
+        }
+
+        source_block_x = 0;
+        source_block_y = 0;
+        source_block_z = 0;
+        destination_block_x = 0;
+        destination_block_y = 0;
+        destination_block_z = 0;
+        blocks_x = source_blocks_x;
+        blocks_y = source_blocks_y;
+        blocks_z = source_blocks_z;
+    } else {
+        uint32_t source_width;
+        uint32_t source_height;
+        uint32_t source_depth;
+        uint32_t destination_available_x;
+        uint32_t destination_available_y;
+        uint32_t destination_available_z;
+
+        if (copy_box->w == 0 || copy_box->h == 0 || copy_box->d == 0 ||
+            copy_box->srcx >= source_image->size.width ||
+            copy_box->srcy >= source_image->size.height ||
+            copy_box->srcz >= source_image->size.depth ||
+            copy_box->x >= destination_image->size.width ||
+            copy_box->y >= destination_image->size.height ||
+            copy_box->z >= destination_image->size.depth ||
+            copy_box->srcx % source_desc->block_size.width != 0 ||
+            copy_box->srcy % source_desc->block_size.height != 0 ||
+            copy_box->srcz % source_desc->block_size.depth != 0 ||
+            copy_box->x % destination_desc->block_size.width != 0 ||
+            copy_box->y % destination_desc->block_size.height != 0 ||
+            copy_box->z % destination_desc->block_size.depth != 0) {
+            return false;
+        }
+
+        source_width = MIN(copy_box->w,
+                           source_image->size.width - copy_box->srcx);
+        source_height = MIN(copy_box->h,
+                            source_image->size.height - copy_box->srcy);
+        source_depth = MIN(copy_box->d,
+                           source_image->size.depth - copy_box->srcz);
+        if ((source_width % source_desc->block_size.width != 0 &&
+             copy_box->srcx + source_width != source_image->size.width) ||
+            (source_height % source_desc->block_size.height != 0 &&
+             copy_box->srcy + source_height != source_image->size.height) ||
+            (source_depth % source_desc->block_size.depth != 0 &&
+             copy_box->srcz + source_depth != source_image->size.depth)) {
+            return false;
+        }
+
+        source_block_x = copy_box->srcx / source_desc->block_size.width;
+        source_block_y = copy_box->srcy / source_desc->block_size.height;
+        source_block_z = copy_box->srcz / source_desc->block_size.depth;
+        destination_block_x =
+            copy_box->x / destination_desc->block_size.width;
+        destination_block_y =
+            copy_box->y / destination_desc->block_size.height;
+        destination_block_z =
+            copy_box->z / destination_desc->block_size.depth;
+        blocks_x = 1 + (source_width - 1) /
+                           source_desc->block_size.width;
+        blocks_y = 1 + (source_height - 1) /
+                           source_desc->block_size.height;
+        blocks_z = 1 + (source_depth - 1) /
+                           source_desc->block_size.depth;
+
+        destination_available_x = destination_blocks_x - destination_block_x;
+        destination_available_y = destination_blocks_y - destination_block_y;
+        destination_available_z = destination_blocks_z - destination_block_z;
+        blocks_x = MIN(blocks_x, destination_available_x);
+        blocks_y = MIN(blocks_y, destination_available_y);
+        blocks_z = MIN(blocks_z, destination_available_z);
+    }
+
+    if (blocks_x == 0 || blocks_y == 0 || blocks_z == 0 ||
+        source_block_x >= source_blocks_x ||
+        source_block_y >= source_blocks_y ||
+        source_block_z >= source_blocks_z ||
+        destination_block_x >= destination_blocks_x ||
+        destination_block_y >= destination_blocks_y ||
+        destination_block_z >= destination_blocks_z ||
+        blocks_x > source_blocks_x - source_block_x ||
+        blocks_y > source_blocks_y - source_block_y ||
+        blocks_z > source_blocks_z - source_block_z) {
+        return false;
+    }
+
+    row_bytes = (uint64_t)blocks_x * source_desc->bytes_per_block;
+    source_offset = 0;
+    if (row_bytes == 0 || row_bytes > UINT32_MAX ||
+        row_bytes > source_image->pitch ||
+        (uint64_t)source_block_x * source_desc->bytes_per_block >
+            source_image->pitch - row_bytes ||
+        !vmsvga3d_u64_add_product(
+            &source_offset, source_block_x, source_desc->bytes_per_block) ||
+        !vmsvga3d_u64_add_product(
+            &source_offset, source_block_y, source_image->pitch) ||
+        !vmsvga3d_u64_add_product(
+            &source_offset, source_block_z, source_image->plane_size)) {
+        return false;
+    }
+
+    source_end = source_offset;
+    if (!vmsvga3d_u64_add_product(
+            &source_end, blocks_y - 1, source_image->pitch) ||
+        !vmsvga3d_u64_add_product(
+            &source_end, blocks_z - 1, source_image->plane_size) ||
+        source_end > UINT64_MAX - row_bytes) {
+        return false;
+    }
+    source_end += row_bytes;
+    if (source_end > source_image->data_size ||
+        !vmsvga3d_d3d10_readback_image_live(
+            s, source, source_subresource)) {
+        return false;
+    }
+
+    source_right = MIN(
+        (uint64_t)source_image->size.width,
+        ((uint64_t)source_block_x + blocks_x) *
+            source_desc->block_size.width);
+    source_bottom = MIN(
+        (uint64_t)source_image->size.height,
+        ((uint64_t)source_block_y + blocks_y) *
+            source_desc->block_size.height);
+    source_back = MIN(
+        (uint64_t)source_image->size.depth,
+        ((uint64_t)source_block_z + blocks_z) *
+            source_desc->block_size.depth);
+    destination_right = MIN(
+        (uint64_t)destination_image->size.width,
+        ((uint64_t)destination_block_x + blocks_x) *
+            destination_desc->block_size.width);
+    destination_bottom = MIN(
+        (uint64_t)destination_image->size.height,
+        ((uint64_t)destination_block_y + blocks_y) *
+            destination_desc->block_size.height);
+    destination_back = MIN(
+        (uint64_t)destination_image->size.depth,
+        ((uint64_t)destination_block_z + blocks_z) *
+            destination_desc->block_size.depth);
+
+    destination_box.left =
+        destination_block_x * destination_desc->block_size.width;
+    destination_box.top =
+        destination_block_y * destination_desc->block_size.height;
+    destination_box.front =
+        destination_block_z * destination_desc->block_size.depth;
+    destination_box.right = destination_right;
+    destination_box.bottom = destination_bottom;
+    destination_box.back = destination_back;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-COPY-BLOCK src=%u:%u fmt=%u block=%ux%ux%u "
+        "dst=%u:%u fmt=%u block=%ux%ux%u blocks=%ux%ux%u "
+        "src-box=%u,%u,%u-%u,%u,%u dst-box=%u,%u,%u-%u,%u,%u",
+        source->sid, source_subresource, source->format,
+        source_desc->block_size.width, source_desc->block_size.height,
+        source_desc->block_size.depth, destination->sid,
+        destination_subresource, destination->format,
+        destination_desc->block_size.width, destination_desc->block_size.height,
+        destination_desc->block_size.depth, blocks_x, blocks_y, blocks_z,
+        source_block_x * source_desc->block_size.width,
+        source_block_y * source_desc->block_size.height,
+        source_block_z * source_desc->block_size.depth, source_right,
+        source_bottom, source_back, destination_box.left, destination_box.top,
+        destination_box.front, destination_box.right, destination_box.bottom,
+        destination_box.back);
+
+    if (!vmsvga3d_dxvk_d3d11_update_subresource(
+            s->dxvk, destination->dxvk_surface, destination_subresource,
+            &destination_box, source_image->data + source_offset,
+            source_image->pitch, source_image->plane_size)) {
+        return false;
+    }
+
+    if (destination_box_out != NULL) {
+        destination_box_out->x = destination_box.left;
+        destination_box_out->y = destination_box.top;
+        destination_box_out->z = destination_box.front;
+        destination_box_out->w = destination_box.right - destination_box.left;
+        destination_box_out->h = destination_box.bottom - destination_box.top;
+        destination_box_out->d = destination_box.back - destination_box.front;
+    }
+    return true;
+}
+
+static bool vmsvga3d_d3d10_raw_copy_resource_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *source,
+    VMSVGA3DSurface *destination)
+{
+    uint32_t subresource;
+
+    if (source == NULL || destination == NULL || source->mips == NULL ||
+        destination->mips == NULL || source->mip_count == 0 ||
+        source->mip_count != destination->mip_count ||
+        !vmsvga3d_d3d10_raw_copy_compatible(
+            source, destination, true, NULL, NULL)) {
+        return false;
+    }
+
+    for (subresource = 0; subresource < source->mip_count; subresource++) {
+        if (!vmsvga3d_d3d10_raw_copy_subresource_live(
+                s, source, subresource, destination, subresource, NULL, NULL)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
 static bool vmsvga3d_d3d10_pred_copy_region_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXPredCopyRegion *command)
@@ -11906,6 +12353,39 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         command->srcSubResource >= source->mip_count ||
         command->dstSubResource >= destination->mip_count) {
         return false;
+    }
+
+    if (context->shadow.predication.queryID == SVGA3D_INVALID_ID &&
+        vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
+        vmsvga3d_d3d10_raw_copy_compatible(
+            source, destination, false, NULL, NULL)) {
+        SVGA3dBox dirty;
+
+        if (!vmsvga3d_d3d10_copy_surface_materialize_live(
+                s, source, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
+            !vmsvga3d_d3d10_copy_surface_materialize_live(
+                s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
+            !vmsvga3d_d3d10_raw_copy_subresource_live(
+                s, source, command->srcSubResource, destination,
+                command->dstSubResource, &command->box, &dirty)) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-COPY-FORMAT kind=region-raw-compatible cid=%u "
+            "src=%u:%u guest=%u native=%u dst=%u:%u guest=%u native=%u",
+            cid, command->srcSid, command->srcSubResource, source->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
+            command->dstSid, command->dstSubResource, destination->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(
+                destination->dxvk_surface));
+
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
+            destination, command->dstSubResource, "pred-copy-region-raw");
+        (void)vmsvga3d_surface_changed_live(
+            s, command->dstSid, command->dstSubResource, &dirty);
+        return true;
     }
 
     level = vmsvga3d_d3d10_copy_subresource_plan(
@@ -12034,6 +12514,32 @@ static bool vmsvga3d_d3d10_pred_copy_live(
         !vmsvga3d_d3d10_copy_surface_materialize_live(
             s, destination, plan.destination_create_kind)) {
         return false;
+    }
+
+    if (context->shadow.predication.queryID == SVGA3D_INVALID_ID &&
+        vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
+        vmsvga3d_d3d10_raw_copy_compatible(
+            source, destination, true, NULL, NULL)) {
+        if (!vmsvga3d_d3d10_raw_copy_resource_live(
+                s, source, destination)) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-COPY-FORMAT kind=resource-raw-compatible cid=%u "
+            "src=%u guest=%u native=%u dst=%u guest=%u native=%u",
+            cid, command->srcSid, source->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
+            command->dstSid, destination->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(
+                destination->dxvk_surface));
+
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
+            destination, "pred-copy-resource-raw");
+        (void)vmsvga3d_d3d10_surface_changed_full_live(
+            s, command->dstSid, 0);
+        return true;
     }
 
     VMVGA_TRACE_LOCAL(

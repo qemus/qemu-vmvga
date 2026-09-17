@@ -1426,6 +1426,45 @@ static bool vmsvga3d_d3d11_indirect_args_buffer_live(
     return true;
 }
 
+static bool vmsvga3d_d3d11_indexed_indirect_cpu_args_live(
+    struct vmsvga_state_s *s, SVGA3dSurfaceId sid, uint32_t byte_offset,
+    uint32_t args[5])
+{
+    VMSVGA3DSurface *surface;
+    const uint8_t *data;
+    const SVGA3dSurfaceAllFlags gpu_write_flags =
+        SVGA3D_SURFACE_BIND_STREAM_OUTPUT |
+        SVGA3D_SURFACE_BIND_UAVIEW |
+        SVGA3D_SURFACE_BIND_RENDER_TARGET |
+        SVGA3D_SURFACE_BIND_DEPTH_STENCIL;
+
+    if (s == NULL || s->svga3d == NULL || args == NULL ||
+        sid == SVGA3D_INVALID_ID || sid >= SVGA3D_MAX_SURFACE_IDS ||
+        (byte_offset & 3u) != 0) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[sid];
+    if (surface == NULL || surface->format != SVGA3D_BUFFER ||
+        surface->mips == NULL || surface->mip_count == 0 ||
+        surface->mips[0].data == NULL ||
+        !surface->d3d11_indirect_args_shadow_authoritative ||
+        (surface->surface_flags & SVGA3D_SURFACE_DRAWINDIRECT_ARGS) == 0 ||
+        (surface->surface_flags & gpu_write_flags) != 0 ||
+        byte_offset > surface->mips[0].data_size ||
+        sizeof(uint32_t) * 5u > surface->mips[0].data_size - byte_offset) {
+        return false;
+    }
+
+    data = surface->mips[0].data + byte_offset;
+    args[0] = ldl_le_p(data + 0);
+    args[1] = ldl_le_p(data + 4);
+    args[2] = ldl_le_p(data + 8);
+    args[3] = ldl_le_p(data + 12);
+    args[4] = ldl_le_p(data + 16);
+    return true;
+}
+
 static bool vmsvga3d_d3d11_native_predication_suspend(
     struct vmsvga_state_s *s, uint32_t cid, VMSVGA3DDXContext *context,
     bool *was_enabled)
@@ -2157,6 +2196,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         SVGA3dCmdDXDrawIndexedInstancedIndirect command;
         VMSVGA3DD3D11DrawIndexedInstancedIndirectPlan plan;
         VMSVGA3DDxvkSurface *args_buffer;
+        uint32_t cpu_args[5];
         bool success;
 
         if (size < sizeof(command)) {
@@ -2165,19 +2205,41 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         memcpy(&command, payload, sizeof(command));
 
         if (vmsvga3d_d3d11_draw_indexed_instanced_indirect_plan(
-                &command, &plan) == VMSVGA3D_D3D11_LEVEL_INVALID ||
-            !vmsvga3d_d3d11_indirect_args_buffer_live(
+                &command, &plan) == VMSVGA3D_D3D11_LEVEL_INVALID) {
+            return false;
+        }
+
+        /* If a complete guest update established the argument bytes and no
+         * tracked resource write has made that shadow stale, the direct call
+         * is exactly equivalent to DrawIndexedInstancedIndirect.  This avoids
+         * the problematic native indexed-indirect + SO path in DXVK 2.x while
+         * preserving native indirect execution for GPU-generated arguments. */
+        if (vmsvga3d_d3d11_indexed_indirect_cpu_args_live(
+                s, plan.args_buffer_sid, plan.aligned_byte_offset, cpu_args)) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-DRAW-INDEXED-INDIRECT path=cpu-direct cid=%u sid=%u "
+                "offset=%u args=%u,%u,%u,%d,%u",
+                cid, plan.args_buffer_sid, plan.aligned_byte_offset,
+                cpu_args[0], cpu_args[1], cpu_args[2], (int32_t)cpu_args[3],
+                cpu_args[4]);
+            return vmsvga3d_d3d10_draw_indexed_instanced_live(
+                s, cid, cpu_args[0], cpu_args[1], cpu_args[2],
+                (int32_t)cpu_args[3], cpu_args[4]);
+        }
+
+        if (!vmsvga3d_d3d11_indirect_args_buffer_live(
                 s, plan.args_buffer_sid, &args_buffer)) {
             return false;
         }
 
-        /* VirtualBox materializes the argument buffer before pipeline setup,
-         * then uses the normal draw setup and post-draw state bookkeeping.
-         */
         vmsvga3d_dx_pipeline_setup_live(s, cid);
         success = vmsvga3d_d3d11_draw_indexed_instanced_indirect_live(
                       s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;
+        if (success) {
+            vmsvga3d_d3d10_bound_rtvs_changed_live(s, cid, context);
+        }
         vmsvga3d_dx_post_draw_live(s, cid);
         return success;
     }

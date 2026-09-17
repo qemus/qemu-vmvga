@@ -369,6 +369,12 @@ typedef struct vmsvga3d_surface_s {
      * clear-only compatibility path, track subresources whose CPU shadow is
      * known to exactly match the native D3D11 resource. */
     uint64_t d3d11_1d_d24s8_shadow_valid_mask;
+    /* A full guest update can make a DRAWINDIRECT_ARGS buffer's CPU shadow
+     * exactly match its native D3D11 buffer.  Keep that fact explicit so
+     * indexed indirect draws can use the equivalent direct call without
+     * guessing from the mere presence of CPU storage.  Any later tracked
+     * resource write clears this bit. */
+    bool d3d11_indirect_args_shadow_authoritative;
     /* Pure-2D GB ScreenTarget fast-path bookkeeping.  When authoritative is
      * true, the currently bound MOB contains the complete visible contents of
      * subresource 0 and may be used directly as the QEMU scanout when its
@@ -396,135 +402,6 @@ typedef struct vmsvga3d_surface_s {
     uint32_t trace_vgpu9_last_write_kind;
     uint32_t trace_vgpu9_last_write_cid;
 } VMSVGA3DSurface;
-
-/* Copy diagnostics are observational unless VMVGA_COPY_DIAG_BYTES=1 is set.
- * Keep optional GPU readbacks separate from normal debug tracing: they can
- * serialize execution. Never replace guest data or change copy dispatch. */
-static void vmsvga3d_copy_diag_surface(
-    const char *stage, const char *role, const VMSVGA3DSurface *surface,
-    uint32_t subresource)
-{
-    const VMSVGA3DSurfaceImage *image;
-
-    if (!VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
-        return;
-    }
-    if (surface == NULL) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG stage=%s role=%s surface=NULL",
-                          stage, role);
-        return;
-    }
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "COPYDIAG stage=%s role=%s sid=%u sub=%u guest=%u native=%u "
-        "resident=%u flags=0x%016" PRIx64 " arrays=%u mips=%u total=%u ms=%u",
-        stage, role, surface->sid, subresource, surface->format,
-        vmsvga3d_dxvk_d3d11_surface_native_format(surface->dxvk_surface),
-        vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface),
-        (uint64_t)surface->surface_flags, surface->array_elements,
-        surface->face[0].numMipLevels, surface->mip_count,
-        surface->multisample_count);
-    if (surface->mips == NULL || subresource >= surface->mip_count) {
-        return;
-    }
-    image = &surface->mips[subresource];
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "COPYDIAG stage=%s role=%s sid=%u sub=%u size=%ux%ux%u "
-        "pitch=%u plane=%u bytes=%u shadow=%u",
-        stage, role, surface->sid, subresource, image->size.width,
-        image->size.height, image->size.depth, image->pitch,
-        image->plane_size, image->data_size, image->data != NULL);
-}
-
-static bool vmsvga3d_copy_diag_bytes_enabled(void)
-{
-    const char *value;
-
-    if (!VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
-        return false;
-    }
-    value = getenv("VMVGA_COPY_DIAG_BYTES");
-    return value != NULL && strcmp(value, "1") == 0;
-}
-
-static void vmsvga3d_copy_diag_bytes(
-    const char *stage, uint32_t sid, uint32_t subresource,
-    const uint8_t *data, size_t size)
-{
-    size_t offset;
-
-    if (!vmsvga3d_copy_diag_bytes_enabled() || data == NULL) {
-        return;
-    }
-    size = MIN(size, (size_t)256);
-    for (offset = 0; offset < size; offset += 16) {
-        char hex[16 * 2 + 1];
-        size_t count = MIN(size - offset, (size_t)16);
-        size_t i;
-
-        for (i = 0; i < count; i++) {
-            snprintf(hex + i * 2, sizeof(hex) - i * 2,
-                     "%02x", data[offset + i]);
-        }
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "COPYDIAG-BYTES stage=%s sid=%u sub=%u offset=%zu hex=%s",
-            stage, sid, subresource, offset, hex);
-    }
-}
-
-static void vmsvga3d_copy_diag_snapshot(
-    struct vmsvga_state_s *s, const char *stage,
-    VMSVGA3DSurface *surface, uint32_t subresource)
-{
-    VMSVGA3DSurfaceImage *image;
-    uint8_t *data;
-    bool result;
-
-    if (!vmsvga3d_copy_diag_bytes_enabled()) {
-        return;
-    }
-    if (s == NULL || surface == NULL || surface->mips == NULL ||
-        subresource >= surface->mip_count || surface->multisample_count > 1 ||
-        !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG snapshot=%s result=SKIP-not-resident-or-valid",
-                          stage);
-        return;
-    }
-    image = &surface->mips[subresource];
-    /* Both target Wine tests use very small resources. Bound allocations and
-     * avoid diagnostic readbacks of ordinary desktop textures. */
-    if (image->data_size == 0 || image->data_size > 65536 ||
-        image->pitch == 0 || image->plane_size == 0 ||
-        image->plane_size % image->pitch != 0 ||
-        image->data_size % image->plane_size != 0) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG snapshot=%s sid=%u sub=%u result=SKIP-layout-or-size",
-                          stage, surface->sid, subresource);
-        return;
-    }
-    data = g_try_malloc0(image->data_size);
-    if (data == NULL) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG snapshot=%s result=SKIP-allocation", stage);
-        return;
-    }
-    result = vmsvga3d_dxvk_d3d11_readback_subresource(
-        s->dxvk, surface->dxvk_surface, subresource, data, image->pitch,
-        image->pitch, image->plane_size / image->pitch,
-        image->plane_size, image->data_size / image->plane_size);
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                      "COPYDIAG snapshot=%s sid=%u sub=%u result=%s",
-                      stage, surface->sid, subresource, result ? "OK" : "FAIL");
-    if (result) {
-        vmsvga3d_copy_diag_bytes(stage, surface->sid, subresource,
-                               data, image->data_size);
-    }
-    g_free(data);
-}
 
 /* vmware_vga_vgpu10.c is included below after the legacy command handlers.
  * SurfaceCopy needs the same vGPU10 resource materializer when either side
@@ -6721,16 +6598,6 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
             vmsvga3d_dxvk_d3d11_surface_resident(src_surface->dxvk_surface) ||
             vmsvga3d_dxvk_d3d11_surface_resident(dst_surface->dxvk_surface);
     }
-
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                      "COPYDIAG route=SURFACE_COPY valid=%u d3d11=%u boxes=%u",
-                      valid, d3d11_copy, box_count);
-    vmsvga3d_copy_diag_surface("SURFACE_COPY", "src", src_surface,
-        src_surface != NULL ? body->src.face * src_surface->face[0].numMipLevels +
-                              body->src.mipmap : 0);
-    vmsvga3d_copy_diag_surface("SURFACE_COPY", "dst", dst_surface,
-        dst_surface != NULL ? body->dest.face * dst_surface->face[0].numMipLevels +
-                              body->dest.mipmap : 0);
 
     if (valid && !d3d11_copy &&
         (!vmsvga3d_d3d9_runtime_surface_info(s, src_surface, &src_info) ||
@@ -16041,17 +15908,6 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
                 "VMVGA-3D-CMD path=%s name=%s id=%u action=%s fifo=0x%08x\n",
                 vmsvga3d_trace_command_path(cmd), info->name, cmd,
                 vmsvga3d_trace_command_action(cmd, info), fifo_start);
-    }
-
-    if (trace_3d && (strstr(info->name, "COPY") != NULL ||
-                     strstr(info->name, "CONVERT") != NULL ||
-                     strstr(info->name, "STRETCH") != NULL ||
-                     strstr(info->name, "TRANSFER") != NULL)) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "COPYDIAG route=%s cmd=%u cid=%u action=%s fifo=0x%08x",
-            info->name, cmd, dx_context,
-            vmsvga3d_trace_command_action(cmd, info), fifo_start);
     }
 
     if (info->handler != NULL) {

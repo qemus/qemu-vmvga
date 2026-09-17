@@ -203,6 +203,9 @@ typedef struct vmsvga3d_d3d10_create_desc_s {
     uint32_t mip_levels;
     uint32_t array_size;
     uint32_t format;
+    /* Typed format used for CPU-readable staging copies. The primary resource
+     * may be typeless so that guest views can reinterpret it. */
+    uint32_t readback_format;
     uint32_t sample_count;
     uint32_t sample_quality;
     uint32_t usage;

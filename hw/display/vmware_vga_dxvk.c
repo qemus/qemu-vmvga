@@ -9724,7 +9724,9 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
           staging_desc.width = MAX(1u, desc->width >> mip_level);
           staging_desc.mip_levels = 1;
           staging_desc.array_size = 1;
-          staging_desc.format = desc->format;
+          staging_desc.format = desc->readback_format != 0
+                                    ? desc->readback_format
+                                    : desc->format;
           staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
           staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
           result = create_texture1d(dxvk->d3d11_device, &staging_desc, NULL,
@@ -9781,7 +9783,9 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
 
           staging_desc.mip_levels = 1;
           staging_desc.array_size = 1;
-          staging_desc.format = desc->format;
+          staging_desc.format = desc->readback_format != 0
+                                    ? desc->readback_format
+                                    : desc->format;
           staging_desc.sample_desc.count = 1;
           staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
           staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
@@ -9825,14 +9829,43 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
               staging = surface->d3d11_readback_staging_2d;
               staging_transient = false;
           } else {
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-READBACK-TEX2D stage=create sid=%u sub=%u native=%u "
+                  "staging=%u size=%ux%u",
+                  surface->sid, subresource, desc->format,
+                  staging_desc.format, staging_desc.width, staging_desc.height);
               result = create_texture2d(dxvk->d3d11_device, &staging_desc, NULL,
                                         &staging);
               if (!vmsvga3d_dxvk_succeeded(result) || staging == NULL) {
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "DX-READBACK-TEX2D stage=create-result sid=%u sub=%u "
+                      "result=FAIL hr=0x%08x",
+                      surface->sid, subresource, (uint32_t)result);
                   return false;
               }
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-READBACK-TEX2D stage=create-result sid=%u sub=%u "
+                  "result=OK",
+                  surface->sid, subresource);
+          }
+          if (source_box == NULL) {
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-READBACK-TEX2D stage=copy sid=%u sub=%u",
+                  surface->sid, subresource);
           }
           copy_region(dxvk->d3d11_context, staging, 0, 0, 0, 0,
                       surface->d3d11_resource, subresource, copy_box);
+          if (source_box == NULL) {
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "DX-READBACK-TEX2D stage=copy-result sid=%u sub=%u "
+                  "result=OK",
+                  surface->sid, subresource);
+          }
           break;
       }
     case VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
@@ -9850,7 +9883,9 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
           staging_desc.height = MAX(1u, desc->height >> mip_level);
           staging_desc.depth = MAX(1u, desc->depth >> mip_level);
           staging_desc.mip_levels = 1;
-          staging_desc.format = desc->format;
+          staging_desc.format = desc->readback_format != 0
+                                    ? desc->readback_format
+                                    : desc->format;
           staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
           staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
           result = create_texture3d(dxvk->d3d11_device, &staging_desc, NULL,
@@ -9866,10 +9901,37 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
         return false;
     }
 
+    if (desc->resource_dimension ==
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
+        source_box == NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-READBACK-TEX2D stage=map sid=%u sub=%u",
+            surface->sid, subresource);
+    }
     result = map(dxvk->d3d11_context, staging, 0,
                  VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
+        if (desc->resource_dimension ==
+                VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
+            source_box == NULL) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-READBACK-TEX2D stage=map-result sid=%u sub=%u "
+                "result=FAIL hr=0x%08x data=%u",
+                surface->sid, subresource, (uint32_t)result,
+                mapped.data != NULL ? 1u : 0u);
+        }
         goto out;
+    }
+    if (desc->resource_dimension ==
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
+        source_box == NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-READBACK-TEX2D stage=map-result sid=%u sub=%u result=OK "
+            "rowPitch=%u depthPitch=%u",
+            surface->sid, subresource, mapped.row_pitch, mapped.depth_pitch);
     }
 
     if (desc->resource_dimension ==
@@ -10043,7 +10105,9 @@ bool vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
     staging_desc.height = batch_bottom - batch_top;
     staging_desc.mip_levels = 1;
     staging_desc.array_size = 1;
-    staging_desc.format = desc->format;
+    staging_desc.format = desc->readback_format != 0
+                                    ? desc->readback_format
+                                    : desc->format;
     staging_desc.sample_desc.count = 1;
     staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
     staging_desc.cpu_access_flags = VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;

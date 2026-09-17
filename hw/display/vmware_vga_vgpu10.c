@@ -908,6 +908,11 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_resource_plan(
 
     d3d10_texture_desc(&plan->primary, surface, dimension,
                        plan->resource_format, &policy);
+    /* Keep the guest-requested typed format for CPU readback. The native
+     * resource is usually typeless to support compatible guest views, but a
+     * staging texture does not need that flexibility and should retain the
+     * concrete format whenever the guest supplied one. */
+    plan->primary.readback_format = plan->requested_format;
 
     if (surface->multisample_count <= 1) {
         d3d10_texture_companions(surface, plan);

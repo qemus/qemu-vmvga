@@ -471,6 +471,12 @@ struct vmsvga3d_state_s {
     SVGA3dRect screen_target_dirty_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
     bool screen_target_full_present_pending;
     uint32_t legacy_present_sid;
+    SVGA3dSurfaceFormat legacy_present_format;
+    uint32_t legacy_present_d3d9_format;
+    uint32_t legacy_present_width;
+    uint32_t legacy_present_height;
+    uint8_t *legacy_present_pixels;
+    size_t legacy_present_pixels_size;
     uint32_t legacy_present_rect_count;
     SVGA3dCopyRect
         legacy_present_rects[VMSVGA3D_LEGACY_PRESENT_DAMAGE_RECTS];
@@ -2314,9 +2320,17 @@ static bool vmsvga3d_legacy_present_queue_live(
     const VMSVGA3DD3D9PresentPlan *plan)
 {
     struct vmsvga3d_state_s *state;
-    const SVGA3dCopyRect *queued_rects;
-    uint32_t queued_count;
-    SVGA3dCopyRect full_screen_rect;
+    VMSVGA3DSurface *surface;
+    VMSVGA3DSurfaceImage *image;
+    VMSVGA3DD3D9TransferSurface surface_info;
+    const SVGA3dCopyRect *present_rects;
+    uint32_t present_rect_count;
+    uint32_t screen_width;
+    uint32_t screen_height;
+    uint32_t visible_rect_count = 0;
+    bool full_screen_present = false;
+    SVGA3dCopyRect full_screen_damage = { 0 };
+    uint32_t i;
 
     if (s == NULL || command == NULL || plan == NULL || s->svga3d == NULL ||
         command->sid >= SVGA3D_MAX_SURFACE_IDS ||
@@ -2326,77 +2340,130 @@ static bool vmsvga3d_legacy_present_queue_live(
         return false;
     }
 
+    state = s->svga3d;
+    surface = state->surfaces[command->sid];
+    image = surface != NULL && surface->mip_count != 0 ? &surface->mips[0] : NULL;
+    screen_width = vmsvga_active_width(s);
+    screen_height = vmsvga_active_height(s);
+    if (surface == NULL || image == NULL || screen_width == 0 ||
+        screen_height == 0 ||
+        !vmsvga3d_d3d9_runtime_surface_info(s, surface, &surface_info) ||
+        !surface_info.resident) {
+        return false;
+    }
+
     if (rect_count == 0) {
         if (!plan->synthesize_full_screen_rect ||
             plan->effective_rect_count != 1) {
             return false;
         }
-        queued_rects = &plan->full_screen_rect;
-        queued_count = 1;
+        present_rects = &plan->full_screen_rect;
+        present_rect_count = 1;
     } else {
         if (rects == NULL || plan->effective_rect_count != rect_count) {
             return false;
         }
-        queued_rects = rects;
-        queued_count = rect_count;
+        present_rects = rects;
+        present_rect_count = rect_count;
     }
 
-    state = s->svga3d;
+    if (present_rect_count > VMSVGA3D_LEGACY_PRESENT_DAMAGE_RECTS) {
+        return false;
+    }
 
-    /*
-     * A legacy PRESENT is a scanout operation, not a reason to synchronously
-     * download the D3D9 render target into QEMU's CPU framebuffer.  Keep only
-     * enough information for the frontend refresh path to sample the newest
-     * completed frame.  Switching source surfaces is uncommon and cannot be
-     * safely coalesced, so preserve ordering by flushing the previous source.
-     */
+    /* A private GPU scanout preserves the contents that existed at PRESENT
+     * time.  The source surface may therefore be rendered into immediately
+     * after this command without changing what a later QEMU frontend sees. */
     if (state->legacy_present_pending &&
-        state->legacy_present_sid != command->sid &&
+        (state->legacy_present_format != surface->format ||
+         state->legacy_present_d3d9_format != surface_info.format ||
+         state->legacy_present_width != screen_width ||
+         state->legacy_present_height != screen_height) &&
         !vmsvga3d_legacy_present_flush_live(s)) {
         return false;
     }
 
-    if (!state->legacy_present_pending) {
-        state->legacy_present_sid = command->sid;
-        state->legacy_present_rect_count = 0;
-        state->legacy_present_pending = true;
+    for (i = 0; i < present_rect_count; i++) {
+        SVGA3dCopyRect clipped;
+
+        vmsvga3d_clip_present_rect(&present_rects[i], &image->size,
+                                   screen_width, screen_height, &clipped);
+        if (clipped.w == 0 || clipped.h == 0) {
+            continue;
+        }
+
+        visible_rect_count++;
+        if (vmsvga3d_legacy_present_full_rect(s, &clipped)) {
+            full_screen_present = true;
+            full_screen_damage = clipped;
+            full_screen_damage.srcx = clipped.x;
+            full_screen_damage.srcy = clipped.y;
+        }
     }
 
-    /*
-     * Full-screen PRESENT is by far the common rendering path.  Replacing an
-     * older full-screen frame rather than appending it lets an unobserved VNC
-     * console drop intermediate frames without growing work or forcing GPU
-     * readback while RDP is the active display path.
-     */
-    if (queued_count == 1 &&
-        vmsvga3d_legacy_present_full_rect(s, &queued_rects[0])) {
-        state->legacy_present_rects[0] = queued_rects[0];
+    if (visible_rect_count == 0) {
+        return true;
+    }
+
+    if (!full_screen_present &&
+        visible_rect_count > VMSVGA3D_LEGACY_PRESENT_DAMAGE_RECTS -
+                                 state->legacy_present_rect_count &&
+        state->legacy_present_pending &&
+        !vmsvga3d_legacy_present_flush_live(s)) {
+        return false;
+    }
+
+    for (i = 0; i < present_rect_count; i++) {
+        SVGA3dCopyRect clipped;
+        VMSVGA3DD3D9Rect source_rect;
+        VMSVGA3DD3D9Rect destination_rect;
+
+        vmsvga3d_clip_present_rect(&present_rects[i], &image->size,
+                                   screen_width, screen_height, &clipped);
+        if (clipped.w == 0 || clipped.h == 0) {
+            continue;
+        }
+
+        if (!vmsvga3d_d3d9_screen_blit_copy_rect(
+                &clipped, &source_rect, &destination_rect) ||
+            !vmsvga3d_dxvk_d3d9_legacy_present_copy(
+                s->dxvk, surface->dxvk_surface, 0, screen_width,
+                screen_height, surface_info.format, &source_rect,
+                &destination_rect)) {
+            return false;
+        }
+    }
+
+    state->legacy_present_sid = command->sid;
+    state->legacy_present_format = surface->format;
+    state->legacy_present_d3d9_format = surface_info.format;
+    state->legacy_present_width = screen_width;
+    state->legacy_present_height = screen_height;
+    state->legacy_present_pending = true;
+
+    if (full_screen_present) {
+        state->legacy_present_rects[0] = full_screen_damage;
         state->legacy_present_rect_count = 1;
         return true;
     }
 
-    if (queued_count <= VMSVGA3D_LEGACY_PRESENT_DAMAGE_RECTS -
-                            state->legacy_present_rect_count) {
-        memcpy(&state->legacy_present_rects[state->legacy_present_rect_count],
-               queued_rects, (size_t)queued_count * sizeof(*queued_rects));
-        state->legacy_present_rect_count += queued_count;
-        return true;
+    for (i = 0; i < present_rect_count; i++) {
+        SVGA3dCopyRect clipped;
+        SVGA3dCopyRect damage;
+
+        vmsvga3d_clip_present_rect(&present_rects[i], &image->size,
+                                   screen_width, screen_height, &clipped);
+        if (clipped.w == 0 || clipped.h == 0) {
+            continue;
+        }
+
+        damage = clipped;
+        damage.srcx = clipped.x;
+        damage.srcy = clipped.y;
+        state->legacy_present_rects[state->legacy_present_rect_count++] =
+            damage;
     }
 
-    /*
-     * Too many partial PRESENTs arrived between frontend refreshes.  Sampling
-     * the newest full surface is preferable to stalling the guest merely to
-     * preserve intermediate host-console frames that no frontend consumed.
-     */
-    memset(&full_screen_rect, 0, sizeof(full_screen_rect));
-    full_screen_rect.w = vmsvga_active_width(s);
-    full_screen_rect.h = vmsvga_active_height(s);
-    if (full_screen_rect.w == 0 || full_screen_rect.h == 0) {
-        return false;
-    }
-
-    state->legacy_present_rects[0] = full_screen_rect;
-    state->legacy_present_rect_count = 1;
     return true;
 }
 
@@ -2553,6 +2620,9 @@ static void vmsvga3d_reset(struct vmsvga_state_s *s)
 
     vmsvga3d_gart_disable_live(s);
     g_hash_table_destroy(state->mobs);
+    g_free(state->legacy_present_pixels);
+    state->legacy_present_pixels = NULL;
+    state->legacy_present_pixels_size = 0;
     g_free(state);
 
     s->svga3d = NULL;
@@ -3074,17 +3144,6 @@ static void vmsvga3d_surface_install(
             "SURFACE result=REJECT reason=DXVK_SURFACE_CREATE sid=%u "
             "format=%u flags=0x%016" PRIx64 " bytes=%zu",
             sid, format, surface_flags, surface->storage_bytes);
-        vmsvga3d_surface_free(surface);
-        return;
-    }
-
-    if (old_surface != NULL && state->legacy_present_pending &&
-        sid == state->legacy_present_sid &&
-        !vmsvga3d_legacy_present_flush_live(s)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "SURFACE result=REJECT reason=LEGACY_PRESENT_PENDING "
-                          "sid=%u",
-                          sid);
         vmsvga3d_surface_free(surface);
         return;
     }
@@ -3754,15 +3813,6 @@ static void vmsvga3d_surface_destroy_live(struct vmsvga_state_s *s,
 
     surface = state->surfaces[sid];
     if (surface == NULL) {
-        return;
-    }
-
-    if (state->legacy_present_pending && sid == state->legacy_present_sid &&
-        !vmsvga3d_legacy_present_flush_live(s)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "SURFACE_DESTROY result=REJECT "
-                          "reason=LEGACY_PRESENT_PENDING sid=%u",
-                          sid);
         return;
     }
 
@@ -6334,14 +6384,15 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_present(
         !vmsvga3d_d3d9_present_plan(&surface_info, rect_count, width, height,
                                     &plan) ||
         plan.execution != VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED ||
-        !surface_info.resident) {
+        !surface_info.resident ||
+        plan.effective_rect_count > VMSVGA3D_LEGACY_PRESENT_DAMAGE_RECTS) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
 
     return vmsvga3d_legacy_present_queue_live(s, command, rects, rect_count,
                                                &plan)
                ? VMSVGA3D_D3D9_ACCEL_COMPLETE
-               : VMSVGA3D_D3D9_ACCEL_FAILED;
+               : VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
 }
 
 static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_screen_blit(
@@ -7735,10 +7786,12 @@ static bool vmsvga3d_present_rect(
 static bool vmsvga3d_legacy_present_flush_live(struct vmsvga_state_s *s)
 {
     struct vmsvga3d_state_s *state;
-    VMSVGA3DSurface *surface;
-    VMSVGA3DSurfaceImage *image;
-    const struct svga3d_surface_desc *desc = NULL;
-    uint32_t sid;
+    VMSVGA3DSurface snapshot_surface = { 0 };
+    VMSVGA3DSurfaceImage snapshot_image = { 0 };
+    const struct svga3d_surface_desc *desc;
+    uint64_t pitch;
+    uint64_t data_size;
+    uint8_t *pixels;
     uint32_t i;
 
     if (s == NULL || s->svga3d == NULL) {
@@ -7750,44 +7803,75 @@ static bool vmsvga3d_legacy_present_flush_live(struct vmsvga_state_s *s)
         return true;
     }
 
-    sid = state->legacy_present_sid;
-    if (sid == SVGA3D_INVALID_ID || sid >= SVGA3D_MAX_SURFACE_IDS ||
+    if (state->legacy_present_format == SVGA3D_FORMAT_INVALID ||
+        state->legacy_present_width == 0 || state->legacy_present_height == 0 ||
         state->legacy_present_rect_count == 0) {
         vmsvga3d_legacy_present_reset_live(s);
         return true;
     }
 
-    surface = state->surfaces[sid];
-    image = surface != NULL && surface->mip_count != 0 ? &surface->mips[0] : NULL;
-    if (surface == NULL || image == NULL ||
-        !vmsvga3d_present_format(surface, &desc)) {
-        vmsvga3d_legacy_present_reset_live(s);
-        return true;
-    }
-
-    /*
-     * A QEMU display frontend has now explicitly requested pixels.  Synchronize
-     * the newest renderer-owned contents exactly once here, rather than once
-     * per guest PRESENT.  With an idle VNC listener this function is never
-     * reached from the frontend refresh path, so RDP-only rendering remains
-     * free of legacy scanout readbacks.
-     */
-    if (!vmsvga3d_surface_readback_to_shadow(s, surface, image, 0)) {
+    desc = svga3dsurface_get_desc(state->legacy_present_format);
+    if (desc->format != state->legacy_present_format ||
+        (desc->block_desc & SVGA3DBLOCKDESC_RGB_UNORM) !=
+            SVGA3DBLOCKDESC_RGB_UNORM ||
+        desc->block_size.width != 1 || desc->block_size.height != 1 ||
+        desc->block_size.depth != 1 || desc->bytes_per_block == 0 ||
+        desc->bytes_per_block > sizeof(uint64_t) ||
+        desc->pitch_bytes_per_block != desc->bytes_per_block ||
+        desc->bitDepth.blue == 0 || desc->bitDepth.green == 0 ||
+        desc->bitDepth.red == 0) {
         return false;
     }
 
+    pitch = (uint64_t)state->legacy_present_width * desc->bytes_per_block;
+    data_size = pitch * state->legacy_present_height;
+    if (pitch == 0 || pitch > UINT32_MAX || data_size == 0 ||
+        data_size > UINT32_MAX || data_size > SIZE_MAX) {
+        return false;
+    }
+
+    if (state->legacy_present_pixels_size < (size_t)data_size) {
+        pixels = g_try_realloc(state->legacy_present_pixels,
+                               (size_t)data_size);
+        if (pixels == NULL) {
+            return false;
+        }
+        state->legacy_present_pixels = pixels;
+        state->legacy_present_pixels_size = (size_t)data_size;
+    }
+
+    /* Only a host display consumer reaches this path.  PRESENT itself merely
+     * snapshots GPU pixels into the private scanout, so RDP-only rendering
+     * does not synchronize the renderer with a CPU framebuffer. */
+    if (!vmsvga3d_dxvk_d3d9_legacy_present_readback(
+            s->dxvk, state->legacy_present_pixels, (uint32_t)pitch,
+            state->legacy_present_height)) {
+        return false;
+    }
+
+    snapshot_image.size.width = state->legacy_present_width;
+    snapshot_image.size.height = state->legacy_present_height;
+    snapshot_image.size.depth = 1;
+    snapshot_image.pitch = (uint32_t)pitch;
+    snapshot_image.plane_size = (uint32_t)data_size;
+    snapshot_image.data_size = (uint32_t)data_size;
+    snapshot_image.data = state->legacy_present_pixels;
+    snapshot_surface.format = state->legacy_present_format;
+    snapshot_surface.mip_count = 1;
+    snapshot_surface.mips = &snapshot_image;
+
     for (i = 0; i < state->legacy_present_rect_count; i++) {
         if (!vmsvga3d_present_rect(
-                s, surface, image, desc, &state->legacy_present_rects[i],
-                false)) {
+                s, &snapshot_surface, &snapshot_image, desc,
+                &state->legacy_present_rects[i], false)) {
             return false;
         }
     }
 
     for (i = 0; i < state->legacy_present_rect_count; i++) {
         if (!vmsvga3d_present_rect(
-                s, surface, image, desc, &state->legacy_present_rects[i],
-                true)) {
+                s, &snapshot_surface, &snapshot_image, desc,
+                &state->legacy_present_rects[i], true)) {
             return false;
         }
     }
@@ -7795,7 +7879,7 @@ static bool vmsvga3d_legacy_present_flush_live(struct vmsvga_state_s *s)
     if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
         fprintf(stderr,
                 "VMVGA-LEGACY-PRESENT phase=frontend-flush sid=%u rects=%u\n",
-                sid, state->legacy_present_rect_count);
+                state->legacy_present_sid, state->legacy_present_rect_count);
     }
 
     vmsvga3d_legacy_present_reset_live(s);

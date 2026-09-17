@@ -7721,6 +7721,16 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
      * before this realization point.
      */
     if (shader->bytecode == NULL) {
+        level = vmsvga3d_d3d10_shader_resolve_component_types(&shader->info);
+        if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SHADER-REALIZE cid=%u shid=%u type=%u result=FAIL "
+                "reason=signature-types",
+                cid, shader_id, shader->shader_type);
+            return false;
+        }
+
         memset(&dxbc, 0, sizeof(dxbc));
         level = vmsvga3d_d3d10_shader_create_dxbc(&shader->info, &dxbc);
         if (level == VMSVGA3D_D3D10_LEVEL_INVALID ||

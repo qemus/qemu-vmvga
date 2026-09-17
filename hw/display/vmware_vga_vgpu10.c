@@ -9981,6 +9981,153 @@ static bool vmsvga3d_d3d10_invalidate_subresource_live(
     return true;
 }
 
+static bool vmsvga3d_d3d10_1d_d24s8_shadow_eligible(
+    const VMSVGA3DSurface *surface, uint32_t subresource)
+{
+    return surface != NULL &&
+           surface->format == SVGA3D_D24_UNORM_S8_UINT &&
+           (surface->surface_flags & SVGA3D_SURFACE_1D) != 0 &&
+           surface->mips != NULL && surface->mip_count != 0 &&
+           surface->mip_count <= 64 && subresource < surface->mip_count;
+}
+
+static void vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
+    VMSVGA3DSurface *surface, uint32_t subresource, const char *reason)
+{
+    uint64_t bit;
+
+    if (!vmsvga3d_d3d10_1d_d24s8_shadow_eligible(surface, subresource)) {
+        return;
+    }
+
+    bit = UINT64_C(1) << subresource;
+    if ((surface->d3d11_1d_d24s8_shadow_valid_mask & bit) == 0) {
+        return;
+    }
+
+    surface->d3d11_1d_d24s8_shadow_valid_mask &= ~bit;
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-1D-DS-SHADOW action=invalidate sid=%u sub=%u reason=%s",
+        surface->sid, subresource, reason != NULL ? reason : "write");
+}
+
+static bool vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    SVGA3dDepthStencilViewId view_id, uint32_t clear_flags,
+    float depth, uint8_t stencil)
+{
+    SVGACOTableDXDSViewEntry *entry;
+    VMSVGA3DSurface *surface;
+    uint32_t levels;
+    uint32_t slice_count;
+    uint32_t depth24;
+    uint32_t slice;
+    bool clear_depth;
+    bool clear_stencil;
+
+    if (s == NULL || s->svga3d == NULL || view_id == SVGA3D_INVALID_ID) {
+        return false;
+    }
+
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DSVIEW, view_id);
+    if (entry == NULL || entry->sid == SVGA3D_INVALID_ID ||
+        entry->sid >= SVGA3D_MAX_SURFACE_IDS ||
+        entry->resourceDimension != SVGA3D_RESOURCE_TEXTURE1D) {
+        return false;
+    }
+
+    surface = s->svga3d->surfaces[entry->sid];
+    if (surface == NULL || surface->format != SVGA3D_D24_UNORM_S8_UINT ||
+        (surface->surface_flags & SVGA3D_SURFACE_1D) == 0 ||
+        surface->mips == NULL || surface->mip_count == 0 ||
+        surface->mip_count > 64) {
+        return false;
+    }
+
+    levels = surface->face[0].numMipLevels;
+    if (levels == 0 || entry->mipSlice >= levels ||
+        entry->firstArraySlice >= surface->array_elements) {
+        return false;
+    }
+
+    slice_count = entry->arraySize;
+    if (slice_count == 0) {
+        slice_count = 1;
+    }
+    if (slice_count > surface->array_elements - entry->firstArraySlice) {
+        return false;
+    }
+
+    clear_depth = (clear_flags & SVGA3D_CLEAR_DEPTH) != 0;
+    clear_stencil = (clear_flags & SVGA3D_CLEAR_STENCIL) != 0;
+    if (!clear_depth && !clear_stencil) {
+        return true;
+    }
+
+    if (!(depth >= 0.0f)) {
+        depth = 0.0f;
+    } else if (depth > 1.0f) {
+        depth = 1.0f;
+    }
+    depth24 = (uint32_t)(depth * 16777215.0f + 0.5f) & 0x00ffffffu;
+
+    for (slice = 0; slice < slice_count; slice++) {
+        uint32_t array_slice = entry->firstArraySlice + slice;
+        uint32_t subresource = array_slice * levels + entry->mipSlice;
+        VMSVGA3DSurfaceImage *image;
+        uint64_t bit;
+        bool was_valid;
+        bool becomes_valid;
+        uint32_t x;
+
+        if (!vmsvga3d_d3d10_1d_d24s8_shadow_eligible(
+                surface, subresource)) {
+            return false;
+        }
+
+        image = &surface->mips[subresource];
+        if (image->data == NULL || image->size.height != 1 ||
+            image->size.depth != 1 || image->pitch < image->size.width * 4u ||
+            image->data_size < image->pitch) {
+            return false;
+        }
+
+        bit = UINT64_C(1) << subresource;
+        was_valid = (surface->d3d11_1d_d24s8_shadow_valid_mask & bit) != 0;
+        becomes_valid = was_valid || (clear_depth && clear_stencil);
+
+        for (x = 0; x < image->size.width; x++) {
+            uint8_t *pixel = image->data + (size_t)x * 4u;
+            uint32_t value = ldl_le_p(pixel);
+
+            if (clear_depth) {
+                value = (value & 0xff000000u) | depth24;
+            }
+            if (clear_stencil) {
+                value = (value & 0x00ffffffu) | ((uint32_t)stencil << 24);
+            }
+            stl_le_p(pixel, value);
+        }
+
+        if (becomes_valid) {
+            surface->d3d11_1d_d24s8_shadow_valid_mask |= bit;
+        } else {
+            surface->d3d11_1d_d24s8_shadow_valid_mask &= ~bit;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-1D-DS-SHADOW action=clear sid=%u sub=%u flags=0x%x "
+            "depth24=0x%06x stencil=0x%02x valid=%u",
+            surface->sid, subresource, clear_flags, depth24, stencil,
+            becomes_valid ? 1u : 0u);
+    }
+
+    return true;
+}
+
 static bool vmsvga3d_d3d10_surface_changed_full_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource)
 {
@@ -9996,6 +10143,9 @@ static bool vmsvga3d_d3d10_surface_changed_full_live(
         subresource >= surface->mip_count) {
         return false;
     }
+
+    vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
+        surface, subresource, "gpu-write");
 
     memset(&box, 0, sizeof(box));
     box.w = surface->mips[subresource].size.width;
@@ -11056,8 +11206,16 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
         vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface) ? 1u : 0u,
         vmsvga3d_dxvk_d3d11_surface_native_format(surface->dxvk_surface));
 
-    if (!vmsvga3d_surface_readback_to_shadow(
-            s, surface, image, command->subResource)) {
+    if (vmsvga3d_d3d10_1d_d24s8_shadow_eligible(
+            surface, command->subResource) &&
+        (surface->d3d11_1d_d24s8_shadow_valid_mask &
+         (UINT64_C(1) << command->subResource)) != 0) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-1D-DS-READBACK path=cpu-shadow sid=%u sub=%u",
+            command->sid, command->subResource);
+    } else if (!vmsvga3d_surface_readback_to_shadow(
+                   s, surface, image, command->subResource)) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "GB-READBACK sid=%u sub=%u result=FAIL",
@@ -11580,6 +11738,9 @@ static bool vmsvga3d_d3d10_clear_dsv_live(
     }
 
     (void)vmsvga3d_d3d10_dsv_changed_live(s, cid, clear_plan.view_id);
+    (void)vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
+        s, cid, clear_plan.view_id, command->flags, command->depth,
+        command->stencil);
     return true;
 }
 

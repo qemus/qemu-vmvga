@@ -7892,6 +7892,18 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
         if (!vmsvga3d_dxvk_d3d11_shader_object_exists(
                 s->dxvk, cid, shader_id, &defined_type) ||
             defined_type != shader_type) {
+            /* The guest requested this stage, so never leave a shader from a
+             * previous pipeline setup active when the requested object is
+             * unavailable or has the wrong stage type.  Keep guest shadow
+             * state unchanged so a later setup can retry it.
+             */
+            (void)vmsvga3d_dxvk_d3d11_shader_set(
+                s->dxvk, cid, SVGA3D_INVALID_ID, shader_type);
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SHADER-PIPELINE cid=%u shid=%u type=%u prepared=0 "
+                "realized=0 bound=0 reason=object",
+                cid, shader_id, shader_type);
             continue;
         }
 
@@ -8056,6 +8068,12 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
                 s->dxvk, cid, shader_id, shader_type);
 
             if (!bound) {
+                /* shader_set() can fail before issuing *SetShader.  Do not
+                 * allow the previously bound native shader to survive that
+                 * failure either.
+                 */
+                (void)vmsvga3d_dxvk_d3d11_shader_set(
+                    s->dxvk, cid, SVGA3D_INVALID_ID, shader_type);
                 VMVGA_TRACE_LOCAL(
                     VMVGA_TRACE_3D,
                     "DX-SHADER-PIPELINE cid=%u shid=%u type=%u prepared=1 "
@@ -8063,16 +8081,15 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
                     cid, shader_id, shader_type);
             }
         } else {
-            /* A cached GS can have been retired when its stream-output object
-             * changed while the immediate D3D11 context still owns the old
-             * COM binding.  If rebuilding the GS (including its SO variant)
-             * fails, explicitly unbind GS rather than leaving that retired
-             * native object active.
+            /* The guest shadow selects shader_id, but no corresponding native
+             * shader is available.  Explicitly unbind every stage here; only
+             * doing this for GS can leave an older VS/PS/HS/DS/CS active and
+             * make native pipeline state disagree with guest-visible state.
+             * Guest shadow state remains unchanged, allowing a later setup to
+             * retry realization.
              */
-            if (shader_type == SVGA3D_SHADERTYPE_GS) {
-                (void)vmsvga3d_dxvk_d3d11_shader_set(
-                    s->dxvk, cid, SVGA3D_INVALID_ID, shader_type);
-            }
+            (void)vmsvga3d_dxvk_d3d11_shader_set(
+                s->dxvk, cid, SVGA3D_INVALID_ID, shader_type);
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
                 "DX-SHADER-PIPELINE cid=%u shid=%u type=%u prepared=%u "

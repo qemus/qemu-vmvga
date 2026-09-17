@@ -6687,14 +6687,6 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
             valid = false;
         }
 
-        /* Native D3D11 SurfaceCopy deliberately leaves the destination CPU
-         * image stale.  Drop indexed-indirect shadow authority before any
-         * copy can modify a buffer destination; if a later box fails, some
-         * earlier boxes may already have changed the native resource. */
-        if (valid && dst_surface->format == SVGA3D_BUFFER) {
-            dst_surface->d3d11_indirect_args_shadow_authoritative = false;
-        }
-
         for (i = 0; valid && i < box_count; i++) {
             SVGA3dCopyBox clipped;
             VMSVGA3DD3D10Box src_box;
@@ -6710,6 +6702,16 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
             src_box.right = clipped.srcx + clipped.w;
             src_box.bottom = clipped.srcy + clipped.h;
             src_box.back = clipped.srcz + clipped.d;
+
+            /* Native D3D11 SurfaceCopy deliberately leaves the destination
+             * CPU image stale.  Invalidate only when a non-empty copy is
+             * actually submitted, so zero-box and fully clipped no-op copies
+             * do not unnecessarily disable the CPU-direct indirect path.
+             * Once cleared it stays cleared even if a later box fails. */
+            if (dst_surface->format == SVGA3D_BUFFER) {
+                dst_surface->d3d11_indirect_args_shadow_authoritative = false;
+            }
+
             if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
                     s->dxvk, dst_surface->dxvk_surface, dst_subresource,
                     clipped.x, clipped.y, clipped.z, src_surface->dxvk_surface,

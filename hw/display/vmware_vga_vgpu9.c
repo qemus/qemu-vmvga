@@ -3561,8 +3561,7 @@ static bool vmsvga3d_dxvk_apply_context_textures(
 }
 
 static bool vmsvga3d_dxvk_apply_context_shaders(
-    struct vmsvga_state_s *s, VMSVGA3DContext *context,
-    void *bound_shaders[SVGA3D_NUM_SHADERTYPE_PREDX], bool full_replay)
+    struct vmsvga_state_s *s, VMSVGA3DContext *context, bool full_replay)
 {
     uint32_t type_index;
 
@@ -3578,10 +3577,10 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
             return false;
         }
 
-        bound_shaders[type_index] = NULL;
-
         if (full_replay ||
             (context->legacy_shader_dirty & (UINT32_C(1) << type_index)) != 0) {
+            void *native_shader = NULL;
+
             if (shid != SVGA3D_INVALID_ID) {
                 VMSVGA3DShader *shader;
 
@@ -3591,16 +3590,18 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
                     return false;
                 }
 
-                bound_shaders[type_index] =
-                    vmsvga3d_dxvk_shader_create(s->dxvk, stage,
-                                                shader->bytecode);
-                if (bound_shaders[type_index] == NULL) {
-                    return false;
+                if (shader->d3d9_native_shader == NULL) {
+                    shader->d3d9_native_shader =
+                        vmsvga3d_dxvk_shader_create(s->dxvk, stage,
+                                                    shader->bytecode);
+                    if (shader->d3d9_native_shader == NULL) {
+                        return false;
+                    }
                 }
+                native_shader = shader->d3d9_native_shader;
             }
 
-            if (!vmsvga3d_dxvk_shader_bind(s->dxvk, stage,
-                                           bound_shaders[type_index])) {
+            if (!vmsvga3d_dxvk_shader_bind(s->dxvk, stage, native_shader)) {
                 return false;
             }
         }
@@ -3690,7 +3691,6 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     VMSVGA3DD3D9VertexElement elements[SVGA3D_MAX_VERTEX_ARRAYS + 1];
     VMSVGA3DD3D9VertexStream streams[SVGA3D_MAX_VERTEX_ARRAYS];
     VMSVGA3DD3D9DrawBatchPlan batch;
-    void *shaders[SVGA3D_NUM_SHADERTYPE_PREDX] = { 0 };
     void *declaration = NULL;
     uint32_t stream_count = 0;
     uint32_t vertex_buffer_bytes;
@@ -3818,13 +3818,13 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         goto out;
     }
 
-    /* Keep dirty replay for repeated draws.  A new context still needs a
-     * pristine native D3D9 state, while a shader binding change replays the
-     * complete VMware context without resetting first.  This separates the
-     * full-replay requirement from the pristine-state reset. */
+    /* A new context still needs a pristine native D3D9 state and a complete
+     * replay.  Shader bindings and constants are independent D3D9 state, so a
+     * shader switch only needs the dirty shader stage rather than replaying
+     * render targets, fixed-function state, and all texture stages. */
     reset_state = context->legacy_full_replay ||
                   s->svga3d->active_legacy_context_id != cid;
-    full_replay = reset_state || context->legacy_shader_dirty != 0;
+    full_replay = reset_state;
     if (reset_state && !vmsvga3d_dxvk_reset_state(s->dxvk)) {
         failure_stage = "reset-state-before";
         goto out;
@@ -3842,8 +3842,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         failure_stage = "apply-textures";
         goto out;
     }
-    if (!vmsvga3d_dxvk_apply_context_shaders(s, context, shaders,
-                                              full_replay)) {
+    if (!vmsvga3d_dxvk_apply_context_shaders(s, context, full_replay)) {
         failure_stage = "apply-shaders";
         goto out;
     }
@@ -4112,12 +4111,6 @@ out:
             fprintf(stderr,
                     "VMVGA-D3D9-DRAW fail cid=%u stage=reset-state-after\n",
                     cid);
-        }
-    }
-
-    for (i = 0; i < G_N_ELEMENTS(shaders); i++) {
-        if (shaders[i] != NULL) {
-            vmsvga3d_dxvk_shader_destroy(shaders[i]);
         }
     }
 

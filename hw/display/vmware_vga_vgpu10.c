@@ -7940,6 +7940,7 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
 
         if (shader_type == SVGA3D_SHADERTYPE_GS) {
             VMSVGA3DD3D10ShaderInfo *info = NULL;
+            const VMSVGA3DD3D10ShaderInfo *stream_output_info = NULL;
 
             prepared = vmsvga3d_dxvk_d3d11_shader_info_for_realize(
                 s->dxvk, cid, shader_id, shader_type, &info);
@@ -7963,11 +7964,27 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
                         SVGA3D_SHADERTYPE_GS, info, vs, NULL, ds, NULL, ps) !=
                         VMSVGA3D_D3D10_LEVEL_INVALID;
                 if (prepared) {
-                    prepared = vmsvga3d_d3d10_stream_output_prepare_live(
-                        s, context, cid, info, &stream_output_id, &stream_output);
-                    if (prepared && stream_output_id != SVGA3D_INVALID_ID) {
-                        stream_output_ptr = &stream_output;
-                    }
+                    stream_output_info = info;
+                }
+            } else if (prepared) {
+                /* shader_info_for_realize() intentionally leaves info NULL
+                 * once the native shader exists. Stream output still has to
+                 * be prepared on every pipeline setup so shader_realize()
+                 * receives the currently active SO id instead of interpreting
+                 * SVGA3D_INVALID_ID as a request to replace the SO geometry
+                 * shader with a plain geometry shader.
+                 */
+                prepared = vmsvga3d_dxvk_d3d11_shader_info(
+                    s->dxvk, cid, shader_id, shader_type,
+                    &stream_output_info);
+            }
+
+            if (prepared && stream_output_info != NULL) {
+                prepared = vmsvga3d_d3d10_stream_output_prepare_live(
+                    s, context, cid, stream_output_info,
+                    &stream_output_id, &stream_output);
+                if (prepared && stream_output_id != SVGA3D_INVALID_ID) {
+                    stream_output_ptr = &stream_output;
                 }
             }
         }
@@ -12298,6 +12315,11 @@ static bool vmsvga3d_d3d10_raw_copy_resource_live(
 
     if (source == NULL || destination == NULL || source->mips == NULL ||
         destination->mips == NULL || source->mip_count == 0 ||
+        source->array_elements == 0 || destination->array_elements == 0 ||
+        source->array_elements != destination->array_elements ||
+        source->face[0].numMipLevels == 0 ||
+        destination->face[0].numMipLevels == 0 ||
+        source->face[0].numMipLevels != destination->face[0].numMipLevels ||
         source->mip_count != destination->mip_count ||
         !vmsvga3d_d3d10_raw_copy_compatible(
             source, destination, true, NULL, NULL)) {

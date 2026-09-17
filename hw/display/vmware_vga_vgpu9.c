@@ -2625,15 +2625,21 @@ static void vmsvga3d_legacy_surface_bindings_dirty(
             if (binding->valid && binding->value == sid) {
                 context->legacy_texture_state_dirty[i] |=
                     UINT64_C(1) << SVGA3D_TS_BIND_TEXTURE;
+                context->legacy_pipeline_dirty |=
+                    VMSVGA3D_LEGACY_PIPELINE_DIRTY_TEXTURES;
             }
         }
 
         for (i = 0; i < SVGA3D_RT_MAX; i++) {
             if (context->render_targets[i].sid == sid) {
                 context->legacy_target_dirty |= UINT32_C(1) << i;
+                context->legacy_pipeline_dirty |=
+                    VMSVGA3D_LEGACY_PIPELINE_DIRTY_TARGETS;
                 if (i >= SVGA3D_RT_COLOR0 && i <= SVGA3D_RT_COLOR3) {
                     context->legacy_viewport_dirty = true;
                     context->legacy_scissor_dirty = true;
+                    context->legacy_pipeline_dirty |=
+                        VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
                 }
             }
         }
@@ -3134,6 +3140,8 @@ static bool vmsvga3d_dxvk_apply_context_targets(
     }
 
     context->legacy_target_dirty = 0;
+    context->legacy_pipeline_dirty &=
+        ~VMSVGA3D_LEGACY_PIPELINE_DIRTY_TARGETS;
     return true;
 }
 
@@ -3409,6 +3417,7 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
     context->legacy_light_data_dirty = 0;
     context->legacy_light_enable_dirty = 0;
     context->legacy_clip_plane_dirty = 0;
+    context->legacy_pipeline_dirty &= ~VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     return true;
 }
 
@@ -3557,6 +3566,8 @@ static bool vmsvga3d_dxvk_apply_context_textures(
 
     memset(context->legacy_texture_state_dirty, 0,
            sizeof(context->legacy_texture_state_dirty));
+    context->legacy_pipeline_dirty &=
+        ~VMSVGA3D_LEGACY_PIPELINE_DIRTY_TEXTURES;
     return true;
 }
 
@@ -3678,6 +3689,8 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
            sizeof(context->legacy_shader_int_dirty));
     memset(context->legacy_shader_bool_dirty, 0,
            sizeof(context->legacy_shader_bool_dirty));
+    context->legacy_pipeline_dirty &=
+        ~VMSVGA3D_LEGACY_PIPELINE_DIRTY_SHADERS;
     return true;
 }
 
@@ -3829,20 +3842,32 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         failure_stage = "reset-state-before";
         goto out;
     }
-    if (!vmsvga3d_dxvk_apply_context_targets(s, context, full_replay)) {
+    if ((full_replay ||
+         (context->legacy_pipeline_dirty &
+          VMSVGA3D_LEGACY_PIPELINE_DIRTY_TARGETS) != 0) &&
+        !vmsvga3d_dxvk_apply_context_targets(s, context, full_replay)) {
         failure_stage = "apply-targets";
         goto out;
     }
-    if (!vmsvga3d_dxvk_apply_context_fixed_state(s, context, full_replay)) {
+    if ((full_replay ||
+         (context->legacy_pipeline_dirty &
+          VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED) != 0) &&
+        !vmsvga3d_dxvk_apply_context_fixed_state(s, context, full_replay)) {
         failure_stage = "apply-fixed-state";
         goto out;
     }
-    if (!vmsvga3d_dxvk_apply_context_textures(s, context, trace,
+    if ((full_replay ||
+         (context->legacy_pipeline_dirty &
+          VMSVGA3D_LEGACY_PIPELINE_DIRTY_TEXTURES) != 0) &&
+        !vmsvga3d_dxvk_apply_context_textures(s, context, trace,
                                                full_replay)) {
         failure_stage = "apply-textures";
         goto out;
     }
-    if (!vmsvga3d_dxvk_apply_context_shaders(s, context, full_replay)) {
+    if ((full_replay ||
+         (context->legacy_pipeline_dirty &
+          VMSVGA3D_LEGACY_PIPELINE_DIRTY_SHADERS) != 0) &&
+        !vmsvga3d_dxvk_apply_context_shaders(s, context, full_replay)) {
         failure_stage = "apply-shaders";
         goto out;
     }

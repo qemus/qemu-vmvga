@@ -146,6 +146,16 @@ typedef struct vmsvga3d_query_s {
 #define VMSVGA3D_LEGACY_BOOL_CONST_DIRTY_WORDS \
     ((SVGA3D_CONSTBOOLREG_MAX + 63u) / 64u)
 
+#define VMSVGA3D_LEGACY_PIPELINE_DIRTY_TARGETS UINT32_C(0x01)
+#define VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED UINT32_C(0x02)
+#define VMSVGA3D_LEGACY_PIPELINE_DIRTY_TEXTURES UINT32_C(0x04)
+#define VMSVGA3D_LEGACY_PIPELINE_DIRTY_SHADERS UINT32_C(0x08)
+#define VMSVGA3D_LEGACY_PIPELINE_DIRTY_ALL \
+    (VMSVGA3D_LEGACY_PIPELINE_DIRTY_TARGETS | \
+     VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED | \
+     VMSVGA3D_LEGACY_PIPELINE_DIRTY_TEXTURES | \
+     VMSVGA3D_LEGACY_PIPELINE_DIRTY_SHADERS)
+
 typedef struct vmsvga3d_context_s {
     uint32_t cid;
     SVGA3dSurfaceImageId render_targets[SVGA3D_RT_MAX];
@@ -170,6 +180,7 @@ typedef struct vmsvga3d_context_s {
     VMSVGA3DShaderConstant shader_int[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTINTREG_MAX];
     VMSVGA3DShaderConstant shader_bool[SVGA3D_NUM_SHADERTYPE_PREDX][SVGA3D_CONSTBOOLREG_MAX];
     VMSVGA3DQuery occlusion;
+    uint32_t legacy_pipeline_dirty;
     uint32_t legacy_target_dirty;
     uint64_t legacy_transform_dirty;
     uint64_t legacy_render_state_dirty[VMSVGA3D_LEGACY_RS_DIRTY_WORDS];
@@ -669,6 +680,8 @@ static void vmsvga3d_surface_clear_legacy_bindings(
                 binding->value = SVGA3D_INVALID_ID;
                 context->legacy_texture_state_dirty[i] |=
                     UINT64_C(1) << SVGA3D_TS_BIND_TEXTURE;
+                context->legacy_pipeline_dirty |=
+                    VMSVGA3D_LEGACY_PIPELINE_DIRTY_TEXTURES;
             }
         }
 
@@ -676,9 +689,13 @@ static void vmsvga3d_surface_clear_legacy_bindings(
             if (context->render_targets[i].sid == sid) {
                 context->render_targets[i].sid = SVGA3D_INVALID_ID;
                 context->legacy_target_dirty |= UINT32_C(1) << i;
+                context->legacy_pipeline_dirty |=
+                    VMSVGA3D_LEGACY_PIPELINE_DIRTY_TARGETS;
                 if (i >= SVGA3D_RT_COLOR0 && i <= SVGA3D_RT_COLOR3) {
                     context->legacy_viewport_dirty = true;
                     context->legacy_scissor_dirty = true;
+                    context->legacy_pipeline_dirty |=
+                        VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
                 }
             }
         }

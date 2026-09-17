@@ -2819,15 +2819,38 @@ static bool vmsvga3d_dxvk_materialize_buffer(
     VMSVGA3DD3D9ResourcePlan plan;
     VMSVGA3DD3D9TransferSurface before = { 0 };
     bool compatible = false;
+    bool index_buffer;
+    uint32_t native_format;
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
-        !vmsvga3d_dxvk_handoff_d3d11_to_shadow(s, surface) ||
-        surface->mip_count != 1 || surface->mips == NULL ||
-        surface->mips[0].data == NULL || surface->storage_bytes == 0 ||
-        surface->storage_bytes > UINT32_MAX ||
-        surface->mips[0].data_size < surface->storage_bytes ||
+        surface->storage_bytes == 0 || surface->storage_bytes > UINT32_MAX ||
         (use != VMSVGA3D_D3D9_RESOURCE_USE_VERTEX_BUFFER &&
-         use != VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER) ||
+         use != VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER)) {
+        return false;
+    }
+
+    index_buffer = use == VMSVGA3D_D3D9_RESOURCE_USE_INDEX_BUFFER;
+    if (index_buffer && index_width != sizeof(uint16_t) &&
+        index_width != sizeof(uint32_t)) {
+        return false;
+    }
+    native_format = index_buffer ? vmsvga3d_d3d9_index_format(index_width) : 0;
+
+    /* The overwhelmingly common draw path already has the requested native
+     * D3D9 buffer resident.  Check that directly before walking the D3D11
+     * handoff, CPU shadow, resource-plan and materialization machinery.
+     * Resident buffer writes are uploaded in place; CPU-only fallback writes
+     * evict the resource, so a compatible resident buffer is authoritative. */
+    if (vmsvga3d_dxvk_d3d9_buffer_compatible(
+            surface->dxvk_surface, index_buffer,
+            (uint32_t)surface->storage_bytes, native_format)) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_handoff_d3d11_to_shadow(s, surface) ||
+        surface->mip_count != 1 || surface->mips == NULL ||
+        surface->mips[0].data == NULL ||
+        surface->mips[0].data_size < surface->storage_bytes ||
         !vmsvga3d_d3d9_transfer_surface_info(s, surface, &before)) {
         return false;
     }

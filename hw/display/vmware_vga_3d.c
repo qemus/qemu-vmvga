@@ -2869,8 +2869,13 @@ static bool vmsvga3d_fifo_read_payload(struct vmsvga_state_s *s,
             vmsvga3d_fifo_rewind(s, len, fifo_start);
             return false;
         }
+        /* Copy the payload in bulk so FIFO_STOP is published once for the
+         * complete packet instead of once for every 32-bit word.  The FIFO
+         * stores little-endian words; normalize the scratch copy afterwards
+         * so this stays correct on big-endian hosts as well. */
+        vmsvga_fifo_read_raw_data(s, data, payload_words);
         for (i = 0; i < payload_words; i++) {
-            data[i] = vmsvga_fifo_read(s);
+            data[i] = le32_to_cpu(data[i]);
         }
     }
 
@@ -2893,10 +2898,7 @@ static bool vmsvga3d_fifo_discard_packet(struct vmsvga_state_s *s,
         return false;
     }
 
-    while (payload_words > 0) {
-        vmsvga_fifo_read(s);
-        payload_words--;
-    }
+    vmsvga_fifo_skip(s, payload_words);
 
     *len -= (int32_t)total_words;
 

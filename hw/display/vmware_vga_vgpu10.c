@@ -1905,26 +1905,6 @@ static void vmsvga3d_d3d10_index_buffer_size_update(
     }
 }
 
-static bool vmsvga3d_d3d10_buffer_binding_range(
-    uint32_t surface_bytes, uint32_t offset, uint64_t size,
-    uint32_t *range_end)
-{
-    uint64_t effective_size;
-
-    if (range_end == NULL || offset > surface_bytes) {
-        return false;
-    }
-
-    effective_size = size == UINT64_MAX ? surface_bytes - offset : size;
-    if (effective_size == 0 ||
-        effective_size > (uint64_t)(surface_bytes - offset)) {
-        return false;
-    }
-
-    *range_end = offset + (uint32_t)effective_size;
-    return true;
-}
-
 VMSVGA3DD3D10Level vmsvga3d_d3d10_viewports_set_plan(
     uint32_t count, const SVGA3dViewport *viewports,
     VMSVGA3DD3D10ViewportsSetPlan *plan)
@@ -6285,13 +6265,18 @@ static void vmsvga3d_d3d10_pipeline_index_buffer_live(
             surface->mips != NULL && surface->mip_count != 0 &&
             vmsvga3d_d3d10_buffer_materialize_live(
                 s, context->shadow.inputAssembly.indexBufferSid)) {
-            uint32_t range_end;
+            uint32_t surface_bytes = surface->mips[0].data_size;
 
             offset = context->shadow.inputAssembly.indexBufferOffset;
-            if (vmsvga3d_d3d10_buffer_binding_range(
-                    surface->mips[0].data_size, offset,
-                    context->index_buffer_size, &range_end) &&
-                bytes_per_index <= range_end - offset) {
+
+            /* V2 sizeInBytes is guest binding metadata, not a D3D11
+             * IASetIndexBuffer range.  VMware's WDDM driver can keep the same
+             * size while advancing the offset through a buffer, so rejecting
+             * offset + size past the allocation incorrectly turns an otherwise
+             * valid binding into NULL.  Validate only that one native index
+             * element fits at the requested offset. */
+            if (offset <= surface_bytes &&
+                bytes_per_index <= surface_bytes - offset) {
                 surface_binding = surface->dxvk_surface;
             } else {
                 dxgi_format = 0;
@@ -6305,7 +6290,6 @@ static void vmsvga3d_d3d10_pipeline_index_buffer_live(
     /* Invalid index formats are converted to a NULL/UNKNOWN binding at draw
      * setup instead of being rejected by DX_SET_INDEX_BUFFER.
      */
-    (void)bytes_per_index;
     {
         bool bind_ok = vmsvga3d_dxvk_d3d11_set_index_buffer(
             s->dxvk, surface_binding, dxgi_format, offset);

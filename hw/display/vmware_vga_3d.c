@@ -116,6 +116,7 @@ typedef struct vmsvga3d_shader_s {
     SVGA3dShaderType type;
     uint32_t bytecode_size;
     uint32_t *bytecode;
+    void *d3d9_native_shader;
 } VMSVGA3DShader;
 
 typedef struct vmsvga3d_shader_constant_s {
@@ -537,6 +538,10 @@ static void vmsvga3d_shader_free(VMSVGA3DShader *shader)
         return;
     }
 
+    if (shader->d3d9_native_shader != NULL) {
+        vmsvga3d_dxvk_shader_destroy(shader->d3d9_native_shader);
+        shader->d3d9_native_shader = NULL;
+    }
     g_free(shader->bytecode);
     g_free(shader);
 }
@@ -568,6 +573,39 @@ static void vmsvga3d_context_free(struct vmsvga3d_state_s *state,
     }
 
     g_free(context);
+}
+
+static void vmsvga3d_shader_native_reset_all(struct vmsvga_state_s *s)
+{
+    struct vmsvga3d_state_s *state;
+    uint32_t cid;
+    uint32_t type;
+    uint32_t shid;
+
+    if (s == NULL || (state = s->svga3d) == NULL) {
+        return;
+    }
+
+    for (cid = 0; cid < SVGA3D_MAX_CONTEXT_IDS; cid++) {
+        VMSVGA3DContext *context = state->contexts[cid];
+
+        if (context == NULL) {
+            continue;
+        }
+
+        for (type = 0; type < SVGA3D_NUM_SHADERTYPE_PREDX; type++) {
+            for (shid = 0; shid < SVGA3D_MAX_SHADERIDS; shid++) {
+                VMSVGA3DShader *shader = context->shader[type][shid];
+
+                if (shader == NULL || shader->d3d9_native_shader == NULL) {
+                    continue;
+                }
+
+                vmsvga3d_dxvk_shader_destroy(shader->d3d9_native_shader);
+                shader->d3d9_native_shader = NULL;
+            }
+        }
+    }
 }
 
 static void vmsvga3d_dx_context_free(VMSVGA3DDXContext *context)
@@ -2589,6 +2627,7 @@ static void vmsvga3d_renderer_realize(struct vmsvga_state_s *s)
     s->svga3d_dx_capable = false;
 
     vmsvga3d_renderer_surface_renderer_set(s, NULL, true);
+    vmsvga3d_shader_native_reset_all(s);
     vmsvga3d_dxvk_destroy(s->dxvk);
     s->dxvk = NULL;
 
@@ -2654,6 +2693,7 @@ static void vmsvga3d_renderer_unrealize(struct vmsvga_state_s *s)
     s->svga3d_dx_capable = false;
 
     vmsvga3d_renderer_surface_renderer_set(s, NULL, true);
+    vmsvga3d_shader_native_reset_all(s);
     vmsvga3d_dxvk_destroy(s->dxvk);
 
     s->dxvk = NULL;

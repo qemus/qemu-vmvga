@@ -423,6 +423,11 @@ static bool vmsvga3d_clear_readback_targets(
 static bool vmsvga3d_legacy_present_flush_live(struct vmsvga_state_s *s);
 static bool vmsvga3d_present_surface_format_supported(
     VMSVGA3DSurface *surface, const struct svga3d_surface_desc **desc_out);
+static void vmsvga3d_clip_present_rect(const SVGA3dCopyRect *rect,
+                                       const SVGA3dSize *src_size,
+                                       uint32_t dst_width,
+                                       uint32_t dst_height,
+                                       SVGA3dCopyRect *clipped);
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s);
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s);
 static bool vmsvga2d_screen_target_flush_live(struct vmsvga_state_s *s);
@@ -8052,17 +8057,21 @@ static bool vmsvga3d_legacy_present_readback_to_guest_live(
     }
 
     state = s->svga3d;
-    if (!state->legacy_present_snapshot_valid) {
-        return true;
-    }
-
     if (state->legacy_present_pending &&
         !vmsvga3d_legacy_present_flush_live(s)) {
         return false;
     }
 
+    /* A later legacy 2D write can invalidate the private GPU snapshot while
+     * leaving the host scanout mirror authoritative.  PRESENT_READBACK must
+     * still copy that displayed image back to BAR1.  If no host mirror exists
+     * and no snapshot is valid, BAR1 is already the authoritative image. */
     if (!s->legacy_handoff_active || s->legacy_handoff_rebind ||
-        s->screen_base == NULL || !s->active_valid || s->active_depth != 32 ||
+        s->screen_base == NULL) {
+        return !state->legacy_present_snapshot_valid;
+    }
+
+    if (!s->active_valid || s->active_depth != 32 ||
         state->legacy_present_width != s->active_width ||
         state->legacy_present_height != s->active_height) {
         return false;
@@ -8949,6 +8958,10 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
     }
 
     if (cmd == SVGA_3D_CMD_PRESENT_READBACK) {
+        if (size != 0) {
+            vmsvga3d_fifo_release_payload(s, payload);
+            return true;
+        }
         if (!vmsvga3d_legacy_present_readback_to_guest_live(s)) {
             vmsvga3d_fifo_release_payload(s, payload);
             vmsvga3d_fifo_rewind(s, len, fifo_start);
@@ -8988,7 +9001,9 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
     if (valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE &&
         state->legacy_present_pending &&
         !vmsvga3d_legacy_present_flush_live(s)) {
-        valid = false;
+        vmsvga3d_fifo_release_payload(s, payload);
+        vmsvga3d_fifo_rewind(s, len, fifo_start);
+        return true;
     }
     if (valid && accel != VMSVGA3D_D3D9_ACCEL_COMPLETE) {
         /* The CPU fallback becomes the authoritative visible image.  Do not

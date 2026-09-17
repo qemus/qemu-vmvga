@@ -5168,22 +5168,7 @@ static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
         elements[i].name_offset = name_offset;
         elements[i].semantic_index = semantic[i].semantic_index;
         elements[i].system_value = shader_system_value(signature[i].semanticName);
-        if (signature[i].componentType ==
-            VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN) {
-            VMVGA_TRACE_LOCAL(
-                VMVGA_TRACE_3D,
-                "DX-SIGNATURE-FALLBACK program=%u blob=0x%08x index=%u "
-                "reg=%u semantic=%u name=%s mask=0x%02x fallback=FLOAT32",
-                info != NULL ? info->program_type : UINT32_MAX, blob_type, i,
-                signature[i].registerIndex, signature[i].semanticName,
-                semantic[i].semantic_name != NULL
-                    ? semantic[i].semantic_name : "?",
-                component_mask);
-            elements[i].component_type =
-                VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
-        } else {
-            elements[i].component_type = signature[i].componentType;
-        }
+        elements[i].component_type = signature[i].componentType;
         elements[i].register_index = signature[i].registerIndex;
 
         /*

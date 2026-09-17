@@ -48,6 +48,7 @@ static bool vmsvga3d_state_context_define(struct vmsvga_state_s *s,
 
     context->cid = cid;
     context->legacy_full_replay = true;
+    context->legacy_pipeline_dirty = VMSVGA3D_LEGACY_PIPELINE_DIRTY_ALL;
     for (i = 0; i < SVGA3D_RT_MAX; i++) {
         context->render_targets[i].sid = SVGA3D_INVALID_ID;
     }
@@ -931,6 +932,7 @@ static bool vmsvga3d_state_set_transform(struct vmsvga_state_s *s,
                sizeof(context->transform[type].matrix));
         context->transform[type].valid = true;
         context->legacy_transform_dirty |= UINT64_C(1) << type;
+        context->legacy_pipeline_dirty |= VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     }
     return true;
 }
@@ -950,6 +952,7 @@ static bool vmsvga3d_state_set_z_range(struct vmsvga_state_s *s,
         context->z_range = *z_range;
         context->z_range_valid = true;
         context->legacy_viewport_dirty = true;
+        context->legacy_pipeline_dirty |= VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     }
 
     return true;
@@ -976,6 +979,8 @@ static bool vmsvga3d_state_set_render_state(
             context->render_state[states[i].state].valid = true;
             context->legacy_render_state_dirty[states[i].state / 64u] |=
                 UINT64_C(1) << (states[i].state % 64u);
+            context->legacy_pipeline_dirty |=
+                VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
 
             /* Legacy replay is defined by SVGA render-state enum order.  A few
              * VMware states translate onto native D3D9 slots that are also
@@ -1016,9 +1021,13 @@ static bool vmsvga3d_state_set_render_target(
         if (memcmp(&context->render_targets[type], target, sizeof(*target)) != 0) {
             context->render_targets[type] = *target;
             context->legacy_target_dirty |= UINT32_C(1) << type;
+            context->legacy_pipeline_dirty |=
+                VMSVGA3D_LEGACY_PIPELINE_DIRTY_TARGETS;
             if (type >= SVGA3D_RT_COLOR0 && type <= SVGA3D_RT_COLOR3) {
                 context->legacy_viewport_dirty = true;
                 context->legacy_scissor_dirty = true;
+                context->legacy_pipeline_dirty |=
+                    VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
             }
         }
         return true;
@@ -1044,9 +1053,13 @@ static bool vmsvga3d_state_set_render_target(
     if (memcmp(&context->render_targets[type], target, sizeof(*target)) != 0) {
         context->render_targets[type] = *target;
         context->legacy_target_dirty |= UINT32_C(1) << type;
+        context->legacy_pipeline_dirty |=
+            VMSVGA3D_LEGACY_PIPELINE_DIRTY_TARGETS;
         if (type >= SVGA3D_RT_COLOR0 && type <= SVGA3D_RT_COLOR3) {
             context->legacy_viewport_dirty = true;
             context->legacy_scissor_dirty = true;
+            context->legacy_pipeline_dirty |=
+                VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
         }
     }
 
@@ -1087,6 +1100,8 @@ static bool vmsvga3d_state_set_texture_state(
             context->texture_state[states[i].stage][states[i].name].valid = true;
             context->legacy_texture_state_dirty[states[i].stage] |=
                 UINT64_C(1) << states[i].name;
+            context->legacy_pipeline_dirty |=
+                VMSVGA3D_LEGACY_PIPELINE_DIRTY_TEXTURES;
         }
     }
 
@@ -1109,6 +1124,7 @@ static bool vmsvga3d_state_set_material(struct vmsvga_state_s *s,
         context->material[face].material = *material;
         context->material[face].valid = true;
         context->legacy_material_dirty |= UINT32_C(1) << face;
+        context->legacy_pipeline_dirty |= VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     }
 
     return true;
@@ -1132,6 +1148,7 @@ static bool vmsvga3d_state_set_light_data(struct vmsvga_state_s *s,
         context->light[index].data = *data;
         context->light[index].data_valid = true;
         context->legacy_light_data_dirty |= UINT32_C(1) << index;
+        context->legacy_pipeline_dirty |= VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     }
 
     return true;
@@ -1153,6 +1170,7 @@ static bool vmsvga3d_state_set_light_enabled(struct vmsvga_state_s *s,
         context->light[index].enabled = enabled;
         context->light[index].enabled_valid = true;
         context->legacy_light_enable_dirty |= UINT32_C(1) << index;
+        context->legacy_pipeline_dirty |= VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     }
 
     return true;
@@ -1173,6 +1191,7 @@ static bool vmsvga3d_state_set_viewport(struct vmsvga_state_s *s,
         context->viewport = *rect;
         context->viewport_valid = true;
         context->legacy_viewport_dirty = true;
+        context->legacy_pipeline_dirty |= VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     }
 
     return true;
@@ -1195,6 +1214,7 @@ static bool vmsvga3d_state_set_clip_plane(struct vmsvga_state_s *s,
                sizeof(context->clip_plane[index].plane));
         context->clip_plane[index].valid = true;
         context->legacy_clip_plane_dirty |= UINT32_C(1) << index;
+        context->legacy_pipeline_dirty |= VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     }
 
     return true;
@@ -1309,6 +1329,7 @@ static bool vmsvga3d_state_set_scissor(struct vmsvga_state_s *s,
         context->scissor = *rect;
         context->scissor_valid = true;
         context->legacy_scissor_dirty = true;
+        context->legacy_pipeline_dirty |= VMSVGA3D_LEGACY_PIPELINE_DIRTY_FIXED;
     }
 
     return true;
@@ -1490,6 +1511,8 @@ static bool vmsvga3d_state_shader_define(
     state->shader_bytes = new_shader_bytes + bytecode_size;
     if (context->bound_shader[type_index] == shid) {
         context->legacy_shader_dirty |= UINT32_C(1) << type_index;
+        context->legacy_pipeline_dirty |=
+            VMSVGA3D_LEGACY_PIPELINE_DIRTY_SHADERS;
     }
 
     return true;
@@ -1525,6 +1548,8 @@ static bool vmsvga3d_state_shader_destroy(struct vmsvga_state_s *s,
     context->shader[type_index][shid] = NULL;
     if (context->bound_shader[type_index] == shid) {
         context->legacy_shader_dirty |= UINT32_C(1) << type_index;
+        context->legacy_pipeline_dirty |=
+            VMSVGA3D_LEGACY_PIPELINE_DIRTY_SHADERS;
     }
 
     return true;
@@ -1545,6 +1570,8 @@ static bool vmsvga3d_state_set_shader(struct vmsvga_state_s *s,
     if (context->bound_shader[type_index] != shid) {
         context->bound_shader[type_index] = shid;
         context->legacy_shader_dirty |= UINT32_C(1) << type_index;
+        context->legacy_pipeline_dirty |=
+            VMSVGA3D_LEGACY_PIPELINE_DIRTY_SHADERS;
     }
     if (shid == SVGA3D_INVALID_ID) {
         return true;
@@ -1606,6 +1633,8 @@ static bool vmsvga3d_state_set_shader_const(
             default:
                 return false;
             }
+            context->legacy_pipeline_dirty |=
+                VMSVGA3D_LEGACY_PIPELINE_DIRTY_SHADERS;
         }
     }
 

@@ -74,6 +74,8 @@ struct vmsvga3d_dxvk_s {
     bool d3d9_bound_stream_frequency_valid[SVGA3D_MAX_VERTEX_ARRAYS];
     void *d3d9_bound_index_buffer;
     bool d3d9_bound_index_buffer_valid;
+    void *d3d9_bound_vertex_declaration;
+    bool d3d9_bound_vertex_declaration_valid;
     VMSVGA3DDxvkSurface *d3d9_bound_render_targets[SVGA3D_MAX_RENDER_TARGETS];
     uint32_t d3d9_bound_render_target_levels[SVGA3D_MAX_RENDER_TARGETS];
     bool d3d9_bound_render_target_valid[SVGA3D_MAX_RENDER_TARGETS];
@@ -2203,6 +2205,8 @@ static void vmsvga3d_dxvk_d3d9_binding_cache_reset(
            sizeof(dxvk->d3d9_bound_stream_frequency_valid));
     dxvk->d3d9_bound_index_buffer = NULL;
     dxvk->d3d9_bound_index_buffer_valid = false;
+    dxvk->d3d9_bound_vertex_declaration = NULL;
+    dxvk->d3d9_bound_vertex_declaration_valid = false;
 }
 
 static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
@@ -12486,8 +12490,8 @@ bool vmsvga3d_dxvk_reset_state(VMSVGA3DDxvk *dxvk)
 
     /* D3DSBT_ALL does not include render-target or depth/stencil bindings, so
      * applying the pristine state does not invalidate the target cache.  It
-     * does restore stream/index state, so cached buffer bindings must be
-     * forgotten even when Apply itself reports failure. */
+     * does restore stream/index/vertex-declaration state, so those cached
+     * bindings must be forgotten even when Apply itself reports failure. */
     result = apply(dxvk->d3d9_pristine_state);
     vmsvga3d_dxvk_d3d9_binding_cache_reset(dxvk);
 
@@ -13225,8 +13229,14 @@ bool vmsvga3d_dxvk_vertex_declaration_bind(VMSVGA3DDxvk *dxvk,
     VMSVGA3DDxvkSetVertexDeclaration set_declaration = NULL;
     int32_t result;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) ||
-        !vmsvga3d_dxvk_get_method(
+    if (!vmsvga3d_dxvk_ready(dxvk)) {
+        return false;
+    }
+    if (dxvk->d3d9_bound_vertex_declaration_valid &&
+        dxvk->d3d9_bound_vertex_declaration == declaration) {
+        return true;
+    }
+    if (!vmsvga3d_dxvk_get_method(
             dxvk->d3d9_device,
             VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_VERTEX_DECLARATION,
             &set_declaration, sizeof(set_declaration))) {
@@ -13234,8 +13244,15 @@ bool vmsvga3d_dxvk_vertex_declaration_bind(VMSVGA3DDxvk *dxvk,
     }
 
     result = set_declaration(dxvk->d3d9_device, declaration);
+    if (vmsvga3d_dxvk_succeeded(result)) {
+        dxvk->d3d9_bound_vertex_declaration = declaration;
+        dxvk->d3d9_bound_vertex_declaration_valid = true;
+        return true;
+    }
 
-    return vmsvga3d_dxvk_succeeded(result);
+    dxvk->d3d9_bound_vertex_declaration = NULL;
+    dxvk->d3d9_bound_vertex_declaration_valid = false;
+    return false;
 #else
     (void)dxvk;
     (void)declaration;

@@ -66,6 +66,14 @@ struct vmsvga3d_dxvk_s {
     uint32_t d3d9_legacy_present_height;
     uint32_t d3d9_legacy_present_format;
     uint64_t d3d9_gb_query_next_token;
+    void *d3d9_bound_stream_sources[SVGA3D_MAX_VERTEX_ARRAYS];
+    uint32_t d3d9_bound_stream_offsets[SVGA3D_MAX_VERTEX_ARRAYS];
+    uint32_t d3d9_bound_stream_strides[SVGA3D_MAX_VERTEX_ARRAYS];
+    bool d3d9_bound_stream_source_valid[SVGA3D_MAX_VERTEX_ARRAYS];
+    uint32_t d3d9_bound_stream_frequencies[SVGA3D_MAX_VERTEX_ARRAYS];
+    bool d3d9_bound_stream_frequency_valid[SVGA3D_MAX_VERTEX_ARRAYS];
+    void *d3d9_bound_index_buffer;
+    bool d3d9_bound_index_buffer_valid;
     VMSVGA3DDxvkSurface *d3d9_bound_render_targets[SVGA3D_MAX_RENDER_TARGETS];
     uint32_t d3d9_bound_render_target_levels[SVGA3D_MAX_RENDER_TARGETS];
     bool d3d9_bound_render_target_valid[SVGA3D_MAX_RENDER_TARGETS];
@@ -2174,6 +2182,29 @@ fail_unlocked:
 #endif
 }
 
+static void vmsvga3d_dxvk_d3d9_binding_cache_reset(
+    VMSVGA3DDxvk *dxvk)
+{
+    if (dxvk == NULL) {
+        return;
+    }
+
+    memset(dxvk->d3d9_bound_stream_sources, 0,
+           sizeof(dxvk->d3d9_bound_stream_sources));
+    memset(dxvk->d3d9_bound_stream_offsets, 0,
+           sizeof(dxvk->d3d9_bound_stream_offsets));
+    memset(dxvk->d3d9_bound_stream_strides, 0,
+           sizeof(dxvk->d3d9_bound_stream_strides));
+    memset(dxvk->d3d9_bound_stream_source_valid, 0,
+           sizeof(dxvk->d3d9_bound_stream_source_valid));
+    memset(dxvk->d3d9_bound_stream_frequencies, 0,
+           sizeof(dxvk->d3d9_bound_stream_frequencies));
+    memset(dxvk->d3d9_bound_stream_frequency_valid, 0,
+           sizeof(dxvk->d3d9_bound_stream_frequency_valid));
+    dxvk->d3d9_bound_index_buffer = NULL;
+    dxvk->d3d9_bound_index_buffer_valid = false;
+}
+
 static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
     VMSVGA3DDxvk *dxvk)
 {
@@ -2340,6 +2371,7 @@ static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
     }
 #endif
 
+    vmsvga3d_dxvk_d3d9_binding_cache_reset(dxvk);
     vmsvga3d_dxvk_d3d11_binding_cache_reset(dxvk);
 }
 
@@ -3168,6 +3200,34 @@ VMSVGA3DDxvkSurface *vmsvga3d_dxvk_surface_create(VMSVGA3DDxvk *dxvk,
     return surface;
 }
 
+static void vmsvga3d_dxvk_d3d9_binding_cache_invalidate_surface(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface)
+{
+    void *resource;
+    uint32_t i;
+
+    if (dxvk == NULL || surface == NULL || surface->d3d9_resource == NULL) {
+        return;
+    }
+
+    resource = surface->d3d9_resource;
+    for (i = 0; i < G_N_ELEMENTS(dxvk->d3d9_bound_stream_sources); i++) {
+        if (dxvk->d3d9_bound_stream_source_valid[i] &&
+            dxvk->d3d9_bound_stream_sources[i] == resource) {
+            dxvk->d3d9_bound_stream_sources[i] = NULL;
+            dxvk->d3d9_bound_stream_offsets[i] = 0;
+            dxvk->d3d9_bound_stream_strides[i] = 0;
+            dxvk->d3d9_bound_stream_source_valid[i] = false;
+        }
+    }
+
+    if (dxvk->d3d9_bound_index_buffer_valid &&
+        dxvk->d3d9_bound_index_buffer == resource) {
+        dxvk->d3d9_bound_index_buffer = NULL;
+        dxvk->d3d9_bound_index_buffer_valid = false;
+    }
+}
+
 static void vmsvga3d_dxvk_d3d9_target_cache_invalidate(
     VMSVGA3DDxvk *dxvk)
 {
@@ -3217,6 +3277,8 @@ static void vmsvga3d_dxvk_surface_evict_d3d9(
         return;
     }
 
+    vmsvga3d_dxvk_d3d9_binding_cache_invalidate_surface(
+        surface->owner, surface);
     vmsvga3d_dxvk_d3d9_target_cache_invalidate_surface(
         surface->owner, surface);
 
@@ -3318,6 +3380,26 @@ bool vmsvga3d_dxvk_surface_info(
     info->has_bounce = surface->d3d9_has_bounce;
 
     return true;
+}
+
+bool vmsvga3d_dxvk_d3d9_buffer_compatible(
+    const VMSVGA3DDxvkSurface *surface, bool index_buffer,
+    uint32_t length, uint32_t format)
+{
+    if (surface == NULL || !surface->d3d9_resident ||
+        surface->d3d9_resource == NULL || surface->d3d11_resident ||
+        surface->d3d9_length != length) {
+        return false;
+    }
+
+    if (index_buffer) {
+        return surface->d3d9_resource_type ==
+                   VMSVGA3D_D3D9_HOST_RESOURCE_INDEX_BUFFER &&
+               surface->d3d9_format == format;
+    }
+
+    return surface->d3d9_resource_type ==
+           VMSVGA3D_D3D9_HOST_RESOURCE_VERTEX_BUFFER;
 }
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -12403,8 +12485,11 @@ bool vmsvga3d_dxvk_reset_state(VMSVGA3DDxvk *dxvk)
     }
 
     /* D3DSBT_ALL does not include render-target or depth/stencil bindings, so
-     * applying the pristine state does not invalidate the target cache. */
+     * applying the pristine state does not invalidate the target cache.  It
+     * does restore stream/index state, so cached buffer bindings must be
+     * forgotten even when Apply itself reports failure. */
     result = apply(dxvk->d3d9_pristine_state);
+    vmsvga3d_dxvk_d3d9_binding_cache_reset(dxvk);
 
     return vmsvga3d_dxvk_succeeded(result);
 #else
@@ -13165,12 +13250,11 @@ bool vmsvga3d_dxvk_set_stream_source(VMSVGA3DDxvk *dxvk, uint32_t stream,
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkSetStreamSource set_stream = NULL;
     void *buffer = NULL;
+    bool cacheable;
+    bool success;
     int32_t result;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) ||
-        !vmsvga3d_dxvk_get_method(
-            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_STREAM_SOURCE,
-            &set_stream, sizeof(set_stream))) {
+    if (!vmsvga3d_dxvk_ready(dxvk)) {
         return false;
     }
 
@@ -13183,9 +13267,35 @@ bool vmsvga3d_dxvk_set_stream_source(VMSVGA3DDxvk *dxvk, uint32_t stream,
         buffer = surface->d3d9_resource;
     }
 
-    result = set_stream(dxvk->d3d9_device, stream, buffer, offset, stride);
+    cacheable = stream < G_N_ELEMENTS(dxvk->d3d9_bound_stream_sources);
+    if (cacheable && dxvk->d3d9_bound_stream_source_valid[stream] &&
+        dxvk->d3d9_bound_stream_sources[stream] == buffer &&
+        dxvk->d3d9_bound_stream_offsets[stream] == offset &&
+        dxvk->d3d9_bound_stream_strides[stream] == stride) {
+        return true;
+    }
 
-    return vmsvga3d_dxvk_succeeded(result);
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_STREAM_SOURCE,
+            &set_stream, sizeof(set_stream))) {
+        return false;
+    }
+
+    result = set_stream(dxvk->d3d9_device, stream, buffer, offset, stride);
+    success = vmsvga3d_dxvk_succeeded(result);
+
+    if (cacheable) {
+        if (success) {
+            dxvk->d3d9_bound_stream_sources[stream] = buffer;
+            dxvk->d3d9_bound_stream_offsets[stream] = offset;
+            dxvk->d3d9_bound_stream_strides[stream] = stride;
+            dxvk->d3d9_bound_stream_source_valid[stream] = true;
+        } else {
+            dxvk->d3d9_bound_stream_source_valid[stream] = false;
+        }
+    }
+
+    return success;
 #else
     (void)dxvk;
     (void)stream;
@@ -13202,10 +13312,21 @@ bool vmsvga3d_dxvk_set_stream_frequency(VMSVGA3DDxvk *dxvk,
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkSetStreamSourceFreq set_frequency = NULL;
+    bool cacheable;
+    bool success;
     int32_t result;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) ||
-        !vmsvga3d_dxvk_get_method(
+    if (!vmsvga3d_dxvk_ready(dxvk)) {
+        return false;
+    }
+
+    cacheable = stream < G_N_ELEMENTS(dxvk->d3d9_bound_stream_frequencies);
+    if (cacheable && dxvk->d3d9_bound_stream_frequency_valid[stream] &&
+        dxvk->d3d9_bound_stream_frequencies[stream] == frequency) {
+        return true;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
             dxvk->d3d9_device,
             VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_STREAM_SOURCE_FREQ,
             &set_frequency, sizeof(set_frequency))) {
@@ -13213,8 +13334,18 @@ bool vmsvga3d_dxvk_set_stream_frequency(VMSVGA3DDxvk *dxvk,
     }
 
     result = set_frequency(dxvk->d3d9_device, stream, frequency);
+    success = vmsvga3d_dxvk_succeeded(result);
 
-    return vmsvga3d_dxvk_succeeded(result);
+    if (cacheable) {
+        if (success) {
+            dxvk->d3d9_bound_stream_frequencies[stream] = frequency;
+            dxvk->d3d9_bound_stream_frequency_valid[stream] = true;
+        } else {
+            dxvk->d3d9_bound_stream_frequency_valid[stream] = false;
+        }
+    }
+
+    return success;
 #else
     (void)dxvk;
     (void)stream;
@@ -13229,12 +13360,10 @@ bool vmsvga3d_dxvk_set_indices(VMSVGA3DDxvk *dxvk,
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkSetIndices set_indices = NULL;
     void *buffer = NULL;
+    bool success;
     int32_t result;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) ||
-        !vmsvga3d_dxvk_get_method(
-            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_INDICES,
-            &set_indices, sizeof(set_indices))) {
+    if (!vmsvga3d_dxvk_ready(dxvk)) {
         return false;
     }
 
@@ -13247,9 +13376,28 @@ bool vmsvga3d_dxvk_set_indices(VMSVGA3DDxvk *dxvk,
         buffer = surface->d3d9_resource;
     }
 
-    result = set_indices(dxvk->d3d9_device, buffer);
+    if (dxvk->d3d9_bound_index_buffer_valid &&
+        dxvk->d3d9_bound_index_buffer == buffer) {
+        return true;
+    }
 
-    return vmsvga3d_dxvk_succeeded(result);
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_SET_INDICES,
+            &set_indices, sizeof(set_indices))) {
+        return false;
+    }
+
+    result = set_indices(dxvk->d3d9_device, buffer);
+    success = vmsvga3d_dxvk_succeeded(result);
+
+    if (success) {
+        dxvk->d3d9_bound_index_buffer = buffer;
+        dxvk->d3d9_bound_index_buffer_valid = true;
+    } else {
+        dxvk->d3d9_bound_index_buffer_valid = false;
+    }
+
+    return success;
 #else
     (void)dxvk;
     (void)surface;

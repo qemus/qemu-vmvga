@@ -9763,8 +9763,6 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -9781,8 +9779,6 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
     }
 
     if (!vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -9796,8 +9792,6 @@ static bool vmsvga3d_d3d10_copy_surface_materialize_live(
         !vmsvga3d_d3d10_initial_subresources_live(
             surface, &resource_plan.primary, &initial_data,
             &initial_data_count)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -10531,6 +10525,9 @@ static bool vmsvga3d_d3d10_surface_changed_full_live_internal(
     if (invalidate_shadow) {
         vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
             surface, subresource, "gpu-write");
+        if (subresource == 0) {
+            surface->d3d11_indirect_args_shadow_authoritative = false;
+        }
     }
 
     memset(&box, 0, sizeof(box));
@@ -10977,6 +10974,14 @@ static bool vmsvga3d_d3d10_update_subresource_live(
         return false;
     }
 
+    /* Only a complete guest write proves that every byte consumed by a
+     * later indirect draw is current in the CPU shadow.  Partial updates do
+     * not strengthen an existing stale shadow. */
+    if (surface->format == SVGA3D_BUFFER && command->subResource == 0 &&
+        full_image_update) {
+        surface->d3d11_indirect_args_shadow_authoritative = true;
+    }
+
     if (command->subResource == 0 &&
         !vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
             s, command->sid)) {
@@ -11092,8 +11097,6 @@ static bool vmsvga3d_d3d10_readback_image_live(
 
     if (s == NULL || surface == NULL || surface->mips == NULL ||
         subresource >= surface->mip_count) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -11106,8 +11109,6 @@ static bool vmsvga3d_d3d10_readback_image_live(
     if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
         image->data_size == 0 || image->plane_size % image->pitch != 0 ||
         image->data_size % image->plane_size != 0) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12095,11 +12096,6 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
     uint32_t destination_bottom;
     uint32_t destination_back;
 
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                      "COPYDIAG stage=raw-enter whole=%u", copy_box == NULL);
-    vmsvga3d_copy_diag_surface("raw-enter", "src", source, source_subresource);
-    vmsvga3d_copy_diag_surface("raw-enter", "dst", destination, destination_subresource);
-
     if (s == NULL || source == NULL || destination == NULL ||
         source->mips == NULL || destination->mips == NULL ||
         source_subresource >= source->mip_count ||
@@ -12107,8 +12103,6 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
         !vmsvga3d_d3d10_raw_copy_compatible(
             source, destination, copy_box == NULL,
             &source_desc, &destination_desc)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12122,8 +12116,6 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
         source_image->size.depth == 0 || destination_image->size.width == 0 ||
         destination_image->size.height == 0 ||
         destination_image->size.depth == 0) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12144,8 +12136,6 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
         if (source_blocks_x != destination_blocks_x ||
             source_blocks_y != destination_blocks_y ||
             source_blocks_z != destination_blocks_z) {
-            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                              "COPYDIAG reject=%s line=%d", __func__, __LINE__);
             return false;
         }
 
@@ -12179,8 +12169,6 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
             copy_box->x % destination_desc->block_size.width != 0 ||
             copy_box->y % destination_desc->block_size.height != 0 ||
             copy_box->z % destination_desc->block_size.depth != 0) {
-            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                              "COPYDIAG reject=%s line=%d", __func__, __LINE__);
             return false;
         }
 
@@ -12196,8 +12184,6 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
              copy_box->srcy + source_height != source_image->size.height) ||
             (source_depth % source_desc->block_size.depth != 0 &&
              copy_box->srcz + source_depth != source_image->size.depth)) {
-            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                              "COPYDIAG reject=%s line=%d", __func__, __LINE__);
             return false;
         }
 
@@ -12235,8 +12221,6 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
         blocks_x > source_blocks_x - source_block_x ||
         blocks_y > source_blocks_y - source_block_y ||
         blocks_z > source_blocks_z - source_block_z) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12252,8 +12236,6 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
             &source_offset, source_block_y, source_image->pitch) ||
         !vmsvga3d_u64_add_product(
             &source_offset, source_block_z, source_image->plane_size)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12263,24 +12245,14 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
         !vmsvga3d_u64_add_product(
             &source_end, blocks_z - 1, source_image->plane_size) ||
         source_end > UINT64_MAX - row_bytes) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
     source_end += row_bytes;
     if (source_end > source_image->data_size ||
         !vmsvga3d_d3d10_readback_image_live(
             s, source, source_subresource)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
-
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                      "COPYDIAG stage=source-readback-complete offset=%" PRIu64
-                      " row-bytes=%" PRIu64, source_offset, row_bytes);
-    vmsvga3d_copy_diag_bytes("source-shadow", source->sid, source_subresource,
-                           source_image->data, source_image->data_size);
 
     source_right = MIN(
         (uint64_t)source_image->size.width,
@@ -12339,15 +12311,8 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
             s->dxvk, destination->dxvk_surface, destination_subresource,
             &destination_box, source_image->data + source_offset,
             source_image->pitch, source_image->plane_size)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
-
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                      "COPYDIAG stage=raw-upload-wrapper-returned-true");
-    vmsvga3d_copy_diag_snapshot(s, "raw-dst-after", destination,
-                              destination_subresource);
 
     if (destination_box_out != NULL) {
         destination_box_out->x = destination_box.left;
@@ -12376,16 +12341,12 @@ static bool vmsvga3d_d3d10_raw_copy_resource_live(
         source->mip_count != destination->mip_count ||
         !vmsvga3d_d3d10_raw_copy_compatible(
             source, destination, true, NULL, NULL)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
     for (subresource = 0; subresource < source->mip_count; subresource++) {
         if (!vmsvga3d_d3d10_raw_copy_subresource_live(
                 s, source, subresource, destination, subresource, NULL, NULL)) {
-            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                              "COPYDIAG reject=%s line=%d", __func__, __LINE__);
             return false;
         }
     }
@@ -12409,15 +12370,11 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
         command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
         command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
     context = vmsvga3d_dx_context(s, cid);
     if (context == NULL) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12427,20 +12384,8 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     if (source == NULL || destination == NULL ||
         command->srcSubResource >= source->mip_count ||
         command->dstSubResource >= destination->mip_count) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
-
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "COPYDIAG stage=region-select cid=%u pred=%u level-ok=%u raw=%u",
-        cid, context->shadow.predication.queryID,
-        vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1),
-        vmsvga3d_d3d10_raw_copy_compatible(source, destination,
-                                        false, NULL, NULL));
-    vmsvga3d_copy_diag_surface("region-select", "src", source, command->srcSubResource);
-    vmsvga3d_copy_diag_surface("region-select", "dst", destination, command->dstSubResource);
 
     if (context->shadow.predication.queryID == SVGA3D_INVALID_ID &&
         vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
@@ -12449,20 +12394,12 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         SVGA3dBox dirty;
 
         if (!vmsvga3d_d3d10_copy_surface_materialize_live(
-                s, source, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
-            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "COPYDIAG reject=source-materialize");
-            return false;
-        }
-        if (!vmsvga3d_d3d10_copy_surface_materialize_live(
-                s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
-            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "COPYDIAG reject=destination-materialize");
-            return false;
-        }
-        if (!vmsvga3d_d3d10_raw_copy_subresource_live(
+                s, source, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
+            !vmsvga3d_d3d10_copy_surface_materialize_live(
+                s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
+            !vmsvga3d_d3d10_raw_copy_subresource_live(
                 s, source, command->srcSubResource, destination,
                 command->dstSubResource, &command->box, &dirty)) {
-            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                              "COPYDIAG reject=%s line=%d", __func__, __LINE__);
             return false;
         }
 
@@ -12478,6 +12415,9 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
 
         vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
             destination, command->dstSubResource, "pred-copy-region-raw");
+        if (command->dstSubResource == 0) {
+            destination->d3d11_indirect_args_shadow_authoritative = false;
+        }
         (void)vmsvga3d_surface_changed_live(
             s, command->dstSid, command->dstSubResource, &dirty);
         return true;
@@ -12497,8 +12437,6 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
             s, source, plan.source_create_kind) ||
         !vmsvga3d_d3d10_copy_surface_materialize_live(
             s, destination, plan.destination_create_kind)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12521,28 +12459,14 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         plan.region.source_box.front, plan.region.source_box.right,
         plan.region.source_box.bottom, plan.region.source_box.back);
 
-    if (source->format != destination->format &&
-        context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
-        vmsvga3d_copy_diag_snapshot(s, "native-src-before", source, command->srcSubResource);
-        vmsvga3d_copy_diag_snapshot(s, "native-dst-before", destination, command->dstSubResource);
-    }
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "COPYDIAG stage=native-region-call");
     if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
             s->dxvk, destination->dxvk_surface, plan.destination_subresource,
             plan.region.destination_x, plan.region.destination_y,
             plan.region.destination_z, source->dxvk_surface,
             plan.source_subresource, &plan.region.source_box)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                      "COPYDIAG stage=native-region-wrapper-returned-true");
-    if (source->format != destination->format &&
-        context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
-        vmsvga3d_copy_diag_snapshot(s, "native-dst-after", destination, command->dstSubResource);
-    }
     if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
         predicate_resolved = true;
         write_executed = true;
@@ -12560,6 +12484,11 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     if (!predicate_resolved || write_executed) {
         vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
             destination, plan.destination_subresource, "pred-copy-region");
+    }
+    /* An active predicate may make the native destination differ from the
+     * CPU shadow even when the CPU cannot determine whether the copy ran. */
+    if (plan.destination_subresource == 0) {
+        destination->d3d11_indirect_args_shadow_authoritative = false;
     }
 
     {
@@ -12601,15 +12530,11 @@ static bool vmsvga3d_d3d10_pred_copy_live(
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
         command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
         command->dstSid >= SVGA3D_MAX_SURFACE_IDS) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
     context = vmsvga3d_dx_context(s, cid);
     if (context == NULL) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12617,8 +12542,6 @@ static bool vmsvga3d_d3d10_pred_copy_live(
     destination = s->svga3d->surfaces[command->dstSid];
 
     if (source == NULL || destination == NULL) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
@@ -12630,20 +12553,8 @@ static bool vmsvga3d_d3d10_pred_copy_live(
             s, source, plan.source_create_kind) ||
         !vmsvga3d_d3d10_copy_surface_materialize_live(
             s, destination, plan.destination_create_kind)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
-
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "COPYDIAG stage=resource-select cid=%u pred=%u level-ok=%u raw=%u",
-        cid, context->shadow.predication.queryID,
-        vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1),
-        vmsvga3d_d3d10_raw_copy_compatible(source, destination,
-                                        true, NULL, NULL));
-    vmsvga3d_copy_diag_surface("resource-select", "src", source, 0);
-    vmsvga3d_copy_diag_surface("resource-select", "dst", destination, 0);
 
     if (context->shadow.predication.queryID == SVGA3D_INVALID_ID &&
         vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
@@ -12651,8 +12562,6 @@ static bool vmsvga3d_d3d10_pred_copy_live(
             source, destination, true, NULL, NULL)) {
         if (!vmsvga3d_d3d10_raw_copy_resource_live(
                 s, source, destination)) {
-            VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                              "COPYDIAG reject=%s line=%d", __func__, __LINE__);
             return false;
         }
 
@@ -12668,6 +12577,7 @@ static bool vmsvga3d_d3d10_pred_copy_live(
 
         vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
             destination, "pred-copy-resource-raw");
+        destination->d3d11_indirect_args_shadow_authoritative = false;
         (void)vmsvga3d_d3d10_surface_changed_full_live(
             s, command->dstSid, 0);
         return true;
@@ -12683,25 +12593,11 @@ static bool vmsvga3d_d3d10_pred_copy_live(
         vmsvga3d_dxvk_d3d11_surface_native_format(destination->dxvk_surface),
         plan.source_create_kind, plan.destination_create_kind);
 
-    if (source->format != destination->format &&
-        context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
-        vmsvga3d_copy_diag_snapshot(s, "native-src-before", source, 0);
-        vmsvga3d_copy_diag_snapshot(s, "native-dst-before", destination, 0);
-    }
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "COPYDIAG stage=native-resource-call");
     if (!vmsvga3d_dxvk_d3d11_copy_resource(
             s->dxvk, destination->dxvk_surface, source->dxvk_surface)) {
-        VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                          "COPYDIAG reject=%s line=%d", __func__, __LINE__);
         return false;
     }
 
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
-                      "COPYDIAG stage=native-resource-wrapper-returned-true");
-    if (source->format != destination->format &&
-        context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
-        vmsvga3d_copy_diag_snapshot(s, "native-dst-after", destination, 0);
-    }
     if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
         predicate_resolved = true;
         write_executed = true;
@@ -12716,6 +12612,7 @@ static bool vmsvga3d_d3d10_pred_copy_live(
         vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
             destination, "pred-copy-resource");
     }
+    destination->d3d11_indirect_args_shadow_authoritative = false;
 
     /* Native D3D11 predication is asynchronous.  If a predicate is bound,
      * successful submission does not prove that CopyResource actually wrote

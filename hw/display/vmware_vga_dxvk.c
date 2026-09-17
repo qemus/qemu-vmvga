@@ -98,7 +98,6 @@ struct vmsvga3d_dxvk_s {
     bool d3d11_blitter_initialized;
     bool ready;
     bool d3d11_ready;
-    uint32_t d3d11_native_version;
 };
 
 struct vmsvga3d_dxvk_d3d9_query_s {
@@ -1437,46 +1436,6 @@ bool vmsvga3d_dxvk_d3d11_context1_acquire(VMSVGA3DDxvk *dxvk)
     return true;
 }
 
-static uint32_t vmsvga3d_dxvk_native_version(void *entry)
-{
-    Dl_info info = { 0 };
-    g_autofree char *resolved = NULL;
-    const char *path;
-    const char *suffix;
-    unsigned int abi_version;
-    unsigned int first;
-    unsigned int second;
-    unsigned int third;
-    int components;
-
-    if (entry == NULL || dladdr(entry, &info) == 0 || info.dli_fname == NULL) {
-        return 0;
-    }
-
-    resolved = realpath(info.dli_fname, NULL);
-    path = resolved != NULL ? resolved : info.dli_fname;
-    suffix = g_strrstr(path, ".so.");
-    if (suffix == NULL) {
-        return 0;
-    }
-
-    components = sscanf(suffix, ".so.%u.%u.%u.%u",
-                        &abi_version, &first, &second, &third);
-    if (components < 2 || abi_version != 0) {
-        return 0;
-    }
-
-    /* DXVK-native normally uses 0.MMmmpp, but accept 0.M.m.p too. */
-    if (first >= 10000u) {
-        return first;
-    }
-    if (components >= 4 && first <= 99u && second <= 99u && third <= 99u) {
-        return first * 10000u + second * 100u + third;
-    }
-
-    return 0;
-}
-
 static bool vmsvga3d_dxvk_create_d3d11(VMSVGA3DDxvk *dxvk, Error **errp)
 {
     VMSVGA3DDxvkD3D11CreateDevice create_device = NULL;
@@ -1500,7 +1459,6 @@ static bool vmsvga3d_dxvk_create_d3d11(VMSVGA3DDxvk *dxvk, Error **errp)
 
     entry = dlsym(dxvk->d3d11_library, "D3D11CreateDevice");
     memcpy(&create_device, &entry, sizeof(create_device));
-    dxvk->d3d11_native_version = vmsvga3d_dxvk_native_version(entry);
 
     if (create_device == NULL) {
         error_setg(errp, "%s has no D3D11CreateDevice entry point",
@@ -2911,14 +2869,6 @@ bool vmsvga3d_dxvk_ready(const VMSVGA3DDxvk *dxvk)
 bool vmsvga3d_dxvk_d3d11_ready(const VMSVGA3DDxvk *dxvk)
 {
     return dxvk != NULL && dxvk->ready && dxvk->d3d11_ready;
-}
-
-bool vmsvga3d_dxvk_d3d11_rasterized_stream_output_supported(
-    const VMSVGA3DDxvk *dxvk)
-{
-    /* Unknown/custom native builds keep the full capability profile. */
-    return dxvk == NULL || dxvk->d3d11_native_version == 0 ||
-           dxvk->d3d11_native_version >= 30000u;
 }
 
 static VMSVGA3DDxvkView *vmsvga3d_dxvk_d3d11_view_find(

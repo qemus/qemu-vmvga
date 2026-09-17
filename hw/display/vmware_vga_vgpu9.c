@@ -3725,9 +3725,10 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         goto out;
     }
 
-    declaration = vmsvga3d_dxvk_vertex_declaration_create(s->dxvk, elements);
+    declaration = vmsvga3d_dxvk_vertex_declaration_get_cached(s->dxvk,
+                                                               elements);
     if (declaration == NULL) {
-        failure_stage = "create-vertex-declaration";
+        failure_stage = "get-vertex-declaration";
         goto out;
     }
     if (!vmsvga3d_dxvk_vertex_declaration_bind(s->dxvk, declaration)) {
@@ -3989,10 +3990,6 @@ out:
                     "VMVGA-D3D9-DRAW fail cid=%u stage=reset-state-after\n",
                     cid);
         }
-    }
-
-    if (declaration != NULL) {
-        vmsvga3d_dxvk_vertex_declaration_destroy(declaration);
     }
 
     for (i = 0; i < G_N_ELEMENTS(shaders); i++) {

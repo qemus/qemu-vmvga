@@ -502,6 +502,13 @@ bool vmsvga3d_dxvk_surface_upload_buffer(
 bool vmsvga3d_dxvk_surface_upload_buffer_range(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t offset,
     const void *data, uint32_t size);
+bool vmsvga3d_dxvk_d3d9_legacy_present_copy(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *source,
+    uint32_t source_level, uint32_t width, uint32_t height, uint32_t format,
+    const struct vmsvga3d_d3d9_rect_s *source_rect,
+    const struct vmsvga3d_d3d9_rect_s *destination_rect);
+bool vmsvga3d_dxvk_d3d9_legacy_present_readback(
+    VMSVGA3DDxvk *dxvk, void *data, uint32_t row_bytes, uint32_t rows);
 bool vmsvga3d_dxvk_surface_stretch_rect(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *source,
     uint32_t source_level, const struct vmsvga3d_d3d9_rect_s *source_rect,

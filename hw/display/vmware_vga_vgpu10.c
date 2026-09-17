@@ -2980,6 +2980,7 @@ enum {
     SHADER_OPERAND_1_COMPONENT = 1,
     SHADER_OPERAND_4_COMPONENT = 2,
     SHADER_OPERAND_MASK_MODE = 0,
+    SHADER_OPERAND_SWIZZLE_MODE = 1,
     SHADER_OPERAND_SELECT_1_MODE = 2,
     SHADER_OPERAND_TYPE_TEMP = 0,
     SHADER_OPERAND_TYPE_INPUT = 1,
@@ -3635,7 +3636,7 @@ enum {
 };
 
 typedef struct shader_type_inference_s {
-    uint8_t temp[SHADER_INFER_MAX_TEMPS];
+    uint8_t temp[SHADER_INFER_MAX_TEMPS][4];
     uint8_t input[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
     uint8_t output[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
     uint8_t patch[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
@@ -3725,17 +3726,85 @@ static bool shader_infer_operand_register(const ShaderOperand *operand,
     return true;
 }
 
+static uint32_t shader_infer_operand_component_mask(
+    const ShaderOperand *operand)
+{
+    uint32_t token0;
+    uint32_t mask = 0;
+    uint32_t component;
+
+    if (operand == NULL || operand->tokens == NULL ||
+        operand->token_count == 0) {
+        return 0;
+    }
+    if (operand->num_components == SHADER_OPERAND_1_COMPONENT) {
+        return 0x1u;
+    }
+    if (operand->num_components != SHADER_OPERAND_4_COMPONENT) {
+        return 0;
+    }
+
+    token0 = operand->tokens[0];
+    switch (operand->selection_mode) {
+    case SHADER_OPERAND_MASK_MODE:
+        return operand->mask & 0x0fu;
+    case SHADER_OPERAND_SWIZZLE_MODE:
+        for (component = 0; component < 4; component++) {
+            mask |= 1u << ((token0 >> (4u + component * 2u)) & 0x3u);
+        }
+        return mask;
+    case SHADER_OPERAND_SELECT_1_MODE:
+        return 1u << ((token0 >> 4) & 0x3u);
+    default:
+        return 0;
+    }
+}
+
+static uint32_t shader_infer_operand_lane_component(
+    const ShaderOperand *operand, uint32_t lane)
+{
+    uint32_t token0;
+
+    if (operand == NULL || operand->tokens == NULL ||
+        operand->token_count == 0 || lane >= 4) {
+        return 0;
+    }
+    if (operand->num_components == SHADER_OPERAND_1_COMPONENT) {
+        return lane == 0 ? 0x1u : 0;
+    }
+    if (operand->num_components != SHADER_OPERAND_4_COMPONENT) {
+        return 0;
+    }
+
+    token0 = operand->tokens[0];
+    switch (operand->selection_mode) {
+    case SHADER_OPERAND_MASK_MODE:
+        return (operand->mask & (1u << lane)) != 0 ? (1u << lane) : 0;
+    case SHADER_OPERAND_SWIZZLE_MODE:
+        return 1u << ((token0 >> (4u + lane * 2u)) & 0x3u);
+    case SHADER_OPERAND_SELECT_1_MODE:
+        return 1u << ((token0 >> 4) & 0x3u);
+    default:
+        return 0;
+    }
+}
+
 static uint32_t shader_infer_signature_get(
     const SVGA3dDXShaderSignatureEntry *signature, const uint8_t *types,
-    uint32_t count, uint32_t register_index)
+    uint32_t count, uint32_t register_index, uint32_t component_mask)
 {
     uint32_t result = SHADER_INFER_TYPE_UNKNOWN;
     uint32_t i;
 
+    if (component_mask == 0) {
+        return result;
+    }
+
     for (i = 0; i < count; i++) {
         uint32_t type;
 
-        if (signature[i].registerIndex != register_index) {
+        if (signature[i].registerIndex != register_index ||
+            (signature[i].mask & component_mask) == 0) {
             continue;
         }
         type = types[i];
@@ -3755,22 +3824,73 @@ static uint32_t shader_infer_signature_get(
 static bool shader_infer_signature_set(
     const SVGA3dDXShaderSignatureEntry *signature, uint8_t *types,
     const bool *fixed, uint32_t count, uint32_t register_index,
-    uint32_t type)
+    uint32_t component_mask, uint32_t type)
 {
     bool changed = false;
     uint32_t i;
 
+    if (component_mask == 0) {
+        return false;
+    }
+
     for (i = 0; i < count; i++) {
-        if (signature[i].registerIndex == register_index) {
+        if (signature[i].registerIndex == register_index &&
+            (signature[i].mask & component_mask) != 0) {
             changed |= shader_infer_type_merge(&types[i], fixed[i], type);
         }
     }
     return changed;
 }
 
-static uint32_t shader_infer_operand_get(const VMSVGA3DD3D10ShaderInfo *info,
-                                         const ShaderTypeInference *state,
-                                         const ShaderOperand *operand)
+static uint32_t shader_infer_temp_get(
+    const ShaderTypeInference *state, uint32_t register_index,
+    uint32_t component_mask)
+{
+    uint32_t result = SHADER_INFER_TYPE_UNKNOWN;
+    uint32_t component;
+
+    if (register_index >= SHADER_INFER_MAX_TEMPS || component_mask == 0) {
+        return result;
+    }
+
+    for (component = 0; component < 4; component++) {
+        uint32_t type;
+
+        if ((component_mask & (1u << component)) == 0) {
+            continue;
+        }
+        type = state->temp[register_index][component];
+        if (type == SHADER_INFER_TYPE_UNKNOWN) {
+            continue;
+        }
+        result = shader_infer_type_combine((uint8_t)result, type);
+    }
+    return result;
+}
+
+static bool shader_infer_temp_set(ShaderTypeInference *state,
+                                  uint32_t register_index,
+                                  uint32_t component_mask, uint32_t type)
+{
+    bool changed = false;
+    uint32_t component;
+
+    if (register_index >= SHADER_INFER_MAX_TEMPS || component_mask == 0) {
+        return false;
+    }
+
+    for (component = 0; component < 4; component++) {
+        if ((component_mask & (1u << component)) != 0) {
+            changed |= shader_infer_type_merge(
+                &state->temp[register_index][component], false, type);
+        }
+    }
+    return changed;
+}
+
+static uint32_t shader_infer_operand_get_mask(
+    const VMSVGA3DD3D10ShaderInfo *info, const ShaderTypeInference *state,
+    const ShaderOperand *operand, uint32_t component_mask)
 {
     uint32_t register_index;
 
@@ -3780,24 +3900,63 @@ static uint32_t shader_infer_operand_get(const VMSVGA3DD3D10ShaderInfo *info,
 
     switch (operand->operand_type) {
     case SHADER_OPERAND_TYPE_TEMP:
-        return register_index < SHADER_INFER_MAX_TEMPS
-            ? state->temp[register_index] : SHADER_INFER_TYPE_UNKNOWN;
+        return shader_infer_temp_get(state, register_index, component_mask);
     case SHADER_OPERAND_TYPE_INPUT:
     case SHADER_OPERAND_TYPE_INPUT_CONTROL_POINT:
-        return shader_infer_signature_get(info->input_signature, state->input,
-                                          info->input_signature_count,
-                                          register_index);
+        return shader_infer_signature_get(
+            info->input_signature, state->input, info->input_signature_count,
+            register_index, component_mask);
     case SHADER_OPERAND_TYPE_OUTPUT:
     case SHADER_OPERAND_TYPE_OUTPUT_CONTROL_POINT:
-        return shader_infer_signature_get(info->output_signature, state->output,
-                                          info->output_signature_count,
-                                          register_index);
+        return shader_infer_signature_get(
+            info->output_signature, state->output, info->output_signature_count,
+            register_index, component_mask);
     case SHADER_OPERAND_TYPE_INPUT_PATCH_CONSTANT:
-        return shader_infer_signature_get(info->patch_signature, state->patch,
-                                          info->patch_signature_count,
-                                          register_index);
+        return shader_infer_signature_get(
+            info->patch_signature, state->patch, info->patch_signature_count,
+            register_index, component_mask);
     default:
         return SHADER_INFER_TYPE_UNKNOWN;
+    }
+}
+
+static uint32_t shader_infer_operand_get(const VMSVGA3DD3D10ShaderInfo *info,
+                                         const ShaderTypeInference *state,
+                                         const ShaderOperand *operand)
+{
+    return shader_infer_operand_get_mask(
+        info, state, operand, shader_infer_operand_component_mask(operand));
+}
+
+static bool shader_infer_operand_set_mask(
+    const VMSVGA3DD3D10ShaderInfo *info, ShaderTypeInference *state,
+    const ShaderOperand *operand, uint32_t component_mask, uint32_t type)
+{
+    uint32_t register_index;
+
+    if (!shader_infer_operand_register(operand, &register_index)) {
+        return false;
+    }
+
+    switch (operand->operand_type) {
+    case SHADER_OPERAND_TYPE_TEMP:
+        return shader_infer_temp_set(state, register_index, component_mask, type);
+    case SHADER_OPERAND_TYPE_INPUT:
+    case SHADER_OPERAND_TYPE_INPUT_CONTROL_POINT:
+        return shader_infer_signature_set(
+            info->input_signature, state->input, state->input_fixed,
+            info->input_signature_count, register_index, component_mask, type);
+    case SHADER_OPERAND_TYPE_OUTPUT:
+    case SHADER_OPERAND_TYPE_OUTPUT_CONTROL_POINT:
+        return shader_infer_signature_set(
+            info->output_signature, state->output, state->output_fixed,
+            info->output_signature_count, register_index, component_mask, type);
+    case SHADER_OPERAND_TYPE_INPUT_PATCH_CONSTANT:
+        return shader_infer_signature_set(
+            info->patch_signature, state->patch, state->patch_fixed,
+            info->patch_signature_count, register_index, component_mask, type);
+    default:
+        return false;
     }
 }
 
@@ -3806,33 +3965,9 @@ static bool shader_infer_operand_set(const VMSVGA3DD3D10ShaderInfo *info,
                                      const ShaderOperand *operand,
                                      uint32_t type)
 {
-    uint32_t register_index;
-
-    if (!shader_infer_operand_register(operand, &register_index)) {
-        return false;
-    }
-
-    switch (operand->operand_type) {
-    case SHADER_OPERAND_TYPE_TEMP:
-        return register_index < SHADER_INFER_MAX_TEMPS &&
-            shader_infer_type_merge(&state->temp[register_index], false, type);
-    case SHADER_OPERAND_TYPE_INPUT:
-    case SHADER_OPERAND_TYPE_INPUT_CONTROL_POINT:
-        return shader_infer_signature_set(
-            info->input_signature, state->input, state->input_fixed,
-            info->input_signature_count, register_index, type);
-    case SHADER_OPERAND_TYPE_OUTPUT:
-    case SHADER_OPERAND_TYPE_OUTPUT_CONTROL_POINT:
-        return shader_infer_signature_set(
-            info->output_signature, state->output, state->output_fixed,
-            info->output_signature_count, register_index, type);
-    case SHADER_OPERAND_TYPE_INPUT_PATCH_CONSTANT:
-        return shader_infer_signature_set(
-            info->patch_signature, state->patch, state->patch_fixed,
-            info->patch_signature_count, register_index, type);
-    default:
-        return false;
-    }
+    return shader_infer_operand_set_mask(
+        info, state, operand, shader_infer_operand_component_mask(operand),
+        type);
 }
 
 static const ShaderOperand *shader_infer_opcode_operand(const ShaderOpcode *opcode,
@@ -3873,23 +4008,39 @@ static bool shader_infer_link_operands(const VMSVGA3DD3D10ShaderInfo *info,
 {
     const ShaderOperand *a = shader_infer_opcode_operand(opcode, a_index);
     const ShaderOperand *b = shader_infer_opcode_operand(opcode, b_index);
-    uint32_t a_type;
-    uint32_t b_type;
     bool changed = false;
+    uint32_t lane;
 
     if (a == NULL || b == NULL) {
         return false;
     }
 
-    a_type = shader_infer_operand_get(info, state, a);
-    b_type = shader_infer_operand_get(info, state, b);
-    if (a_type != SHADER_INFER_TYPE_UNKNOWN &&
-        a_type != SHADER_INFER_TYPE_CONFLICT) {
-        changed |= shader_infer_operand_set(info, state, b, a_type);
-    }
-    if (b_type != SHADER_INFER_TYPE_UNKNOWN &&
-        b_type != SHADER_INFER_TYPE_CONFLICT) {
-        changed |= shader_infer_operand_set(info, state, a, b_type);
+    /* MOV-like instructions are typeless per component.  Preserve that when
+     * registers pack several signature elements with different component
+     * types (for example FLOAT in o2.x and UINT in o2.yz).  Linking an entire
+     * register at once would collapse those valid layouts into CONFLICT. */
+    for (lane = 0; lane < 4; lane++) {
+        uint32_t a_mask = shader_infer_operand_lane_component(a, lane);
+        uint32_t b_mask = shader_infer_operand_lane_component(b, lane);
+        uint32_t a_type;
+        uint32_t b_type;
+
+        if (a_mask == 0 || b_mask == 0) {
+            continue;
+        }
+
+        a_type = shader_infer_operand_get_mask(info, state, a, a_mask);
+        b_type = shader_infer_operand_get_mask(info, state, b, b_mask);
+        if (a_type != SHADER_INFER_TYPE_UNKNOWN &&
+            a_type != SHADER_INFER_TYPE_CONFLICT) {
+            changed |= shader_infer_operand_set_mask(
+                info, state, b, b_mask, a_type);
+        }
+        if (b_type != SHADER_INFER_TYPE_UNKNOWN &&
+            b_type != SHADER_INFER_TYPE_CONFLICT) {
+            changed |= shader_infer_operand_set_mask(
+                info, state, a, a_mask, b_type);
+        }
     }
     return changed;
 }
@@ -10111,6 +10262,139 @@ static void vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
         surface->sid, reason != NULL ? reason : "write");
 }
 
+typedef struct vmsvga3d_d3d10_dsv_subresource_range_s {
+    uint32_t mip_slice;
+    uint32_t first_array_slice;
+    uint32_t slice_count;
+} VMSVGA3DD3D10DSVSubresourceRange;
+
+static bool vmsvga3d_d3d10_dsv_subresource_range(
+    const SVGACOTableDXDSViewEntry *entry, const VMSVGA3DSurface *surface,
+    VMSVGA3DD3D10DSVSubresourceRange *range)
+{
+    uint32_t levels;
+
+    if (entry == NULL || surface == NULL || range == NULL ||
+        surface->mips == NULL || surface->mip_count == 0 ||
+        surface->array_elements == 0) {
+        return false;
+    }
+
+    levels = surface->face[0].numMipLevels;
+    if (levels == 0) {
+        return false;
+    }
+
+    memset(range, 0, sizeof(*range));
+    switch (entry->resourceDimension) {
+    case SVGA3D_RESOURCE_TEXTURE1D:
+        if (entry->mipSlice >= levels) {
+            return false;
+        }
+        range->mip_slice = entry->mipSlice;
+        break;
+    case SVGA3D_RESOURCE_TEXTURE2D:
+        if (surface->multisample_count > 1) {
+            /* D3D10_DSV_TEXTURE2DMS[_ARRAY] has no mip selection. */
+            range->mip_slice = 0;
+        } else {
+            if (entry->mipSlice >= levels) {
+                return false;
+            }
+            range->mip_slice = entry->mipSlice;
+        }
+        break;
+    default:
+        return false;
+    }
+
+    if (surface->array_elements <= 1) {
+        /* Non-array DSVs ignore firstArraySlice/arraySize. */
+        range->first_array_slice = 0;
+        range->slice_count = 1;
+    } else {
+        if (entry->firstArraySlice >= surface->array_elements) {
+            return false;
+        }
+        range->first_array_slice = entry->firstArraySlice;
+        range->slice_count = entry->arraySize != 0 ? entry->arraySize : 1;
+        if (range->slice_count >
+            surface->array_elements - range->first_array_slice) {
+            return false;
+        }
+    }
+
+    if ((uint64_t)(range->first_array_slice + range->slice_count - 1) *
+            levels + range->mip_slice >= surface->mip_count) {
+        return false;
+    }
+    return true;
+}
+
+static bool vmsvga3d_d3d10_dsv_shadow_sensitive_desc(
+    uint32_t format, uint32_t resource_dimension)
+{
+    return format == SVGA3D_D24_UNORM_S8_UINT &&
+           resource_dimension == SVGA3D_RESOURCE_TEXTURE1D;
+}
+
+static VMSVGA3DSurface *vmsvga3d_d3d10_dsv_shadow_surface_live(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dDepthStencilViewId view_id)
+{
+    SVGACOTableDXDSViewEntry *entry;
+    VMSVGA3DSurface *surface;
+
+    if (s == NULL || s->svga3d == NULL || view_id == SVGA3D_INVALID_ID) {
+        return NULL;
+    }
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DSVIEW, view_id);
+    if (entry == NULL || entry->sid == SVGA3D_INVALID_ID ||
+        entry->sid >= SVGA3D_MAX_SURFACE_IDS ||
+        !vmsvga3d_d3d10_dsv_shadow_sensitive_desc(
+            entry->format, entry->resourceDimension)) {
+        return NULL;
+    }
+
+    surface = s->svga3d->surfaces[entry->sid];
+    if (surface == NULL || surface->format != SVGA3D_D24_UNORM_S8_UINT ||
+        (surface->surface_flags & SVGA3D_SURFACE_1D) == 0) {
+        return NULL;
+    }
+    return surface;
+}
+
+static void vmsvga3d_d3d10_dsv_shadow_invalidate_live(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dDepthStencilViewId view_id,
+    const char *reason)
+{
+    SVGACOTableDXDSViewEntry *entry;
+    VMSVGA3DSurface *surface;
+    VMSVGA3DD3D10DSVSubresourceRange range;
+    uint32_t levels;
+    uint32_t slice;
+
+    surface = vmsvga3d_d3d10_dsv_shadow_surface_live(s, cid, view_id);
+    if (surface == NULL) {
+        return;
+    }
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DSVIEW, view_id);
+    if (entry == NULL ||
+        !vmsvga3d_d3d10_dsv_subresource_range(entry, surface, &range)) {
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(surface, reason);
+        return;
+    }
+
+    levels = surface->face[0].numMipLevels;
+    for (slice = 0; slice < range.slice_count; slice++) {
+        uint32_t subresource =
+            (range.first_array_slice + slice) * levels + range.mip_slice;
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
+            surface, subresource, reason);
+    }
+}
+
 static bool vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
     struct vmsvga_state_s *s, uint32_t cid,
     SVGA3dDepthStencilViewId view_id, uint32_t clear_flags,
@@ -10118,8 +10402,8 @@ static bool vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
 {
     SVGACOTableDXDSViewEntry *entry;
     VMSVGA3DSurface *surface;
+    VMSVGA3DD3D10DSVSubresourceRange range;
     uint32_t levels;
-    uint32_t slice_count;
     uint32_t depth24;
     uint32_t slice;
     bool clear_depth;
@@ -10145,19 +10429,10 @@ static bool vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
         return false;
     }
 
+    if (!vmsvga3d_d3d10_dsv_subresource_range(entry, surface, &range)) {
+        return false;
+    }
     levels = surface->face[0].numMipLevels;
-    if (levels == 0 || entry->mipSlice >= levels ||
-        entry->firstArraySlice >= surface->array_elements) {
-        return false;
-    }
-
-    slice_count = entry->arraySize;
-    if (slice_count == 0) {
-        slice_count = 1;
-    }
-    if (slice_count > surface->array_elements - entry->firstArraySlice) {
-        return false;
-    }
 
     clear_depth = (clear_flags & SVGA3D_CLEAR_DEPTH) != 0;
     clear_stencil = (clear_flags & SVGA3D_CLEAR_STENCIL) != 0;
@@ -10172,9 +10447,9 @@ static bool vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
     }
     depth24 = (uint32_t)(depth * 16777215.0f + 0.5f) & 0x00ffffffu;
 
-    for (slice = 0; slice < slice_count; slice++) {
-        uint32_t array_slice = entry->firstArraySlice + slice;
-        uint32_t subresource = array_slice * levels + entry->mipSlice;
+    for (slice = 0; slice < range.slice_count; slice++) {
+        uint32_t array_slice = range.first_array_slice + slice;
+        uint32_t subresource = array_slice * levels + range.mip_slice;
         VMSVGA3DSurfaceImage *image;
         uint64_t bit;
         bool was_valid;
@@ -10366,39 +10641,26 @@ static bool vmsvga3d_d3d10_dsv_changed_live(
         return false;
     }
 
-    levels = surface->face[0].numMipLevels;
-    switch (entry->resourceDimension) {
-    case SVGA3D_RESOURCE_TEXTURE1D:
-    case SVGA3D_RESOURCE_TEXTURE2D:
-    case SVGA3D_RESOURCE_TEXTURECUBE:
-        if (levels == 0 || entry->mipSlice >= levels ||
-            entry->firstArraySlice >= surface->array_elements) {
+    {
+        VMSVGA3DD3D10DSVSubresourceRange range;
+
+        if (!vmsvga3d_d3d10_dsv_subresource_range(entry, surface, &range)) {
             return false;
         }
 
-        slice_count = entry->arraySize != 0 ? entry->arraySize : 1;
-        if (slice_count > surface->array_elements - entry->firstArraySlice) {
-            return false;
-        }
-
+        levels = surface->face[0].numMipLevels;
+        slice_count = range.slice_count;
         for (slice = 0; slice < slice_count; slice++) {
-            uint32_t array_slice = entry->firstArraySlice + slice;
-            uint32_t subresource = array_slice * levels + entry->mipSlice;
+            uint32_t array_slice = range.first_array_slice + slice;
+            uint32_t subresource = array_slice * levels + range.mip_slice;
 
-            if (subresource >= surface->mip_count ||
-                !vmsvga3d_d3d10_surface_changed_full_live_internal(
+            if (!vmsvga3d_d3d10_surface_changed_full_live_internal(
                     s, entry->sid, subresource, invalidate_shadow)) {
                 return false;
             }
         }
-        return true;
-    default:
-        if (entry->mipSlice >= surface->mip_count) {
-            return false;
-        }
-        return vmsvga3d_d3d10_surface_changed_full_live_internal(
-            s, entry->sid, entry->mipSlice, invalidate_shadow);
     }
+    return true;
 }
 
 static void vmsvga3d_d3d10_bound_rtvs_changed_live(
@@ -11551,6 +11813,68 @@ static bool vmsvga3d_d3d10_transfer_from_buffer_live(
 }
 
 
+static bool vmsvga3d_d3d10_predicate_write_executed_live(
+    struct vmsvga_state_s *s, uint32_t cid, VMSVGA3DDXContext *context,
+    bool *executed)
+{
+    VMSVGA3DD3D10QueryInfo info;
+    uint8_t *entry;
+    uint32_t result = 0;
+    uint32_t flags;
+    uint32_t attempt;
+    bool ready = false;
+
+    if (executed == NULL || s == NULL || context == NULL ||
+        context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
+        return false;
+    }
+
+    entry = vmsvga3d_dx_cotable_entry_ptr(
+        s, cid, SVGA_COTABLE_DXQUERY, context->shadow.predication.queryID);
+    if (entry == NULL) {
+        return false;
+    }
+    flags = query_read_u32(entry + 4);
+    if (vmsvga3d_d3d10_query_info(
+            (SVGA3dQueryType)entry[0], flags, &info) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID ||
+        !info.boolean_result || info.d3d_result_size != sizeof(result)) {
+        return false;
+    }
+
+    /* This synchronous query is intentionally restricted to the 1D D24S8
+     * CPU-shadow preservation path.  DXVK 2.x cannot read that resident format
+     * back through our normal staging path, so discarding a valid shadow for a
+     * predicated no-op is a correctness failure rather than a performance loss. */
+    vmsvga3d_dxvk_d3d11_flush(s->dxvk);
+    for (attempt = 0; attempt < 1000; attempt++) {
+        if (!vmsvga3d_dxvk_d3d11_query_get_data(
+                s->dxvk, cid, context->shadow.predication.queryID,
+                &result, sizeof(result), 0, &ready)) {
+            return false;
+        }
+        if (ready) {
+            *executed = (result != 0) ==
+                (context->shadow.predication.value != 0);
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-PREDICATE-RESOLVE cid=%u query=%u raw=%u value=%u "
+                "executed=%u attempts=%u",
+                cid, context->shadow.predication.queryID, result,
+                context->shadow.predication.value != 0, *executed ? 1u : 0u,
+                attempt + 1);
+            return true;
+        }
+        g_usleep(1000);
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-PREDICATE-RESOLVE cid=%u query=%u result=FAIL reason=timeout",
+        cid, context->shadow.predication.queryID);
+    return false;
+}
+
 static bool vmsvga3d_d3d10_pred_copy_region_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const SVGA3dCmdDXPredCopyRegion *command)
@@ -11560,6 +11884,8 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
     VMSVGA3DSurface *destination;
     VMSVGA3DD3D10CopySubresourcePlan plan;
     VMSVGA3DD3D10Level level;
+    bool predicate_resolved = false;
+    bool write_executed = false;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -11626,12 +11952,24 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
         return false;
     }
 
-    /* Native predication is asynchronous, so successful submission does not
-     * tell the CPU whether the copy executed.  Either outcome means the old
-     * CPU shadow can no longer be proven authoritative: if the copy executed
-     * it is stale, and if it did not we merely lose this readback fast path. */
-    vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
-        destination, plan.destination_subresource, "pred-copy-region");
+    if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
+        predicate_resolved = true;
+        write_executed = true;
+    } else if (vmsvga3d_d3d10_1d_d24s8_shadow_eligible(
+                   destination, plan.destination_subresource) &&
+               (destination->d3d11_1d_d24s8_shadow_valid_mask &
+                (UINT64_C(1) << plan.destination_subresource)) != 0) {
+        predicate_resolved = vmsvga3d_d3d10_predicate_write_executed_live(
+            s, cid, context, &write_executed);
+    }
+
+    /* Preserve a valid 1D D24S8 CPU shadow when the predicate is known to
+     * suppress the copy.  If the outcome cannot be resolved, invalidate it
+     * conservatively as before. */
+    if (!predicate_resolved || write_executed) {
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
+            destination, plan.destination_subresource, "pred-copy-region");
+    }
 
     {
         SVGA3dBox dirty = {
@@ -11647,7 +11985,8 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
          * executed without synchronously resolving the query.  Do not claim
          * ScreenTarget write provenance in that case; a disabled predicate is
          * equivalent to an unconditional copy and can be tracked normally. */
-        if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
+        if (context->shadow.predication.queryID == SVGA3D_INVALID_ID ||
+            (predicate_resolved && write_executed)) {
             (void)vmsvga3d_surface_changed_live(
                 s, command->dstSid, plan.destination_subresource, &dirty);
         }
@@ -11664,6 +12003,8 @@ static bool vmsvga3d_d3d10_pred_copy_live(
     VMSVGA3DSurface *destination;
     VMSVGA3DD3D10CopyResourcePlan plan;
     VMSVGA3DD3D10Level level;
+    bool predicate_resolved = false;
+    bool write_executed = false;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -11710,17 +12051,27 @@ static bool vmsvga3d_d3d10_pred_copy_live(
         return false;
     }
 
-    /* CopyResource covers every subresource.  Conservatively invalidate the
-     * entire 1D D24S8 shadow even when a predicate is active and may suppress
-     * the native write; losing the fast path is preferable to stale readback. */
-    vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
-        destination, "pred-copy-resource");
+    if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
+        predicate_resolved = true;
+        write_executed = true;
+    } else if (destination->format == SVGA3D_D24_UNORM_S8_UINT &&
+               (destination->surface_flags & SVGA3D_SURFACE_1D) != 0 &&
+               destination->d3d11_1d_d24s8_shadow_valid_mask != 0) {
+        predicate_resolved = vmsvga3d_d3d10_predicate_write_executed_live(
+            s, cid, context, &write_executed);
+    }
+
+    if (!predicate_resolved || write_executed) {
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
+            destination, "pred-copy-resource");
+    }
 
     /* Native D3D11 predication is asynchronous.  If a predicate is bound,
      * successful submission does not prove that CopyResource actually wrote
      * the destination, so do not establish ScreenTarget content/coverage from
      * that submission alone. */
-    if (context->shadow.predication.queryID == SVGA3D_INVALID_ID) {
+    if (context->shadow.predication.queryID == SVGA3D_INVALID_ID ||
+        (predicate_resolved && write_executed)) {
         (void)vmsvga3d_d3d10_surface_changed_full_live(
             s, command->dstSid, 0);
     }
@@ -11877,15 +12228,27 @@ static bool vmsvga3d_d3d10_clear_dsv_live(
     }
 
     if ((command->flags & (SVGA3D_CLEAR_DEPTH | SVGA3D_CLEAR_STENCIL)) != 0) {
+        VMSVGA3DSurface *shadow_surface =
+            vmsvga3d_d3d10_dsv_shadow_surface_live(
+                s, cid, clear_plan.view_id);
+        bool changed_ok;
+        bool shadow_ok = true;
+
         /* The clear itself is mirrored into the CPU shadow below.  Record the
          * native write for normal dirty tracking without first destroying the
          * pre-clear validity needed to preserve an uncleared depth/stencil
          * component on partial clears. */
-        (void)vmsvga3d_d3d10_dsv_changed_live(
+        changed_ok = vmsvga3d_d3d10_dsv_changed_live(
             s, cid, clear_plan.view_id, false);
-        (void)vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
-            s, cid, clear_plan.view_id, command->flags, command->depth,
-            command->stencil);
+        if (shadow_surface != NULL) {
+            shadow_ok = vmsvga3d_d3d10_1d_d24s8_clear_shadow_live(
+                s, cid, clear_plan.view_id, command->flags, command->depth,
+                command->stencil);
+            if (!changed_ok || !shadow_ok) {
+                vmsvga3d_d3d10_dsv_shadow_invalidate_live(
+                    s, cid, clear_plan.view_id, "clear-mirror-failed");
+            }
+        }
     }
     return true;
 }
@@ -14886,10 +15249,19 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               return false;
           }
 
-          /* VirtualBox only updates the COTable entry here.  An already
-           * materialized native DSV is intentionally left untouched and a
-           * currently bound DSV is not dirtied; preserve that lazy/stale
-           * redefine behavior for compatibility. */
+          /* Preserve VirtualBox's lazy/stale redefine behavior generally, but
+           * retire the cached native view when the 1D D24S8 CPU-shadow path is
+           * involved.  Otherwise a later clear could update the new COTable
+           * subresource's shadow while the stale native DSV still targets the
+           * old subresource. */
+          if ((vmsvga3d_d3d10_dsv_shadow_sensitive_desc(
+                   entry->format, entry->resourceDimension) ||
+               vmsvga3d_d3d10_dsv_shadow_sensitive_desc(
+                   command_v2.format, command_v2.resourceDimension)) &&
+              !vmsvga3d_dxvk_d3d11_depth_stencil_view_destroy(
+                  s->dxvk, cid, command_v2.depthStencilViewId)) {
+              return false;
+          }
           return vmsvga3d_d3d10_dsv_define_entry(&command_v2, entry) !=
                  VMSVGA3D_D3D10_LEVEL_INVALID;
       }
@@ -14911,9 +15283,14 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               return false;
           }
 
-          /* Match VirtualBox: defining a DSV V2 only rewrites the COTable
-           * entry.  Native-view destruction/recreation is deferred until an
-           * explicit destroy or later context lifecycle event. */
+          if ((vmsvga3d_d3d10_dsv_shadow_sensitive_desc(
+                   entry->format, entry->resourceDimension) ||
+               vmsvga3d_d3d10_dsv_shadow_sensitive_desc(
+                   command.format, command.resourceDimension)) &&
+              !vmsvga3d_dxvk_d3d11_depth_stencil_view_destroy(
+                  s->dxvk, cid, command.depthStencilViewId)) {
+              return false;
+          }
           return vmsvga3d_d3d10_dsv_define_entry(&command, entry) !=
                  VMSVGA3D_D3D10_LEVEL_INVALID;
       }

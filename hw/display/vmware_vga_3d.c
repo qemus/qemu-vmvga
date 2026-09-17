@@ -6708,7 +6708,8 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
              * actually submitted, so zero-box and fully clipped no-op copies
              * do not unnecessarily disable the CPU-direct indirect path.
              * Once cleared it stays cleared even if a later box fails. */
-            if (dst_surface->format == SVGA3D_BUFFER) {
+            if (dst_surface->format == SVGA3D_BUFFER &&
+                dst_subresource == 0) {
                 dst_surface->d3d11_indirect_args_shadow_authoritative = false;
             }
 

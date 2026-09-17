@@ -4230,6 +4230,97 @@ static bool shader_infer_run_pass(const VMSVGA3DD3D10ShaderInfo *info,
     return changed;
 }
 
+static void shader_infer_solve_state(const VMSVGA3DD3D10ShaderInfo *info,
+                                     ShaderTypeInference *state)
+{
+    uint32_t pass;
+
+    for (pass = 0; pass < SHADER_INFER_MAX_PASSES; pass++) {
+        if (!shader_infer_run_pass(info, state)) {
+            break;
+        }
+    }
+}
+
+static bool shader_infer_propagate_output_from_consumer(
+    VMSVGA3DD3D10ShaderInfo *producer,
+    const VMSVGA3DD3D10ShaderInfo *consumer,
+    const ShaderTypeInference *consumer_state)
+{
+    bool changed = false;
+    uint32_t i;
+
+    if (producer == NULL || consumer == NULL || consumer_state == NULL) {
+        return false;
+    }
+
+    for (i = 0; i < producer->output_signature_count; i++) {
+        SVGA3dDXShaderSignatureEntry *output = &producer->output_signature[i];
+        uint32_t inferred = SHADER_INFER_TYPE_UNKNOWN;
+        uint32_t j;
+
+        if (output->semanticName != SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED ||
+            output->componentType !=
+                VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN) {
+            continue;
+        }
+
+        /* Prefer an exact packed-register match.  If the register is split
+         * across multiple consumer signature entries, only use the result when
+         * every overlapping entry agrees on one concrete component type.
+         */
+        for (j = 0; j < consumer->input_signature_count; j++) {
+            const SVGA3dDXShaderSignatureEntry *input =
+                &consumer->input_signature[j];
+            uint32_t type;
+
+            if (input->semanticName !=
+                    SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED ||
+                input->registerIndex != output->registerIndex ||
+                input->mask != output->mask) {
+                continue;
+            }
+
+            type = consumer_state->input[j];
+            if (shader_infer_type_is_concrete(type)) {
+                inferred = type;
+            }
+            break;
+        }
+
+        if (!shader_infer_type_is_concrete(inferred)) {
+            for (j = 0; j < consumer->input_signature_count; j++) {
+                const SVGA3dDXShaderSignatureEntry *input =
+                    &consumer->input_signature[j];
+                uint32_t type;
+
+                if (input->semanticName !=
+                        SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED ||
+                    input->registerIndex != output->registerIndex ||
+                    (input->mask & output->mask) == 0) {
+                    continue;
+                }
+
+                type = consumer_state->input[j];
+                if (!shader_infer_type_is_concrete(type)) {
+                    continue;
+                }
+                inferred = shader_infer_type_combine((uint8_t)inferred, type);
+                if (!shader_infer_type_is_concrete(inferred)) {
+                    break;
+                }
+            }
+        }
+
+        if (shader_infer_type_is_concrete(inferred)) {
+            output->componentType = inferred;
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 static void shader_infer_apply(VMSVGA3DD3D10ShaderInfo *info,
                                const ShaderTypeInference *state)
 {
@@ -4263,7 +4354,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resolve_component_types(
 {
     ShaderTypeInference state;
     VMSVGA3DD3D10Level level;
-    uint32_t pass;
 
     if (info == NULL) {
         return VMSVGA3D_D3D10_LEVEL_INVALID;
@@ -4280,11 +4370,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resolve_component_types(
     }
 
     shader_infer_state_init(info, &state);
-    for (pass = 0; pass < SHADER_INFER_MAX_PASSES; pass++) {
-        if (!shader_infer_run_pass(info, &state)) {
-            break;
-        }
-    }
+    shader_infer_solve_state(info, &state);
     shader_infer_apply(info, &state);
 
     return level;
@@ -7383,6 +7469,80 @@ vmsvga3d_d3d10_bound_shader_info_live(
     return info;
 }
 
+static void vmsvga3d_d3d10_shader_propagate_vs_output_types_live(
+    struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid,
+    VMSVGA3DD3D10ShaderInfo *vs)
+{
+    const VMSVGA3DD3D10ShaderInfo *consumer = NULL;
+    ShaderTypeInference state;
+    uint32_t consumer_type = SVGA3D_SHADERTYPE_INVALID;
+    uint32_t slot;
+
+    if (s == NULL || context == NULL || vs == NULL) {
+        return;
+    }
+
+    /* The immediate consumer of VS output is HS when tessellation is active,
+     * otherwise GS when present, otherwise PS.  Resolve that consumer's input
+     * types without realizing it early, then use those types as constraints on
+     * otherwise-typeless VS outputs.
+     */
+    consumer = vmsvga3d_d3d10_bound_shader_info_live(
+        s, context, cid, SVGA3D_SHADERTYPE_HS);
+    if (consumer != NULL) {
+        consumer_type = SVGA3D_SHADERTYPE_HS;
+    } else {
+        consumer = vmsvga3d_d3d10_bound_shader_info_live(
+            s, context, cid, SVGA3D_SHADERTYPE_GS);
+        if (consumer != NULL) {
+            consumer_type = SVGA3D_SHADERTYPE_GS;
+        } else {
+            consumer = vmsvga3d_d3d10_bound_shader_info_live(
+                s, context, cid, SVGA3D_SHADERTYPE_PS);
+            if (consumer != NULL) {
+                consumer_type = SVGA3D_SHADERTYPE_PS;
+            }
+        }
+    }
+
+    if (consumer == NULL) {
+        return;
+    }
+
+    shader_infer_state_init(consumer, &state);
+
+    /* PS output registers are anchored by the currently bound render-target
+     * formats.  Seed the transient inference state directly instead of
+     * modifying or realizing the PS ahead of its normal pipeline stage.
+     */
+    if (consumer_type == SVGA3D_SHADERTYPE_PS) {
+        for (slot = 0;
+             slot < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS &&
+             slot < consumer->output_signature_count;
+             slot++) {
+            uint32_t view_id =
+                context->shadow.renderState.renderTargetViewIds[slot];
+            SVGACOTableDXRTViewEntry *entry;
+
+            if (view_id == SVGA3D_INVALID_ID) {
+                continue;
+            }
+            entry = vmsvga3d_dx_cotable_entry_ptr(
+                s, cid, SVGA_COTABLE_RTVIEW, view_id);
+            if (entry == NULL) {
+                continue;
+            }
+
+            state.output[slot] = (uint8_t)
+                vmsvga3d_d3d10_shader_component_type_from_format(entry->format);
+            state.output_fixed[slot] = true;
+        }
+    }
+
+    shader_infer_solve_state(consumer, &state);
+    (void)shader_infer_propagate_output_from_consumer(vs, consumer, &state);
+}
+
 static bool vmsvga3d_d3d10_stream_output_prepare_live(
     struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid,
     const VMSVGA3DD3D10ShaderInfo *gs_info, uint32_t *stream_output_id,
@@ -7659,10 +7819,14 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
                  */
                 prepared =
                     vmsvga3d_d3d10_shader_update_vs_input_signature(
-                        info, descs, desc_count) != VMSVGA3D_D3D10_LEVEL_INVALID &&
-                    vmsvga3d_d3d10_shader_match_signatures(
+                        info, descs, desc_count) != VMSVGA3D_D3D10_LEVEL_INVALID;
+                if (prepared) {
+                    vmsvga3d_d3d10_shader_propagate_vs_output_types_live(
+                        s, context, cid, info);
+                    prepared = vmsvga3d_d3d10_shader_match_signatures(
                         SVGA3D_SHADERTYPE_VS, info, NULL, NULL, NULL, NULL, NULL) !=
                         VMSVGA3D_D3D10_LEVEL_INVALID;
+                }
             }
         }
 

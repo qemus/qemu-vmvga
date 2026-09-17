@@ -726,6 +726,8 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_update_resources(
     VMSVGA3DD3D10ShaderInfo *info,
     const VMSVGA3DD3D10ShaderResourceBinding *bindings,
     uint32_t binding_count);
+VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resolve_component_types(
+    VMSVGA3DD3D10ShaderInfo *info);
 VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_dxbc(
     const VMSVGA3DD3D10ShaderInfo *info, VMSVGA3DD3D10ShaderDXBC *dxbc);
 void vmsvga3d_d3d10_shader_dxbc_release(VMSVGA3DD3D10ShaderDXBC *dxbc);

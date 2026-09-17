@@ -88,7 +88,6 @@ struct vmsvga3d_dxvk_s {
     uint32_t d3d11_bound_index_format;
     uint32_t d3d11_bound_index_offset;
     bool d3d11_bound_index_buffer_valid;
-    void *d3d11_bound_stream_output_targets[SVGA3D_DX_MAX_SOTARGETS];
     void *d3d11_blit_constant_buffer;
     void *d3d11_blit_vertex_shader;
     void *d3d11_blit_pixel_shader;
@@ -418,7 +417,6 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_ID3D11DEVICE_CHECK_FEATURE_SUPPORT 33u
 
 #define VMSVGA3D_DXVK_D3D11_FEATURE_D3D11_OPTIONS 5u
-#define VMSVGA3D_DXVK_D3D11_APPEND_ALIGNED_ELEMENT 0xffffffffu
 #define VMSVGA3D_DXVK_ID3D11DEVICE1_CREATE_BLEND_STATE1 45u
 #define VMSVGA3D_DXVK_ID3D11DEVICE1_CREATE_RASTERIZER_STATE1 46u
 #define VMSVGA3D_DXVK_DXGI_FORMAT_R8G8B8A8_UNORM 28u
@@ -2194,8 +2192,6 @@ static void vmsvga3d_dxvk_d3d11_binding_cache_reset(
     dxvk->d3d11_bound_index_format = 0;
     dxvk->d3d11_bound_index_offset = 0;
     dxvk->d3d11_bound_index_buffer_valid = false;
-    memset(dxvk->d3d11_bound_stream_output_targets, 0,
-           sizeof(dxvk->d3d11_bound_stream_output_targets));
 }
 
 static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
@@ -4892,8 +4888,6 @@ bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
     set_targets(dxvk->d3d11_context, SVGA3D_DX_MAX_SOTARGETS,
                 buffers, offsets);
 
-    memcpy(dxvk->d3d11_bound_stream_output_targets, buffers,
-           sizeof(dxvk->d3d11_bound_stream_output_targets));
     return true;
 #else
     (void)dxvk;
@@ -4902,115 +4896,6 @@ bool vmsvga3d_dxvk_d3d11_set_stream_output_targets(
     return false;
 #endif
 }
-
-typedef struct vmsvga3d_dxvk_d3d11_so_copy_guard_s {
-    bool active;
-    VMSVGA3DDxvkD3D11SOSetTargets set_targets;
-    void *targets[SVGA3D_DX_MAX_SOTARGETS];
-    uint32_t restore_offsets[SVGA3D_DX_MAX_SOTARGETS];
-} VMSVGA3DDxvkD3D11SOCopyGuard;
-
-#if defined(CONFIG_LINUX) && defined(__ELF__)
-static bool vmsvga3d_dxvk_d3d11_so_copy_guard_begin(
-    VMSVGA3DDxvk *dxvk, void *source_resource, uint32_t source_sid,
-    VMSVGA3DDxvkD3D11SOCopyGuard *guard)
-{
-    uint32_t bound_mask = 0;
-    uint32_t i;
-    uint32_t j;
-
-    if (guard == NULL) {
-        return false;
-    }
-    memset(guard, 0, sizeof(*guard));
-
-    if (dxvk == NULL || dxvk->d3d11_context == NULL ||
-        source_resource == NULL) {
-        return false;
-    }
-
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (dxvk->d3d11_bound_stream_output_targets[i] == source_resource) {
-            bound_mask |= 1u << i;
-        }
-    }
-    if (bound_mask == 0) {
-        return true;
-    }
-
-    if (!vmsvga3d_dxvk_get_method(
-            dxvk->d3d11_context,
-            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_SO_SET_TARGETS,
-            &guard->set_targets, sizeof(guard->set_targets))) {
-        return false;
-    }
-
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        guard->targets[i] = dxvk->d3d11_bound_stream_output_targets[i];
-        if (guard->targets[i] == NULL) {
-            continue;
-        }
-        if (!vmsvga3d_dxvk_addref(guard->targets[i],
-                                   VMSVGA3D_DXVK_IUNKNOWN_ADDREF)) {
-            for (j = 0; j < i; j++) {
-                if (guard->targets[j] != NULL) {
-                    vmsvga3d_dxvk_release(
-                        guard->targets[j], VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-                }
-            }
-            memset(guard, 0, sizeof(*guard));
-            return false;
-        }
-        /* Preserve the hidden stream-output cursor across the temporary
-         * unbind rather than replaying the guest's original binding offset. */
-        guard->restore_offsets[i] =
-            VMSVGA3D_DXVK_D3D11_APPEND_ALIGNED_ELEMENT;
-    }
-
-    /* D3D11 defines SOSetTargets(0, NULL, NULL) as unbinding every target. */
-    guard->set_targets(dxvk->d3d11_context, 0, NULL, NULL);
-    guard->active = true;
-
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "DX-SO-COPY-HAZARD action=unbind src=%u slots=0x%x",
-        source_sid, bound_mask);
-    return true;
-}
-
-static bool vmsvga3d_dxvk_d3d11_so_copy_guard_end(
-    VMSVGA3DDxvk *dxvk, uint32_t source_sid,
-    VMSVGA3DDxvkD3D11SOCopyGuard *guard)
-{
-    bool restored = false;
-    uint32_t i;
-
-    if (guard == NULL || !guard->active) {
-        return true;
-    }
-
-    if (dxvk != NULL && dxvk->d3d11_context != NULL &&
-        guard->set_targets != NULL) {
-        guard->set_targets(dxvk->d3d11_context, SVGA3D_DX_MAX_SOTARGETS,
-                           guard->targets, guard->restore_offsets);
-        restored = true;
-    }
-
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (guard->targets[i] != NULL) {
-            vmsvga3d_dxvk_release(
-                guard->targets[i], VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-        }
-    }
-
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "DX-SO-COPY-HAZARD action=restore src=%u result=%s",
-        source_sid, restored ? "OK" : "FAIL");
-    memset(guard, 0, sizeof(*guard));
-    return restored;
-}
-#endif
 
 bool vmsvga3d_dxvk_d3d11_set_index_buffer(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
@@ -9543,7 +9428,6 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
-    VMSVGA3DDxvkD3D11SOCopyGuard so_guard;
     const VMSVGA3DD3D10Box *box = source_box;
     VMSVGA3DDxvkD3D11Box native;
 
@@ -9565,18 +9449,12 @@ bool vmsvga3d_dxvk_d3d11_copy_subresource_region(
     native.bottom = box->bottom;
     native.back = box->back;
 
-    if (!vmsvga3d_dxvk_d3d11_so_copy_guard_begin(
-            dxvk, source->d3d11_resource, source->sid, &so_guard)) {
-        return false;
-    }
-
     copy_region(dxvk->d3d11_context, destination->d3d11_resource,
                 destination_subresource, destination_x, destination_y,
                 destination_z, source->d3d11_resource, source_subresource,
                 &native);
 
-    return vmsvga3d_dxvk_d3d11_so_copy_guard_end(
-        dxvk, source->sid, &so_guard);
+    return true;
 #else
     (void)dxvk;
     (void)destination;
@@ -9597,7 +9475,6 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CopyResource copy_resource = NULL;
-    VMSVGA3DDxvkD3D11SOCopyGuard so_guard;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
         destination == NULL || source == NULL ||
@@ -9609,16 +9486,10 @@ bool vmsvga3d_dxvk_d3d11_copy_resource(
         return false;
     }
 
-    if (!vmsvga3d_dxvk_d3d11_so_copy_guard_begin(
-            dxvk, source->d3d11_resource, source->sid, &so_guard)) {
-        return false;
-    }
-
     copy_resource(dxvk->d3d11_context, destination->d3d11_resource,
                   source->d3d11_resource);
 
-    return vmsvga3d_dxvk_d3d11_so_copy_guard_end(
-        dxvk, source->sid, &so_guard);
+    return true;
 #else
     (void)dxvk;
     (void)destination;

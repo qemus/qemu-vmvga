@@ -439,68 +439,6 @@ static bool vmsvga3d_d3d9_direct_render_state(uint32_t state,
     return false;
 }
 
-static bool vmsvga3d_d3d9_blend_supported(uint32_t value)
-{
-    return (value >= SVGA3D_BLENDOP_ZERO &&
-            value <= SVGA3D_BLENDOP_SRCALPHASAT) ||
-           value == SVGA3D_BLENDOP_BLENDFACTOR ||
-           value == SVGA3D_BLENDOP_INVBLENDFACTOR;
-}
-
-static const char *vmsvga3d_d3d9_blend_name(uint32_t value)
-{
-    switch (value) {
-    case SVGA3D_BLENDOP_ZERO:
-        return "ZERO";
-    case SVGA3D_BLENDOP_ONE:
-        return "ONE";
-    case SVGA3D_BLENDOP_SRCCOLOR:
-        return "SRCCOLOR";
-    case SVGA3D_BLENDOP_INVSRCCOLOR:
-        return "INVSRCCOLOR";
-    case SVGA3D_BLENDOP_SRCALPHA:
-        return "SRCALPHA";
-    case SVGA3D_BLENDOP_INVSRCALPHA:
-        return "INVSRCALPHA";
-    case SVGA3D_BLENDOP_DESTALPHA:
-        return "DESTALPHA";
-    case SVGA3D_BLENDOP_INVDESTALPHA:
-        return "INVDESTALPHA";
-    case SVGA3D_BLENDOP_DESTCOLOR:
-        return "DESTCOLOR";
-    case SVGA3D_BLENDOP_INVDESTCOLOR:
-        return "INVDESTCOLOR";
-    case SVGA3D_BLENDOP_SRCALPHASAT:
-        return "SRCALPHASAT";
-    case SVGA3D_BLENDOP_BLENDFACTOR:
-        return "BLENDFACTOR";
-    case SVGA3D_BLENDOP_INVBLENDFACTOR:
-        return "INVBLENDFACTOR";
-    case SVGA3D_BLENDOP_SRC1COLOR:
-        return "SRC1COLOR";
-    case SVGA3D_BLENDOP_INVSRC1COLOR:
-        return "INVSRC1COLOR";
-    case SVGA3D_BLENDOP_SRC1ALPHA:
-        return "SRC1ALPHA";
-    case SVGA3D_BLENDOP_INVSRC1ALPHA:
-        return "INVSRC1ALPHA";
-    case SVGA3D_BLENDOP_BLENDFACTORALPHA:
-        return "BLENDFACTORALPHA";
-    case SVGA3D_BLENDOP_INVBLENDFACTORALPHA:
-        return "INVBLENDFACTORALPHA";
-    default:
-        return "UNKNOWN";
-    }
-}
-
-static bool vmsvga3d_d3d9_blend_render_state(uint32_t state)
-{
-    return state == SVGA3D_RS_SRCBLEND ||
-           state == SVGA3D_RS_DSTBLEND ||
-           state == SVGA3D_RS_SRCBLENDALPHA ||
-           state == SVGA3D_RS_DSTBLENDALPHA;
-}
-
 static uint32_t vmsvga3d_d3d9_blend(uint32_t value, uint32_t fallback)
 {
     if (value >= SVGA3D_BLENDOP_ZERO && value <= SVGA3D_BLENDOP_SRCALPHASAT) {
@@ -3281,44 +3219,6 @@ static bool vmsvga3d_dxvk_apply_context_fixed_state(
         }
 
         for (op = 0; op < plan.count; op++) {
-            const char *trace_state_name =
-                vmsvga3d_trace_render_state_name(i);
-
-            if (trace_state_name != NULL) {
-                if (vmsvga3d_d3d9_blend_render_state(i)) {
-                    bool fallback =
-                        !vmsvga3d_d3d9_blend_supported(state.uintValue);
-
-                    VMVGA_TRACE_LOCAL(
-                        VMVGA_TRACE_3D,
-                        "D3D9-STATE phase=apply cid=%u state=%s(%u) "
-                        "svga-value=%s(%u) d3d-state=%u d3d-value=%u "
-                        "fallback=%u",
-                        context->cid, trace_state_name, i,
-                        vmsvga3d_d3d9_blend_name(state.uintValue),
-                        state.uintValue, plan.ops[op].state,
-                        plan.ops[op].value, fallback ? 1u : 0u);
-
-                    if (fallback) {
-                        VMVGA_TRACE_LOCAL(
-                            VMVGA_TRACE_3D,
-                            "D3D9-BLEND-FALLBACK cid=%u state=%s(%u) "
-                            "svga-value=%s(%u) fallback-d3d=%u",
-                            context->cid, trace_state_name, i,
-                            vmsvga3d_d3d9_blend_name(state.uintValue),
-                            state.uintValue, plan.ops[op].value);
-                    }
-                } else {
-                    VMVGA_TRACE_LOCAL(
-                        VMVGA_TRACE_3D,
-                        "D3D9-STATE phase=apply cid=%u state=%s(%u) "
-                        "svga-value=0x%08x d3d-state=%u "
-                        "d3d-value=0x%08x",
-                        context->cid, trace_state_name, i, state.uintValue,
-                        plan.ops[op].state, plan.ops[op].value);
-                }
-            }
-
             if (!vmsvga3d_dxvk_set_render_state(s->dxvk, plan.ops[op].state,
                                                 plan.ops[op].value)) {
                 VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,

@@ -10782,69 +10782,6 @@ static bool vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
     return true;
 }
 
-static void vmsvga3d_trace_argb_alpha_update(
-    const VMSVGA3DSurface *surface, const VMSVGA3DSurfaceImage *image,
-    uint32_t sid, uint32_t subresource,
-    const VMSVGA3DD3D10UpdateLayout *layout)
-{
-    uint64_t alpha_zero = 0;
-    uint64_t alpha_full = 0;
-    uint64_t alpha_other = 0;
-    uint64_t alpha_sum = 0;
-    uint64_t samples;
-    uint8_t alpha_min = UINT8_MAX;
-    uint8_t alpha_max = 0;
-    uint32_t y;
-
-    if (!VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D) || surface == NULL ||
-        image == NULL || layout == NULL ||
-        surface->format != SVGA3D_A8R8G8B8 || subresource != 0 ||
-        layout->box.d != 1 || layout->box.w == 0 || layout->box.h == 0 ||
-        image->data == NULL ||
-        (uint64_t)layout->box.x * 4u > image->pitch ||
-        (uint64_t)layout->box.w * 4u >
-            image->pitch - (uint64_t)layout->box.x * 4u ||
-        layout->box.y >= image->size.height ||
-        layout->box.h > image->size.height - layout->box.y) {
-        return;
-    }
-
-    samples = (uint64_t)layout->box.w * layout->box.h;
-    for (y = 0; y < layout->box.h; y++) {
-        const uint8_t *row =
-            image->data +
-            (size_t)(layout->box.y + y) * image->pitch +
-            (size_t)layout->box.x * 4u;
-        uint32_t x;
-
-        for (x = 0; x < layout->box.w; x++) {
-            uint8_t alpha = row[(size_t)x * 4u + 3u];
-
-            alpha_min = MIN(alpha_min, alpha);
-            alpha_max = MAX(alpha_max, alpha);
-            alpha_sum += alpha;
-            if (alpha == 0) {
-                alpha_zero++;
-            } else if (alpha == UINT8_MAX) {
-                alpha_full++;
-            } else {
-                alpha_other++;
-            }
-        }
-    }
-
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "GB-ALPHA-UPLOAD sid=%u sub=%u surface=%ux%u "
-        "box=%u,%u/%ux%u samples=%" PRIu64 " amin=%u amax=%u "
-        "a0=%" PRIu64 " a255=%" PRIu64 " amid=%" PRIu64 " "
-        "aavg=%" PRIu64,
-        sid, subresource, image->size.width, image->size.height,
-        layout->box.x, layout->box.y, layout->box.w, layout->box.h, samples,
-        alpha_min, alpha_max, alpha_zero, alpha_full, alpha_other,
-        samples != 0 ? alpha_sum / samples : 0);
-}
-
 static bool vmsvga3d_d3d10_update_subresource_live(
     struct vmsvga_state_s *s, const SVGA3dCmdDXUpdateSubResource *command)
 {
@@ -11013,9 +10950,6 @@ static bool vmsvga3d_d3d10_update_subresource_live(
             }
         }
     }
-
-    vmsvga3d_trace_argb_alpha_update(
-        surface, image, command->sid, command->subResource, &layout);
 
     native_box.left = layout.box.x;
     native_box.top = layout.box.y;

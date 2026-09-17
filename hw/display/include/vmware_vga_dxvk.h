@@ -502,6 +502,13 @@ bool vmsvga3d_dxvk_surface_upload_buffer(
 bool vmsvga3d_dxvk_surface_upload_buffer_range(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t offset,
     const void *data, uint32_t size);
+bool vmsvga3d_dxvk_d3d9_legacy_present_copy(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *source,
+    uint32_t source_level, uint32_t width, uint32_t height, uint32_t format,
+    const struct vmsvga3d_d3d9_rect_s *source_rect,
+    const struct vmsvga3d_d3d9_rect_s *destination_rect);
+bool vmsvga3d_dxvk_d3d9_legacy_present_readback(
+    VMSVGA3DDxvk *dxvk, void *data, uint32_t row_bytes, uint32_t rows);
 bool vmsvga3d_dxvk_surface_stretch_rect(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *source,
     uint32_t source_level, const struct vmsvga3d_d3d9_rect_s *source_rect,
@@ -555,6 +562,9 @@ bool vmsvga3d_dxvk_shader_bind(VMSVGA3DDxvk *dxvk, uint32_t stage,
 bool vmsvga3d_dxvk_shader_constant(VMSVGA3DDxvk *dxvk, uint32_t target,
                                    uint32_t reg, const uint32_t values[4]);
 void *vmsvga3d_dxvk_vertex_declaration_create(
+    VMSVGA3DDxvk *dxvk,
+    const struct vmsvga3d_d3d9_vertex_element_s *elements);
+void *vmsvga3d_dxvk_vertex_declaration_get_cached(
     VMSVGA3DDxvk *dxvk,
     const struct vmsvga3d_d3d9_vertex_element_s *elements);
 void vmsvga3d_dxvk_vertex_declaration_destroy(void *declaration);

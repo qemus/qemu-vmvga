@@ -1704,6 +1704,8 @@ static inline void vmsvga_legacy_handoff_present_rect(
 static inline void vmsvga_legacy_handoff_sync_dirty_rect(
     struct vmsvga_state_s *s, uint32_t x, uint32_t y, uint32_t w,
     uint32_t h);
+static void vmsvga3d_legacy_present_external_scanout_write_live(
+    struct vmsvga_state_s *s);
 
 static inline void vmsvga_damage_flush(struct vmsvga_state_s *s)
 {
@@ -1821,6 +1823,7 @@ static inline void vmsvga_damage_add(struct vmsvga_state_s *s, uint32_t x,
      * register-mode handoff they replace the same rectangle in the preserved
      * transition mirror before normal frontend damage processing. */
     vmsvga_legacy_handoff_present_rect(s, x, y, w, h);
+    vmsvga3d_legacy_present_external_scanout_write_live(s);
     vmsvga_damage_queue(s, x, y, w, h);
 }
 
@@ -1831,6 +1834,7 @@ static inline void vmsvga_damage_add_dirty(struct vmsvga_state_s *s,
     /* DIRTY_MEMORY_VGA is page-granular, so it can refresh an already-active
      * transition mirror but must never arm or complete the handoff. */
     vmsvga_legacy_handoff_sync_dirty_rect(s, x, y, w, h);
+    vmsvga3d_legacy_present_external_scanout_write_live(s);
     vmsvga_damage_queue(s, x, y, w, h);
 }
 
@@ -6033,6 +6037,13 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
 
         irq_status = 0;
 
+        if (!vmsvga3d_legacy_present_fifo_2d_barrier_live(s, cmd)) {
+            s->fifo_stop = fifo_start;
+            s->fifo[SVGA_FIFO_STOP] = cpu_to_le32(s->fifo_stop);
+            len = 0;
+            break;
+        }
+
         /*
          * Do not pre-filter commands by numeric value here.  Extended 2D FIFO
          * commands (ESCAPE, screen objects, GMRFB, GMR2, ...) live above
@@ -8045,6 +8056,10 @@ static inline bool vmsvga_try_commit_mode(struct vmsvga_state_s *s)
     changed = !s->active_valid || s->active_width != s->new_width ||
               s->active_height != s->new_height ||
               s->active_depth != s->new_depth || s->active_stride != stride;
+
+    if (changed && !vmsvga3d_legacy_present_mode_quiesce_live(s)) {
+        return false;
+    }
 
     s->active_valid = true;
     s->active_width = s->new_width;
@@ -10589,6 +10604,10 @@ static int vmsvga_pre_save(void *opaque)
     uint32_t id;
     s->screen_base_migration_size = 0;
 
+    if (!vmsvga3d_legacy_present_migration_prepare_live(s)) {
+        return -EINVAL;
+    }
+
     if (s->screen_direct_active) {
         if (!vmsvga3d_screen_target_quiesce_live(s) ||
             !vmsvga_screen_direct_materialize(s, "pre-save")) {
@@ -10629,8 +10648,26 @@ static int vmsvga_pre_save(void *opaque)
             }
             s->screen_base_migration_size = (uint32_t)size;
         }
-    } else if (s->screen_base != NULL || s->screen_base_size != 0 ||
-               s->screen_stride != 0 || s->screen_backing_valid ||
+    } else if (s->screen_base != NULL) {
+        uint64_t stride = (uint64_t)s->active_width * 4U;
+        uint64_t size = stride * s->active_height;
+
+        if (!s->legacy_handoff_active || s->legacy_handoff_rebind ||
+            !s->active_valid || s->active_depth != 32 ||
+            s->active_width == 0 || s->active_height == 0 ||
+            s->active_width > VMSVGA_LEGACY_MAX_WIDTH ||
+            s->active_height > VMSVGA_LEGACY_MAX_HEIGHT ||
+            stride > UINT32_MAX || size == 0 || size > UINT32_MAX ||
+            s->screen_stride != stride || s->screen_base_size != size ||
+            s->screen_backing_valid ||
+            s->screen_backing_gmr_id != SVGA_GMR_NULL ||
+            s->screen_backing_offset != 0 || s->screen_backing_pitch != 0 ||
+            s->screen_clone_count != 0) {
+            return -EINVAL;
+        }
+        s->screen_base_migration_size = (uint32_t)size;
+    } else if (s->screen_base_size != 0 || s->screen_stride != 0 ||
+               s->screen_backing_valid ||
                s->screen_backing_gmr_id != SVGA_GMR_NULL ||
                s->screen_backing_offset != 0 || s->screen_backing_pitch != 0 ||
                s->screen_clone_count != 0) {
@@ -10995,6 +11032,7 @@ static int vmsvga_post_load(void *opaque, int version_id)
 
     struct vmsvga_state_s *s = opaque;
     size_t shadow_size;
+    bool legacy_mirror_restored = false;
     int ret;
 
     if (s->fifo_bh != NULL) {
@@ -11063,11 +11101,31 @@ static int vmsvga_post_load(void *opaque, int version_id)
         } else {
             s->screen_base_size = (size_t)size;
         }
-    } else if (s->screen_base_migration_size != 0 || s->screen_base != NULL ||
-               s->screen_backing_valid ||
+    } else if (s->screen_base_migration_size != 0 || s->screen_base != NULL) {
+        uint64_t stride = (uint64_t)s->active_width * 4U;
+        uint64_t size = stride * s->active_height;
+
+        if (!s->active_valid || s->active_depth != 32 ||
+            s->active_width == 0 || s->active_height == 0 ||
+            s->active_width > VMSVGA_LEGACY_MAX_WIDTH ||
+            s->active_height > VMSVGA_LEGACY_MAX_HEIGHT ||
+            stride > UINT32_MAX || size == 0 || size > UINT32_MAX ||
+            s->screen_base_migration_size != size || s->screen_base == NULL ||
+            s->screen_backing_valid ||
+            s->screen_backing_gmr_id != SVGA_GMR_NULL ||
+            s->screen_backing_offset != 0 || s->screen_backing_pitch != 0 ||
+            s->screen_clone_count != 0) {
+            ret = -EINVAL;
+            goto fail;
+        }
+        s->screen_stride = (uint32_t)stride;
+        s->screen_base_size = (size_t)size;
+        legacy_mirror_restored = true;
+    } else if (s->screen_backing_valid ||
                s->screen_backing_gmr_id != SVGA_GMR_NULL ||
                s->screen_backing_offset != 0 || s->screen_backing_pitch != 0 ||
-               s->screen_clone_count != 0) {
+               s->screen_clone_count != 0 || s->screen_base_size != 0 ||
+               s->screen_stride != 0) {
         ret = -EINVAL;
         goto fail;
     }
@@ -11084,6 +11142,10 @@ static int vmsvga_post_load(void *opaque, int version_id)
     }
 
     vmsvga_legacy_handoff_reset_state(s);
+    if (legacy_mirror_restored) {
+        s->legacy_handoff_active = true;
+        s->legacy_handoff_rebind = false;
+    }
     s->cursor_dirty = true;
     s->damage_count = 0;
     s->invalidated = s->enable && s->active_valid;

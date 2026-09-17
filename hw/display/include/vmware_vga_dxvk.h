@@ -557,6 +557,9 @@ bool vmsvga3d_dxvk_shader_constant(VMSVGA3DDxvk *dxvk, uint32_t target,
 void *vmsvga3d_dxvk_vertex_declaration_create(
     VMSVGA3DDxvk *dxvk,
     const struct vmsvga3d_d3d9_vertex_element_s *elements);
+void *vmsvga3d_dxvk_vertex_declaration_get_cached(
+    VMSVGA3DDxvk *dxvk,
+    const struct vmsvga3d_d3d9_vertex_element_s *elements);
 void vmsvga3d_dxvk_vertex_declaration_destroy(void *declaration);
 bool vmsvga3d_dxvk_vertex_declaration_bind(VMSVGA3DDxvk *dxvk,
                                            void *declaration);

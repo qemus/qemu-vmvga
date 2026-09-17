@@ -117,6 +117,9 @@ void vmsvga3d_dxvk_surface_destroy(VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_surface_info(
     const VMSVGA3DDxvkSurface *surface,
     struct vmsvga3d_d3d9_transfer_surface_s *info);
+bool vmsvga3d_dxvk_d3d9_buffer_compatible(
+    const VMSVGA3DDxvkSurface *surface, bool index_buffer,
+    uint32_t length, uint32_t format);
 bool vmsvga3d_dxvk_surface_materialize(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const struct vmsvga3d_d3d9_resource_plan_s *plan);

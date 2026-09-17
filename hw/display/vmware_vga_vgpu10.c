@@ -3615,8 +3615,8 @@ static bool shader_parse_opcode(ShaderTokenReader *reader, ShaderOpcode *opcode)
  * generated DXBC signature is serialized.
  *
  * Registers in tokenized DXBC are typeless and may be reused, so inference is
- * deliberately conservative.  Conflicting evidence is left unresolved and
- * the serializer's compatibility fallback remains the last resort.
+ * deliberately conservative.  Conflicting evidence is left unresolved rather
+ * than guessed.
  */
 enum {
     SHADER_INFER_TYPE_UNKNOWN = 0,
@@ -3625,6 +3625,11 @@ enum {
     SHADER_INFER_TYPE_FLOAT = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32,
     SHADER_INFER_TYPE_INTEGER = 4,
     SHADER_INFER_TYPE_CONFLICT = 5,
+    SHADER_RESINFO_RETURN_FLOAT = 0,
+    SHADER_RESINFO_RETURN_RCPFLOAT = 1,
+    SHADER_RESINFO_RETURN_UINT = 2,
+    SHADER_RESINFO_RETURN_TYPE_MASK = 0x00001800,
+    SHADER_RESINFO_RETURN_TYPE_SHIFT = 11,
     SHADER_INFER_MAX_TEMPS = 4096,
     SHADER_INFER_MAX_PASSES = 32,
 };
@@ -3646,14 +3651,17 @@ static bool shader_infer_type_is_concrete(uint32_t type)
 
 static uint8_t shader_infer_type_combine(uint8_t current, uint32_t incoming)
 {
-    if (incoming == SHADER_INFER_TYPE_UNKNOWN ||
+    if (current == SHADER_INFER_TYPE_CONFLICT ||
         incoming == SHADER_INFER_TYPE_CONFLICT) {
+        return SHADER_INFER_TYPE_CONFLICT;
+    }
+    if (incoming == SHADER_INFER_TYPE_UNKNOWN) {
         return current;
     }
     if (current == SHADER_INFER_TYPE_UNKNOWN) {
         return (uint8_t)incoming;
     }
-    if (current == incoming || current == SHADER_INFER_TYPE_CONFLICT) {
+    if (current == incoming) {
         return current;
     }
 
@@ -3677,8 +3685,7 @@ static bool shader_infer_type_merge(uint8_t *slot, bool fixed,
 {
     uint8_t combined;
 
-    if (slot == NULL || fixed || incoming == SHADER_INFER_TYPE_UNKNOWN ||
-        incoming == SHADER_INFER_TYPE_CONFLICT) {
+    if (slot == NULL || fixed || incoming == SHADER_INFER_TYPE_UNKNOWN) {
         return false;
     }
 
@@ -4088,6 +4095,30 @@ static bool shader_infer_opcode_types(const VMSVGA3DD3D10ShaderInfo *info,
         return shader_infer_operand_type(info, state, opcode, 0,
                                          SHADER_INFER_TYPE_INTEGER);
 
+    /* RESINFO's mip level is UINT; its destination type is encoded in the
+     * opcode-specific control bits (FLOAT/RCPFLOAT/UINT).
+     */
+    case SHADER_OPCODE_RESINFO: {
+        uint32_t return_type =
+            (opcode->tokens[0] & SHADER_RESINFO_RETURN_TYPE_MASK) >>
+            SHADER_RESINFO_RETURN_TYPE_SHIFT;
+        uint32_t destination_type;
+
+        changed |= shader_infer_operand_type(info, state, opcode, 1,
+                                             SHADER_INFER_TYPE_UINT);
+        if (return_type == SHADER_RESINFO_RETURN_UINT) {
+            destination_type = SHADER_INFER_TYPE_UINT;
+        } else if (return_type == SHADER_RESINFO_RETURN_FLOAT ||
+                   return_type == SHADER_RESINFO_RETURN_RCPFLOAT) {
+            destination_type = SHADER_INFER_TYPE_FLOAT;
+        } else {
+            return changed;
+        }
+        changed |= shader_infer_operand_type(info, state, opcode, 0,
+                                             destination_type);
+        return changed;
+    }
+
     /* Texture sampling coordinates and comparison values are floating-point. */
     case SHADER_OPCODE_SAMPLE:
         changed |= shader_infer_operand_type(info, state, opcode, 1,
@@ -4265,14 +4296,16 @@ static bool shader_infer_propagate_output_from_consumer(
             continue;
         }
 
-        /* Prefer an exact packed-register match.  If the register is split
-         * across multiple consumer signature entries, only use the result when
-         * every overlapping entry agrees on one concrete component type.
+        /* Prefer an exact packed-register match.  A non-concrete exact match
+         * is still authoritative: do not replace INTEGER/CONFLICT evidence
+         * with a concrete type from a merely overlapping signature entry.
+         * Otherwise, combine every overlapping entry.  UNKNOWN contributes no
+         * evidence, INTEGER may be refined by UINT/SINT, and CONFLICT is
+         * absorbing.
          */
         for (j = 0; j < consumer->input_signature_count; j++) {
             const SVGA3dDXShaderSignatureEntry *input =
                 &consumer->input_signature[j];
-            uint32_t type;
 
             if (input->semanticName !=
                     SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED ||
@@ -4281,14 +4314,11 @@ static bool shader_infer_propagate_output_from_consumer(
                 continue;
             }
 
-            type = consumer_state->input[j];
-            if (shader_infer_type_is_concrete(type)) {
-                inferred = type;
-            }
+            inferred = consumer_state->input[j];
             break;
         }
 
-        if (!shader_infer_type_is_concrete(inferred)) {
+        if (inferred == SHADER_INFER_TYPE_UNKNOWN) {
             for (j = 0; j < consumer->input_signature_count; j++) {
                 const SVGA3dDXShaderSignatureEntry *input =
                     &consumer->input_signature[j];
@@ -4302,11 +4332,11 @@ static bool shader_infer_propagate_output_from_consumer(
                 }
 
                 type = consumer_state->input[j];
-                if (!shader_infer_type_is_concrete(type)) {
+                if (type == SHADER_INFER_TYPE_UNKNOWN) {
                     continue;
                 }
                 inferred = shader_infer_type_combine((uint8_t)inferred, type);
-                if (!shader_infer_type_is_concrete(inferred)) {
+                if (inferred == SHADER_INFER_TYPE_CONFLICT) {
                     break;
                 }
             }
@@ -7348,6 +7378,42 @@ static void vmsvga3d_d3d10_pipeline_state_realize_live(
 static bool vmsvga3d_d3d10_surface_info_live(
     const VMSVGA3DSurface *surface, VMSVGA3DD3D10SurfaceInfo *info);
 
+static void vmsvga3d_d3d10_shader_set_ps_output_type(
+    VMSVGA3DD3D10ShaderInfo *info, uint32_t register_index, uint32_t type)
+{
+    uint32_t i;
+
+    for (i = 0; i < info->output_signature_count; i++) {
+        SVGA3dDXShaderSignatureEntry *output = &info->output_signature[i];
+
+        if (output->semanticName == SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED &&
+            output->registerIndex == register_index) {
+            output->componentType = type;
+        }
+    }
+}
+
+static void vmsvga3d_d3d10_shader_seed_ps_output_type(
+    const VMSVGA3DD3D10ShaderInfo *info, ShaderTypeInference *state,
+    uint32_t register_index, uint32_t type)
+{
+    uint32_t i;
+
+    if (!shader_infer_type_is_concrete(type)) {
+        return;
+    }
+
+    for (i = 0; i < info->output_signature_count; i++) {
+        const SVGA3dDXShaderSignatureEntry *output = &info->output_signature[i];
+
+        if (output->semanticName == SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED &&
+            output->registerIndex == register_index) {
+            state->output[i] = (uint8_t)type;
+            state->output_fixed[i] = true;
+        }
+    }
+}
+
 static bool vmsvga3d_d3d10_shader_prepare_ps_live(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t stage,
     VMSVGA3DD3D10ShaderInfo *info)
@@ -7409,10 +7475,7 @@ static bool vmsvga3d_d3d10_shader_prepare_ps_live(
      * the SRV formats above.  Invalid/unbound RTV slots leave the signature as
      * parsed, exactly like the Oracle.
      */
-    for (slot = 0;
-         slot < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS &&
-         slot < info->output_signature_count;
-         slot++) {
+    for (slot = 0; slot < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS; slot++) {
         uint32_t view_id = context->shadow.renderState.renderTargetViewIds[slot];
         SVGACOTableDXRTViewEntry *entry;
 
@@ -7422,8 +7485,10 @@ static bool vmsvga3d_d3d10_shader_prepare_ps_live(
         entry = vmsvga3d_dx_cotable_entry_ptr(
             s, cid, SVGA_COTABLE_RTVIEW, view_id);
         if (entry != NULL) {
-            info->output_signature[slot].componentType =
-                vmsvga3d_d3d10_shader_component_type_from_format(entry->format);
+            vmsvga3d_d3d10_shader_set_ps_output_type(
+                info, slot,
+                vmsvga3d_d3d10_shader_component_type_from_format(
+                    entry->format));
         }
     }
 
@@ -7501,9 +7566,7 @@ static void vmsvga3d_d3d10_shader_propagate_vs_output_types_live(
      * modifying or realizing the PS ahead of its normal pipeline stage.
      */
     if (consumer_type == SVGA3D_SHADERTYPE_PS) {
-        for (slot = 0;
-             slot < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS &&
-             slot < consumer->output_signature_count;
+        for (slot = 0; slot < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS;
              slot++) {
             uint32_t view_id =
                 context->shadow.renderState.renderTargetViewIds[slot];
@@ -7518,9 +7581,10 @@ static void vmsvga3d_d3d10_shader_propagate_vs_output_types_live(
                 continue;
             }
 
-            state.output[slot] = (uint8_t)
-                vmsvga3d_d3d10_shader_component_type_from_format(entry->format);
-            state.output_fixed[slot] = true;
+            vmsvga3d_d3d10_shader_seed_ps_output_type(
+                consumer, &state, slot,
+                vmsvga3d_d3d10_shader_component_type_from_format(
+                    entry->format));
         }
     }
 

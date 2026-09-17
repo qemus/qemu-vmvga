@@ -365,6 +365,10 @@ typedef struct vmsvga3d_surface_s {
      * PRESENTBLT operations can refresh it instead of recreating it. */
     VMSVGA3DDxvkSurface *present_d3d9_bridge;
     bool screen_target_content_valid;
+    /* DXVK 2.x cannot read back 1D D24S8 staging images.  For the narrow
+     * clear-only compatibility path, track subresources whose CPU shadow is
+     * known to exactly match the native D3D11 resource. */
+    uint64_t d3d11_1d_d24s8_shadow_valid_mask;
     /* Pure-2D GB ScreenTarget fast-path bookkeeping.  When authoritative is
      * true, the currently bound MOB contains the complete visible contents of
      * subresource 0 and may be used directly as the QEMU scanout when its
@@ -11927,6 +11931,19 @@ static bool vmsvga3d_gb_zero_surface_live(struct vmsvga_state_s *s,
         box.h = image->size.height;
         box.d = image->size.depth;
         (void)vmsvga3d_surface_changed_live(s, sid, subresource, &box);
+    }
+
+    if (success && surface->format == SVGA3D_D24_UNORM_S8_UINT &&
+        (surface->surface_flags & SVGA3D_SURFACE_1D) != 0 &&
+        surface->mip_count <= 64) {
+        surface->d3d11_1d_d24s8_shadow_valid_mask =
+            surface->mip_count == 64
+                ? UINT64_MAX
+                : ((UINT64_C(1) << surface->mip_count) - 1u);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-1D-DS-SHADOW action=zero sid=%u mask=0x%016" PRIx64,
+            sid, surface->d3d11_1d_d24s8_shadow_valid_mask);
     }
 
     return success;

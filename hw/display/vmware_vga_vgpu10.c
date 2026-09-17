@@ -2803,19 +2803,31 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_guest_signatures(
     }
 
     info->guest_signatures = true;
-    info->input_signature_count = header.numInputSignatures;
-    info->output_signature_count = header.numOutputSignatures;
-    info->patch_signature_count = header.numPatchConstantSignatures;
     offset = info->bytecode_size + sizeof(header);
 
-    memcpy(info->input_signature, bytes + offset,
-           info->input_signature_count * sizeof(info->input_signature[0]));
-    offset += info->input_signature_count * sizeof(info->input_signature[0]);
-    memcpy(info->output_signature, bytes + offset,
-           info->output_signature_count * sizeof(info->output_signature[0]));
-    offset += info->output_signature_count * sizeof(info->output_signature[0]);
-    memcpy(info->patch_signature, bytes + offset,
-           info->patch_signature_count * sizeof(info->patch_signature[0]));
+    /* A valid guest signature block may omit one signature class.  The token
+     * parser has already reconstructed declarations from the shader body, so a
+     * zero guest count means there is no metadata to override for that class.
+     * Nonzero guest signatures remain authoritative. */
+    if (header.numInputSignatures != 0) {
+        info->input_signature_count = header.numInputSignatures;
+        memcpy(info->input_signature, bytes + offset,
+               info->input_signature_count * sizeof(info->input_signature[0]));
+    }
+    offset += header.numInputSignatures * sizeof(info->input_signature[0]);
+
+    if (header.numOutputSignatures != 0) {
+        info->output_signature_count = header.numOutputSignatures;
+        memcpy(info->output_signature, bytes + offset,
+               info->output_signature_count * sizeof(info->output_signature[0]));
+    }
+    offset += header.numOutputSignatures * sizeof(info->output_signature[0]);
+
+    if (header.numPatchConstantSignatures != 0) {
+        info->patch_signature_count = header.numPatchConstantSignatures;
+        memcpy(info->patch_signature, bytes + offset,
+               info->patch_signature_count * sizeof(info->patch_signature[0]));
+    }
 
     return vmsvga3d_d3d10_shader_finalize_signatures(info);
 }

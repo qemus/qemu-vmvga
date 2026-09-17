@@ -769,17 +769,77 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_cs_uav_bind_live(
     return VMSVGA3D_D3D11_LEVEL_11_0;
 }
 
+static uint32_t vmsvga3d_d3d11_uav_clear_sign_extend(
+    uint32_t value, uint32_t bits)
+{
+    uint32_t sign_bit = UINT32_C(1) << (bits - 1);
+    uint32_t mask = (UINT32_C(1) << bits) - 1;
+
+    value &= mask;
+    if (value & sign_bit) {
+        value |= ~mask;
+    }
+    return value;
+}
+
 VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_clear_uint_live(
     VMSVGA3DDxvk *dxvk, uint32_t cid, SVGA3dUAViewId view_id,
     VMSVGA3DDxvkSurface *surface, const SVGACOTableDXUAViewEntry *entry,
     uint32_t array_elements, const uint32_t values[4])
 {
-    if (!values ||
-        vmsvga3d_d3d11_uav_ensure_live(
+    uint32_t native_values[4];
+    uint32_t component_bits = 0;
+    uint32_t component_count = 0;
+    uint32_t i;
+
+    if (!entry || !values) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    switch (entry->format) {
+    case SVGA3D_R8G8B8A8_SINT:
+        component_bits = 8;
+        component_count = 4;
+        break;
+    case SVGA3D_R16G16B16A16_SINT:
+        component_bits = 16;
+        component_count = 4;
+        break;
+    case SVGA3D_R8G8_SINT:
+        component_bits = 8;
+        component_count = 2;
+        break;
+    case SVGA3D_R16G16_SINT:
+        component_bits = 16;
+        component_count = 2;
+        break;
+    case SVGA3D_R8_SINT:
+        component_bits = 8;
+        component_count = 1;
+        break;
+    case SVGA3D_R16_SINT:
+        component_bits = 16;
+        component_count = 1;
+        break;
+    default:
+        break;
+    }
+
+    memcpy(native_values, values, sizeof(native_values));
+    for (i = 0; i < component_count; i++) {
+        /* ClearUnorderedAccessViewUint is bit-precise: narrow signed formats
+         * consume the low channel bits without numeric conversion.  Sign
+         * extend those bits before the native call so backends which perform
+         * signed integer conversion still preserve the required bit pattern. */
+        native_values[i] = vmsvga3d_d3d11_uav_clear_sign_extend(
+            native_values[i], component_bits);
+    }
+
+    if (vmsvga3d_d3d11_uav_ensure_live(
             dxvk, cid, view_id, surface, entry, array_elements) ==
             VMSVGA3D_D3D11_LEVEL_INVALID ||
         !vmsvga3d_dxvk_d3d11_clear_unordered_access_view_uint(
-            dxvk, cid, view_id, values)) {
+            dxvk, cid, view_id, native_values)) {
         return VMSVGA3D_D3D11_LEVEL_INVALID;
     }
 

@@ -5777,7 +5777,9 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_legacy_entry(
     SVGACOTableDXStreamOutputEntry *dst)
 {
     if (src == NULL || dst == NULL ||
-        src->numOutputStreamEntries > SVGA3D_MAX_DX10_STREAMOUT_DECLS) {
+        src->numOutputStreamEntries > SVGA3D_MAX_DX10_STREAMOUT_DECLS ||
+        (src->rasterizedStream >= SVGA3D_DX_MAX_SOTARGETS &&
+         src->rasterizedStream != SVGA3D_DX_SO_NO_RASTERIZED_STREAM)) {
         return VMSVGA3D_D3D10_LEVEL_INVALID;
     }
 
@@ -5787,7 +5789,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_stream_output_legacy_entry(
     memcpy(dst->streamOutputStrideInBytes, src->streamOutputStrideInBytes,
            sizeof(dst->streamOutputStrideInBytes));
 
-    dst->rasterizedStream = SVGA3D_DX_SO_NO_RASTERIZED_STREAM;
+    dst->rasterizedStream = src->rasterizedStream;
     dst->numOutputStreamStrides = 1;
     dst->mobid = SVGA3D_INVALID_ID;
     dst->usesMob = 0;

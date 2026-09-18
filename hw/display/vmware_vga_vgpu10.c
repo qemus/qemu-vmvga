@@ -8815,11 +8815,55 @@ static void vmsvga3d_d3d10_pipeline_input_layout_realize_live(
     (void)vmsvga3d_dxvk_d3d11_set_input_layout(s->dxvk, cid, layout_id);
 }
 
+static bool vmsvga3d_d3d10_so_targets_bind_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const VMSVGA3DD3D10SOTargetsPlan *plan);
+
+static bool vmsvga3d_d3d10_pipeline_so_targets_live(
+    struct vmsvga_state_s *s, uint32_t cid)
+{
+    VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    VMSVGA3DD3D10SOTargetsPlan restore_plan;
+    const VMSVGA3DD3D10SOTargetsPlan *plan;
+
+    if (context == NULL) {
+        return false;
+    }
+    if ((context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_SOTARGETS) == 0) {
+        return true;
+    }
+
+    if (context->pending_so_targets_valid) {
+        plan = &context->pending_so_targets;
+    } else {
+        if (vmsvga3d_d3d10_so_targets_restore_plan(
+                context->shadow.streamOut.targets, &restore_plan) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID) {
+            return false;
+        }
+        plan = &restore_plan;
+    }
+
+    if (!vmsvga3d_d3d10_so_targets_bind_live(s, cid, plan)) {
+        return false;
+    }
+
+    context->pending_so_targets_valid = false;
+    context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-SO-TARGETS-BIND cid=%u count=%u source=%s",
+        cid, plan->backend_remembered_count,
+        plan == &context->pending_so_targets ? "pending" : "restore");
+    return true;
+}
+
 /*
  * VirtualBox-style live dxSetupPipeline executor for the vGPU10 stages that
  * are implemented here.
  */
-static void VMSVGA3D_D3D10_LIVE_UNUSED
+static bool VMSVGA3D_D3D10_LIVE_UNUSED
 vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
 {
     vmsvga3d_d3d10_pipeline_resources_views_ensure_live(s, cid);
@@ -8830,8 +8874,12 @@ vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
     vmsvga3d_d3d10_pipeline_vertex_buffers_live(s, cid);
     vmsvga3d_d3d10_pipeline_index_buffer_live(s, cid);
     vmsvga3d_d3d10_pipeline_shader_resources_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_so_targets_live(s, cid)) {
+        return false;
+    }
     vmsvga3d_d3d10_pipeline_shaders_setup_live(s, cid);
     vmsvga3d_d3d10_pipeline_input_layout_realize_live(s, cid);
+    return true;
 }
 
 static void vmsvga3d_d3d10_bound_rtvs_changed_live(
@@ -8852,9 +8900,9 @@ static void vmsvga3d_d3d10_post_draw_live(VMSVGA3DDXContext *context)
     memset(context->cs_uav_modified, 0, sizeof(context->cs_uav_modified));
 }
 
-void vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
+bool vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
 {
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    return vmsvga3d_d3d10_pipeline_setup_live(s, cid);
 }
 
 void vmsvga3d_dx_post_draw_live(struct vmsvga_state_s *s, uint32_t cid)
@@ -8873,7 +8921,9 @@ static bool vmsvga3d_d3d10_draw_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
     if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
         const uint32_t vs_stage =
             SVGA3D_SHADERTYPE_VS - SVGA3D_SHADERTYPE_MIN;
@@ -9097,7 +9147,9 @@ static bool vmsvga3d_d3d10_draw_indexed_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
     if (context->shadow.inputAssembly.topology ==
         SVGA3D_PRIMITIVE_TRIANGLEFAN) {
         /* VirtualBox ignores every error from dxDrawIndexedTriangleFan. */
@@ -9128,7 +9180,9 @@ static bool vmsvga3d_d3d10_draw_instanced_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
 
     /* VirtualBox only asserts that triangle fans are not used for instanced
      * draws and still submits the native call.  Keep that assert-only behavior
@@ -9158,7 +9212,9 @@ static bool vmsvga3d_d3d10_draw_indexed_instanced_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
     /* As in VirtualBox, triangle-fan topology is assert-only for this command;
      * the native instanced draw is still submitted.
      */
@@ -9183,7 +9239,9 @@ static bool vmsvga3d_d3d10_draw_auto_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
     /* VirtualBox only asserts that triangle fans are not used for DrawAuto and
      * still submits the native call.  Preserve that assert-only behavior.
      */
@@ -9929,7 +9987,6 @@ static bool vmsvga3d_d3d10_context_switch_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
     VMSVGA3DDXContext *context;
-    VMSVGA3DD3D10SOTargetsPlan plan;
     uint32_t old_cid;
     uint32_t stage;
     uint32_t slot;
@@ -10029,16 +10086,12 @@ static bool vmsvga3d_d3d10_context_switch_live(
         return false;
     }
 
-    /* VirtualBox restores SO targets on every DX context switch.  The context
-     * MOB stores only target SIDs, so the original offsets and sizes are lost:
-     * all four slots are rebound with offset 0 and sizeInBytes 0.
+    /* ClearState removed native SO targets too.  Keep their restoration in the
+     * same deferred pipeline path as the other renderer state.  If this context
+     * has an unconsumed SET_SOTARGETS plan, that exact plan (including offsets)
+     * wins; otherwise draw setup reconstructs the SID-only shadow in append mode.
      */
-    if (vmsvga3d_d3d10_so_targets_restore_plan(
-            context->shadow.streamOut.targets, &plan) ==
-            VMSVGA3D_D3D10_LEVEL_INVALID ||
-        !vmsvga3d_d3d10_so_targets_bind_live(s, cid, &plan)) {
-        return false;
-    }
+    context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
 
     s->svga3d->active_dx_context_id = cid;
     return true;
@@ -17019,12 +17072,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               return false;
           }
 
-          /* VirtualBox stores the guest shadow before attempting backend binding. */
-          if (!vmsvga3d_state_dx_apply_so_targets(s, cid, &plan)) {
-              return false;
-          }
-
-          return vmsvga3d_d3d10_so_targets_bind_live(s, cid, &plan);
+          /* Keep only the newest guest request pending.  Draw setup realizes
+           * the latest plan once, so intermediate SET_SOTARGETS commands that
+           * are overwritten before a draw never reach SOSetTargets().
+           */
+          return vmsvga3d_state_dx_apply_so_targets(s, cid, &plan);
       }
 
     case SVGA_3D_CMD_DX_SET_STREAMOUTPUT: {

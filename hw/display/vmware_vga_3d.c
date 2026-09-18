@@ -311,6 +311,7 @@ typedef struct vmsvga3d_dx_cotable_s {
    VMSVGA3D_DX_CTX_F_STATE_SRV_DS | \
    VMSVGA3D_DX_CTX_F_STATE_SRV_CS)
 #define VMSVGA3D_DX_CTX_F_STATE_SHADERS         UINT64_C(0x40000000)
+#define VMSVGA3D_DX_CTX_F_STATE_SOTARGETS       UINT64_C(0x80000000)
 #define VMSVGA3D_DX_CTX_F_STATE_ALL \
   (VMSVGA3D_DX_CTX_F_STATE_INPUTLAYOUT | \
    VMSVGA3D_DX_CTX_F_STATE_TOPOLOGY | \
@@ -325,12 +326,15 @@ typedef struct vmsvga3d_dx_cotable_s {
    VMSVGA3D_DX_CTX_F_STATE_VERTEXBUFFER | \
    VMSVGA3D_DX_CTX_F_STATE_SAMPLERS | \
    VMSVGA3D_DX_CTX_F_STATE_SRVS | \
-   VMSVGA3D_DX_CTX_F_STATE_SHADERS)
+   VMSVGA3D_DX_CTX_F_STATE_SHADERS | \
+   VMSVGA3D_DX_CTX_F_STATE_SOTARGETS)
 
 typedef struct vmsvga3d_dx_context_s {
     uint32_t cid;
     uint32_t render_target_count;
     uint32_t stream_output_target_count;
+    VMSVGA3DD3D10SOTargetsPlan pending_so_targets;
+    bool pending_so_targets_valid;
     uint64_t renderer_dirty;
     uint32_t vertex_buffer_max_bound;
     uint64_t vertex_buffer_modified;

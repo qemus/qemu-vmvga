@@ -258,6 +258,8 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_bind(
                 ? 0 : UINT64_MAX;
 
         memcpy(&context->shadow, valid_contents, sizeof(context->shadow));
+        context->pending_so_targets_valid = false;
+        context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
     }
 
     return true;
@@ -883,6 +885,9 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_so_targets(
 
     memcpy(context->shadow.streamOut.targets, plan->shadow_targets,
            sizeof(context->shadow.streamOut.targets));
+    context->pending_so_targets = *plan;
+    context->pending_so_targets_valid = true;
+    context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
 
     return true;
 }

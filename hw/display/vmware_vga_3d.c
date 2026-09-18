@@ -14371,26 +14371,22 @@ static bool vmsvga2d_screen_target_bind_live(
     return true;
 }
 
-static bool vmsvga3d_screen_target_async_storage_live(
-    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
-    uint8_t **screen_base, uint32_t *screen_stride, uint32_t *screen_size)
+static bool vmsvga3d_screen_target_async_format_compatible(
+    const VMSVGA3DSurface *surface, const struct svga3d_surface_desc *desc)
 {
-    const struct svga3d_surface_desc *desc = NULL;
-    size_t storage_size = 0;
-
-    if (s == NULL || surface == NULL || screen_base == NULL ||
-        screen_stride == NULL || screen_size == NULL ||
-        !vmsvga3d_present_format(surface, &desc) ||
-        desc->bytes_per_block != 4 ||
-        (surface->format != SVGA3D_X8R8G8B8 &&
-         surface->format != SVGA3D_A8R8G8B8) ||
-        !vmsvga_screen_storage(s, screen_base, &storage_size, screen_stride) ||
-        storage_size > UINT32_MAX) {
+    if (surface == NULL || desc == NULL || desc->bytes_per_block != 4) {
         return false;
     }
 
-    *screen_size = (uint32_t)storage_size;
-    return true;
+    switch (surface->format) {
+    case SVGA3D_X8R8G8B8:
+    case SVGA3D_A8R8G8B8:
+    case SVGA3D_B8G8R8A8_UNORM:
+    case SVGA3D_B8G8R8X8_UNORM:
+        return true;
+    default:
+        return false;
+    }
 }
 
 static VMSVGA3DDxvkScreenReadbackPollResult
@@ -14410,10 +14406,26 @@ vmsvga3d_screen_target_async_poll_present_live(
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
         surface->mips == NULL || surface->mip_count == 0 ||
-        !vmsvga3d_present_format(surface, &desc) ||
-        !vmsvga3d_screen_target_async_storage_live(
-            s, surface, &screen_base, &screen_stride, &screen_size)) {
+        !vmsvga3d_present_format(surface, &desc)) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+    }
+
+    /* A surface that cannot use the async ring cannot have pending async
+     * ScreenTarget readbacks. Treat that as an empty ring, not a drain failure.
+     * This matters during active-surface redefine/destroy barriers. */
+    if (!vmsvga3d_screen_target_async_format_compatible(surface, desc)) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
+    }
+
+    {
+        size_t storage_size = 0;
+
+        if (!vmsvga_screen_storage(
+                s, &screen_base, &storage_size, &screen_stride) ||
+            storage_size > UINT32_MAX) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+        }
+        screen_size = (uint32_t)storage_size;
     }
 
     if (d3d9_resident && !d3d11_resident) {
@@ -14721,9 +14733,8 @@ static bool vmsvga3d_screen_target_flush_live_mode(
                 }
             }
 
-            if (desc->bytes_per_block == 4 &&
-                (surface->format == SVGA3D_X8R8G8B8 ||
-                 surface->format == SVGA3D_A8R8G8B8) &&
+            if (vmsvga3d_screen_target_async_format_compatible(
+                    surface, desc) &&
                 vmsvga_screen_storage(s, &screen_base, &screen_size,
                                       &screen_stride) &&
                 screen_size <= UINT32_MAX) {

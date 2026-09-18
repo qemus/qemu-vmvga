@@ -9157,6 +9157,12 @@ static bool vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(
         return true;
     }
 
+    if (s->svga3d != NULL &&
+        s->svga3d->active_screen_target_sid == surface->sid &&
+        !vmsvga3d_screen_target_quiesce_live(s)) {
+        return false;
+    }
+
     if (vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface) ||
         surface->mips == NULL) {
         return false;

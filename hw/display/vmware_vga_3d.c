@@ -425,6 +425,16 @@ typedef struct vmsvga3d_surface_s {
 static bool vmsvga3d_d3d10_copy_surface_materialize_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DD3D10ResourceCreateKind create_kind);
+static bool vmsvga3d_d3d10_raw_copy_compatible(
+    const VMSVGA3DSurface *source, const VMSVGA3DSurface *destination,
+    bool whole_resource,
+    const struct svga3d_surface_desc **source_desc_out,
+    const struct svga3d_surface_desc **destination_desc_out);
+static bool vmsvga3d_d3d10_raw_copy_subresource_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *source,
+    uint32_t source_subresource, VMSVGA3DSurface *destination,
+    uint32_t destination_subresource, const SVGA3dCopyBox *copy_box,
+    SVGA3dBox *destination_box_out, uint32_t route_cmd, bool convert_copy);
 static void vmsvga3d_legacy_surface_evict(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface);
 static bool vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
@@ -7015,6 +7025,18 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         uint32_t dst_subresource =
             body->dest.face * dst_surface->face[0].numMipLevels +
             body->dest.mipmap;
+        VMSVGA3DD3D10Format src_format =
+            vmsvga3d_d3d10_surface_format(src_surface->format);
+        VMSVGA3DD3D10Format dst_format =
+            vmsvga3d_d3d10_surface_format(dst_surface->format);
+        bool raw_copy =
+            src_format.min_level != VMSVGA3D_D3D10_LEVEL_INVALID &&
+            dst_format.min_level != VMSVGA3D_D3D10_LEVEL_INVALID &&
+            src_format.dxgi_format != dst_format.dxgi_format &&
+            vmsvga3d_d3d10_typeless_format(src_format.dxgi_format) ==
+                vmsvga3d_d3d10_typeless_format(dst_format.dxgi_format) &&
+            vmsvga3d_d3d10_raw_copy_compatible(
+                src_surface, dst_surface, false, NULL, NULL);
 
         if (!vmsvga3d_d3d10_copy_surface_materialize_live(
                 s, src_surface, src_kind) ||
@@ -7049,10 +7071,28 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
                 dst_surface->d3d11_indirect_args_shadow_authoritative = false;
             }
 
-            if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
-                    s->dxvk, dst_surface->dxvk_surface, dst_subresource,
-                    clipped.x, clipped.y, clipped.z, src_surface->dxvk_surface,
-                    src_subresource, &src_box)) {
+            if (raw_copy) {
+                if (!vmsvga3d_d3d10_raw_copy_subresource_live(
+                        s, src_surface, src_subresource, dst_surface,
+                        dst_subresource, &clipped, NULL,
+                        SVGA_3D_CMD_SURFACE_COPY, false)) {
+                    valid = false;
+                } else {
+                    VMVGA_TRACE_LOCAL(
+                        VMVGA_TRACE_3D,
+                        "DX-COPY-FORMAT kind=surface-copy-raw-family "
+                        "src=%u:%u guest=%u dxgi=%u dst=%u:%u guest=%u "
+                        "dxgi=%u",
+                        body->src.sid, src_subresource, src_surface->format,
+                        src_format.dxgi_format, body->dest.sid,
+                        dst_subresource, dst_surface->format,
+                        dst_format.dxgi_format);
+                }
+            } else if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
+                           s->dxvk, dst_surface->dxvk_surface, dst_subresource,
+                           clipped.x, clipped.y, clipped.z,
+                           src_surface->dxvk_surface, src_subresource,
+                           &src_box)) {
                 valid = false;
             }
         }

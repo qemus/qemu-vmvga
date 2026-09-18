@@ -6838,9 +6838,6 @@ static bool vmsvga3d_d3d10_shader_bind_live(
         return false;
     }
 
-    vmsvga3d_d3d10_bound_shader_dirty_live(
-        s, command->cid, command->shid);
-
     /* VirtualBox updates the COTable even for an invalid MOB and does not call
      * the backend in that case, leaving the previous backend shader untouched.
      */
@@ -6870,6 +6867,10 @@ static bool vmsvga3d_d3d10_shader_bind_live(
 
     success = vmsvga3d_dxvk_d3d11_shader_bind_info(
         s->dxvk, command->cid, command->shid, &info);
+    if (success) {
+        vmsvga3d_d3d10_bound_shader_dirty_live(
+            s, command->cid, command->shid);
+    }
     if (success && entry->type == SVGA3D_SHADERTYPE_VS) {
         vmsvga3d_d3d10_input_layout_dependency_invalidate_live(
             s, command->cid);
@@ -16931,16 +16932,13 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           if (!vmsvga3d_dxvk_d3d11_shader_destroy(
                   s->dxvk, cid, command.shaderId) ||
               vmsvga3d_d3d10_shader_define_entry(&command, entry) ==
-                  VMSVGA3D_D3D10_LEVEL_INVALID) {
-              return false;
-          }
-
-          vmsvga3d_d3d10_bound_shader_dirty_live(s, cid, command.shaderId);
-          if (!vmsvga3d_dxvk_d3d11_shader_object_define(
+                  VMSVGA3D_D3D10_LEVEL_INVALID ||
+              !vmsvga3d_dxvk_d3d11_shader_object_define(
                   s->dxvk, cid, command.shaderId, command.type)) {
               return false;
           }
 
+          vmsvga3d_d3d10_bound_shader_dirty_live(s, cid, command.shaderId);
           if (old_type == SVGA3D_SHADERTYPE_VS ||
               command.type == SVGA3D_SHADERTYPE_VS) {
               vmsvga3d_d3d10_input_layout_dependency_invalidate_live(s, cid);

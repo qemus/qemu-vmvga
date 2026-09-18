@@ -690,8 +690,16 @@ VMSVGA3DD3D11Level vmsvga3d_d3d11_uav_ensure_live(
 {
     VMSVGA3DD3D11UAVDesc desc;
 
-    if (!dxvk || !surface || !entry ||
-        vmsvga3d_d3d11_uav_desc(entry, array_elements, &desc) ==
+    if (!dxvk || !surface || !entry) {
+        return VMSVGA3D_D3D11_LEVEL_INVALID;
+    }
+
+    if (vmsvga3d_dxvk_d3d11_unordered_access_view_ensure(
+            dxvk, cid, view_id, surface, NULL)) {
+        return VMSVGA3D_D3D11_LEVEL_11_0;
+    }
+
+    if (vmsvga3d_d3d11_uav_desc(entry, array_elements, &desc) ==
             VMSVGA3D_D3D11_LEVEL_INVALID ||
         !vmsvga3d_dxvk_d3d11_unordered_access_view_ensure(
             dxvk, cid, view_id, surface, &desc)) {
@@ -1321,8 +1329,17 @@ bool vmsvga3d_d3d11_uav_surface_live(
     }
 
     surface = s->svga3d->surfaces[entry->sid];
-    if (surface == NULL || surface->dxvk_surface == NULL ||
-        !vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
+    if (surface == NULL || surface->dxvk_surface == NULL) {
+        return false;
+    }
+
+    if (vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        *surface_out = surface->dxvk_surface;
+        *array_elements_out = surface->array_elements;
+        return surface->array_elements != 0;
+    }
+
+    if (!vmsvga3d_d3d10_surface_info_live(surface, &surface_info)) {
         return false;
     }
 

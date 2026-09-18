@@ -12809,11 +12809,7 @@ static bool vmsvga3d_d3d10_pred_convert_region_live(
             raw_compatible,
         false);
 
-    /* The raw fallback executes on the CPU, so it cannot inherit asynchronous
-     * native D3D11 predication.  Keep predicated conversion unsupported rather
-     * than executing a write that the guest predicate may have suppressed. */
-    if (context->shadow.predication.queryID != SVGA3D_INVALID_ID ||
-        !vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) ||
+    if (!vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) ||
         !raw_compatible ||
         !vmsvga3d_d3d10_convert_region_copy_box(
             source, command->srcSubResource, &command->srcBox, destination,
@@ -12821,8 +12817,50 @@ static bool vmsvga3d_d3d10_pred_convert_region_live(
         !vmsvga3d_d3d10_copy_surface_materialize_live(
             s, source, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
         !vmsvga3d_d3d10_copy_surface_materialize_live(
-            s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
-        !vmsvga3d_d3d10_raw_copy_subresource_live(
+            s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
+        return false;
+    }
+
+    if (context->shadow.predication.queryID != SVGA3D_INVALID_ID) {
+        VMSVGA3DD3D10Box source_box = {
+            .left = command->srcBox.x,
+            .top = command->srcBox.y,
+            .front = command->srcBox.z,
+            .right = command->srcBox.x + command->srcBox.w,
+            .bottom = command->srcBox.y + command->srcBox.h,
+            .back = command->srcBox.z + command->srcBox.d,
+        };
+
+        if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
+                s->dxvk, destination->dxvk_surface, command->dstSubResource,
+                command->destBox.x, command->destBox.y, command->destBox.z,
+                source->dxvk_surface, command->srcSubResource, &source_box)) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-CONVERT-FORMAT kind=region-native-predicated cid=%u "
+            "src=%u:%u guest=%u native=%u src-box=%u,%u,%u/%ux%ux%u "
+            "dst=%u:%u guest=%u native=%u dst-box=%u,%u,%u/%ux%ux%u",
+            cid, command->srcSid, command->srcSubResource, source->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
+            command->srcBox.x, command->srcBox.y, command->srcBox.z,
+            command->srcBox.w, command->srcBox.h, command->srcBox.d,
+            command->dstSid, command->dstSubResource, destination->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(destination->dxvk_surface),
+            command->destBox.x, command->destBox.y, command->destBox.z,
+            command->destBox.w, command->destBox.h, command->destBox.d);
+
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
+            destination, command->dstSubResource, "pred-convert-region");
+        if (command->dstSubResource == 0) {
+            destination->d3d11_indirect_args_shadow_authoritative = false;
+        }
+        return true;
+    }
+
+    if (!vmsvga3d_d3d10_raw_copy_subresource_live(
             s, source, command->srcSubResource, destination,
             command->dstSubResource, &copy_box, &dirty,
             SVGA_3D_CMD_DX_PRED_CONVERT_REGION)) {
@@ -12890,14 +12928,38 @@ static bool vmsvga3d_d3d10_pred_convert_live(
             raw_compatible,
         false);
 
-    if (context->shadow.predication.queryID != SVGA3D_INVALID_ID ||
-        !vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) ||
+    if (!vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) ||
         !raw_compatible ||
         !vmsvga3d_d3d10_copy_surface_materialize_live(
             s, source, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
         !vmsvga3d_d3d10_copy_surface_materialize_live(
-            s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
-        !vmsvga3d_d3d10_raw_copy_resource_live(
+            s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE)) {
+        return false;
+    }
+
+    if (context->shadow.predication.queryID != SVGA3D_INVALID_ID) {
+        if (!vmsvga3d_dxvk_d3d11_copy_resource(
+                s->dxvk, destination->dxvk_surface, source->dxvk_surface)) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-CONVERT-FORMAT kind=resource-native-predicated cid=%u "
+            "src=%u guest=%u native=%u dst=%u guest=%u native=%u",
+            cid, command->srcSid, source->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
+            command->dstSid, destination->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(
+                destination->dxvk_surface));
+
+        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
+            destination, "pred-convert-resource");
+        destination->d3d11_indirect_args_shadow_authoritative = false;
+        return true;
+    }
+
+    if (!vmsvga3d_d3d10_raw_copy_resource_live(
             s, source, destination, SVGA_3D_CMD_DX_PRED_CONVERT)) {
         return false;
     }

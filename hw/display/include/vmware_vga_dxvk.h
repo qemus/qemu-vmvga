@@ -35,6 +35,21 @@
 typedef struct vmsvga3d_dxvk_s VMSVGA3DDxvk;
 typedef struct vmsvga3d_dxvk_surface_s VMSVGA3DDxvkSurface;
 
+#define VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS 3u
+
+typedef enum vmsvga3d_dxvk_screen_readback_submit_result_e {
+    VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED = 0,
+    VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_BUSY,
+    VMSVGA3D_DXVK_SCREEN_READBACK_SUBMITTED,
+} VMSVGA3DDxvkScreenReadbackSubmitResult;
+
+typedef enum vmsvga3d_dxvk_screen_readback_poll_result_e {
+    VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED = 0,
+    VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE,
+    VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING,
+    VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY,
+} VMSVGA3DDxvkScreenReadbackPollResult;
+
 typedef enum vmsvga3d_dxvk_view_kind_e {
     VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
     VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
@@ -499,6 +514,29 @@ bool vmsvga3d_dxvk_surface_readback_rects(
     uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
     void *secondary_data, uint32_t secondary_row_pitch,
     uint32_t secondary_data_size);
+VMSVGA3DDxvkScreenReadbackSubmitResult
+vmsvga3d_dxvk_d3d9_screen_readback_submit(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
+    const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
+    uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel);
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d9_screen_readback_poll(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, bool wait, void *data,
+    uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
+    struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
+    uint32_t *rect_count);
+VMSVGA3DDxvkScreenReadbackSubmitResult
+vmsvga3d_dxvk_d3d11_screen_readback_submit(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
+    uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel);
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d11_screen_readback_poll(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, bool wait, void *data,
+    uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
+    struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
+    uint32_t *rect_count);
+void vmsvga3d_dxvk_screen_readback_discard(VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_surface_upload_buffer(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
     const void *data, uint32_t size);

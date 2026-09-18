@@ -2270,7 +2270,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
-        vmsvga3d_dx_pipeline_setup_live(s, cid);
+        if (!vmsvga3d_dx_pipeline_setup_live(s, cid)) {
+            return false;
+        }
         success = vmsvga3d_d3d11_draw_indexed_instanced_indirect_live(
                       s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;
@@ -2302,7 +2304,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         /* Keep the same ordering as VirtualBox's backend: ensure argument
          * buffer, setup shared pipeline state, submit, then dxPostDraw.
          */
-        vmsvga3d_dx_pipeline_setup_live(s, cid);
+        if (!vmsvga3d_dx_pipeline_setup_live(s, cid)) {
+            return false;
+        }
         success = vmsvga3d_d3d11_draw_instanced_indirect_live(
                       s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;
@@ -2329,7 +2333,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
          * Dispatch and the same dxPostDraw cleanup afterwards.  Its
          * force-all-SRVs workaround is intentionally excluded for DXVK.
          */
-        vmsvga3d_dx_pipeline_setup_live(s, cid);
+        if (!vmsvga3d_dx_pipeline_setup_live(s, cid)) {
+            return false;
+        }
         success = vmsvga3d_d3d11_dispatch_live(
                       s->dxvk, plan.thread_group_count_x,
                       plan.thread_group_count_y, plan.thread_group_count_z) !=
@@ -2356,7 +2362,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
-        vmsvga3d_dx_pipeline_setup_live(s, cid);
+        if (!vmsvga3d_dx_pipeline_setup_live(s, cid)) {
+            return false;
+        }
         success = vmsvga3d_d3d11_dispatch_indirect_live(
                       s->dxvk, args_buffer, plan.aligned_byte_offset) !=
                   VMSVGA3D_D3D11_LEVEL_INVALID;

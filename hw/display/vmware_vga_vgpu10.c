@@ -8696,16 +8696,18 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
     struct vmsvga_state_s *s, uint32_t cid,
     const VMSVGA3DD3D10SOTargetsPlan *plan);
 
-static void vmsvga3d_d3d10_pipeline_so_targets_live(
+static bool vmsvga3d_d3d10_pipeline_so_targets_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     VMSVGA3DD3D10SOTargetsPlan restore_plan;
     const VMSVGA3DD3D10SOTargetsPlan *plan;
 
-    if (context == NULL ||
-        (context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_SOTARGETS) == 0) {
-        return;
+    if (context == NULL) {
+        return false;
+    }
+    if ((context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_SOTARGETS) == 0) {
+        return true;
     }
 
     if (context->pending_so_targets_valid) {
@@ -8714,13 +8716,13 @@ static void vmsvga3d_d3d10_pipeline_so_targets_live(
         if (vmsvga3d_d3d10_so_targets_restore_plan(
                 context->shadow.streamOut.targets, &restore_plan) ==
             VMSVGA3D_D3D10_LEVEL_INVALID) {
-            return;
+            return false;
         }
         plan = &restore_plan;
     }
 
     if (!vmsvga3d_d3d10_so_targets_bind_live(s, cid, plan)) {
-        return;
+        return false;
     }
 
     context->pending_so_targets_valid = false;
@@ -8731,13 +8733,14 @@ static void vmsvga3d_d3d10_pipeline_so_targets_live(
         "DX-SO-TARGETS-BIND cid=%u count=%u source=%s",
         cid, plan->backend_remembered_count,
         plan == &context->pending_so_targets ? "pending" : "restore");
+    return true;
 }
 
 /*
  * VirtualBox-style live dxSetupPipeline executor for the vGPU10 stages that
  * are implemented here.
  */
-static void VMSVGA3D_D3D10_LIVE_UNUSED
+static bool VMSVGA3D_D3D10_LIVE_UNUSED
 vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
 {
     vmsvga3d_d3d10_pipeline_resources_views_ensure_live(s, cid);
@@ -8748,9 +8751,12 @@ vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
     vmsvga3d_d3d10_pipeline_vertex_buffers_live(s, cid);
     vmsvga3d_d3d10_pipeline_index_buffer_live(s, cid);
     vmsvga3d_d3d10_pipeline_shader_resources_live(s, cid);
-    vmsvga3d_d3d10_pipeline_so_targets_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_so_targets_live(s, cid)) {
+        return false;
+    }
     vmsvga3d_d3d10_pipeline_shaders_setup_live(s, cid);
     vmsvga3d_d3d10_pipeline_input_layout_realize_live(s, cid);
+    return true;
 }
 
 static void vmsvga3d_d3d10_bound_rtvs_changed_live(
@@ -8771,9 +8777,9 @@ static void vmsvga3d_d3d10_post_draw_live(VMSVGA3DDXContext *context)
     memset(context->cs_uav_modified, 0, sizeof(context->cs_uav_modified));
 }
 
-void vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
+bool vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
 {
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    return vmsvga3d_d3d10_pipeline_setup_live(s, cid);
 }
 
 void vmsvga3d_dx_post_draw_live(struct vmsvga_state_s *s, uint32_t cid)
@@ -8792,7 +8798,9 @@ static bool vmsvga3d_d3d10_draw_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
     if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
         const uint32_t vs_stage =
             SVGA3D_SHADERTYPE_VS - SVGA3D_SHADERTYPE_MIN;
@@ -9016,7 +9024,9 @@ static bool vmsvga3d_d3d10_draw_indexed_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
     if (context->shadow.inputAssembly.topology ==
         SVGA3D_PRIMITIVE_TRIANGLEFAN) {
         /* VirtualBox ignores every error from dxDrawIndexedTriangleFan. */
@@ -9047,7 +9057,9 @@ static bool vmsvga3d_d3d10_draw_instanced_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
 
     /* VirtualBox only asserts that triangle fans are not used for instanced
      * draws and still submits the native call.  Keep that assert-only behavior
@@ -9077,7 +9089,9 @@ static bool vmsvga3d_d3d10_draw_indexed_instanced_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
     /* As in VirtualBox, triangle-fan topology is assert-only for this command;
      * the native instanced draw is still submitted.
      */
@@ -9102,7 +9116,9 @@ static bool vmsvga3d_d3d10_draw_auto_live(
         return false;
     }
 
-    vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+        return false;
+    }
     /* VirtualBox only asserts that triangle fans are not used for DrawAuto and
      * still submits the native call.  Preserve that assert-only behavior.
      */

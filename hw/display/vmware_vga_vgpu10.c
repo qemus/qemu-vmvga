@@ -11971,10 +11971,10 @@ static bool vmsvga3d_d3d10_predicate_write_executed_live(
         return false;
     }
 
-    /* This synchronous query is intentionally restricted to the 1D D24S8
-     * CPU-shadow preservation path.  DXVK 2.x cannot read that resident format
-     * back through our normal staging path, so discarding a valid shadow for a
-     * predicated no-op is a correctness failure rather than a performance loss. */
+    /* CPU-side compatibility paths cannot inherit asynchronous native D3D11
+     * predication.  Resolve the boolean predicate synchronously before such a
+     * path mutates resource storage.  The same helper also preserves the 1D
+     * D24S8 shadow when a predicated native copy is known not to execute. */
     vmsvga3d_dxvk_d3d11_flush(s->dxvk);
     for (attempt = 0; attempt < 1000; attempt++) {
         if (!vmsvga3d_dxvk_d3d11_query_get_data(
@@ -12368,11 +12368,65 @@ static bool vmsvga3d_d3d10_raw_copy_compatible(
     return true;
 }
 
+static bool vmsvga3d_d3d10_convert_copy_compatible(
+    const VMSVGA3DSurface *source, const VMSVGA3DSurface *destination,
+    bool whole_resource,
+    const struct svga3d_surface_desc **source_desc_out,
+    const struct svga3d_surface_desc **destination_desc_out)
+{
+    const struct svga3d_surface_desc *source_desc;
+    const struct svga3d_surface_desc *destination_desc;
+    VMSVGA3DD3D10Format source_format;
+
+    /* Prefer the existing precise compatibility rules.  CONVERT commands can
+     * additionally present two surfaces with the same canonical SVGA format:
+     * the Windows driver has already collapsed compatible typed DXGI formats
+     * to a common storage format, while the opcode still requires a raw copy. */
+    if (vmsvga3d_d3d10_raw_copy_compatible(
+            source, destination, whole_resource,
+            source_desc_out, destination_desc_out)) {
+        return true;
+    }
+
+    if (source == NULL || destination == NULL ||
+        source->format != destination->format ||
+        source->multisample_count > 1 || destination->multisample_count > 1 ||
+        (source->surface_flags & SVGA3D_SURFACE_BIND_DEPTH_STENCIL) ||
+        (destination->surface_flags & SVGA3D_SURFACE_BIND_DEPTH_STENCIL)) {
+        return false;
+    }
+
+    source_format = vmsvga3d_d3d10_surface_format(source->format);
+    if (source_format.min_level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+        return false;
+    }
+
+    source_desc = svga3dsurface_get_desc(source->format);
+    destination_desc = svga3dsurface_get_desc(destination->format);
+    if (source_desc->format != source->format ||
+        destination_desc->format != destination->format ||
+        source_desc->bytes_per_block == 0 ||
+        source_desc->pitch_bytes_per_block != source_desc->bytes_per_block ||
+        destination_desc->pitch_bytes_per_block !=
+            destination_desc->bytes_per_block ||
+        source_desc->bytes_per_block != destination_desc->bytes_per_block) {
+        return false;
+    }
+
+    if (source_desc_out != NULL) {
+        *source_desc_out = source_desc;
+    }
+    if (destination_desc_out != NULL) {
+        *destination_desc_out = destination_desc;
+    }
+    return true;
+}
+
 static bool vmsvga3d_d3d10_raw_copy_subresource_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *source,
     uint32_t source_subresource, VMSVGA3DSurface *destination,
     uint32_t destination_subresource, const SVGA3dCopyBox *copy_box,
-    SVGA3dBox *destination_box_out, uint32_t route_cmd)
+    SVGA3dBox *destination_box_out, uint32_t route_cmd, bool convert_copy)
 {
     const struct svga3d_surface_desc *source_desc;
     const struct svga3d_surface_desc *destination_desc;
@@ -12407,10 +12461,19 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
     if (s == NULL || source == NULL || destination == NULL ||
         source->mips == NULL || destination->mips == NULL ||
         source_subresource >= source->mip_count ||
-        destination_subresource >= destination->mip_count ||
-        !vmsvga3d_d3d10_raw_copy_compatible(
-            source, destination, copy_box == NULL,
-            &source_desc, &destination_desc)) {
+        destination_subresource >= destination->mip_count) {
+        return false;
+    }
+
+    if (convert_copy) {
+        if (!vmsvga3d_d3d10_convert_copy_compatible(
+                source, destination, copy_box == NULL,
+                &source_desc, &destination_desc)) {
+            return false;
+        }
+    } else if (!vmsvga3d_d3d10_raw_copy_compatible(
+                   source, destination, copy_box == NULL,
+                   &source_desc, &destination_desc)) {
         return false;
     }
 
@@ -12639,10 +12702,12 @@ static bool vmsvga3d_d3d10_raw_copy_subresource_live(
     return true;
 }
 
-static bool vmsvga3d_d3d10_raw_copy_resource_live(
-    struct vmsvga_state_s *s, VMSVGA3DSurface *source,
-    VMSVGA3DSurface *destination, uint32_t route_cmd)
+static bool vmsvga3d_d3d10_raw_copy_resource_geometry_compatible(
+    const VMSVGA3DSurface *source, const VMSVGA3DSurface *destination,
+    bool convert_copy)
 {
+    const struct svga3d_surface_desc *source_desc;
+    const struct svga3d_surface_desc *destination_desc;
     uint32_t subresource;
 
     if (source == NULL || destination == NULL || source->mips == NULL ||
@@ -12652,16 +12717,78 @@ static bool vmsvga3d_d3d10_raw_copy_resource_live(
         source->face[0].numMipLevels == 0 ||
         destination->face[0].numMipLevels == 0 ||
         source->face[0].numMipLevels != destination->face[0].numMipLevels ||
-        source->mip_count != destination->mip_count ||
-        !vmsvga3d_d3d10_raw_copy_compatible(
-            source, destination, true, NULL, NULL)) {
+        source->mip_count != destination->mip_count) {
+        return false;
+    }
+
+    if (convert_copy) {
+        if (!vmsvga3d_d3d10_convert_copy_compatible(
+                source, destination, true, &source_desc, &destination_desc)) {
+            return false;
+        }
+    } else if (!vmsvga3d_d3d10_raw_copy_compatible(
+                   source, destination, true,
+                   &source_desc, &destination_desc)) {
+        return false;
+    }
+
+    for (subresource = 0; subresource < source->mip_count; subresource++) {
+        const VMSVGA3DSurfaceImage *source_image = &source->mips[subresource];
+        const VMSVGA3DSurfaceImage *destination_image =
+            &destination->mips[subresource];
+        uint32_t source_blocks_x;
+        uint32_t source_blocks_y;
+        uint32_t source_blocks_z;
+        uint32_t destination_blocks_x;
+        uint32_t destination_blocks_y;
+        uint32_t destination_blocks_z;
+
+        if (source_image->size.width == 0 || source_image->size.height == 0 ||
+            source_image->size.depth == 0 ||
+            destination_image->size.width == 0 ||
+            destination_image->size.height == 0 ||
+            destination_image->size.depth == 0) {
+            return false;
+        }
+
+        source_blocks_x = 1 + (source_image->size.width - 1) /
+                                source_desc->block_size.width;
+        source_blocks_y = 1 + (source_image->size.height - 1) /
+                                source_desc->block_size.height;
+        source_blocks_z = 1 + (source_image->size.depth - 1) /
+                                source_desc->block_size.depth;
+        destination_blocks_x = 1 + (destination_image->size.width - 1) /
+                                     destination_desc->block_size.width;
+        destination_blocks_y = 1 + (destination_image->size.height - 1) /
+                                     destination_desc->block_size.height;
+        destination_blocks_z = 1 + (destination_image->size.depth - 1) /
+                                     destination_desc->block_size.depth;
+
+        if (source_blocks_x != destination_blocks_x ||
+            source_blocks_y != destination_blocks_y ||
+            source_blocks_z != destination_blocks_z) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool vmsvga3d_d3d10_raw_copy_resource_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *source,
+    VMSVGA3DSurface *destination, uint32_t route_cmd, bool convert_copy)
+{
+    uint32_t subresource;
+
+    if (!vmsvga3d_d3d10_raw_copy_resource_geometry_compatible(
+            source, destination, convert_copy)) {
         return false;
     }
 
     for (subresource = 0; subresource < source->mip_count; subresource++) {
         if (!vmsvga3d_d3d10_raw_copy_subresource_live(
                 s, source, subresource, destination, subresource, NULL, NULL,
-                route_cmd)) {
+                route_cmd, convert_copy)) {
             return false;
         }
     }
@@ -12690,8 +12817,8 @@ static bool vmsvga3d_d3d10_convert_region_copy_box(
         destination_box == NULL || copy_box == NULL || source->mips == NULL ||
         destination->mips == NULL || source_subresource >= source->mip_count ||
         destination_subresource >= destination->mip_count ||
-        !vmsvga3d_d3d10_bc_copy_compatible(
-            source, destination, &source_desc, &destination_desc, NULL)) {
+        !vmsvga3d_d3d10_convert_copy_compatible(
+            source, destination, false, &source_desc, &destination_desc)) {
         return false;
     }
 
@@ -12752,9 +12879,9 @@ static bool vmsvga3d_d3d10_convert_region_copy_box(
         1 + (destination_box->d - 1) / destination_desc->block_size.depth;
 
     /* CONVERT_REGION expresses source and destination rectangles separately
-     * because compressed and uncompressed resources use different texel-space
-     * dimensions.  The operation is nevertheless a raw storage-block copy: the
-     * two boxes must describe the same number of equally sized storage blocks. */
+     * because compatible resources may use different texel-space block
+     * geometries.  The operation is a raw storage-block copy: the two boxes
+     * must describe the same number of equally sized storage blocks. */
     if (source_blocks_x != destination_blocks_x ||
         source_blocks_y != destination_blocks_y ||
         source_blocks_z != destination_blocks_z) {
@@ -12784,6 +12911,7 @@ static bool vmsvga3d_d3d10_pred_convert_region_live(
     SVGA3dCopyBox copy_box;
     SVGA3dBox dirty;
     bool raw_compatible;
+    bool write_executed = true;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -12805,13 +12933,12 @@ static bool vmsvga3d_d3d10_pred_convert_region_live(
         return false;
     }
 
-    raw_compatible = vmsvga3d_d3d10_bc_copy_compatible(
-        source, destination, NULL, NULL, NULL);
+    raw_compatible = vmsvga3d_d3d10_convert_copy_compatible(
+        source, destination, false, NULL, NULL);
     vmsvga3d_d3d10_copy_diag_trace_route(
         SVGA_3D_CMD_DX_PRED_CONVERT_REGION, cid, context, source, destination,
         false, raw_compatible,
-        context->shadow.predication.queryID == SVGA3D_INVALID_ID &&
-            vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
+        vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
             raw_compatible,
         false);
 
@@ -12828,57 +12955,36 @@ static bool vmsvga3d_d3d10_pred_convert_region_live(
     }
 
     if (context->shadow.predication.queryID != SVGA3D_INVALID_ID) {
-        VMSVGA3DD3D10Box source_box = {
-            .left = command->srcBox.x,
-            .top = command->srcBox.y,
-            .front = command->srcBox.z,
-            .right = command->srcBox.x + command->srcBox.w,
-            .bottom = command->srcBox.y + command->srcBox.h,
-            .back = command->srcBox.z + command->srcBox.d,
-        };
-
-        if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
-                s->dxvk, destination->dxvk_surface, command->dstSubResource,
-                command->destBox.x, command->destBox.y, command->destBox.z,
-                source->dxvk_surface, command->srcSubResource, &source_box)) {
+        if (!vmsvga3d_d3d10_predicate_write_executed_live(
+                s, cid, context, &write_executed)) {
             return false;
         }
-
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-CONVERT-FORMAT kind=region-native-predicated cid=%u "
-            "src=%u:%u guest=%u native=%u src-box=%u,%u,%u/%ux%ux%u "
-            "dst=%u:%u guest=%u native=%u dst-box=%u,%u,%u/%ux%ux%u",
-            cid, command->srcSid, command->srcSubResource, source->format,
-            vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
-            command->srcBox.x, command->srcBox.y, command->srcBox.z,
-            command->srcBox.w, command->srcBox.h, command->srcBox.d,
-            command->dstSid, command->dstSubResource, destination->format,
-            vmsvga3d_dxvk_d3d11_surface_native_format(destination->dxvk_surface),
-            command->destBox.x, command->destBox.y, command->destBox.z,
-            command->destBox.w, command->destBox.h, command->destBox.d);
-
-        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate(
-            destination, command->dstSubResource, "pred-convert-region");
-        if (command->dstSubResource == 0) {
-            destination->d3d11_indirect_args_shadow_authoritative = false;
+        if (!write_executed) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-CONVERT-FORMAT kind=region-raw-predicate-skip cid=%u "
+                "src=%u:%u guest=%u dst=%u:%u guest=%u",
+                cid, command->srcSid, command->srcSubResource, source->format,
+                command->dstSid, command->dstSubResource,
+                destination->format);
+            return true;
         }
-        return true;
     }
 
     if (!vmsvga3d_d3d10_raw_copy_subresource_live(
             s, source, command->srcSubResource, destination,
             command->dstSubResource, &copy_box, &dirty,
-            SVGA_3D_CMD_DX_PRED_CONVERT_REGION)) {
+            SVGA_3D_CMD_DX_PRED_CONVERT_REGION, true)) {
         return false;
     }
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "DX-CONVERT-FORMAT kind=region-raw-compatible cid=%u "
+        "DX-CONVERT-FORMAT kind=region-raw-compatible cid=%u predicated=%u "
         "src=%u:%u guest=%u native=%u src-box=%u,%u,%u/%ux%ux%u "
         "dst=%u:%u guest=%u native=%u dst-box=%u,%u,%u/%ux%ux%u",
-        cid, command->srcSid, command->srcSubResource, source->format,
+        cid, context->shadow.predication.queryID != SVGA3D_INVALID_ID,
+        command->srcSid, command->srcSubResource, source->format,
         vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
         command->srcBox.x, command->srcBox.y, command->srcBox.z,
         command->srcBox.w, command->srcBox.h, command->srcBox.d,
@@ -12905,6 +13011,7 @@ static bool vmsvga3d_d3d10_pred_convert_live(
     VMSVGA3DSurface *source;
     VMSVGA3DSurface *destination;
     bool raw_compatible;
+    bool write_executed = true;
 
     if (s == NULL || command == NULL || s->svga3d == NULL ||
         !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
@@ -12924,18 +13031,19 @@ static bool vmsvga3d_d3d10_pred_convert_live(
         return false;
     }
 
-    raw_compatible = vmsvga3d_d3d10_bc_copy_compatible(
-        source, destination, NULL, NULL, NULL);
+    raw_compatible = vmsvga3d_d3d10_convert_copy_compatible(
+        source, destination, true, NULL, NULL);
     vmsvga3d_d3d10_copy_diag_trace_route(
         SVGA_3D_CMD_DX_PRED_CONVERT, cid, context, source, destination, true,
         raw_compatible,
-        context->shadow.predication.queryID == SVGA3D_INVALID_ID &&
-            vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
+        vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
             raw_compatible,
         false);
 
     if (!vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) ||
         !raw_compatible ||
+        !vmsvga3d_d3d10_raw_copy_resource_geometry_compatible(
+            source, destination, true) ||
         !vmsvga3d_d3d10_copy_surface_materialize_live(
             s, source, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
         !vmsvga3d_d3d10_copy_surface_materialize_live(
@@ -12944,37 +13052,32 @@ static bool vmsvga3d_d3d10_pred_convert_live(
     }
 
     if (context->shadow.predication.queryID != SVGA3D_INVALID_ID) {
-        if (!vmsvga3d_dxvk_d3d11_copy_resource(
-                s->dxvk, destination->dxvk_surface, source->dxvk_surface)) {
+        if (!vmsvga3d_d3d10_predicate_write_executed_live(
+                s, cid, context, &write_executed)) {
             return false;
         }
-
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-CONVERT-FORMAT kind=resource-native-predicated cid=%u "
-            "src=%u guest=%u native=%u dst=%u guest=%u native=%u",
-            cid, command->srcSid, source->format,
-            vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
-            command->dstSid, destination->format,
-            vmsvga3d_dxvk_d3d11_surface_native_format(
-                destination->dxvk_surface));
-
-        vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
-            destination, "pred-convert-resource");
-        destination->d3d11_indirect_args_shadow_authoritative = false;
-        return true;
+        if (!write_executed) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-CONVERT-FORMAT kind=resource-raw-predicate-skip cid=%u "
+                "src=%u guest=%u dst=%u guest=%u",
+                cid, command->srcSid, source->format, command->dstSid,
+                destination->format);
+            return true;
+        }
     }
 
     if (!vmsvga3d_d3d10_raw_copy_resource_live(
-            s, source, destination, SVGA_3D_CMD_DX_PRED_CONVERT)) {
+            s, source, destination, SVGA_3D_CMD_DX_PRED_CONVERT, true)) {
         return false;
     }
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
-        "DX-CONVERT-FORMAT kind=resource-raw-compatible cid=%u "
+        "DX-CONVERT-FORMAT kind=resource-raw-compatible cid=%u predicated=%u "
         "src=%u guest=%u native=%u dst=%u guest=%u native=%u",
-        cid, command->srcSid, source->format,
+        cid, context->shadow.predication.queryID != SVGA3D_INVALID_ID,
+        command->srcSid, source->format,
         vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
         command->dstSid, destination->format,
         vmsvga3d_dxvk_d3d11_surface_native_format(destination->dxvk_surface));
@@ -13042,7 +13145,8 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
                 s, destination, VMSVGA3D_D3D10_CREATE_TEXTURE) ||
             !vmsvga3d_d3d10_raw_copy_subresource_live(
                 s, source, command->srcSubResource, destination,
-                command->dstSubResource, &command->box, &dirty, route_cmd)) {
+                command->dstSubResource, &command->box, &dirty, route_cmd,
+                false)) {
             return false;
         }
 
@@ -13214,7 +13318,7 @@ static bool vmsvga3d_d3d10_pred_copy_live(
 
     if (raw_selected) {
         if (!vmsvga3d_d3d10_raw_copy_resource_live(
-                s, source, destination, route_cmd)) {
+                s, source, destination, route_cmd, false)) {
             return false;
         }
 

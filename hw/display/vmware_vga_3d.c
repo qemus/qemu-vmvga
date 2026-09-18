@@ -10100,84 +10100,18 @@ static bool vmsvga3d_clear_readback_targets(
 #include "vmware_vga_vgpu11.c"
 #include "vmware_vga_3d_state.c"
 
-static SVGACBStatus vmsvga3d_device_command_buffer_process(
-    const void *commands, uint32_t size, uint32_t *error_offset)
-{
-    const uint8_t *bytes = commands;
-    uint32_t offset = 0;
+#define VMSVGA_CB_BH_MAX_BUFFERS 8u
+#define VMSVGA_CB_BH_MAX_BYTES (4u * 1024u * 1024u)
 
-    if (error_offset == NULL || (size != 0 && commands == NULL)) {
-        return SVGA_CB_STATUS_COMMAND_ERROR;
-    }
-    *error_offset = 0;
-
-    while (offset < size) {
-        const uint32_t command_offset = offset;
-        uint32_t cmd;
-
-        if (size - offset < sizeof(cmd)) {
-            *error_offset = command_offset;
-            return SVGA_CB_STATUS_COMMAND_ERROR;
-        }
-
-        memcpy(&cmd, bytes + offset, sizeof(cmd));
-        cmd = le32_to_cpu(cmd);
-        offset += sizeof(cmd);
-
-        switch (cmd) {
-        case SVGA_DC_CMD_NOP:
-            break;
-
-        case SVGA_DC_CMD_START_STOP_CONTEXT: {
-              SVGADCCmdStartStop command;
-
-              if (size - offset < sizeof(command)) {
-                  *error_offset = command_offset;
-                  return SVGA_CB_STATUS_COMMAND_ERROR;
-              }
-              memcpy(&command, bytes + offset, sizeof(command));
-              command.enable = le32_to_cpu(command.enable);
-              command.context = (SVGACBContext)le32_to_cpu((uint32_t)command.context);
-              offset += sizeof(command);
-              /* QEMU executes context-0 command buffers synchronously, so there is no
-               * queue object to create or destroy.  Keep VirtualBox's command/argument
-               * validation while making START/STOP an otherwise successful no-op. */
-              if (command.context >= SVGA_CB_CONTEXT_MAX) {
-                  *error_offset = command_offset;
-                  return SVGA_CB_STATUS_COMMAND_ERROR;
-              }
-              break;
-          }
-
-        case SVGA_DC_CMD_PREEMPT: {
-              SVGADCCmdPreempt command;
-
-              if (size - offset < sizeof(command)) {
-                  *error_offset = command_offset;
-                  return SVGA_CB_STATUS_COMMAND_ERROR;
-              }
-              memcpy(&command, bytes + offset, sizeof(command));
-              command.context = (SVGACBContext)le32_to_cpu((uint32_t)command.context);
-              command.ignoreIDZero = le32_to_cpu(command.ignoreIDZero);
-              offset += sizeof(command);
-              /* There is no asynchronous queue in this backend, therefore by the time
-               * PREEMPT executes there is nothing pending to preempt. */
-              if (command.context >= SVGA_CB_CONTEXT_MAX) {
-                  *error_offset = command_offset;
-                  return SVGA_CB_STATUS_COMMAND_ERROR;
-              }
-              break;
-          }
-
-        default:
-            *error_offset = command_offset;
-            return SVGA_CB_STATUS_COMMAND_ERROR;
-        }
-    }
-
-    *error_offset = offset;
-    return SVGA_CB_STATUS_COMPLETED;
-}
+struct vmsvga_command_buffer_work_s {
+    struct vmsvga_command_buffer_work_s *next;
+    SVGACBHeader header;
+    uint64_t header_gpa;
+    uint64_t sequence;
+    uint32_t context;
+    bool prepend;
+    uint8_t *commands;
+};
 
 static void vmsvga3d_command_buffer_write_status(
     struct vmsvga_state_s *s, uint64_t header_gpa, SVGACBStatus status,
@@ -10196,8 +10130,8 @@ static void vmsvga3d_command_buffer_write_status(
     }
 
     /* Some guests read back `SVGACBHeader.offset` on completion to determine
-     * how far the synchronous parser progressed.  Publish the processed offset
-     * before writing the terminal status value. */
+     * how far the parser progressed.  Publish the processed offset before
+     * writing the terminal status value. */
     value = cpu_to_le32(processed_offset);
     (void)vmsvga3d_guest_memory_write(
         s, header_gpa + offsetof(SVGACBHeader, offset), &value, sizeof(value));
@@ -10244,6 +10178,263 @@ static void vmsvga3d_command_buffer_raise_irq(struct vmsvga_state_s *s,
 #endif
 }
 
+static void vmsvga3d_command_buffer_work_free(
+    struct vmsvga_command_buffer_work_s *work)
+{
+    if (work == NULL) {
+        return;
+    }
+    g_free(work->commands);
+    g_free(work);
+}
+
+static struct vmsvga_command_buffer_work_s *
+vmsvga3d_command_buffer_pop(struct vmsvga_state_s *s)
+{
+    struct vmsvga_command_buffer_work_s *work;
+
+    if (s->cb_prepend_head != NULL) {
+        work = s->cb_prepend_head;
+        s->cb_prepend_head = work->next;
+        if (s->cb_prepend_head == NULL) {
+            s->cb_prepend_tail = NULL;
+        }
+    } else {
+        work = s->cb_queue_head;
+        if (work == NULL) {
+            return NULL;
+        }
+        s->cb_queue_head = work->next;
+        if (s->cb_queue_head == NULL) {
+            s->cb_queue_tail = NULL;
+        }
+    }
+
+    work->next = NULL;
+    assert(s->cb_queue_count != 0);
+    s->cb_queue_count--;
+    return work;
+}
+
+static bool vmsvga3d_command_buffer_enqueue(
+    struct vmsvga_state_s *s, uint64_t header_gpa, uint32_t context,
+    const SVGACBHeader *header, uint8_t *commands, bool prepend)
+{
+    struct vmsvga_command_buffer_work_s *work;
+
+    if (s == NULL || header == NULL || context >= SVGA_CB_CONTEXT_MAX ||
+        s->cb_queue_count >= SVGA_CB_MAX_QUEUED_PER_CONTEXT) {
+        return false;
+    }
+
+    work = g_try_new0(struct vmsvga_command_buffer_work_s, 1);
+    if (work == NULL) {
+        return false;
+    }
+
+    work->header = *header;
+    work->header_gpa = header_gpa;
+    work->sequence = ++s->cb_queue_sequence;
+    work->context = context;
+    work->prepend = prepend;
+    work->commands = commands;
+
+    if (prepend) {
+        if (s->cb_prepend_tail != NULL) {
+            s->cb_prepend_tail->next = work;
+        } else {
+            s->cb_prepend_head = work;
+        }
+        s->cb_prepend_tail = work;
+    } else {
+        if (s->cb_queue_tail != NULL) {
+            s->cb_queue_tail->next = work;
+        } else {
+            s->cb_queue_head = work;
+        }
+        s->cb_queue_tail = work;
+    }
+
+    s->cb_queue_count++;
+    s->cb_queue_depth_max = MAX(s->cb_queue_depth_max, s->cb_queue_count);
+    s->cb_queue_submitted++;
+    s->cb_queue_bytes += header->length - header->offset;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-ASYNC phase=enqueue seq=%" PRIu64 " kind=%s header=0x%016" PRIx64
+        " context=%u id=0x%016" PRIx64 " bytes=%u depth=%u max-depth=%u",
+        work->sequence, prepend ? "PREPEND" : "COMMAND", header_gpa,
+        context, header->id, header->length - header->offset,
+        s->cb_queue_count, s->cb_queue_depth_max);
+
+    if (s->cb_bh != NULL && !s->cb_bh_running) {
+        qemu_bh_schedule(s->cb_bh);
+    }
+    return true;
+}
+
+static uint32_t vmsvga3d_command_buffer_preempt_list(
+    struct vmsvga_state_s *s,
+    struct vmsvga_command_buffer_work_s **head,
+    struct vmsvga_command_buffer_work_s **tail,
+    uint32_t context, bool ignore_id_zero)
+{
+    struct vmsvga_command_buffer_work_s *work = *head;
+    struct vmsvga_command_buffer_work_s *previous = NULL;
+    uint32_t preempted = 0;
+
+    while (work != NULL) {
+        struct vmsvga_command_buffer_work_s *next = work->next;
+
+        if (work->context == context &&
+            !(ignore_id_zero && work->header.id == 0)) {
+            if (previous != NULL) {
+                previous->next = next;
+            } else {
+                *head = next;
+            }
+            if (*tail == work) {
+                *tail = previous;
+            }
+            assert(s->cb_queue_count != 0);
+            s->cb_queue_count--;
+            vmsvga3d_command_buffer_write_status(
+                s, work->header_gpa, SVGA_CB_STATUS_PREEMPTED,
+                0, work->header.offset);
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "CB-ASYNC phase=preempt seq=%" PRIu64
+                " header=0x%016" PRIx64 " context=%u id=0x%016" PRIx64
+                " depth=%u",
+                work->sequence, work->header_gpa, work->context,
+                work->header.id, s->cb_queue_count);
+            vmsvga3d_command_buffer_work_free(work);
+            preempted++;
+        } else {
+            previous = work;
+        }
+        work = next;
+    }
+
+    return preempted;
+}
+
+static uint32_t vmsvga3d_command_buffer_preempt_context(
+    struct vmsvga_state_s *s, uint32_t context, bool ignore_id_zero)
+{
+    uint32_t preempted = 0;
+
+    if (s == NULL || context >= SVGA_CB_CONTEXT_MAX) {
+        return 0;
+    }
+
+    preempted += vmsvga3d_command_buffer_preempt_list(
+        s, &s->cb_prepend_head, &s->cb_prepend_tail,
+        context, ignore_id_zero);
+    preempted += vmsvga3d_command_buffer_preempt_list(
+        s, &s->cb_queue_head, &s->cb_queue_tail,
+        context, ignore_id_zero);
+    return preempted;
+}
+
+static SVGACBStatus vmsvga3d_device_command_buffer_process(
+    struct vmsvga_state_s *s, const void *commands, uint32_t size,
+    uint32_t *error_offset)
+{
+    const uint8_t *bytes = commands;
+    uint32_t offset = 0;
+
+    if (s == NULL || error_offset == NULL ||
+        (size != 0 && commands == NULL)) {
+        return SVGA_CB_STATUS_COMMAND_ERROR;
+    }
+    *error_offset = 0;
+
+    while (offset < size) {
+        const uint32_t command_offset = offset;
+        uint32_t cmd;
+
+        if (size - offset < sizeof(cmd)) {
+            *error_offset = command_offset;
+            return SVGA_CB_STATUS_COMMAND_ERROR;
+        }
+
+        memcpy(&cmd, bytes + offset, sizeof(cmd));
+        cmd = le32_to_cpu(cmd);
+        offset += sizeof(cmd);
+
+        switch (cmd) {
+        case SVGA_DC_CMD_NOP:
+            break;
+
+        case SVGA_DC_CMD_START_STOP_CONTEXT: {
+              SVGADCCmdStartStop command;
+
+              if (size - offset < sizeof(command)) {
+                  *error_offset = command_offset;
+                  return SVGA_CB_STATUS_COMMAND_ERROR;
+              }
+              memcpy(&command, bytes + offset, sizeof(command));
+              command.enable = le32_to_cpu(command.enable);
+              command.context =
+                  (SVGACBContext)le32_to_cpu((uint32_t)command.context);
+              offset += sizeof(command);
+              if (command.context >= SVGA_CB_CONTEXT_MAX) {
+                  *error_offset = command_offset;
+                  return SVGA_CB_STATUS_COMMAND_ERROR;
+              }
+              if (command.enable == 0) {
+                  uint32_t preempted =
+                      vmsvga3d_command_buffer_preempt_context(
+                          s, command.context, false);
+                  VMVGA_TRACE_LOCAL(
+                      VMVGA_TRACE_3D,
+                      "CB-ASYNC phase=context-stop context=%u preempted=%u "
+                      "depth=%u",
+                      command.context, preempted, s->cb_queue_count);
+              }
+              break;
+          }
+
+        case SVGA_DC_CMD_PREEMPT: {
+              SVGADCCmdPreempt command;
+              uint32_t preempted;
+
+              if (size - offset < sizeof(command)) {
+                  *error_offset = command_offset;
+                  return SVGA_CB_STATUS_COMMAND_ERROR;
+              }
+              memcpy(&command, bytes + offset, sizeof(command));
+              command.context =
+                  (SVGACBContext)le32_to_cpu((uint32_t)command.context);
+              command.ignoreIDZero = le32_to_cpu(command.ignoreIDZero);
+              offset += sizeof(command);
+              if (command.context >= SVGA_CB_CONTEXT_MAX) {
+                  *error_offset = command_offset;
+                  return SVGA_CB_STATUS_COMMAND_ERROR;
+              }
+              preempted = vmsvga3d_command_buffer_preempt_context(
+                  s, command.context, command.ignoreIDZero != 0);
+              VMVGA_TRACE_LOCAL(
+                  VMVGA_TRACE_3D,
+                  "CB-ASYNC phase=preempt-request context=%u ignore-id-zero=%u "
+                  "preempted=%u depth=%u",
+                  command.context, command.ignoreIDZero != 0,
+                  preempted, s->cb_queue_count);
+              break;
+          }
+
+        default:
+            *error_offset = command_offset;
+            return SVGA_CB_STATUS_COMMAND_ERROR;
+        }
+    }
+
+    *error_offset = offset;
+    return SVGA_CB_STATUS_COMPLETED;
+}
+
 static uint32_t vmsvga3d_command_buffer_max_size(
     const struct vmsvga_state_s *s)
 {
@@ -10254,6 +10445,183 @@ static uint32_t vmsvga3d_command_buffer_max_size(
     }
 
     return SVGA_CB_MAX_SIZE;
+}
+
+static void vmsvga3d_command_buffer_execute_work(
+    struct vmsvga_state_s *s, struct vmsvga_command_buffer_work_s *work)
+{
+    SVGACBStatus status;
+    uint32_t local_offset = 0;
+    uint32_t processed;
+    uint32_t irq_flags = 0;
+    uint32_t dx_context;
+
+    assert(s != NULL);
+    assert(work != NULL);
+    assert(work->context < SVGA_CB_CONTEXT_MAX);
+
+    processed = work->header.offset;
+    dx_context = (work->header.flags & SVGA_CB_FLAG_DX_CONTEXT) != 0
+                     ? work->header.dxContext
+                     : SVGA3D_INVALID_ID;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-ASYNC phase=execute seq=%" PRIu64 " kind=%s header=0x%016" PRIx64
+        " context=%u id=0x%016" PRIx64 " bytes=%u depth=%u",
+        work->sequence, work->prepend ? "PREPEND" : "COMMAND",
+        work->header_gpa, work->context, work->header.id,
+        work->header.length - work->header.offset, s->cb_queue_count);
+
+    /* COMMAND_BUFFERS_2 carries the normal SVGA command stream.  The
+     * DX_CONTEXT flag supplies metadata for DX commands in that stream; it
+     * does not select a different command encoding. */
+    status = vmsvga_command_buffer_process(
+        s, dx_context,
+        work->commands != NULL ? work->commands + work->header.offset : NULL,
+        work->header.length - work->header.offset, &local_offset);
+    processed = work->header.offset + local_offset;
+
+    /* QUEUE_FULL is only legal as a synchronous submission rejection.
+     * Once this command buffer was accepted into the host queue, a later
+     * private-parser allocation failure is an execution failure instead. */
+    if (status == SVGA_CB_STATUS_QUEUE_FULL) {
+        status = SVGA_CB_STATUS_COMMAND_ERROR;
+    }
+
+    if ((work->header.flags & SVGA_CB_FLAG_NO_IRQ) == 0) {
+        irq_flags |= SVGA_IRQFLAG_COMMAND_BUFFER;
+    }
+    if (status == SVGA_CB_STATUS_COMMAND_ERROR) {
+        irq_flags |= SVGA_IRQFLAG_ERROR;
+    }
+
+    vmsvga3d_command_buffer_write_status(
+        s, work->header_gpa, status, processed, processed);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-COMPLETE kind=%s header=0x%016" PRIx64
+        " context=%u id=0x%016" PRIx64
+        " status=%u processed=%u errorOffset=%u irq=0x%08x seq=%" PRIu64
+        " depth=%u",
+        work->prepend ? "PREPEND" : "COMMAND", work->header_gpa,
+        work->context, work->header.id, (unsigned)status, processed,
+        status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0,
+        irq_flags, work->sequence, s->cb_queue_count);
+    vmsvga3d_command_buffer_raise_irq(s, irq_flags);
+    s->cb_queue_executed++;
+    vmsvga3d_command_buffer_work_free(work);
+}
+
+static void vmsvga3d_command_buffer_bh(void *opaque)
+{
+    struct vmsvga_state_s *s = opaque;
+    uint32_t buffers = 0;
+    uint64_t bytes = 0;
+
+    if (s == NULL || s->cb_bh_running) {
+        return;
+    }
+
+    s->cb_bh_running = true;
+    while (buffers < VMSVGA_CB_BH_MAX_BUFFERS &&
+           bytes < VMSVGA_CB_BH_MAX_BYTES) {
+        struct vmsvga_command_buffer_work_s *work =
+            vmsvga3d_command_buffer_pop(s);
+
+        if (work == NULL) {
+            break;
+        }
+        bytes += work->header.length - work->header.offset;
+        buffers++;
+        vmsvga3d_command_buffer_execute_work(s, work);
+    }
+    s->cb_bh_running = false;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-ASYNC phase=service buffers=%u bytes=%" PRIu64
+        " depth=%u submitted=%" PRIu64 " executed=%" PRIu64,
+        buffers, bytes, s->cb_queue_count,
+        s->cb_queue_submitted, s->cb_queue_executed);
+
+    if (s->cb_queue_count != 0 && s->cb_bh != NULL) {
+        qemu_bh_schedule(s->cb_bh);
+    }
+}
+
+static void vmsvga3d_command_buffer_drain(struct vmsvga_state_s *s,
+                                           const char *reason)
+{
+    uint32_t drained = 0;
+    uint64_t bytes = 0;
+
+    if (s == NULL || s->cb_bh_running) {
+        return;
+    }
+    if (s->cb_bh != NULL) {
+        qemu_bh_cancel(s->cb_bh);
+    }
+
+    s->cb_bh_running = true;
+    while (s->cb_queue_count != 0) {
+        struct vmsvga_command_buffer_work_s *work =
+            vmsvga3d_command_buffer_pop(s);
+
+        if (work == NULL) {
+            break;
+        }
+        bytes += work->header.length - work->header.offset;
+        drained++;
+        vmsvga3d_command_buffer_execute_work(s, work);
+    }
+    s->cb_bh_running = false;
+    if (drained != 0) {
+        s->cb_queue_drains++;
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-ASYNC phase=drain reason=%s buffers=%u bytes=%" PRIu64
+        " depth=%u drains=%" PRIu64,
+        reason != NULL ? reason : "unspecified", drained, bytes,
+        s->cb_queue_count, s->cb_queue_drains);
+}
+
+static void vmsvga3d_command_buffer_discard(struct vmsvga_state_s *s,
+                                             bool publish_preempted,
+                                             const char *reason)
+{
+    uint32_t discarded = 0;
+
+    if (s == NULL) {
+        return;
+    }
+    if (s->cb_bh != NULL) {
+        qemu_bh_cancel(s->cb_bh);
+    }
+
+    while (s->cb_queue_count != 0) {
+        struct vmsvga_command_buffer_work_s *work =
+            vmsvga3d_command_buffer_pop(s);
+
+        if (work == NULL) {
+            break;
+        }
+        if (publish_preempted) {
+            vmsvga3d_command_buffer_write_status(
+                s, work->header_gpa, SVGA_CB_STATUS_PREEMPTED,
+                0, work->header.offset);
+        }
+        discarded++;
+        vmsvga3d_command_buffer_work_free(work);
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "CB-ASYNC phase=discard reason=%s buffers=%u publish=%u depth=%u",
+        reason != NULL ? reason : "unspecified", discarded,
+        publish_preempted ? 1u : 0u, s->cb_queue_count);
 }
 
 static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
@@ -10283,14 +10651,13 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "CB-SUBMIT kind=%s low=0x%08x high=0x%08x header=0x%016" PRIx64
-        " context=%u enable=%u config=%u",
+        " context=%u enable=%u config=%u depth=%u",
         prepend ? "PREPEND" : "COMMAND", command_low, command_high,
-        header_gpa, context, s->enable, s->config);
+        header_gpa, context, s->enable, s->config, s->cb_queue_count);
 
     /* CONFIG_DONE is required for register command buffers.  Device-context
      * teardown commands may still arrive after SVGA_REG_ENABLE is cleared. */
-    if (!s->config ||
-        (!s->enable && context != SVGA_CB_CONTEXT_DEVICE)) {
+    if (!s->config || (!s->enable && context != SVGA_CB_CONTEXT_DEVICE)) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "CB-COMPLETE kind=%s header=0x%016" PRIx64
@@ -10368,6 +10735,19 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
         goto out;
     }
 
+    /* The protocol requires queue exhaustion to be reported synchronously and
+     * without an IRQ.  Device-context commands are synchronous and do not
+     * consume a normal rendering queue slot. */
+    if (context < SVGA_CB_CONTEXT_MAX &&
+        s->cb_queue_count >= SVGA_CB_MAX_QUEUED_PER_CONTEXT) {
+        status = SVGA_CB_STATUS_QUEUE_FULL;
+        goto out;
+    }
+    if (context != SVGA_CB_CONTEXT_DEVICE && context >= SVGA_CB_CONTEXT_MAX) {
+        status = SVGA_CB_STATUS_QUEUE_FULL;
+        goto out;
+    }
+
     if (header.length != 0) {
         commands = g_try_malloc(header.length);
         if (commands == NULL) {
@@ -10421,38 +10801,38 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
 
     if (context == SVGA_CB_CONTEXT_DEVICE) {
         uint32_t local_offset = 0;
+
         status = vmsvga3d_device_command_buffer_process(
-            commands != NULL ? commands + header.offset : NULL,
+            s, commands != NULL ? commands + header.offset : NULL,
             header.length - header.offset, &local_offset);
         processed = header.offset + local_offset;
-    } else if (context < SVGA_CB_CONTEXT_MAX) {
-        uint32_t local_offset = 0;
-        uint32_t dx_context =
-            (header.flags & SVGA_CB_FLAG_DX_CONTEXT) != 0
-                ? header.dxContext
-                : SVGA3D_INVALID_ID;
+        if ((header.flags & SVGA_CB_FLAG_NO_IRQ) == 0) {
+            irq_flags |= SVGA_IRQFLAG_COMMAND_BUFFER;
+        }
+        if (status == SVGA_CB_STATUS_COMMAND_ERROR) {
+            irq_flags |= SVGA_IRQFLAG_ERROR;
+        }
+        goto out;
+    }
 
-        /*
-         * COMMAND_BUFFERS_2 carries the normal SVGA command stream.  The
-         * DX_CONTEXT flag supplies metadata for DX commands in that stream;
-         * it does not select a different command encoding.  Use one parser
-         * for both flagged and unflagged buffers, like VirtualBox does.
-         */
-        status = vmsvga_command_buffer_process(
-            s, dx_context,
-            commands != NULL ? commands + header.offset : NULL,
-            header.length - header.offset, &local_offset);
-        processed = header.offset + local_offset;
-    } else {
+    /* If the guest explicitly asked the legacy FIFO to run before this
+     * register submission, preserve that cross-transport ordering.  The FIFO
+     * path itself drains older queued command buffers before consuming FIFO
+     * commands. */
+    if (s->sync && vmsvga_fifo_pending(s)) {
+        vmsvga_fifo_run(s, false, SVGA3D_INVALID_ID);
+    }
+
+    if (!vmsvga3d_command_buffer_enqueue(
+            s, header_gpa, context, &header, commands, prepend)) {
         status = SVGA_CB_STATUS_QUEUE_FULL;
+        goto out;
     }
 
-    if ((header.flags & SVGA_CB_FLAG_NO_IRQ) == 0) {
-        irq_flags |= SVGA_IRQFLAG_COMMAND_BUFFER;
-    }
-    if (status == SVGA_CB_STATUS_COMMAND_ERROR) {
-        irq_flags |= SVGA_IRQFLAG_ERROR;
-    }
+    /* Ownership of the command copy moved to the queue.  Completion status and
+     * IRQ are deliberately deferred until the BH has actually executed it. */
+    commands = NULL;
+    return;
 
 out:
     if (status != SVGA_CB_STATUS_NONE) {
@@ -10464,16 +10844,15 @@ out:
         VMVGA_TRACE_3D,
         "CB-COMPLETE kind=%s header=0x%016" PRIx64
         " context=%u id=0x%016" PRIx64
-        " status=%u processed=%u errorOffset=%u irq=0x%08x",
+        " status=%u processed=%u errorOffset=%u irq=0x%08x depth=%u",
         prepend ? "PREPEND" : "COMMAND", header_gpa, context, header.id,
         (unsigned)status, processed,
-        status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0, irq_flags);
+        status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0,
+        irq_flags, s->cb_queue_count);
 
     vmsvga3d_command_buffer_raise_irq(s, irq_flags);
-
     g_free(commands);
 }
-
 
 static bool vmsvga3d_gb_context_entry_read(struct vmsvga_state_s *s,
                                              uint32_t cid,

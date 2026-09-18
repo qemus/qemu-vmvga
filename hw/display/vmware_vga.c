@@ -397,6 +397,8 @@ struct vmsvga_trace_devcap_s {
     uint32_t value;
 };
 
+struct vmsvga_command_buffer_work_s;
+
 enum vmsvga_vgpu_generation_e {
     VMSVGA_VGPU_AUTO = 0,
     VMSVGA_VGPU_9 = 9,
@@ -441,6 +443,19 @@ struct vmsvga_state_s {
     uint32_t thread;
     uint32_t sync;
     QEMUBH *fifo_bh;
+    QEMUBH *cb_bh;
+    struct vmsvga_command_buffer_work_s *cb_prepend_head;
+    struct vmsvga_command_buffer_work_s *cb_prepend_tail;
+    struct vmsvga_command_buffer_work_s *cb_queue_head;
+    struct vmsvga_command_buffer_work_s *cb_queue_tail;
+    uint32_t cb_queue_count;
+    uint32_t cb_queue_depth_max;
+    uint64_t cb_queue_sequence;
+    uint64_t cb_queue_submitted;
+    uint64_t cb_queue_executed;
+    uint64_t cb_queue_bytes;
+    uint64_t cb_queue_drains;
+    bool cb_bh_running;
     uint32_t fifo_size;
     uint32_t fifo_min;
     uint32_t fifo_max;
@@ -5259,6 +5274,8 @@ typedef struct {
 } SVGAFifoCmdSurfaceAlphaBlend;
 
 static inline void vmsvga_check_size(struct vmsvga_state_s *s);
+static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
+                            uint32_t dx_context);
 static SVGACBStatus vmsvga_command_buffer_process(
     struct vmsvga_state_s *s, uint32_t dx_context, const void *commands,
     uint32_t size, uint32_t *error_offset);
@@ -5937,6 +5954,13 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
     uint32_t maxloop = 1024;
     struct vmsvga_cursor_definition_s cursor = {0};
     bool trace_flight = vmsvga_trace_flight_enabled();
+
+    /* Keep register-command-buffer and legacy FIFO side effects ordered.
+     * Private FIFO parsing for a queued command buffer sets
+     * cb_fifo_scratch_in_use, so it must not recursively drain its own queue. */
+    if (!s->cb_fifo_scratch_in_use && s->cb_queue_count != 0) {
+        vmsvga3d_command_buffer_drain(s, "fifo-order");
+    }
 
     len = vmsvga_fifo_length(s);
     if (trace_flight) {
@@ -9719,6 +9743,7 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
               vmsvga_trace_vga_state(s, "svga-enable-before");
               vmsvga_legacy_vga_enter(s);
           } else if (was_enabled && !enabled) {
+              vmsvga3d_command_buffer_drain(s, "svga-disable");
               vmsvga_trace_vga_state(s, "svga-disable-before");
               /*
                * The SVGA cursor belongs to this display mode. Hide it before
@@ -9786,7 +9811,12 @@ static void vmsvga_value_write(void *opaque, uint32_t address, uint32_t value)
       break;
   case SVGA_REG_CONFIG_DONE: {
         bool was_config = s->config;
-        s->config = !!value;
+        bool config = !!value;
+
+        if (was_config && !config) {
+            vmsvga3d_command_buffer_drain(s, "config-done-clear");
+        }
+        s->config = config;
         if (s->config) {
             vmsvga_publish_fifo_registers(s);
             if (!was_config) {
@@ -10382,6 +10412,7 @@ static void vmsvga_reset(DeviceState *dev)
     if (s->fifo_bh != NULL) {
         qemu_bh_cancel(s->fifo_bh);
     }
+    vmsvga3d_command_buffer_discard(s, true, "device-reset");
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_STATE,
@@ -10453,6 +10484,12 @@ static void vmsvga_reset(DeviceState *dev)
     s->sync = 0;
     s->irq_mask = 0;
     s->irq_status = 0;
+    s->cb_queue_depth_max = 0;
+    s->cb_queue_sequence = 0;
+    s->cb_queue_submitted = 0;
+    s->cb_queue_executed = 0;
+    s->cb_queue_bytes = 0;
+    s->cb_queue_drains = 0;
     s->cursor = 0;
     s->cursor_x = 0;
     s->cursor_y = 0;
@@ -10562,6 +10599,7 @@ static int vmsvga_pre_load(void *opaque)
 {
     struct vmsvga_state_s *s = opaque;
 
+    vmsvga3d_command_buffer_discard(s, false, "pre-load");
     vmsvga_set_dirty_log(s, true);
 
     if (s->screen_direct_active) {
@@ -10604,6 +10642,7 @@ static int vmsvga_pre_save(void *opaque)
     uint32_t id;
     s->screen_base_migration_size = 0;
 
+    vmsvga3d_command_buffer_drain(s, "pre-save");
     if (!vmsvga3d_legacy_present_migration_prepare_live(s)) {
         return -EINVAL;
     }
@@ -11038,6 +11077,7 @@ static int vmsvga_post_load(void *opaque, int version_id)
     if (s->fifo_bh != NULL) {
         qemu_bh_cancel(s->fifo_bh);
     }
+    vmsvga3d_command_buffer_discard(s, false, "post-load");
 
     s->scratch_size = VMSVGA_SCRATCH_SIZE;
     s->fifo_size = VMSVGA_FIFO_SIZE;
@@ -11432,6 +11472,8 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->hidden = false;
     s->fifo_bh = qemu_bh_new_guarded(vmsvga_fifo_bh, s,
                                       &dev->mem_reentrancy_guard);
+    s->cb_bh = qemu_bh_new_guarded(vmsvga3d_command_buffer_bh, s,
+                                    &dev->mem_reentrancy_guard);
 
     vmsvga_trace_display_path_reset(s);
     vmsvga_trace_flight_reset(s);
@@ -11488,6 +11530,18 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->traces = 0;
     s->guest = 0;
     s->sync = 0;
+    s->cb_prepend_head = NULL;
+    s->cb_prepend_tail = NULL;
+    s->cb_queue_head = NULL;
+    s->cb_queue_tail = NULL;
+    s->cb_queue_count = 0;
+    s->cb_queue_depth_max = 0;
+    s->cb_queue_sequence = 0;
+    s->cb_queue_submitted = 0;
+    s->cb_queue_executed = 0;
+    s->cb_queue_bytes = 0;
+    s->cb_queue_drains = 0;
+    s->cb_bh_running = false;
     s->cb_fifo_scratch = NULL;
     s->cb_fifo_scratch_capacity = 0;
     s->cb_fifo_scratch_in_use = false;
@@ -11698,6 +11752,11 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
         qemu_bh_cancel(s->chip.fifo_bh);
         qemu_bh_delete(s->chip.fifo_bh);
         s->chip.fifo_bh = NULL;
+    }
+    vmsvga3d_command_buffer_discard(&s->chip, false, "unrealize");
+    if (s->chip.cb_bh != NULL) {
+        qemu_bh_delete(s->chip.cb_bh);
+        s->chip.cb_bh = NULL;
     }
 
     if (s->chip.screen_direct_active) {

@@ -451,7 +451,12 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader(
         return false;
     }
 
-    context->shadow.shaderState[plan->stage_index].shaderId = plan->shader_id;
+    if (context->shadow.shaderState[plan->stage_index].shaderId !=
+        plan->shader_id) {
+        context->shadow.shaderState[plan->stage_index].shaderId =
+            plan->shader_id;
+        context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SHADERS;
+    }
     return true;
 }
 
@@ -892,7 +897,10 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_stream_output(
         return false;
     }
 
-    context->shadow.streamOut.soid = plan->stream_output_id;
+    if (context->shadow.streamOut.soid != plan->stream_output_id) {
+        context->shadow.streamOut.soid = plan->stream_output_id;
+        context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SHADERS;
+    }
     return true;
 }
 

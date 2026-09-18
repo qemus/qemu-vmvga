@@ -1721,7 +1721,8 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
          * CopyResource is a predicated resource-manipulation command, so the
          * existing whole-resource copy path supplies the required behavior.
          */
-        if (!vmsvga3d_d3d10_pred_copy_live(s, cid, &copy)) {
+        if (!vmsvga3d_d3d10_pred_copy_live(
+                s, cid, &copy, SVGA_3D_CMD_DX_PRED_STAGING_COPY, false)) {
             return false;
         }
 
@@ -1740,6 +1741,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             if (!readback_ok || !restore_ok) {
                 return false;
             }
+            vmsvga3d_d3d10_copy_diag_trace_staging_readback(
+                s, SVGA_3D_CMD_DX_PRED_STAGING_COPY, command.srcSid,
+                command.dstSid, 0);
         }
 
         VMVGA_TRACE_LOCAL(
@@ -1778,7 +1782,8 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
-        operation_ok = vmsvga3d_d3d10_pred_copy_live(s, cid, &copy);
+        operation_ok = vmsvga3d_d3d10_pred_copy_live(
+            s, cid, &copy, SVGA_3D_CMD_DX_STAGING_COPY, predicate_enabled);
         if (operation_ok && predicate_enabled) {
             /* pred_copy_live conservatively suppresses ScreenTarget provenance
              * whenever the guest shadow has an active predicate.  This command
@@ -1791,6 +1796,11 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         if (operation_ok && command.readback != 0) {
             operation_ok =
                 vmsvga3d_d3d11_staging_readback_live(s, command.dstSid);
+            if (operation_ok) {
+                vmsvga3d_d3d10_copy_diag_trace_staging_readback(
+                    s, SVGA_3D_CMD_DX_STAGING_COPY, command.srcSid,
+                    command.dstSid, 0);
+            }
         }
 
         restore_ok = vmsvga3d_d3d11_native_predication_restore(
@@ -1830,7 +1840,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         copy.srcSubResource = command.srcSubResource;
         copy.box = command.box;
 
-        if (!vmsvga3d_d3d10_pred_copy_region_live(s, cid, &copy)) {
+        if (!vmsvga3d_d3d10_pred_copy_region_live(
+                s, cid, &copy, SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION,
+                false)) {
             return false;
         }
 
@@ -1859,6 +1871,9 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             if (!readback_ok || !restore_ok) {
                 return false;
             }
+            vmsvga3d_d3d10_copy_diag_trace_staging_readback(
+                s, SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION, command.srcSid,
+                command.dstSid, command.dstSubResource);
         }
 
         VMVGA_TRACE_LOCAL(

@@ -4539,49 +4539,6 @@ static void shader_infer_apply(VMSVGA3DD3D10ShaderInfo *info,
     }
 }
 
-/*
- * Generic DX shader I/O declarations are typeless in the VMware protocol.
- * The normal inference pass above resolves them from typed instructions,
- * bound render-target formats and adjacent shader stages.  Some legal shaders
- * are nevertheless type-neutral (for example a pure MOV varying), leaving an
- * UNKNOWN component type after every available constraint has been consumed.
- *
- * Do not serialize that UNKNOWN value into DXBC.  dxbc-spirv treats the
- * signature type as an actual scalar type during deferred pipeline compilation
- * and can reach normalizeTypeForConsume() with a non-numeric type.  The old
- * compatibility fallback proved that FLOAT32 is the safe D3D linkage default
- * for these unresolved generic varyings.  Keep the fallback here, after all
- * real inference, so concrete UINT/SINT/FLOAT evidence always wins.
- */
-static void shader_infer_fallback_unknown_generic(
-    VMSVGA3DD3D10ShaderInfo *info, SVGA3dDXShaderSignatureEntry *signature,
-    uint32_t count, const char *kind)
-{
-    uint32_t i;
-
-    if (info == NULL || signature == NULL) {
-        return;
-    }
-
-    for (i = 0; i < count; i++) {
-        if (signature[i].componentType !=
-                VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN ||
-            signature[i].semanticName !=
-                SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED) {
-            continue;
-        }
-
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "DX-SIGNATURE-FALLBACK program=%u kind=%s index=%u reg=%u "
-            "mask=0x%02x fallback=FLOAT32",
-            info->program_type, kind, i, signature[i].registerIndex,
-            signature[i].mask & 0xffu);
-        signature[i].componentType =
-            VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
-    }
-}
-
 VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resolve_component_types(
     VMSVGA3DD3D10ShaderInfo *info)
 {
@@ -4605,13 +4562,6 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resolve_component_types(
     shader_infer_state_init(info, &state);
     shader_infer_solve_state(info, &state);
     shader_infer_apply(info, &state);
-
-    shader_infer_fallback_unknown_generic(
-        info, info->input_signature, info->input_signature_count, "input");
-    shader_infer_fallback_unknown_generic(
-        info, info->output_signature, info->output_signature_count, "output");
-    shader_infer_fallback_unknown_generic(
-        info, info->patch_signature, info->patch_signature_count, "patch");
 
     return level;
 }
@@ -5360,11 +5310,73 @@ static uint32_t shader_system_value(uint32_t semantic)
     }
 }
 
+static bool shader_signature_component_type_for_serialization(
+    const VMSVGA3DD3D10ShaderInfo *info, uint32_t blob_type, uint32_t index,
+    const SVGA3dDXShaderSignatureEntry *entry, uint8_t inferred_type,
+    uint32_t *component_type)
+{
+    if (entry == NULL || component_type == NULL) {
+        return false;
+    }
+
+    if (entry->componentType != VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN) {
+        *component_type = entry->componentType;
+        return true;
+    }
+
+    /* create_dxbc() recomputes inference into a transient state.  Consume a
+     * concrete result directly for serialization, but never write it back to
+     * ShaderInfo here: a failed native create must be able to retry later with
+     * new adjacent-stage constraints.
+     */
+    if (shader_infer_type_is_concrete(inferred_type)) {
+        *component_type = inferred_type;
+        return true;
+    }
+
+    /* The compatibility fallback is only valid for a genuinely unconstrained
+     * generic varying.  INTEGER means there is real integer evidence but the
+     * signedness is unresolved, while CONFLICT means contradictory evidence;
+     * guessing FLOAT32 for either would destroy the conservative inference
+     * semantics.
+     */
+    if (entry->semanticName == SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED) {
+        if (inferred_type == SHADER_INFER_TYPE_UNKNOWN) {
+            *component_type = VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SIGNATURE-FALLBACK program=%u blob=0x%08x index=%u "
+                "reg=%u mask=0x%02x inference=unknown fallback=FLOAT32",
+                info != NULL ? info->program_type : UINT32_MAX, blob_type, index,
+                entry->registerIndex, entry->mask & 0xffu);
+            return true;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SIGNATURE-REJECT program=%u blob=0x%08x index=%u reg=%u "
+            "mask=0x%02x inference=%s",
+            info != NULL ? info->program_type : UINT32_MAX, blob_type, index,
+            entry->registerIndex, entry->mask & 0xffu,
+            inferred_type == SHADER_INFER_TYPE_INTEGER ? "integer-ambiguous" :
+            inferred_type == SHADER_INFER_TYPE_CONFLICT ? "conflict" :
+            "invalid");
+        return false;
+    }
+
+    /* Preserve the existing behavior for non-generic/system-value entries.
+     * Their linkage type can be implied by the semantic itself.
+     */
+    *component_type = entry->componentType;
+    return true;
+}
+
 static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
                                          ShaderDXBCHeader *header,
                                          uint32_t blob_type, uint32_t count,
                                          const SVGA3dDXShaderSignatureEntry *signature,
                                          const VMSVGA3DD3D10ShaderSemantic *semantic,
+                                         const uint8_t *inferred_types,
                                          ShaderByteWriter *writer)
 {
     ShaderDXBCBlobHeader *blob;
@@ -5408,7 +5420,13 @@ static bool shader_create_signature_blob(const VMSVGA3DD3D10ShaderInfo *info,
         elements[i].name_offset = name_offset;
         elements[i].semantic_index = semantic[i].semantic_index;
         elements[i].system_value = shader_system_value(signature[i].semanticName);
-        elements[i].component_type = signature[i].componentType;
+        if (!shader_signature_component_type_for_serialization(
+                info, blob_type, i, &signature[i],
+                inferred_types != NULL ? inferred_types[i] :
+                                         SHADER_INFER_TYPE_UNKNOWN,
+                &elements[i].component_type)) {
+            return false;
+        }
         elements[i].register_index = signature[i].registerIndex;
 
         /*
@@ -5478,6 +5496,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_dxbc(
 {
     ShaderByteWriter writer;
     ShaderDXBCHeader *header;
+    ShaderTypeInference inference;
     uint32_t blob_count = 3;
     uint32_t header_size;
     uint32_t blob_index = 0;
@@ -5494,6 +5513,14 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_dxbc(
     }
 
     memset(dxbc, 0, sizeof(*dxbc));
+
+    /* Recompute signature inference only for this serialization attempt.
+     * Keeping this state transient is important: if native shader creation
+     * fails, a later retry may have additional adjacent-stage information and
+     * must still see persistent UNKNOWN entries as unresolved.
+     */
+    shader_infer_state_init(info, &inference);
+    shader_infer_solve_state(info, &inference);
 
     if (info->program_type == VMSVGA3D_D3D10_SHADER_PROGRAM_HULL ||
         info->program_type == VMSVGA3D_D3D10_SHADER_PROGRAM_DOMAIN) {
@@ -5518,7 +5545,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_dxbc(
     if (!shader_create_signature_blob(info, header, SHADER_DXBC_ISGN,
                                       info->input_signature_count,
                                       info->input_signature, info->input_semantic,
-                                      &writer)) {
+                                      inference.input, &writer)) {
         shader_writer_reset(&writer);
         return VMSVGA3D_D3D10_LEVEL_INVALID;
     }
@@ -5527,7 +5554,8 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_dxbc(
     if (!shader_create_signature_blob(info, header, SHADER_DXBC_OSGN,
                                       info->output_signature_count,
                                       info->output_signature,
-                                      info->output_semantic, &writer)) {
+                                      info->output_semantic, inference.output,
+                                      &writer)) {
         shader_writer_reset(&writer);
         return VMSVGA3D_D3D10_LEVEL_INVALID;
     }
@@ -5538,7 +5566,8 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_create_dxbc(
         if (!shader_create_signature_blob(info, header, SHADER_DXBC_PCSG,
                                           info->patch_signature_count,
                                           info->patch_signature,
-                                          info->patch_semantic, &writer)) {
+                                          info->patch_semantic, inference.patch,
+                                          &writer)) {
             shader_writer_reset(&writer);
             return VMSVGA3D_D3D10_LEVEL_INVALID;
         }
@@ -7729,44 +7758,76 @@ vmsvga3d_d3d10_bound_shader_info_live(
     return info;
 }
 
-static void vmsvga3d_d3d10_shader_propagate_vs_output_types_live(
+static bool vmsvga3d_d3d10_shader_propagate_output_types_live(
     struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid,
-    VMSVGA3DD3D10ShaderInfo *vs)
+    SVGA3dShaderType producer_type, VMSVGA3DD3D10ShaderInfo *producer)
 {
     const VMSVGA3DD3D10ShaderInfo *consumer = NULL;
     ShaderTypeInference state;
     uint32_t consumer_type = SVGA3D_SHADERTYPE_INVALID;
     uint32_t slot;
 
-    if (s == NULL || context == NULL || vs == NULL) {
-        return;
+    if (s == NULL || context == NULL || producer == NULL) {
+        return false;
     }
 
-    /* The immediate consumer of VS output is HS when tessellation is active,
-     * otherwise GS when present, otherwise PS.  Resolve that consumer's input
-     * types without realizing it early, then use those types as constraints on
-     * otherwise-typeless VS outputs.
+    /* Resolve the immediate graphics consumer.  This is deliberately the same
+     * pipeline topology used by signature matching: tessellation inserts HS/DS
+     * between VS and GS/PS, while GS (when present) is the final PS producer.
      */
-    consumer = vmsvga3d_d3d10_bound_shader_info_live(
-        s, context, cid, SVGA3D_SHADERTYPE_HS);
-    if (consumer != NULL) {
-        consumer_type = SVGA3D_SHADERTYPE_HS;
-    } else {
+    switch (producer_type) {
+    case SVGA3D_SHADERTYPE_VS:
+        consumer = vmsvga3d_d3d10_bound_shader_info_live(
+            s, context, cid, SVGA3D_SHADERTYPE_HS);
+        if (consumer != NULL) {
+            consumer_type = SVGA3D_SHADERTYPE_HS;
+            break;
+        }
         consumer = vmsvga3d_d3d10_bound_shader_info_live(
             s, context, cid, SVGA3D_SHADERTYPE_GS);
         if (consumer != NULL) {
             consumer_type = SVGA3D_SHADERTYPE_GS;
-        } else {
-            consumer = vmsvga3d_d3d10_bound_shader_info_live(
-                s, context, cid, SVGA3D_SHADERTYPE_PS);
-            if (consumer != NULL) {
-                consumer_type = SVGA3D_SHADERTYPE_PS;
-            }
+            break;
         }
+        consumer = vmsvga3d_d3d10_bound_shader_info_live(
+            s, context, cid, SVGA3D_SHADERTYPE_PS);
+        if (consumer != NULL) {
+            consumer_type = SVGA3D_SHADERTYPE_PS;
+        }
+        break;
+    case SVGA3D_SHADERTYPE_HS:
+        consumer = vmsvga3d_d3d10_bound_shader_info_live(
+            s, context, cid, SVGA3D_SHADERTYPE_DS);
+        if (consumer != NULL) {
+            consumer_type = SVGA3D_SHADERTYPE_DS;
+        }
+        break;
+    case SVGA3D_SHADERTYPE_DS:
+        consumer = vmsvga3d_d3d10_bound_shader_info_live(
+            s, context, cid, SVGA3D_SHADERTYPE_GS);
+        if (consumer != NULL) {
+            consumer_type = SVGA3D_SHADERTYPE_GS;
+            break;
+        }
+        consumer = vmsvga3d_d3d10_bound_shader_info_live(
+            s, context, cid, SVGA3D_SHADERTYPE_PS);
+        if (consumer != NULL) {
+            consumer_type = SVGA3D_SHADERTYPE_PS;
+        }
+        break;
+    case SVGA3D_SHADERTYPE_GS:
+        consumer = vmsvga3d_d3d10_bound_shader_info_live(
+            s, context, cid, SVGA3D_SHADERTYPE_PS);
+        if (consumer != NULL) {
+            consumer_type = SVGA3D_SHADERTYPE_PS;
+        }
+        break;
+    default:
+        break;
     }
 
     if (consumer == NULL) {
-        return;
+        return false;
     }
 
     shader_infer_state_init(consumer, &state);
@@ -7799,7 +7860,47 @@ static void vmsvga3d_d3d10_shader_propagate_vs_output_types_live(
     }
 
     shader_infer_solve_state(consumer, &state);
-    (void)shader_infer_propagate_output_from_consumer(vs, consumer, &state);
+    return shader_infer_propagate_output_from_consumer(
+        producer, consumer, &state);
+}
+
+static void vmsvga3d_d3d10_pipeline_propagate_output_types_live(
+    struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid)
+{
+    static const SVGA3dShaderType producer_order[] = {
+        SVGA3D_SHADERTYPE_GS,
+        SVGA3D_SHADERTYPE_DS,
+        SVGA3D_SHADERTYPE_HS,
+        SVGA3D_SHADERTYPE_VS,
+    };
+    uint32_t i;
+
+    if (s == NULL || context == NULL) {
+        return;
+    }
+
+    /* Walk the graphics pipeline backwards before any stage is serialized.
+     * A concrete consumer type therefore reaches every upstream producer in
+     * the same setup pass (PS -> GS -> DS -> HS -> VS), regardless of the
+     * numeric SVGA shader-stage order used by the realization loop below.
+     */
+    for (i = 0; i < ARRAY_SIZE(producer_order); i++) {
+        SVGA3dShaderType producer_type = producer_order[i];
+        uint32_t stage =
+            (uint32_t)producer_type - (uint32_t)SVGA3D_SHADERTYPE_MIN;
+        uint32_t shader_id = context->shadow.shaderState[stage].shaderId;
+        VMSVGA3DD3D10ShaderInfo *producer = NULL;
+
+        if (shader_id == SVGA3D_INVALID_ID ||
+            !vmsvga3d_dxvk_d3d11_shader_info_for_realize(
+                s->dxvk, cid, shader_id, producer_type, &producer) ||
+            producer == NULL) {
+            continue;
+        }
+
+        (void)vmsvga3d_d3d10_shader_propagate_output_types_live(
+            s, context, cid, producer_type, producer);
+    }
 }
 
 static bool vmsvga3d_d3d10_stream_output_prepare_live(
@@ -7899,6 +8000,7 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
      * remains dirty so the next Draw preserves the old retry behavior.
      */
     context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SHADERS;
+    vmsvga3d_d3d10_pipeline_propagate_output_types_live(s, context, cid);
     for (stage = 0; stage < vmsvga3d_dx_shader_stage_count(s); stage++) {
         uint32_t shader_type = stage + SVGA3D_SHADERTYPE_MIN;
         uint32_t shader_id = context->shadow.shaderState[stage].shaderId;
@@ -8116,8 +8218,6 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
                     vmsvga3d_d3d10_shader_update_vs_input_signature(
                         info, descs, desc_count) != VMSVGA3D_D3D10_LEVEL_INVALID;
                 if (prepared) {
-                    vmsvga3d_d3d10_shader_propagate_vs_output_types_live(
-                        s, context, cid, info);
                     prepared = vmsvga3d_d3d10_shader_match_signatures(
                         SVGA3D_SHADERTYPE_VS, info, NULL, NULL, NULL, NULL, NULL) !=
                         VMSVGA3D_D3D10_LEVEL_INVALID;

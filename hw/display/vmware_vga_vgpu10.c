@@ -7043,6 +7043,7 @@ static bool vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
     }
 
     if (changed_type != SVGA3D_SHADERTYPE_VS &&
+        changed_type != SVGA3D_SHADERTYPE_HS &&
         changed_type != SVGA3D_SHADERTYPE_DS &&
         changed_type != SVGA3D_SHADERTYPE_PS) {
         return true;
@@ -7072,10 +7073,16 @@ static bool vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
 
         /* DS output is the direct GS producer while tessellation is active;
          * otherwise GS input is linked to VS output.  A VS-only change cannot
-         * alter GS input linkage while a DS remains selected.
+         * alter GS input linkage while a DS remains selected.  Conversely, an
+         * HS change can only reach GS through a selected DS.
          */
         if (changed_type == SVGA3D_SHADERTYPE_VS &&
             context->shadow.shaderState[ds_stage].shaderId !=
+                SVGA3D_INVALID_ID) {
+            return true;
+        }
+        if (changed_type == SVGA3D_SHADERTYPE_HS &&
+            context->shadow.shaderState[ds_stage].shaderId ==
                 SVGA3D_INVALID_ID) {
             return true;
         }
@@ -7103,6 +7110,41 @@ static bool vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
     return vmsvga3d_dxvk_d3d11_shader_invalidate(s->dxvk, cid, gs_id);
 }
 
+static bool vmsvga3d_d3d10_pipeline_signature_dependency_invalidate_live(
+    struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid,
+    SVGA3dShaderType changed_type)
+{
+    uint32_t ds_stage =
+        (uint32_t)SVGA3D_SHADERTYPE_DS - (uint32_t)SVGA3D_SHADERTYPE_MIN;
+    uint32_t ds_id;
+
+    if (s == NULL || context == NULL || ds_stage >= SVGA3D_NUM_SHADERTYPE) {
+        return false;
+    }
+
+    /* HS is special because it can introduce linkage into a DS that was
+     * already realized before any HS was selected.  Such a DS has no old
+     * pipeline-derived provenance for the generic reset pass to notice, yet
+     * its ordinary and patch inputs must now be rematched against the new HS.
+     * Make the DS mutable up front; the normal dirty-pipeline reset then clears
+     * any old derived state and realization rebuilds it from the current HS.
+     */
+    if (changed_type == SVGA3D_SHADERTYPE_HS) {
+        ds_id = context->shadow.shaderState[ds_stage].shaderId;
+        if (ds_id != SVGA3D_INVALID_ID &&
+            !vmsvga3d_dxvk_d3d11_shader_invalidate(
+                s->dxvk, cid, ds_id)) {
+            return false;
+        }
+    }
+
+    /* An HS change reaches GS through DS, so apply the same GS dependency
+     * invalidation used for a direct DS selection/redefinition change.
+     */
+    return vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
+        s, context, cid, changed_type);
+}
+
 static void vmsvga3d_d3d10_bound_shader_dirty_live(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t shader_id)
 {
@@ -7115,7 +7157,7 @@ static void vmsvga3d_d3d10_bound_shader_dirty_live(
 
     for (stage = 0; stage < vmsvga3d_dx_shader_stage_count(s); stage++) {
         if (context->shadow.shaderState[stage].shaderId == shader_id) {
-            (void)vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
+            (void)vmsvga3d_d3d10_pipeline_signature_dependency_invalidate_live(
                 s, context, cid,
                 (SVGA3dShaderType)(stage + SVGA3D_SHADERTYPE_MIN));
             context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SHADERS;
@@ -16381,7 +16423,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           if (old_shader_id != plan.shader_id &&
-              !vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
+              !vmsvga3d_d3d10_pipeline_signature_dependency_invalidate_live(
                   s, context, cid, command.type)) {
               return false;
           }

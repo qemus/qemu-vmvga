@@ -4436,7 +4436,8 @@ static void shader_infer_solve_state(const VMSVGA3DD3D10ShaderInfo *info,
 static bool shader_infer_propagate_signature_from_consumer(
     SVGA3dDXShaderSignatureEntry *producer_signature, uint32_t producer_count,
     const SVGA3dDXShaderSignatureEntry *consumer_signature,
-    const uint8_t *consumer_types, uint32_t consumer_count)
+    const uint8_t *consumer_types, uint32_t consumer_count,
+    uint32_t *pipeline_linked_component_mask)
 {
     bool changed = false;
     uint32_t i;
@@ -4504,6 +4505,9 @@ static bool shader_infer_propagate_signature_from_consumer(
 
         if (shader_infer_type_is_concrete(inferred)) {
             output->componentType = inferred;
+            if (pipeline_linked_component_mask != NULL) {
+                *pipeline_linked_component_mask |= 1u << i;
+            }
             changed = true;
         }
     }
@@ -4523,7 +4527,9 @@ static bool shader_infer_propagate_output_from_consumer(
     return shader_infer_propagate_signature_from_consumer(
         producer->output_signature, producer->output_signature_count,
         consumer->input_signature, consumer_state->input,
-        consumer->input_signature_count);
+        consumer->input_signature_count,
+        producer->program_type == VMSVGA3D_D3D10_SHADER_PROGRAM_GEOMETRY ?
+            &producer->gs_linked_output_component_mask : NULL);
 }
 
 static bool shader_infer_propagate_patch_from_consumer(
@@ -4538,7 +4544,7 @@ static bool shader_infer_propagate_patch_from_consumer(
     return shader_infer_propagate_signature_from_consumer(
         producer->patch_signature, producer->patch_signature_count,
         consumer->patch_signature, consumer_state->patch,
-        consumer->patch_signature_count);
+        consumer->patch_signature_count, NULL);
 }
 
 static void shader_infer_apply(VMSVGA3DD3D10ShaderInfo *info,
@@ -5817,11 +5823,19 @@ static bool shader_match_input(VMSVGA3DD3D10ShaderInfo *shader,
             }
 
             semantic->semantic_index = output_semantic->semantic_index;
+            if (shader->program_type ==
+                VMSVGA3D_D3D10_SHADER_PROGRAM_GEOMETRY) {
+                shader->gs_linked_input_semantic_mask |= 1u << i;
+            }
             if (input->componentType ==
                     VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN &&
                 output->componentType !=
                     VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN) {
                 input->componentType = output->componentType;
+                if (shader->program_type ==
+                    VMSVGA3D_D3D10_SHADER_PROGRAM_GEOMETRY) {
+                    shader->gs_linked_input_component_mask |= 1u << i;
+                }
             }
         }
     }
@@ -5878,6 +5892,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_match_signatures(
                        prior->output_signature_count * sizeof(shader->input_signature[0]));
                 memcpy(shader->input_semantic, prior->output_semantic,
                        prior->output_signature_count * sizeof(shader->input_semantic[0]));
+                shader->input_signature_synthesized = true;
             } else {
                 shader->match_masks_covered = shader_match_input(shader, prior);
             }
@@ -5888,6 +5903,7 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_match_signatures(
                    ps->input_signature_count * sizeof(shader->output_signature[0]));
             memcpy(shader->output_semantic, ps->input_semantic,
                    ps->input_signature_count * sizeof(shader->output_semantic[0]));
+            shader->output_signature_synthesized = true;
         }
         break;
     case SVGA3D_SHADERTYPE_PS:
@@ -6968,6 +6984,115 @@ static void vmsvga3d_d3d10_input_layout_dependency_invalidate_live(
     }
 }
 
+static bool shader_signature_has_generic_component(
+    const SVGA3dDXShaderSignatureEntry *signature, uint32_t count,
+    bool require_unknown_type)
+{
+    uint32_t i;
+
+    if (signature == NULL) {
+        return false;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (signature[i].semanticName !=
+                SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED) {
+            continue;
+        }
+        if (!require_unknown_type ||
+            signature[i].componentType ==
+                VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
+    struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid,
+    SVGA3dShaderType changed_type)
+{
+    uint32_t gs_stage =
+        (uint32_t)SVGA3D_SHADERTYPE_GS - (uint32_t)SVGA3D_SHADERTYPE_MIN;
+    uint32_t vs_stage =
+        (uint32_t)SVGA3D_SHADERTYPE_VS - (uint32_t)SVGA3D_SHADERTYPE_MIN;
+    uint32_t ds_stage =
+        (uint32_t)SVGA3D_SHADERTYPE_DS - (uint32_t)SVGA3D_SHADERTYPE_MIN;
+    uint32_t ps_stage =
+        (uint32_t)SVGA3D_SHADERTYPE_PS - (uint32_t)SVGA3D_SHADERTYPE_MIN;
+    uint32_t gs_id;
+    const VMSVGA3DD3D10ShaderInfo *gs = NULL;
+    bool dependent = false;
+
+    if (s == NULL || context == NULL || gs_stage >= SVGA3D_NUM_SHADERTYPE ||
+        vs_stage >= SVGA3D_NUM_SHADERTYPE ||
+        ds_stage >= SVGA3D_NUM_SHADERTYPE ||
+        ps_stage >= SVGA3D_NUM_SHADERTYPE) {
+        return false;
+    }
+
+    if (changed_type != SVGA3D_SHADERTYPE_VS &&
+        changed_type != SVGA3D_SHADERTYPE_DS &&
+        changed_type != SVGA3D_SHADERTYPE_PS) {
+        return true;
+    }
+
+    gs_id = context->shadow.shaderState[gs_stage].shaderId;
+    if (gs_id == SVGA3D_INVALID_ID ||
+        !vmsvga3d_dxvk_d3d11_shader_info(
+            s->dxvk, cid, gs_id, SVGA3D_SHADERTYPE_GS, &gs) ||
+        gs == NULL) {
+        return true;
+    }
+
+    if (changed_type == SVGA3D_SHADERTYPE_PS) {
+        uint32_t ps_id = context->shadow.shaderState[ps_stage].shaderId;
+
+        dependent = gs->output_signature_synthesized ||
+                    gs->gs_linked_output_component_mask != 0;
+        if (!dependent && ps_id != SVGA3D_INVALID_ID) {
+            dependent = gs->output_signature_count == 0 ||
+                        shader_signature_has_generic_component(
+                            gs->output_signature,
+                            gs->output_signature_count, true);
+        }
+    } else {
+        uint32_t prior_id;
+
+        /* DS output is the direct GS producer while tessellation is active;
+         * otherwise GS input is linked to VS output.  A VS-only change cannot
+         * alter GS input linkage while a DS remains selected.
+         */
+        if (changed_type == SVGA3D_SHADERTYPE_VS &&
+            context->shadow.shaderState[ds_stage].shaderId !=
+                SVGA3D_INVALID_ID) {
+            return true;
+        }
+
+        prior_id = context->shadow.shaderState[ds_stage].shaderId;
+        if (prior_id == SVGA3D_INVALID_ID) {
+            prior_id = context->shadow.shaderState[vs_stage].shaderId;
+        }
+
+        dependent = gs->input_signature_synthesized ||
+                    gs->gs_linked_input_semantic_mask != 0 ||
+                    gs->gs_linked_input_component_mask != 0;
+        if (!dependent && prior_id != SVGA3D_INVALID_ID) {
+            dependent = gs->input_signature_count == 0 ||
+                        shader_signature_has_generic_component(
+                            gs->input_signature,
+                            gs->input_signature_count, false);
+        }
+    }
+
+    if (!dependent) {
+        return true;
+    }
+
+    return vmsvga3d_dxvk_d3d11_shader_invalidate(s->dxvk, cid, gs_id);
+}
+
 static void vmsvga3d_d3d10_bound_shader_dirty_live(
     struct vmsvga_state_s *s, uint32_t cid, uint32_t shader_id)
 {
@@ -6980,6 +7105,9 @@ static void vmsvga3d_d3d10_bound_shader_dirty_live(
 
     for (stage = 0; stage < vmsvga3d_dx_shader_stage_count(s); stage++) {
         if (context->shadow.shaderState[stage].shaderId == shader_id) {
+            (void)vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
+                s, context, cid,
+                (SVGA3dShaderType)(stage + SVGA3D_SHADERTYPE_MIN));
             context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SHADERS;
             return;
         }
@@ -7974,6 +8102,62 @@ static bool vmsvga3d_d3d10_shader_propagate_output_types_live(
         producer, consumer, &state);
 }
 
+static void shader_reset_pipeline_linked_signature_state(
+    VMSVGA3DD3D10ShaderInfo *shader)
+{
+    uint32_t i;
+
+    if (shader == NULL) {
+        return;
+    }
+
+    if (shader->input_signature_synthesized) {
+        memset(shader->input_signature, 0, sizeof(shader->input_signature));
+        memset(shader->input_semantic, 0, sizeof(shader->input_semantic));
+        shader->input_signature_count = 0;
+        shader->input_signature_synthesized = false;
+    } else {
+        for (i = 0; i < shader->input_signature_count; i++) {
+            if ((shader->gs_linked_input_component_mask & (1u << i)) != 0) {
+                shader->input_signature[i].componentType =
+                    VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN;
+            }
+            if ((shader->gs_linked_input_semantic_mask & (1u << i)) != 0) {
+                uint32_t j;
+
+                shader->input_semantic[i].semantic_index = 0;
+                for (j = 0; j < i; j++) {
+                    const char *prior = shader->input_semantic[j].semantic_name;
+                    const char *current = shader->input_semantic[i].semantic_name;
+
+                    if (prior != NULL && current != NULL &&
+                        strcmp(prior, current) == 0) {
+                        shader->input_semantic[i].semantic_index++;
+                    }
+                }
+            }
+        }
+    }
+
+    if (shader->output_signature_synthesized) {
+        memset(shader->output_signature, 0, sizeof(shader->output_signature));
+        memset(shader->output_semantic, 0, sizeof(shader->output_semantic));
+        shader->output_signature_count = 0;
+        shader->output_signature_synthesized = false;
+    } else {
+        for (i = 0; i < shader->output_signature_count; i++) {
+            if ((shader->gs_linked_output_component_mask & (1u << i)) != 0) {
+                shader->output_signature[i].componentType =
+                    VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN;
+            }
+        }
+    }
+
+    shader->gs_linked_input_semantic_mask = 0;
+    shader->gs_linked_input_component_mask = 0;
+    shader->gs_linked_output_component_mask = 0;
+}
+
 static void vmsvga3d_d3d10_pipeline_materialize_signatures_live(
     struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid)
 {
@@ -8001,7 +8185,14 @@ static void vmsvga3d_d3d10_pipeline_materialize_signatures_live(
      * input/output signature arrays.  Materialize those arrays before the
      * reverse inference walk so DS -> GS and GS -> PS linkage sees the same
      * graph that the later realization loop will serialize.
+     *
+     * A directly adjacent shader change can invalidate those synthesized
+     * arrays and component/semantic values learned from the previous linkage.
+     * The dependency invalidation path drops the native GS first; rebuild its
+     * mutable signature state here before materializing the current graph.
      */
+    shader_reset_pipeline_linked_signature_state(gs);
+
     vs = vmsvga3d_d3d10_bound_shader_info_live(
         s, context, cid, SVGA3D_SHADERTYPE_VS);
     ds = vmsvga3d_d3d10_bound_shader_info_live(
@@ -16102,6 +16293,12 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
           old_shader_id = context->shadow.shaderState[plan.stage_index].shaderId;
           if (!vmsvga3d_state_dx_apply_shader(s, cid, &plan)) {
+              return false;
+          }
+
+          if (old_shader_id != plan.shader_id &&
+              !vmsvga3d_d3d10_gs_signature_dependency_invalidate_live(
+                  s, context, cid, command.type)) {
               return false;
           }
 

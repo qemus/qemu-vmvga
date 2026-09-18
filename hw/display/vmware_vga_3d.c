@@ -425,6 +425,16 @@ typedef struct vmsvga3d_surface_s {
 static bool vmsvga3d_d3d10_copy_surface_materialize_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     VMSVGA3DD3D10ResourceCreateKind create_kind);
+static bool vmsvga3d_d3d10_raw_copy_compatible(
+    const VMSVGA3DSurface *source, const VMSVGA3DSurface *destination,
+    bool whole_resource,
+    const struct svga3d_surface_desc **source_desc_out,
+    const struct svga3d_surface_desc **destination_desc_out);
+static bool vmsvga3d_d3d10_raw_copy_subresource_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *source,
+    uint32_t source_subresource, VMSVGA3DSurface *destination,
+    uint32_t destination_subresource, const SVGA3dCopyBox *copy_box,
+    SVGA3dBox *destination_box_out, uint32_t route_cmd, bool convert_copy);
 static void vmsvga3d_legacy_surface_evict(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface);
 static bool vmsvga3d_d3d10_constant_buffers_refresh_sid_live(
@@ -6874,6 +6884,148 @@ static bool vmsvga3d_surface_copy_box(
     return true;
 }
 
+static bool vmsvga3d_surface_copy_raw_family_box_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *source,
+    uint32_t source_subresource, VMSVGA3DSurface *destination,
+    uint32_t destination_subresource, const SVGA3dCopyBox *copy_box)
+{
+    const struct svga3d_surface_desc *source_desc;
+    const struct svga3d_surface_desc *destination_desc;
+    VMSVGA3DSurfaceImage *source_image;
+    VMSVGA3DSurfaceImage *destination_image;
+    VMSVGA3DD3D10Box source_box;
+    VMSVGA3DD3D10Box destination_box;
+    uint8_t *temporary = NULL;
+    const void *data;
+    uint64_t source_offset;
+    uint64_t source_end;
+    uint64_t compact_depth_pitch;
+    uint64_t compact_size;
+    uint64_t row_bytes64;
+    uint32_t row_bytes;
+    uint32_t row_pitch;
+    uint32_t depth_pitch;
+    bool source_resident;
+    bool success;
+
+    if (s == NULL || source == NULL || destination == NULL ||
+        copy_box == NULL || source->mips == NULL || destination->mips == NULL ||
+        source_subresource >= source->mip_count ||
+        destination_subresource >= destination->mip_count ||
+        !vmsvga3d_d3d10_raw_copy_compatible(
+            source, destination, false, &source_desc, &destination_desc)) {
+        return false;
+    }
+
+    source_image = &source->mips[source_subresource];
+    destination_image = &destination->mips[destination_subresource];
+    if (copy_box->w == 0 || copy_box->h == 0 || copy_box->d == 0 ||
+        copy_box->srcx >= source_image->size.width ||
+        copy_box->srcy >= source_image->size.height ||
+        copy_box->srcz >= source_image->size.depth ||
+        copy_box->x >= destination_image->size.width ||
+        copy_box->y >= destination_image->size.height ||
+        copy_box->z >= destination_image->size.depth ||
+        copy_box->w > source_image->size.width - copy_box->srcx ||
+        copy_box->h > source_image->size.height - copy_box->srcy ||
+        copy_box->d > source_image->size.depth - copy_box->srcz ||
+        copy_box->w > destination_image->size.width - copy_box->x ||
+        copy_box->h > destination_image->size.height - copy_box->y ||
+        copy_box->d > destination_image->size.depth - copy_box->z) {
+        return false;
+    }
+
+    /* raw_copy_compatible() guarantees 1x1x1 blocks and equal storage width
+     * for this same-family SurfaceCopy path.  Read back only the requested
+     * source box instead of synchronizing the entire subresource for each box.
+     */
+    row_bytes64 = (uint64_t)copy_box->w * source_desc->bytes_per_block;
+    if (row_bytes64 == 0 || row_bytes64 > UINT32_MAX ||
+        copy_box->h > UINT64_MAX / row_bytes64) {
+        return false;
+    }
+    compact_depth_pitch = row_bytes64 * copy_box->h;
+    if (compact_depth_pitch == 0 || compact_depth_pitch > UINT32_MAX ||
+        copy_box->d > SIZE_MAX / compact_depth_pitch) {
+        return false;
+    }
+    compact_size = compact_depth_pitch * copy_box->d;
+    if (compact_size == 0) {
+        return false;
+    }
+    row_bytes = (uint32_t)row_bytes64;
+
+    source_box.left = copy_box->srcx;
+    source_box.top = copy_box->srcy;
+    source_box.front = copy_box->srcz;
+    source_box.right = copy_box->srcx + copy_box->w;
+    source_box.bottom = copy_box->srcy + copy_box->h;
+    source_box.back = copy_box->srcz + copy_box->d;
+    destination_box.left = copy_box->x;
+    destination_box.top = copy_box->y;
+    destination_box.front = copy_box->z;
+    destination_box.right = copy_box->x + copy_box->w;
+    destination_box.bottom = copy_box->y + copy_box->h;
+    destination_box.back = copy_box->z + copy_box->d;
+
+    source_resident = vmsvga3d_dxvk_d3d11_surface_resident(
+        source->dxvk_surface);
+    if (source_resident) {
+        temporary = g_try_malloc((size_t)compact_size);
+        if (temporary == NULL ||
+            !vmsvga3d_dxvk_d3d11_readback_subresource_box(
+                s->dxvk, source->dxvk_surface, source_subresource, &source_box,
+                temporary, row_bytes, row_bytes, copy_box->h,
+                (uint32_t)compact_depth_pitch, copy_box->d)) {
+            g_free(temporary);
+            return false;
+        }
+        data = temporary;
+        row_pitch = row_bytes;
+        depth_pitch = (uint32_t)compact_depth_pitch;
+    } else {
+        if (source_image->data == NULL || source_image->pitch == 0 ||
+            source_image->plane_size == 0 || source_image->data_size == 0 ||
+            row_bytes > source_image->pitch) {
+            return false;
+        }
+
+        source_offset = (uint64_t)copy_box->srcx * source_desc->bytes_per_block;
+        if (source_offset > UINT64_MAX -
+                (uint64_t)copy_box->srcy * source_image->pitch ||
+            source_offset + (uint64_t)copy_box->srcy * source_image->pitch >
+                UINT64_MAX - (uint64_t)copy_box->srcz * source_image->plane_size) {
+            return false;
+        }
+        source_offset += (uint64_t)copy_box->srcy * source_image->pitch;
+        source_offset += (uint64_t)copy_box->srcz * source_image->plane_size;
+        source_end = source_offset;
+        if (source_end > UINT64_MAX -
+                (uint64_t)(copy_box->h - 1) * source_image->pitch ||
+            source_end + (uint64_t)(copy_box->h - 1) * source_image->pitch >
+                UINT64_MAX -
+                    (uint64_t)(copy_box->d - 1) * source_image->plane_size) {
+            return false;
+        }
+        source_end += (uint64_t)(copy_box->h - 1) * source_image->pitch;
+        source_end += (uint64_t)(copy_box->d - 1) * source_image->plane_size;
+        if (source_end > UINT64_MAX - row_bytes ||
+            source_end + row_bytes > source_image->data_size) {
+            return false;
+        }
+
+        data = source_image->data + source_offset;
+        row_pitch = source_image->pitch;
+        depth_pitch = source_image->plane_size;
+    }
+
+    success = vmsvga3d_dxvk_d3d11_update_subresource(
+        s->dxvk, destination->dxvk_surface, destination_subresource,
+        &destination_box, data, row_pitch, depth_pitch);
+    g_free(temporary);
+    return success;
+}
+
 static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
                                          uint32_t cmd, int32_t *len,
                                          uint32_t fifo_start)
@@ -7015,6 +7167,18 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
         uint32_t dst_subresource =
             body->dest.face * dst_surface->face[0].numMipLevels +
             body->dest.mipmap;
+        VMSVGA3DD3D10Format src_format =
+            vmsvga3d_d3d10_surface_format(src_surface->format);
+        VMSVGA3DD3D10Format dst_format =
+            vmsvga3d_d3d10_surface_format(dst_surface->format);
+        bool raw_copy =
+            src_format.min_level != VMSVGA3D_D3D10_LEVEL_INVALID &&
+            dst_format.min_level != VMSVGA3D_D3D10_LEVEL_INVALID &&
+            src_format.dxgi_format != dst_format.dxgi_format &&
+            vmsvga3d_d3d10_typeless_format(src_format.dxgi_format) ==
+                vmsvga3d_d3d10_typeless_format(dst_format.dxgi_format) &&
+            vmsvga3d_d3d10_raw_copy_compatible(
+                src_surface, dst_surface, false, NULL, NULL);
 
         if (!vmsvga3d_d3d10_copy_surface_materialize_live(
                 s, src_surface, src_kind) ||
@@ -7049,10 +7213,27 @@ static bool vmsvga3d_handle_surface_copy(struct vmsvga_state_s *s,
                 dst_surface->d3d11_indirect_args_shadow_authoritative = false;
             }
 
-            if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
-                    s->dxvk, dst_surface->dxvk_surface, dst_subresource,
-                    clipped.x, clipped.y, clipped.z, src_surface->dxvk_surface,
-                    src_subresource, &src_box)) {
+            if (raw_copy) {
+                if (!vmsvga3d_surface_copy_raw_family_box_live(
+                        s, src_surface, src_subresource, dst_surface,
+                        dst_subresource, &clipped)) {
+                    valid = false;
+                } else {
+                    VMVGA_TRACE_LOCAL(
+                        VMVGA_TRACE_3D,
+                        "DX-COPY-FORMAT kind=surface-copy-raw-family "
+                        "src=%u:%u guest=%u dxgi=%u dst=%u:%u guest=%u "
+                        "dxgi=%u",
+                        body->src.sid, src_subresource, src_surface->format,
+                        src_format.dxgi_format, body->dest.sid,
+                        dst_subresource, dst_surface->format,
+                        dst_format.dxgi_format);
+                }
+            } else if (!vmsvga3d_dxvk_d3d11_copy_subresource_region(
+                           s->dxvk, dst_surface->dxvk_surface, dst_subresource,
+                           clipped.x, clipped.y, clipped.z,
+                           src_surface->dxvk_surface, src_subresource,
+                           &src_box)) {
                 valid = false;
             }
         }

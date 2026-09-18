@@ -7528,10 +7528,29 @@ static void vmsvga3d_clip_present_rect(const SVGA3dCopyRect *rect,
     clipped->h = MIN(rect->h, max_height);
 }
 
+static bool vmsvga3d_present_bgr8_storage_compatible(
+    SVGA3dSurfaceFormat format)
+{
+    switch (format) {
+    case SVGA3D_X8R8G8B8:
+    case SVGA3D_A8R8G8B8:
+    case SVGA3D_B8G8R8A8_TYPELESS:
+    case SVGA3D_B8G8R8A8_UNORM_SRGB:
+    case SVGA3D_B8G8R8X8_TYPELESS:
+    case SVGA3D_B8G8R8X8_UNORM_SRGB:
+    case SVGA3D_B8G8R8A8_UNORM:
+    case SVGA3D_B8G8R8X8_UNORM:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool vmsvga3d_present_surface_format_supported(
     VMSVGA3DSurface *surface, const struct svga3d_surface_desc **desc_out)
 {
     const struct svga3d_surface_desc *desc;
+    bool typeless_bgr8;
 
     if (surface == NULL || surface->mip_count == 0 ||
         surface->multisample_count > 1) {
@@ -7539,9 +7558,13 @@ static bool vmsvga3d_present_surface_format_supported(
     }
 
     desc = svga3dsurface_get_desc(surface->format);
+    typeless_bgr8 =
+        surface->format == SVGA3D_B8G8R8A8_TYPELESS ||
+        surface->format == SVGA3D_B8G8R8X8_TYPELESS;
     if (desc->format != surface->format ||
-        (desc->block_desc & SVGA3DBLOCKDESC_RGB_UNORM) !=
-            SVGA3DBLOCKDESC_RGB_UNORM ||
+        (((desc->block_desc & SVGA3DBLOCKDESC_RGB_UNORM) !=
+              SVGA3DBLOCKDESC_RGB_UNORM) &&
+         !typeless_bgr8) ||
         desc->block_size.width != 1 || desc->block_size.height != 1 ||
         desc->block_size.depth != 1 || desc->bytes_per_block == 0 ||
         desc->bytes_per_block > sizeof(uint64_t) ||
@@ -7858,8 +7881,7 @@ static bool vmsvga3d_present_rect_to_buffer_internal(
     }
 
     if (dst_depth == 32 &&
-        (surface->format == SVGA3D_X8R8G8B8 ||
-         surface->format == SVGA3D_A8R8G8B8)) {
+        vmsvga3d_present_bgr8_storage_compatible(surface->format)) {
         for (row = 0; row < clipped.h; row++) {
             const uint8_t *src = image->data + src_offset +
                                  (uint64_t)row * image->pitch;
@@ -14374,19 +14396,19 @@ static bool vmsvga2d_screen_target_bind_live(
 static bool vmsvga3d_screen_target_async_format_compatible(
     const VMSVGA3DSurface *surface, const struct svga3d_surface_desc *desc)
 {
-    if (surface == NULL || desc == NULL || desc->bytes_per_block != 4) {
+    if (surface == NULL || desc == NULL ||
+        !vmsvga3d_present_bgr8_storage_compatible(surface->format) ||
+        desc->block_size.width != 1 || desc->block_size.height != 1 ||
+        desc->block_size.depth != 1 || desc->bytes_per_block != 4 ||
+        desc->pitch_bytes_per_block != 4 || desc->bitDepth.blue != 8 ||
+        desc->bitDepth.green != 8 || desc->bitDepth.red != 8 ||
+        (desc->bitDepth.alpha != 0 && desc->bitDepth.alpha != 8) ||
+        desc->bitOffset.blue != 0 || desc->bitOffset.green != 8 ||
+        desc->bitOffset.red != 16 || desc->bitOffset.alpha != 24) {
         return false;
     }
 
-    switch (surface->format) {
-    case SVGA3D_X8R8G8B8:
-    case SVGA3D_A8R8G8B8:
-    case SVGA3D_B8G8R8A8_UNORM:
-    case SVGA3D_B8G8R8X8_UNORM:
-        return true;
-    default:
-        return false;
-    }
+    return true;
 }
 
 static VMSVGA3DDxvkScreenReadbackPollResult

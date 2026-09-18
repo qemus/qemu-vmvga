@@ -2680,6 +2680,12 @@ static bool vmsvga3d_dxvk_handoff_d3d11_to_shadow(
         return true;
     }
 
+    if (s->svga3d != NULL &&
+        s->svga3d->active_screen_target_sid == surface->sid &&
+        !vmsvga3d_screen_target_quiesce_live(s)) {
+        return false;
+    }
+
     if (surface->mips == NULL) {
         return false;
     }

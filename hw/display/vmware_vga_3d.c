@@ -10497,7 +10497,8 @@ static void vmsvga3d_command_buffer_execute_work(
     }
 
     vmsvga3d_command_buffer_write_status(
-        s, work->header_gpa, status, processed, processed);
+        s, work->header_gpa, status,
+        status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0, processed);
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "CB-COMPLETE kind=%s header=0x%016" PRIx64
@@ -10524,15 +10525,23 @@ static void vmsvga3d_command_buffer_bh(void *opaque)
     }
 
     s->cb_bh_running = true;
-    while (buffers < VMSVGA_CB_BH_MAX_BUFFERS &&
-           bytes < VMSVGA_CB_BH_MAX_BYTES) {
+    while (buffers < VMSVGA_CB_BH_MAX_BUFFERS) {
         struct vmsvga_command_buffer_work_s *work =
-            vmsvga3d_command_buffer_pop(s);
+            s->cb_prepend_head != NULL ? s->cb_prepend_head : s->cb_queue_head;
+        uint32_t work_bytes;
 
         if (work == NULL) {
             break;
         }
-        bytes += work->header.length - work->header.offset;
+        work_bytes = work->header.length - work->header.offset;
+        if (buffers != 0 &&
+            bytes + work_bytes > VMSVGA_CB_BH_MAX_BYTES) {
+            break;
+        }
+
+        work = vmsvga3d_command_buffer_pop(s);
+        assert(work != NULL);
+        bytes += work_bytes;
         buffers++;
         vmsvga3d_command_buffer_execute_work(s, work);
     }

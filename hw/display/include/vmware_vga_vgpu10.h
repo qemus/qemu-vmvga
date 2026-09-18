@@ -291,6 +291,12 @@ typedef struct vmsvga3d_d3d10_shader_info_s {
     bool guest_signatures;
     bool semantics_complete;
     bool match_masks_covered;
+    /* Context-derived GS linkage is discarded when adjacent shaders change. */
+    bool input_signature_synthesized;
+    bool output_signature_synthesized;
+    uint32_t gs_linked_input_semantic_mask;
+    uint32_t gs_linked_input_component_mask;
+    uint32_t gs_linked_output_component_mask;
     uint32_t input_signature_count;
     uint32_t output_signature_count;
     uint32_t patch_signature_count;

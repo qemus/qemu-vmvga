@@ -4539,6 +4539,49 @@ static void shader_infer_apply(VMSVGA3DD3D10ShaderInfo *info,
     }
 }
 
+/*
+ * Generic DX shader I/O declarations are typeless in the VMware protocol.
+ * The normal inference pass above resolves them from typed instructions,
+ * bound render-target formats and adjacent shader stages.  Some legal shaders
+ * are nevertheless type-neutral (for example a pure MOV varying), leaving an
+ * UNKNOWN component type after every available constraint has been consumed.
+ *
+ * Do not serialize that UNKNOWN value into DXBC.  dxbc-spirv treats the
+ * signature type as an actual scalar type during deferred pipeline compilation
+ * and can reach normalizeTypeForConsume() with a non-numeric type.  The old
+ * compatibility fallback proved that FLOAT32 is the safe D3D linkage default
+ * for these unresolved generic varyings.  Keep the fallback here, after all
+ * real inference, so concrete UINT/SINT/FLOAT evidence always wins.
+ */
+static void shader_infer_fallback_unknown_generic(
+    VMSVGA3DD3D10ShaderInfo *info, SVGA3dDXShaderSignatureEntry *signature,
+    uint32_t count, const char *kind)
+{
+    uint32_t i;
+
+    if (info == NULL || signature == NULL) {
+        return;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (signature[i].componentType !=
+                VMSVGA3D_D3D10_SHADER_COMPONENT_UNKNOWN ||
+            signature[i].semanticName !=
+                SVGADX_SIGNATURE_SEMANTIC_NAME_UNDEFINED) {
+            continue;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SIGNATURE-FALLBACK program=%u kind=%s index=%u reg=%u "
+            "mask=0x%02x fallback=FLOAT32",
+            info->program_type, kind, i, signature[i].registerIndex,
+            signature[i].mask & 0xffu);
+        signature[i].componentType =
+            VMSVGA3D_D3D10_SHADER_COMPONENT_FLOAT32;
+    }
+}
+
 VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resolve_component_types(
     VMSVGA3DD3D10ShaderInfo *info)
 {
@@ -4562,6 +4605,13 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_shader_resolve_component_types(
     shader_infer_state_init(info, &state);
     shader_infer_solve_state(info, &state);
     shader_infer_apply(info, &state);
+
+    shader_infer_fallback_unknown_generic(
+        info, info->input_signature, info->input_signature_count, "input");
+    shader_infer_fallback_unknown_generic(
+        info, info->output_signature, info->output_signature_count, "output");
+    shader_infer_fallback_unknown_generic(
+        info, info->patch_signature, info->patch_signature_count, "patch");
 
     return level;
 }

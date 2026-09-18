@@ -1185,6 +1185,9 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_so_targets_restore_plan(
 
     for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
         restore_targets[i].sid = targets[i];
+        if (targets[i] != SVGA3D_INVALID_ID) {
+            restore_targets[i].offset = UINT32_MAX;
+        }
     }
 
     if (vmsvga3d_d3d10_so_targets_plan(
@@ -9698,6 +9701,13 @@ static bool vmsvga3d_d3d10_surface_info_live(
     info->array_elements = array_elements;
     info->multisample_count = surface->multisample_count;
     info->multisample_quality = surface->multisample_quality;
+    if (surface->multisample_count > 1) {
+        if (surface->multisample_pattern == SVGA3D_MS_PATTERN_STANDARD) {
+            info->multisample_quality = UINT32_MAX;
+        } else if (surface->multisample_pattern == SVGA3D_MS_PATTERN_CENTER) {
+            info->multisample_quality = UINT32_MAX - 1u;
+        }
+    }
     info->autogen_filter = surface->autogen_filter;
     info->surface_bytes = surface->mips[0].data_size;
     info->buffer_byte_stride = surface->buffer_byte_stride;

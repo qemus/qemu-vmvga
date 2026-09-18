@@ -6970,6 +6970,16 @@ static bool vmsvga3d_surface_copy_raw_family_box_live(
 
     source_resident = vmsvga3d_dxvk_d3d11_surface_resident(
         source->dxvk_surface);
+    if (source_resident &&
+        (source->surface_flags &
+         (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) != 0) {
+        /* Boxed D3D11 readback is currently implemented only for Texture2D.
+         * Preserve correctness for resident 1D/3D resources by using the
+         * established full-subresource raw-copy path for those dimensions. */
+        return vmsvga3d_d3d10_raw_copy_subresource_live(
+            s, source, source_subresource, destination, destination_subresource,
+            copy_box, NULL, SVGA_3D_CMD_SURFACE_COPY, false);
+    }
     if (source_resident) {
         temporary = g_try_malloc((size_t)compact_size);
         if (temporary == NULL ||

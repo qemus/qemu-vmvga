@@ -473,6 +473,11 @@ struct vmsvga_perf_counters_s {
     uint64_t quiesce_reason_target_destroy;
     uint64_t quiesce_reason_target_unbind;
     uint64_t screen_target_switches;
+    uint64_t screen_target_retire_armed;
+    uint64_t screen_target_retire_completed;
+    uint64_t screen_target_retire_waits;
+    uint64_t screen_target_transition_async_submits;
+    uint64_t screen_target_transition_async_commits;
     uint64_t quiesce_reason_target_switch;
     uint64_t quiesce_reason_handoff_d3d9;
     uint64_t quiesce_reason_handoff_d3d11;

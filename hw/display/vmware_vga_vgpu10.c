@@ -9210,8 +9210,9 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             " handoff11=%" PRIu64 " handoff11-us=%" PRIu64
             " qr-redef=%" PRIu64 " qr-destroy=%" PRIu64
             " qr-stdef=%" PRIu64 " qr-stdestroy=%" PRIu64
-            " qr-unbind=%" PRIu64 " qr-switch=%" PRIu64
-            " qr-h9=%" PRIu64 " qr-h11=%" PRIu64
+            " qr-unbind=%" PRIu64 " st-switch=%" PRIu64
+            " qr-switch=%" PRIu64 " qr-h9=%" PRIu64
+            " qr-h11=%" PRIu64
             " qr-gbdestroy=%" PRIu64 " qr-other=%" PRIu64 "\n",
             elapsed_ms,
             p->screen_poll_d3d9 - l->screen_poll_d3d9,
@@ -9249,6 +9250,7 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             p->quiesce_reason_target_define - l->quiesce_reason_target_define,
             p->quiesce_reason_target_destroy - l->quiesce_reason_target_destroy,
             p->quiesce_reason_target_unbind - l->quiesce_reason_target_unbind,
+            p->screen_target_switches - l->screen_target_switches,
             p->quiesce_reason_target_switch - l->quiesce_reason_target_switch,
             p->quiesce_reason_handoff_d3d9 - l->quiesce_reason_handoff_d3d9,
             p->quiesce_reason_handoff_d3d11 - l->quiesce_reason_handoff_d3d11,
@@ -11229,20 +11231,26 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         return false;
     }
 
-    /* A ScreenTarget switch is a presentation-ordering barrier.  Pending
-     * damage belongs to the old SID and must be consumed before the new SID
-     * becomes active; dropping it can skip a guest-requested DWM frame.
+    /* Retire the old ScreenTarget through its per-surface async readback ring
+     * before changing the active SID.  A successful async submit snapshots the
+     * old renderer contents into storage owned by that surface, so switching no
+     * longer has to wait for readback completion.  When the old SID becomes
+     * active again, the normal ScreenTarget flush path polls that same ring and
+     * publishes the completed frame before submitting newer damage.
      *
-     * The quiesce path is already selective: it is an O(1) no-op when no
-     * presentation damage is queued, reads back only queued rectangles,
-     * narrows a full D3D9 presentation to tracked writer damage when possible,
-     * and performs no GPU readback when the CPU shadow is authoritative.
-     * Preserve that optimized barrier instead of speculatively coalescing
-     * across guest flips.
+     * If all ring slots are still in flight, flush_live() deliberately leaves
+     * the old dirty rectangles queued.  Preserve correctness in that uncommon
+     * pressure case by falling back to the original synchronous quiesce.
      */
-    s->perf.quiesce_reason_target_switch++;
-    if (!vmsvga3d_screen_target_quiesce_live(s)) {
+    s->perf.screen_target_switches++;
+    if (!vmsvga3d_screen_target_flush_live(s)) {
         return false;
+    }
+    if (s->svga3d->screen_target_dirty_count != 0) {
+        s->perf.quiesce_reason_target_switch++;
+        if (!vmsvga3d_screen_target_quiesce_live(s)) {
+            return false;
+        }
     }
     if (s->screen_direct_active &&
         !vmsvga_screen_direct_detach(s, "target-switch")) {

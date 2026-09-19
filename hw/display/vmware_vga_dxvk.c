@@ -12619,6 +12619,34 @@ static bool vmsvga3d_dxvk_screen_readback_rect_bounds(
     return true;
 }
 
+static uint32_t vmsvga3d_dxvk_screen_readback_pending_backend(
+    const VMSVGA3DDxvkSurface *surface)
+{
+    bool pending_d3d9 = false;
+    bool pending_d3d11 = false;
+    uint32_t i;
+
+    if (surface == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        pending_d3d9 |= surface->d3d9_screen_readback[i].pending;
+        pending_d3d11 |= surface->d3d11_screen_readback[i].pending;
+    }
+
+    if (pending_d3d9 && pending_d3d11) {
+        return 10;
+    }
+    if (pending_d3d9) {
+        return 9;
+    }
+    if (pending_d3d11) {
+        return 11;
+    }
+    return 0;
+}
+
 static VMSVGA3DDxvkScreenReadbackSlot *
 vmsvga3d_dxvk_screen_readback_free_slot(
     VMSVGA3DDxvkScreenReadbackSlot *slots)
@@ -12746,6 +12774,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
     VMSVGA3DDxvkStretchRect stretch_rect = NULL;
     VMSVGA3DDxvkCreateQuery create_query = NULL;
     VMSVGA3DDxvkQueryIssue issue = NULL;
+    VMSVGA3DDxvkQueryGetData get_data = NULL;
     void *source_surface = NULL;
     uint32_t left;
     uint32_t top;
@@ -12755,6 +12784,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
     uint32_t height;
     uint32_t i;
     bool cumulative = false;
+    uint32_t query_data = 0;
     int32_t result;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
@@ -12864,7 +12894,20 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
     }
 
     result = issue(slot->query, VMSVGA3D_DXVK_D3DISSUE_END);
-    if (!vmsvga3d_dxvk_succeeded(result)) {
+    if (!vmsvga3d_dxvk_succeeded(result) ||
+        !vmsvga3d_dxvk_get_method(
+            slot->query, VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+            &get_data, sizeof(get_data))) {
+        goto fail;
+    }
+
+    /* D3D9 has no D3D11-style explicit nonblocking Flush.  Kick submission
+     * exactly once when the slot is queued, then keep ordinary readiness polls
+     * NOFLUSH.  S_FALSE is the expected nonblocking result here. */
+    result = get_data(slot->query, &query_data, sizeof(query_data),
+                      VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
+    if (result != VMSVGA3D_DXVK_D3D_S_FALSE &&
+        !vmsvga3d_dxvk_succeeded(result)) {
         goto fail;
     }
 

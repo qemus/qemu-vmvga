@@ -312,6 +312,11 @@ typedef struct vmsvga3d_dx_cotable_s {
    VMSVGA3D_DX_CTX_F_STATE_SRV_CS)
 #define VMSVGA3D_DX_CTX_F_STATE_SHADERS         UINT64_C(0x40000000)
 #define VMSVGA3D_DX_CTX_F_STATE_SOTARGETS       UINT64_C(0x80000000)
+/* Pipeline-derived shader signatures only need to be rebuilt when the guest
+ * shader graph or selected shader contents change.  Native state replay
+ * (context switch, PresentBlt, SO rebinding, STATE_ALL) must not imply shader
+ * invalidation/recompilation. */
+#define VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE  UINT64_C(0x100000000)
 #define VMSVGA3D_DX_CTX_F_STATE_ALL \
   (VMSVGA3D_DX_CTX_F_STATE_INPUTLAYOUT | \
    VMSVGA3D_DX_CTX_F_STATE_TOPOLOGY | \

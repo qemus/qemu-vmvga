@@ -38,12 +38,14 @@ typedef struct vmsvga3d_dxvk_d3d9_gb_query_s VMSVGA3DDxvkD3D9GBQuery;
 typedef struct vmsvga3d_dxvk_query_s VMSVGA3DDxvkQuery;
 typedef struct vmsvga3d_dxvk_state_s VMSVGA3DDxvkState;
 typedef struct vmsvga3d_dxvk_shader_s VMSVGA3DDxvkShader;
+typedef struct vmsvga3d_dxvk_shader_variant_s VMSVGA3DDxvkShaderVariant;
 typedef struct vmsvga3d_dxvk_stream_output_s VMSVGA3DDxvkStreamOutput;
 typedef struct vmsvga3d_dxvk_input_layout_s VMSVGA3DDxvkInputLayout;
 typedef struct vmsvga3d_dxvk_constant_buffer_s VMSVGA3DDxvkConstantBuffer;
 typedef struct vmsvga3d_dxvk_view_s VMSVGA3DDxvkView;
 
 #define VMSVGA3D_DXVK_D3D9_VERTEX_DECL_CACHE_LIMIT 256u
+#define VMSVGA3D_DXVK_SHADER_VARIANT_LIMIT 4u
 #define VMSVGA3D_DXVK_SCREEN_READBACK_RECTS 32u
 
 typedef struct vmsvga3d_dxvk_d3d9_vertex_declaration_key_s {
@@ -180,9 +182,26 @@ struct vmsvga3d_dxvk_state_s {
     VMSVGA3DDxvkState *next;
 };
 
+/* Native shader variants are keyed by the exact generated DXBC plus the
+ * geometry-shader stream-output object used at Create*Shader time.  Linkage
+ * inference may generate different DXBC for the same guest shader id, so keep
+ * a few compiled variants instead of destroying the previous one whenever the
+ * selected pipeline changes.
+ */
+struct vmsvga3d_dxvk_shader_variant_s {
+    void *shader;
+    uint8_t *bytecode;
+    uint32_t bytecode_size;
+    uint32_t stream_output_id;
+    uint64_t last_used;
+    VMSVGA3DDxvkShaderVariant *next;
+};
+
 /* Mirror VirtualBox DXSHADER lifetime: Define creates the backend record,
- * Bind stores parsed shader information, and pipeline setup later creates
- * DXBC and the native shader.
+ * Bind stores parsed shader information, and pipeline setup later resolves a
+ * native variant for the current linkage environment.  shader/bytecode are
+ * non-owning aliases for active_variant so existing binding/layout helpers can
+ * continue to use the current resolved DXBC.
  */
 struct vmsvga3d_dxvk_shader_s {
     uint32_t cid;
@@ -196,8 +215,14 @@ struct vmsvga3d_dxvk_shader_s {
     uint32_t bytecode_size;
     uint32_t stream_output_id;
     uint32_t stream_output_proxy_id;
+    VMSVGA3DDxvkShaderVariant *variants;
+    VMSVGA3DDxvkShaderVariant *active_variant;
+    uint64_t variant_serial;
+    uint32_t variant_count;
     VMSVGA3DDxvkShader *next;
 };
+
+static void vmsvga3d_dxvk_d3d11_shader_free(VMSVGA3DDxvkShader *shader);
 
 /* Stream-output declarations use D3D11 semantic names/indices even though
  * the guest object names output registers.  Cache the resolved declaration
@@ -2364,14 +2389,7 @@ static void vmsvga3d_dxvk_guest_objects_purge(VMSVGA3DDxvk *dxvk)
         VMSVGA3DDxvkShader *shader = dxvk->d3d11_shaders;
 
         dxvk->d3d11_shaders = shader->next;
-        if (shader->shader != NULL) {
-            vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-        }
-        if (shader->info_valid) {
-            vmsvga3d_d3d10_shader_release(&shader->info);
-        }
-        g_free(shader->bytecode);
-        g_free(shader);
+        vmsvga3d_dxvk_d3d11_shader_free(shader);
     }
 
     if (dxvk->d3d9_vertex_declarations != NULL) {
@@ -7530,6 +7548,189 @@ static VMSVGA3DDxvkShader *vmsvga3d_dxvk_d3d11_shader_find(
     return NULL;
 }
 
+static void vmsvga3d_dxvk_d3d11_shader_variant_free(
+    VMSVGA3DDxvkShaderVariant *variant)
+{
+    if (variant == NULL) {
+        return;
+    }
+
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    if (variant->shader != NULL) {
+        vmsvga3d_dxvk_release(
+            variant->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+    }
+#endif
+    g_free(variant->bytecode);
+    g_free(variant);
+}
+
+static void vmsvga3d_dxvk_d3d11_shader_variant_activate(
+    VMSVGA3DDxvkShader *shader, VMSVGA3DDxvkShaderVariant *variant)
+{
+    if (shader == NULL) {
+        return;
+    }
+
+    shader->active_variant = variant;
+    if (variant == NULL) {
+        shader->shader = NULL;
+        shader->bytecode = NULL;
+        shader->bytecode_size = 0;
+        shader->stream_output_id = SVGA3D_INVALID_ID;
+        return;
+    }
+
+    variant->last_used = ++shader->variant_serial;
+    shader->shader = variant->shader;
+    shader->bytecode = variant->bytecode;
+    shader->bytecode_size = variant->bytecode_size;
+    shader->stream_output_id = variant->stream_output_id;
+}
+
+static void vmsvga3d_dxvk_d3d11_shader_variants_clear(
+    VMSVGA3DDxvkShader *shader)
+{
+    VMSVGA3DDxvkShaderVariant *variant;
+
+    if (shader == NULL) {
+        return;
+    }
+
+    vmsvga3d_dxvk_d3d11_shader_variant_activate(shader, NULL);
+    while (shader->variants != NULL) {
+        variant = shader->variants;
+        shader->variants = variant->next;
+        vmsvga3d_dxvk_d3d11_shader_variant_free(variant);
+    }
+    shader->variant_count = 0;
+    shader->variant_serial = 0;
+}
+
+static VMSVGA3DDxvkShaderVariant *
+vmsvga3d_dxvk_d3d11_shader_variant_find(
+    VMSVGA3DDxvkShader *shader, const void *bytecode, uint32_t bytecode_size,
+    uint32_t stream_output_id)
+{
+    VMSVGA3DDxvkShaderVariant *variant;
+
+    if (shader == NULL || bytecode == NULL || bytecode_size == 0) {
+        return NULL;
+    }
+
+    for (variant = shader->variants; variant != NULL; variant = variant->next) {
+        if (variant->stream_output_id == stream_output_id &&
+            variant->bytecode_size == bytecode_size &&
+            variant->bytecode != NULL &&
+            memcmp(variant->bytecode, bytecode, bytecode_size) == 0) {
+            return variant;
+        }
+    }
+    return NULL;
+}
+
+static void vmsvga3d_dxvk_d3d11_shader_variant_trim(
+    VMSVGA3DDxvkShader *shader)
+{
+    while (shader != NULL &&
+           shader->variant_count > VMSVGA3D_DXVK_SHADER_VARIANT_LIMIT) {
+        VMSVGA3DDxvkShaderVariant **link = &shader->variants;
+        VMSVGA3DDxvkShaderVariant **oldest_link = NULL;
+        uint64_t oldest_use = UINT64_MAX;
+
+        while (*link != NULL) {
+            VMSVGA3DDxvkShaderVariant *variant = *link;
+
+            if (variant != shader->active_variant &&
+                variant->last_used < oldest_use) {
+                oldest_use = variant->last_used;
+                oldest_link = link;
+            }
+            link = &variant->next;
+        }
+
+        if (oldest_link == NULL) {
+            break;
+        }
+
+        {
+            VMSVGA3DDxvkShaderVariant *variant = *oldest_link;
+
+            *oldest_link = variant->next;
+            shader->variant_count--;
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SHADER-VARIANT cid=%u shid=%u type=%u action=evict "
+                "soid=%u bytes=%u variants=%u",
+                shader->cid, shader->shader_id, shader->shader_type,
+                variant->stream_output_id, variant->bytecode_size,
+                shader->variant_count);
+            vmsvga3d_dxvk_d3d11_shader_variant_free(variant);
+        }
+    }
+}
+
+static bool vmsvga3d_dxvk_d3d11_shader_variant_add(
+    VMSVGA3DDxvkShader *shader, void *native_shader,
+    const void *bytecode, uint32_t bytecode_size, uint32_t stream_output_id)
+{
+    VMSVGA3DDxvkShaderVariant *variant;
+
+    if (shader == NULL || native_shader == NULL || bytecode == NULL ||
+        bytecode_size == 0) {
+        return false;
+    }
+
+    variant = g_try_new0(VMSVGA3DDxvkShaderVariant, 1);
+    if (variant == NULL) {
+        return false;
+    }
+    variant->bytecode = g_try_malloc(bytecode_size);
+    if (variant->bytecode == NULL) {
+        g_free(variant);
+        return false;
+    }
+
+    memcpy(variant->bytecode, bytecode, bytecode_size);
+    variant->bytecode_size = bytecode_size;
+    variant->stream_output_id = stream_output_id;
+    variant->shader = native_shader;
+    variant->next = shader->variants;
+    shader->variants = variant;
+    shader->variant_count++;
+    vmsvga3d_dxvk_d3d11_shader_variant_activate(shader, variant);
+    vmsvga3d_dxvk_d3d11_shader_variant_trim(shader);
+    return true;
+}
+
+static void vmsvga3d_dxvk_d3d11_shader_variants_remove_stream_output(
+    VMSVGA3DDxvkShader *shader, uint32_t stream_output_id)
+{
+    VMSVGA3DDxvkShaderVariant **link;
+
+    if (shader == NULL) {
+        return;
+    }
+
+    link = &shader->variants;
+    while (*link != NULL) {
+        VMSVGA3DDxvkShaderVariant *variant = *link;
+
+        if (variant->stream_output_id != stream_output_id) {
+            link = &variant->next;
+            continue;
+        }
+
+        if (shader->active_variant == variant) {
+            vmsvga3d_dxvk_d3d11_shader_variant_activate(shader, NULL);
+        }
+        *link = variant->next;
+        assert(shader->variant_count != 0);
+        shader->variant_count--;
+        vmsvga3d_dxvk_d3d11_shader_variant_free(variant);
+    }
+}
+
 static void vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(
     VMSVGA3DDxvkShader *shader)
 {
@@ -7553,18 +7754,13 @@ static void vmsvga3d_dxvk_d3d11_shader_free(VMSVGA3DDxvkShader *shader)
         return;
     }
 
-#if defined(CONFIG_LINUX) && defined(__ELF__)
-    if (shader->shader != NULL) {
-        vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-    }
-#endif
     vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
+    vmsvga3d_dxvk_d3d11_shader_variants_clear(shader);
 
     if (shader->info_valid) {
         vmsvga3d_d3d10_shader_release(&shader->info);
     }
 
-    g_free(shader->bytecode);
     g_free(shader);
 }
 
@@ -7633,26 +7829,12 @@ bool vmsvga3d_dxvk_d3d11_shader_bind_info(
         return false;
     }
 
-    /* VirtualBox drops generated DXBC/native code on a successful rebind, but
-     * retains the backend shader record itself.
+    /* A successful guest rebind replaces the shader program itself, unlike a
+     * pipeline-linkage invalidation.  Drop every cached native variant here so
+     * no object compiled from the old guest bytecode can be reused.
      */
     vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
-    /* A rebind replaces the shader program.  Any remembered GS/SO pairing
-     * belongs to the old native program and must not make a later plain GS
-     * look like the requested CreateGeometryShaderWithStreamOutput variant.
-     */
-    shader->stream_output_id = SVGA3D_INVALID_ID;
-    if (shader->bytecode != NULL) {
-#if defined(CONFIG_LINUX) && defined(__ELF__)
-        if (shader->shader != NULL) {
-            vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-        }
-#endif
-        shader->shader = NULL;
-        g_free(shader->bytecode);
-        shader->bytecode = NULL;
-        shader->bytecode_size = 0;
-    }
+    vmsvga3d_dxvk_d3d11_shader_variants_clear(shader);
 
     if (shader->info_valid) {
         vmsvga3d_d3d10_shader_release(&shader->info);
@@ -7684,18 +7866,12 @@ bool vmsvga3d_dxvk_d3d11_shader_info_for_realize(
         return false;
     }
 
-    /* dxSetupPipeline only patches a shader while its native object is absent.
-     * If an earlier Create*Shader failed after DXBC generation, the Oracle runs
-     * the create-time preparation again on the next setup attempt.
+    /* Pipeline linkage may detach the active native variant while retaining it
+     * in the small per-shader cache.  Only an actually active variant makes
+     * this ShaderInfo immutable for the current setup pass.
      */
-    if (shader->shader != NULL) {
+    if (shader->active_variant != NULL) {
         return true;
-    }
-
-    if (shader->bytecode != NULL) {
-        g_free(shader->bytecode);
-        shader->bytecode = NULL;
-        shader->bytecode_size = 0;
     }
 
     *info = &shader->info;
@@ -7876,16 +8052,9 @@ bool vmsvga3d_dxvk_d3d11_stream_output_destroy(
             if (shader->stream_output_proxy_id == stream_output_id) {
                 vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
             }
-            if (shader->shader_type == SVGA3D_SHADERTYPE_GS &&
-                shader->stream_output_id == stream_output_id) {
-#if defined(CONFIG_LINUX) && defined(__ELF__)
-                if (shader->shader != NULL) {
-                    vmsvga3d_dxvk_release(
-                        shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-                    shader->shader = NULL;
-                }
-#endif
-                shader->stream_output_id = SVGA3D_INVALID_ID;
+            if (shader->shader_type == SVGA3D_SHADERTYPE_GS) {
+                vmsvga3d_dxvk_d3d11_shader_variants_remove_stream_output(
+                    shader, stream_output_id);
             }
         }
     }
@@ -7902,11 +8071,16 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     VMSVGA3DDxvkD3D11CreateShader create_shader = NULL;
     VMSVGA3DDxvkD3D11CreateGeometryShaderWithSO create_gs_so = NULL;
     VMSVGA3DDxvkShader *shader;
+    VMSVGA3DDxvkShaderVariant *variant;
     VMSVGA3DD3D10ShaderDXBC dxbc;
     VMSVGA3DD3D10Level level;
+    const void *bytecode = NULL;
+    uint32_t bytecode_size = 0;
+    uint32_t variant_stream_output_id;
     uint32_t method;
     uint32_t i;
     void *native_shader = NULL;
+    bool generated_dxbc = false;
     int32_t result;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL) {
@@ -7920,15 +8094,17 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         return false;
     }
 
-    if (shader->shader != NULL) {
-        if (shader->shader_type != SVGA3D_SHADERTYPE_GS ||
-            shader->stream_output_id == stream_output_id) {
-            return true;
-        }
+    variant_stream_output_id =
+        shader->shader_type == SVGA3D_SHADERTYPE_GS ?
+            stream_output_id : SVGA3D_INVALID_ID;
 
-        vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-        shader->shader = NULL;
-        shader->stream_output_id = SVGA3D_INVALID_ID;
+    /* A native variant already active for the requested create-time state can
+     * be rebound immediately.  GS is the only stage whose native object also
+     * depends on the selected stream-output declaration.
+     */
+    if (shader->active_variant != NULL &&
+        shader->active_variant->stream_output_id == variant_stream_output_id) {
+        return true;
     }
 
     switch (shader->shader_type) {
@@ -7954,12 +8130,21 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         return false;
     }
 
-    /* Mirror dxSetupPipeline: DXBC belongs to the persistent shader object and
-     * is generated only when the active pipeline first needs the shader.
-     * B3/B4/B5 insert VirtualBox's contextual signature/resource/SO updates
-     * before this realization point.
-     */
-    if (shader->bytecode == NULL) {
+    memset(&dxbc, 0, sizeof(dxbc));
+
+    if (shader->active_variant != NULL) {
+        /* Only a GS stream-output change can reach here with an active variant.
+         * Its linkage-resolved DXBC itself is unchanged, so reuse those exact
+         * bytes to select/create the alternate SO native variant.
+         */
+        bytecode = shader->active_variant->bytecode;
+        bytecode_size = shader->active_variant->bytecode_size;
+    } else {
+        /* No variant is active because this is the first realization or a real
+         * linkage mutation detached the previous one.  Resolve the canonical
+         * ShaderInfo for the current pipeline and use the finished DXBC bytes as
+         * the variant key.
+         */
         level = vmsvga3d_d3d10_shader_resolve_component_types(&shader->info);
         if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
             VMVGA_TRACE_LOCAL(
@@ -7970,7 +8155,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
             return false;
         }
 
-        memset(&dxbc, 0, sizeof(dxbc));
         level = vmsvga3d_d3d10_shader_create_dxbc(&shader->info, &dxbc);
         if (level == VMSVGA3D_D3D10_LEVEL_INVALID ||
             dxbc.data == NULL || dxbc.size == 0) {
@@ -7982,15 +8166,27 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
             vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
             return false;
         }
-        shader->bytecode = g_try_malloc(dxbc.size);
-        if (shader->bytecode == NULL) {
-            vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
-            return false;
-        }
-        memcpy(shader->bytecode, dxbc.data, dxbc.size);
-        shader->bytecode_size = dxbc.size;
-        vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+        bytecode = dxbc.data;
+        bytecode_size = dxbc.size;
+        generated_dxbc = true;
     }
+
+    variant = vmsvga3d_dxvk_d3d11_shader_variant_find(
+        shader, bytecode, bytecode_size, variant_stream_output_id);
+    if (variant != NULL) {
+        vmsvga3d_dxvk_d3d11_shader_variant_activate(shader, variant);
+        if (generated_dxbc) {
+            vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+        }
+        return true;
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-SHADER-VARIANT cid=%u shid=%u type=%u action=miss "
+        "soid=%u bytes=%u variants=%u",
+        cid, shader_id, shader->shader_type, variant_stream_output_id,
+        bytecode_size, shader->variant_count);
 
     if (shader->shader_type == SVGA3D_SHADERTYPE_GS &&
         stream_output_id != SVGA3D_INVALID_ID) {
@@ -7999,6 +8195,9 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
                 dxvk->d3d11_device,
                 VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_GEOMETRY_SHADER_WITH_SO,
                 &create_gs_so, sizeof(create_gs_so))) {
+            if (generated_dxbc) {
+                vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+            }
             return false;
         }
 
@@ -8029,7 +8228,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         }
 
         result = create_gs_so(
-            dxvk->d3d11_device, shader->bytecode, shader->bytecode_size,
+            dxvk->d3d11_device, bytecode, bytecode_size,
             stream_output->declarations, stream_output->declaration_count,
             stream_output->use_explicit_strides ? stream_output->strides : NULL,
             stream_output->stride_count, stream_output->rasterized_stream,
@@ -8042,31 +8241,44 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
                 "DX-SHADER-REALIZE cid=%u shid=%u type=%u result=FAIL "
                 "reason=missing-method",
                 cid, shader_id, shader->shader_type);
+            if (generated_dxbc) {
+                vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+            }
             return false;
         }
-        result = create_shader(dxvk->d3d11_device, shader->bytecode,
-                               shader->bytecode_size, NULL, &native_shader);
+        result = create_shader(
+            dxvk->d3d11_device, bytecode, bytecode_size, NULL, &native_shader);
     }
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-SHADER-REALIZE cid=%u shid=%u type=%u dxbc=%u hr=0x%08x "
         "native=%u result=%s",
-        cid, shader_id, shader->shader_type, shader->bytecode_size,
+        cid, shader_id, shader->shader_type, bytecode_size,
         (uint32_t)result, native_shader != NULL ? 1u : 0u,
         vmsvga3d_dxvk_succeeded(result) && native_shader != NULL ? "OK" : "FAIL");
     if (!vmsvga3d_dxvk_succeeded(result) || native_shader == NULL) {
         if (native_shader != NULL) {
             vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         }
+        if (generated_dxbc) {
+            vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+        }
         return false;
     }
 
-    shader->shader = native_shader;
-    if (shader->shader_type == SVGA3D_SHADERTYPE_GS &&
-        stream_output_id != SVGA3D_INVALID_ID) {
-        shader->stream_output_id = stream_output_id;
+    if (!vmsvga3d_dxvk_d3d11_shader_variant_add(
+            shader, native_shader, bytecode, bytecode_size,
+            variant_stream_output_id)) {
+        vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        if (generated_dxbc) {
+            vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+        }
+        return false;
     }
 
+    if (generated_dxbc) {
+        vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
+    }
     return true;
 #else
     (void)dxvk;
@@ -8272,15 +8484,13 @@ bool vmsvga3d_dxvk_d3d11_shader_invalidate(
         return true;
     }
 
-#if defined(CONFIG_LINUX) && defined(__ELF__)
-    if (shader->shader != NULL) {
-        vmsvga3d_dxvk_release(shader->shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
-        shader->shader = NULL;
-    }
-#endif
+    /* Linkage invalidation makes the current ShaderInfo mutable again but does
+     * not invalidate the guest shader program.  Detach the active native
+     * variant and keep it cached in case a later pipeline resolves to the same
+     * finished DXBC.
+     */
     vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
-
-    shader->stream_output_id = SVGA3D_INVALID_ID;
+    vmsvga3d_dxvk_d3d11_shader_variant_activate(shader, NULL);
 
     return true;
 }

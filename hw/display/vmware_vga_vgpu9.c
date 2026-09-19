@@ -2674,20 +2674,29 @@ static bool vmsvga3d_dxvk_handoff_d3d11_to_shadow(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface)
 {
     uint32_t subresource;
+    int64_t start_us;
+    bool result = false;
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
         !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
         return true;
     }
 
+    s->perf.handoff_d3d11_to_shadow++;
+    start_us = g_get_monotonic_time();
+
+    if (s->svga3d != NULL &&
+        s->svga3d->active_screen_target_sid == surface->sid) {
+        s->perf.quiesce_reason_handoff_d3d11++;
+    }
     if (s->svga3d != NULL &&
         s->svga3d->active_screen_target_sid == surface->sid &&
         !vmsvga3d_screen_target_quiesce_live(s)) {
-        return false;
+        goto out;
     }
 
     if (surface->mips == NULL) {
-        return false;
+        goto out;
     }
 
     for (subresource = 0; subresource < surface->mip_count; subresource++) {
@@ -2697,7 +2706,7 @@ static bool vmsvga3d_dxvk_handoff_d3d11_to_shadow(
                 VMVGA_TRACE_3D,
                 "COHERENCE op=handoff sid=%u from=d3d11 to=d3d9 sub=%u result=FAIL",
                 surface->sid, subresource);
-            return false;
+            goto out;
         }
     }
 
@@ -2706,7 +2715,12 @@ static bool vmsvga3d_dxvk_handoff_d3d11_to_shadow(
         VMVGA_TRACE_3D,
         "COHERENCE op=handoff sid=%u from=d3d11 to=d3d9 subresources=%u result=OK",
         surface->sid, surface->mip_count);
-    return true;
+    result = true;
+
+out:
+    s->perf.handoff_d3d11_to_shadow_us +=
+        g_get_monotonic_time() - start_us;
+    return result;
 }
 
 static bool vmsvga3d_dxvk_materialize_surface(

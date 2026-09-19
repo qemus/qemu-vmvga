@@ -3302,6 +3302,9 @@ static void vmsvga3d_surface_install(
         return;
     }
 
+    if (old_surface != NULL && sid == state->active_screen_target_sid) {
+        s->perf.quiesce_reason_surface_redefine++;
+    }
     if (old_surface != NULL && sid == state->active_screen_target_sid &&
         !vmsvga3d_screen_target_quiesce_live(s)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
@@ -3970,6 +3973,9 @@ static void vmsvga3d_surface_destroy_live(struct vmsvga_state_s *s,
         return;
     }
 
+    if (sid == state->active_screen_target_sid) {
+        s->perf.quiesce_reason_surface_destroy++;
+    }
     if (sid == state->active_screen_target_sid &&
         !vmsvga3d_screen_target_quiesce_live(s)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D,
@@ -5843,12 +5849,15 @@ static bool vmsvga3d_handle_draw_primitives(struct vmsvga_state_s *s,
         return true;
     }
 
+    s->perf.d3d9_draw_calls++;
     body = payload;
     if (body->numVertexDecls > SVGA3D_MAX_VERTEX_ARRAYS ||
         body->numRanges > SVGA3D_MAX_DRAW_PRIMITIVE_RANGES) {
         vmsvga3d_fifo_release_payload(s, payload);
         return true;
     }
+
+    s->perf.d3d9_draw_ranges += body->numRanges;
 
     base_size = sizeof(*body) +
                 (uint64_t)body->numVertexDecls * sizeof(SVGA3dVertexDecl) +
@@ -9989,6 +9998,7 @@ static bool vmsvga3d_surface_readback_to_shadow(
     bool d3d9_resident;
     bool d3d11_resident;
     bool success;
+    int64_t readback_start_us;
     const char *backend;
 
     if (s == NULL || surface == NULL || image == NULL ||
@@ -10014,13 +10024,21 @@ static bool vmsvga3d_surface_readback_to_shadow(
 
     if (d3d9_resident) {
         backend = "d3d9";
+        s->perf.shadow_readback_d3d9++;
+        readback_start_us = g_get_monotonic_time();
         d3d9_result = vmsvga3d_d3d9_runtime_readback_surface_image(
             s, surface, image, subresource);
+        s->perf.shadow_readback_d3d9_us +=
+            g_get_monotonic_time() - readback_start_us;
         success = d3d9_result == VMSVGA3D_D3D9_ACCEL_COMPLETE;
     } else if (d3d11_resident) {
         backend = "d3d11";
+        s->perf.shadow_readback_d3d11++;
+        readback_start_us = g_get_monotonic_time();
         success = vmsvga3d_d3d11_readback_shadow_image(
             s, surface, image, subresource);
+        s->perf.shadow_readback_d3d11_us +=
+            g_get_monotonic_time() - readback_start_us;
     } else {
         backend = "cpu";
         success = true;
@@ -15028,6 +15046,7 @@ vmsvga3d_screen_target_async_poll_present_live(
     uint32_t screen_size = 0;
     uint32_t rect_count = 0;
     int64_t poll_start_us;
+    int64_t poll_elapsed_us;
     uint32_t i;
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
@@ -15069,8 +15088,16 @@ vmsvga3d_screen_target_async_poll_present_live(
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
     }
 
+    poll_elapsed_us = g_get_monotonic_time() - poll_start_us;
     s->perf.screen_poll_calls++;
-    s->perf.screen_poll_us += g_get_monotonic_time() - poll_start_us;
+    s->perf.screen_poll_us += poll_elapsed_us;
+    if (d3d9_resident && !d3d11_resident) {
+        s->perf.screen_poll_d3d9++;
+        s->perf.screen_poll_d3d9_us += poll_elapsed_us;
+    } else if (d3d11_resident && !d3d9_resident) {
+        s->perf.screen_poll_d3d11++;
+        s->perf.screen_poll_d3d11_us += poll_elapsed_us;
+    }
     switch (poll) {
     case VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY:
         s->perf.screen_poll_ready++;
@@ -15129,6 +15156,8 @@ vmsvga3d_screen_target_async_submit_live(
     VMSVGA3DD3D9Rect d3d_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
     VMSVGA3DSurfaceImage *image;
     VMSVGA3DDxvkScreenReadbackSubmitResult result;
+    int64_t submit_start_us = 0;
+    int64_t submit_elapsed_us = 0;
     uint32_t i;
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
@@ -15153,13 +15182,21 @@ vmsvga3d_screen_target_async_submit_live(
     }
 
     if (d3d9_resident && !d3d11_resident) {
+        submit_start_us = g_get_monotonic_time();
         result = vmsvga3d_dxvk_d3d9_screen_readback_submit(
             s->dxvk, surface->dxvk_surface, 0, d3d_rects, rect_count,
             image->size.width, image->size.height, bytes_per_pixel);
+        submit_elapsed_us = g_get_monotonic_time() - submit_start_us;
+        s->perf.screen_submit_d3d9++;
+        s->perf.screen_submit_d3d9_us += submit_elapsed_us;
     } else if (d3d11_resident && !d3d9_resident) {
+        submit_start_us = g_get_monotonic_time();
         result = vmsvga3d_dxvk_d3d11_screen_readback_submit(
             s->dxvk, surface->dxvk_surface, 0, d3d_rects, rect_count,
             image->size.width, image->size.height, bytes_per_pixel);
+        submit_elapsed_us = g_get_monotonic_time() - submit_start_us;
+        s->perf.screen_submit_d3d11++;
+        s->perf.screen_submit_d3d11_us += submit_elapsed_us;
     } else {
         result = VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
     }
@@ -15233,6 +15270,24 @@ static bool vmsvga3d_screen_target_async_drain_live(
     }
 }
 
+static void vmsvga3d_screen_target_sync_profile_record(
+    struct vmsvga_state_s *s, uint32_t backend, int64_t start_us)
+{
+    int64_t elapsed_us;
+
+    if (s == NULL || start_us == 0) {
+        return;
+    }
+
+    elapsed_us = g_get_monotonic_time() - start_us;
+    s->perf.screen_sync_readback_us += elapsed_us;
+    if (backend == 9) {
+        s->perf.screen_sync_d3d9_us += elapsed_us;
+    } else if (backend == 11) {
+        s->perf.screen_sync_d3d11_us += elapsed_us;
+    }
+}
+
 static bool vmsvga3d_screen_target_flush_live_mode(
     struct vmsvga_state_s *s, bool allow_async)
 {
@@ -15251,6 +15306,7 @@ static bool vmsvga3d_screen_target_flush_live_mode(
     uint32_t handoff_writes = 0;
     bool handoff_overflow = false;
     int64_t sync_readback_start_us = 0;
+    uint32_t sync_readback_backend = 0;
     VMSVGA3DSurface *cpu_direct_surface = NULL;
 
     if (s == NULL || s->svga3d == NULL) {
@@ -15450,6 +15506,12 @@ static bool vmsvga3d_screen_target_flush_live_mode(
 
             if (d3d9_resident || d3d11_resident) {
                 s->perf.screen_sync_readbacks++;
+                sync_readback_backend = d3d9_resident ? 9u : 11u;
+                if (sync_readback_backend == 9u) {
+                    s->perf.screen_sync_d3d9++;
+                } else {
+                    s->perf.screen_sync_d3d11++;
+                }
                 sync_readback_start_us = g_get_monotonic_time();
             }
 
@@ -15471,6 +15533,9 @@ static bool vmsvga3d_screen_target_flush_live_mode(
                     if (vmsvga3d_d3d9_runtime_readback_surface_image(
                             s, surface, &surface->mips[0], 0) !=
                         VMSVGA3D_D3D9_ACCEL_COMPLETE) {
+                        vmsvga3d_screen_target_sync_profile_record(
+                            s, sync_readback_backend, sync_readback_start_us);
+                        sync_readback_start_us = 0;
                         return false;
                     }
                     batch_readback = true;
@@ -15512,16 +15577,18 @@ static bool vmsvga3d_screen_target_flush_live_mode(
                         rects[i].h);
             }
             if (sync_readback_start_us != 0) {
-                s->perf.screen_sync_readback_us +=
-                    g_get_monotonic_time() - sync_readback_start_us;
+                vmsvga3d_screen_target_sync_profile_record(
+                    s, sync_readback_backend, sync_readback_start_us);
+                sync_readback_start_us = 0;
             }
             return false;
         }
     }
 
     if (sync_readback_start_us != 0) {
-        s->perf.screen_sync_readback_us +=
-            g_get_monotonic_time() - sync_readback_start_us;
+        vmsvga3d_screen_target_sync_profile_record(
+            s, sync_readback_backend, sync_readback_start_us);
+        sync_readback_start_us = 0;
     }
 
     if (full_refresh || narrowed_by_write_damage) {
@@ -15591,7 +15658,13 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s)
 {
     struct vmsvga3d_state_s *state;
+    VMSVGA3DSurface *surface = NULL;
+    VMSVGA3DD3D9TransferSurface d3d9_info = {0};
+    uint32_t quiesce_backend = 0;
     int64_t start_us;
+    int64_t elapsed_us;
+    bool d3d9_resident = false;
+    bool d3d11_resident = false;
     bool result = true;
 
     if (s == NULL || s->svga3d == NULL) {
@@ -15601,6 +15674,30 @@ static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s)
     s->perf.screen_quiesces++;
     start_us = g_get_monotonic_time();
     state = s->svga3d;
+    if (state->active_screen_target_sid != SVGA3D_INVALID_ID &&
+        state->active_screen_target_sid < SVGA3D_MAX_SURFACE_IDS) {
+        surface = state->surfaces[state->active_screen_target_sid];
+        if (surface != NULL && surface->dxvk_surface != NULL) {
+            d3d9_resident =
+                vmsvga3d_d3d9_runtime_surface_info(
+                    s, surface, &d3d9_info) && d3d9_info.resident;
+            d3d11_resident =
+                vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+        }
+    }
+    if (d3d9_resident && !d3d11_resident) {
+        quiesce_backend = 9u;
+        s->perf.screen_quiesce_d3d9++;
+    } else if (d3d11_resident && !d3d9_resident) {
+        quiesce_backend = 11u;
+        s->perf.screen_quiesce_d3d11++;
+    } else if (d3d9_resident && d3d11_resident) {
+        quiesce_backend = 10u;
+        s->perf.screen_quiesce_mixed++;
+    } else {
+        s->perf.screen_quiesce_cpu++;
+    }
+
     if (!vmsvga3d_screen_target_async_drain_live(s)) {
         result = false;
         goto out;
@@ -15634,7 +15731,17 @@ static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s)
     result = vmsvga3d_screen_target_flush_live_mode(s, false);
 
 out:
-    s->perf.screen_quiesce_us += g_get_monotonic_time() - start_us;
+    elapsed_us = g_get_monotonic_time() - start_us;
+    s->perf.screen_quiesce_us += elapsed_us;
+    if (quiesce_backend == 9u) {
+        s->perf.screen_quiesce_d3d9_us += elapsed_us;
+    } else if (quiesce_backend == 11u) {
+        s->perf.screen_quiesce_d3d11_us += elapsed_us;
+    } else if (quiesce_backend == 10u) {
+        s->perf.screen_quiesce_mixed_us += elapsed_us;
+    } else {
+        s->perf.screen_quiesce_cpu_us += elapsed_us;
+    }
     return result;
 }
 
@@ -15891,6 +15998,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 body->height > VMSVGA_MAX_HEIGHT) {
                 break;
             }
+            s->perf.quiesce_reason_target_define++;
             if (!vmsvga3d_screen_target_quiesce_live(s)) {
                 break;
             }
@@ -15939,6 +16047,7 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
             if (body->stid != VMSVGA_SCREEN_V1_ID) {
                 break;
             }
+            s->perf.quiesce_reason_target_destroy++;
             if (!vmsvga3d_screen_target_quiesce_live(s)) {
                 break;
             }
@@ -16360,6 +16469,10 @@ static bool vmsvga3d_handle_destroy_gb_surface(struct vmsvga_state_s *s,
 
     if (size >= sizeof(*body)) {
         body = payload;
+        if (s != NULL && s->svga3d != NULL &&
+            body->sid == s->svga3d->active_screen_target_sid) {
+            s->perf.quiesce_reason_gb_surface_destroy++;
+        }
         if (s != NULL && s->svga3d != NULL &&
             body->sid == s->svga3d->active_screen_target_sid &&
             !vmsvga3d_screen_target_quiesce_live(s)) {

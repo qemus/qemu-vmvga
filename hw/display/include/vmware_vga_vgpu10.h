@@ -352,6 +352,31 @@ typedef struct vmsvga3d_d3d10_shader_resource_binding_s {
     SVGA3dSurfaceFormat format;
 } VMSVGA3DD3D10ShaderResourceBinding;
 
+#define VMSVGA3D_D3D10_PIPELINE_GRAPHICS_STAGES 5u
+#define VMSVGA3D_D3D10_PIPELINE_VARIANT_MAX_INPUTS 32u
+
+typedef struct vmsvga3d_d3d10_pipeline_variant_input_s {
+    uint32_t input_register;
+    uint32_t component_type;
+} VMSVGA3DD3D10PipelineVariantInput;
+
+typedef struct vmsvga3d_d3d10_pipeline_variant_resource_s {
+    uint32_t resource_dimension;
+    uint32_t return_type;
+} VMSVGA3DD3D10PipelineVariantResource;
+
+typedef struct vmsvga3d_d3d10_pipeline_variant_key_s {
+    uint32_t shader_ids[VMSVGA3D_D3D10_PIPELINE_GRAPHICS_STAGES];
+    uint64_t shader_generations[VMSVGA3D_D3D10_PIPELINE_GRAPHICS_STAGES];
+    uint32_t vs_input_count;
+    VMSVGA3DD3D10PipelineVariantInput
+        vs_inputs[VMSVGA3D_D3D10_PIPELINE_VARIANT_MAX_INPUTS];
+    uint32_t ps_resource_count;
+    VMSVGA3DD3D10PipelineVariantResource
+        ps_resources[SVGA3D_DX_MAX_SRVIEWS];
+    uint32_t ps_output_types[SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS];
+} VMSVGA3DD3D10PipelineVariantKey;
+
 /*
  * ShaderDXBC owns data after shader_create_dxbc().  Release it exactly once
  * with shader_dxbc_release(); callers must not reuse an owning output object.

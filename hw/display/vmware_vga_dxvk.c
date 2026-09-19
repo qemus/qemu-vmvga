@@ -10181,6 +10181,27 @@ bool vmsvga3d_dxvk_d3d11_query_pending(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d11_any_query_pending(VMSVGA3DDxvk *dxvk)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkQuery *query;
+
+    if (dxvk == NULL) {
+        return false;
+    }
+
+    for (query = dxvk->d3d11_queries; query != NULL; query = query->next) {
+        if (query->query != NULL && query->pending) {
+            return true;
+        }
+    }
+    return false;
+#else
+    (void)dxvk;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_set_predication(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t query_id, bool enabled,
     bool predicate_value)

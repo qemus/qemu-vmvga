@@ -10510,6 +10510,15 @@ static void vmsvga3d_command_buffer_execute_work(
         work->header.length - work->header.offset, &local_offset);
     processed = work->header.offset + local_offset;
 
+    /* VirtualBox services backend pending tasks from its refresh pump.  The
+     * asynchronous command-buffer path can otherwise complete many guest
+     * GetData/READBACK_QUERY submissions before our display timer runs.  Only
+     * scan the guest query tables when the native backend actually has a
+     * pending D3D11 query, so the common no-query path stays cheap. */
+    if (vmsvga3d_dxvk_d3d11_any_query_pending(s->dxvk)) {
+        vmsvga3d_d3d10_process_pending_queries(s, "CB");
+    }
+
     /* QUEUE_FULL is only legal as a synchronous submission rejection.
      * Once this command buffer was accepted into the host queue, a later
      * private-parser allocation failure is an execution failure instead. */

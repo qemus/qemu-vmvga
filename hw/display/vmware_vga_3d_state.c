@@ -259,7 +259,10 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_context_bind(
 
         memcpy(&context->shadow, valid_contents, sizeof(context->shadow));
         context->pending_so_targets_valid = false;
-        context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
+        context->renderer_dirty |=
+            VMSVGA3D_DX_CTX_F_STATE_SOTARGETS |
+            VMSVGA3D_DX_CTX_F_STATE_SHADERS |
+            VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE;
     }
 
     return true;
@@ -455,9 +458,16 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader(
 
     if (context->shadow.shaderState[plan->stage_index].shaderId !=
         plan->shader_id) {
+        SVGA3dShaderType shader_type =
+            (SVGA3dShaderType)(plan->stage_index + SVGA3D_SHADERTYPE_MIN);
+
         context->shadow.shaderState[plan->stage_index].shaderId =
             plan->shader_id;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SHADERS;
+        if (shader_type != SVGA3D_SHADERTYPE_CS) {
+            context->renderer_dirty |=
+                VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE;
+        }
     }
     return true;
 }

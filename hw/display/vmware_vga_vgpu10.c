@@ -7160,10 +7160,16 @@ static void vmsvga3d_d3d10_bound_shader_dirty_live(
 
     for (stage = 0; stage < vmsvga3d_dx_shader_stage_count(s); stage++) {
         if (context->shadow.shaderState[stage].shaderId == shader_id) {
+            SVGA3dShaderType shader_type =
+                (SVGA3dShaderType)(stage + SVGA3D_SHADERTYPE_MIN);
+
             (void)vmsvga3d_d3d10_pipeline_signature_dependency_invalidate_live(
-                s, context, cid,
-                (SVGA3dShaderType)(stage + SVGA3D_SHADERTYPE_MIN));
+                s, context, cid, shader_type);
             context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SHADERS;
+            if (shader_type != SVGA3D_SHADERTYPE_CS) {
+                context->renderer_dirty |=
+                    VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE;
+            }
             return;
         }
     }
@@ -8237,6 +8243,42 @@ static bool shader_has_pipeline_linked_signature_state(
             shader->pipeline_linked_patch_component_mask != 0);
 }
 
+static bool shader_may_need_pipeline_linkage_refresh(
+    SVGA3dShaderType type, const VMSVGA3DD3D10ShaderInfo *shader)
+{
+    if (shader == NULL || type == SVGA3D_SHADERTYPE_CS) {
+        return false;
+    }
+
+    if (shader_has_pipeline_linked_signature_state(shader)) {
+        return true;
+    }
+
+    /* Provenance only records links that existed during an earlier setup.
+     * A newly-created edge has no mask yet, so keep native shaders immutable
+     * only when their declarations cannot be changed by adjacent stages.
+     * Generic inputs always need semantic rematching; UNKNOWN generic outputs
+     * and patch constants can acquire a component type from a consumer.
+     */
+    if (shader_signature_has_generic_component(
+            shader->input_signature, shader->input_signature_count, false) ||
+        shader_signature_has_generic_component(
+            shader->output_signature, shader->output_signature_count, true) ||
+        shader_signature_has_generic_component(
+            shader->patch_signature, shader->patch_signature_count, true)) {
+        return true;
+    }
+
+    /* An already-native GS can also have been created before either adjacent
+     * stage existed, leaving a whole signature array absent rather than merely
+     * unresolved.  A later producer/consumer binding must be allowed to
+     * synthesize that array before the reverse propagation walk.
+     */
+    return type == SVGA3D_SHADERTYPE_GS &&
+           (shader->input_signature_count == 0 ||
+            shader->output_signature_count == 0);
+}
+
 static bool vmsvga3d_d3d10_pipeline_reset_linked_signatures_live(
     struct vmsvga_state_s *s, VMSVGA3DDXContext *context, uint32_t cid)
 {
@@ -8247,9 +8289,10 @@ static bool vmsvga3d_d3d10_pipeline_reset_linked_signatures_live(
     }
 
     /* Pipeline-derived signature data is cached in the persistent ShaderInfo.
-     * Drop any native object that serialized such data before clearing it, so
-     * a dirty pipeline setup always recomputes the linkage from the currently
-     * selected adjacent stages instead of treating an old inferred type as an
+     * On an actual linkage mutation, drop native objects that either serialized
+     * old derived data or can acquire new data from a newly-created edge.  The
+     * following mutable-info pass can then rebuild linkage from the currently
+     * selected adjacent stages without treating an old inferred type as an
      * intrinsic shader declaration.
      */
     for (stage = 0; stage < vmsvga3d_dx_shader_stage_count(s); stage++) {
@@ -8260,7 +8303,8 @@ static bool vmsvga3d_d3d10_pipeline_reset_linked_signatures_live(
         if (shader_id == SVGA3D_INVALID_ID ||
             !vmsvga3d_dxvk_d3d11_shader_info(
                 s->dxvk, cid, shader_id, shader_type, &info) ||
-            !shader_has_pipeline_linked_signature_state(info)) {
+            !shader_may_need_pipeline_linkage_refresh(
+                (SVGA3dShaderType)shader_type, info)) {
             continue;
         }
 
@@ -8450,6 +8494,7 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    bool linkage_dirty;
     bool retry = false;
     uint32_t stage;
 
@@ -8458,19 +8503,27 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
         return;
     }
 
-    /* Shader setup used to visit every available stage on every Draw.  Keep
-     * the exact full-stage replay semantics when shader state is dirty, but
-     * make the steady-state path a single dirty-bit test.  Failed realization
-     * remains dirty so the next Draw preserves the old retry behavior.
+    linkage_dirty =
+        (context->renderer_dirty &
+         VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE) != 0;
+
+    /* STATE_SHADERS also means "replay cached native shader bindings" after
+     * context switches, PresentBlt, stream-output changes, and other backend
+     * state clobbers.  Only an actual guest shader-graph/content mutation may
+     * invalidate pipeline-derived signatures and force native recreation.
      */
-    if (!vmsvga3d_d3d10_pipeline_reset_linked_signatures_live(
-            s, context, cid)) {
-        return;
+    if (linkage_dirty) {
+        if (!vmsvga3d_d3d10_pipeline_reset_linked_signatures_live(
+                s, context, cid)) {
+            return;
+        }
+        context->renderer_dirty &=
+            ~VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE;
+        vmsvga3d_d3d10_pipeline_materialize_signatures_live(s, context, cid);
+        vmsvga3d_d3d10_pipeline_propagate_output_types_live(s, context, cid);
     }
 
     context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SHADERS;
-    vmsvga3d_d3d10_pipeline_materialize_signatures_live(s, context, cid);
-    vmsvga3d_d3d10_pipeline_propagate_output_types_live(s, context, cid);
     for (stage = 0; stage < vmsvga3d_dx_shader_stage_count(s); stage++) {
         uint32_t shader_type = stage + SVGA3D_SHADERTYPE_MIN;
         uint32_t shader_id = context->shadow.shaderState[stage].shaderId;

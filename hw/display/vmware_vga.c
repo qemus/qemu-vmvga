@@ -399,6 +399,52 @@ struct vmsvga_trace_devcap_s {
 
 struct vmsvga_command_buffer_work_s;
 
+struct vmsvga_perf_counters_s {
+    uint64_t pipeline_setups;
+    uint64_t shader_replays;
+    uint64_t shader_replay_us;
+    uint64_t shader_guest_sets;
+    uint64_t shader_guest_changes;
+    uint64_t shader_linkage_refreshes;
+    uint64_t shader_linkage_us;
+    uint64_t shader_retries;
+    uint64_t so_guest_sets;
+    uint64_t so_native_binds;
+    uint64_t so_realize_failures;
+    uint64_t so_realize_us;
+    uint64_t present_blts;
+    uint64_t present_blt_us;
+    uint64_t context_switches;
+    uint64_t context_switch_us;
+    uint64_t screen_poll_calls;
+    uint64_t screen_poll_ready;
+    uint64_t screen_poll_pending;
+    uint64_t screen_poll_idle;
+    uint64_t screen_poll_failed;
+    uint64_t screen_poll_us;
+    uint64_t screen_submit_ok;
+    uint64_t screen_submit_busy;
+    uint64_t screen_submit_failed;
+    uint64_t screen_quiesces;
+    uint64_t screen_quiesce_us;
+    uint64_t screen_sync_readbacks;
+    uint64_t screen_sync_readback_us;
+    uint64_t screen_drains;
+    uint64_t screen_drain_frames;
+    uint64_t d3d11_readbacks;
+    uint64_t d3d11_readback_us;
+    uint64_t cb_submitted;
+    uint64_t cb_executed;
+    uint64_t cb_enqueue_rejects;
+    uint64_t cb_services;
+    uint64_t cb_drains;
+    uint64_t cb_drain_buffers;
+    uint64_t cb_drain_us;
+    uint64_t report_polls;
+    int64_t report_start_us;
+    int64_t report_last_us;
+};
+
 enum vmsvga_vgpu_generation_e {
     VMSVGA_VGPU_AUTO = 0,
     VMSVGA_VGPU_9 = 9,
@@ -455,6 +501,8 @@ struct vmsvga_state_s {
     uint64_t cb_queue_executed;
     uint64_t cb_queue_bytes;
     uint64_t cb_queue_drains;
+    struct vmsvga_perf_counters_s perf;
+    struct vmsvga_perf_counters_s perf_last;
     bool cb_bh_running;
     uint32_t fifo_size;
     uint32_t fifo_min;
@@ -10261,6 +10309,12 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
      * is QEMU's regular renderer-service point. */
     vmsvga3d_d3d9_process_pending_gb_queries(s, "DISPLAY");
     vmsvga3d_d3d10_process_pending_queries(s, "DISPLAY");
+
+    /* Low-volume performance counters are intentionally independent of the
+     * existing trace controls.  Report from the display service point so even
+     * a badly regressed low-FPS workload emits a sample every few seconds.
+     */
+    vmsvga3d_perf_profile_report(s);
 
     if (!s->enable || !s->config) {
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);

@@ -9211,7 +9211,11 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             " qr-redef=%" PRIu64 " qr-destroy=%" PRIu64
             " qr-stdef=%" PRIu64 " qr-stdestroy=%" PRIu64
             " qr-unbind=%" PRIu64 " st-switch=%" PRIu64
-            " qr-switch=%" PRIu64 " qr-h9=%" PRIu64
+            " retire-arm=%" PRIu64 " retire-done=%" PRIu64
+            " retire-wait=%" PRIu64 " retire-fail=%" PRIu64
+            " trans-async=%" PRIu64
+            " trans-commit=%" PRIu64 " qr-switch=%" PRIu64
+            " qr-h9=%" PRIu64
             " qr-h11=%" PRIu64
             " qr-gbdestroy=%" PRIu64 " qr-other=%" PRIu64 "\n",
             elapsed_ms,
@@ -9251,6 +9255,16 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             p->quiesce_reason_target_destroy - l->quiesce_reason_target_destroy,
             p->quiesce_reason_target_unbind - l->quiesce_reason_target_unbind,
             p->screen_target_switches - l->screen_target_switches,
+            p->screen_target_retire_armed - l->screen_target_retire_armed,
+            p->screen_target_retire_completed -
+                l->screen_target_retire_completed,
+            p->screen_target_retire_waits - l->screen_target_retire_waits,
+            p->screen_target_retire_failures -
+                l->screen_target_retire_failures,
+            p->screen_target_transition_async_submits -
+                l->screen_target_transition_async_submits,
+            p->screen_target_transition_async_commits -
+                l->screen_target_transition_async_commits,
             p->quiesce_reason_target_switch - l->quiesce_reason_target_switch,
             p->quiesce_reason_handoff_d3d9 - l->quiesce_reason_handoff_d3d9,
             p->quiesce_reason_handoff_d3d11 - l->quiesce_reason_handoff_d3d11,
@@ -11231,25 +11245,50 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         return false;
     }
 
-    /* Retire the old ScreenTarget through its per-surface async readback ring
-     * before changing the active SID.  A successful async submit snapshots the
-     * old renderer contents into storage owned by that surface, so switching no
-     * longer has to wait for readback completion.  When the old SID becomes
-     * active again, the normal ScreenTarget flush path polls that same ring and
-     * publishes the completed frame before submitting newer damage.
-     *
-     * If all ring slots are still in flight, flush_live() deliberately leaves
-     * the old dirty rectangles queued.  Preserve correctness in that uncommon
-     * pressure case by falling back to the original synchronous quiesce.
-     */
-    s->perf.screen_target_switches++;
-    if (!vmsvga3d_screen_target_flush_live(s)) {
-        return false;
+    /* Keep one ordered inactive-target presentation obligation.  The display
+     * path services it before publishing the active target; if another switch
+     * arrives before it completes, drain it before creating the next one. */
+    if (s->svga3d->screen_target_retired_pending) {
+        bool retired_pending = false;
+
+        if (!vmsvga3d_screen_target_retired_service_live(
+                s, false, &retired_pending)) {
+            return false;
+        }
+        if (retired_pending) {
+            s->perf.screen_target_retire_waits++;
+            if (!vmsvga3d_screen_target_retired_service_live(
+                    s, true, &retired_pending) || retired_pending) {
+                return false;
+            }
+        }
     }
-    if (s->svga3d->screen_target_dirty_count != 0) {
+
+    s->perf.screen_target_switches++;
+    if (!vmsvga3d_screen_target_flush_switch_live(s) ||
+        s->svga3d->screen_target_dirty_count != 0) {
         s->perf.quiesce_reason_target_switch++;
         if (!vmsvga3d_screen_target_quiesce_live(s)) {
             return false;
+        }
+    } else if (old_sid != SVGA3D_INVALID_ID &&
+               old_sid < SVGA3D_MAX_SURFACE_IDS) {
+        VMSVGA3DSurface *old_surface = s->svga3d->surfaces[old_sid];
+        uint32_t pending_backend =
+            old_surface != NULL && old_surface->dxvk_surface != NULL
+                ? vmsvga3d_dxvk_screen_readback_pending_backend(
+                      old_surface->dxvk_surface)
+                : 0;
+
+        if (pending_backend == 9 || pending_backend == 11) {
+            s->svga3d->screen_target_retired_pending = true;
+            s->svga3d->screen_target_retired_sid = old_sid;
+            s->perf.screen_target_retire_armed++;
+        } else if (pending_backend != 0) {
+            s->perf.quiesce_reason_target_switch++;
+            if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                return false;
+            }
         }
     }
     if (s->screen_direct_active &&

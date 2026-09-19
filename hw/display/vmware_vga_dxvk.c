@@ -12619,6 +12619,34 @@ static bool vmsvga3d_dxvk_screen_readback_rect_bounds(
     return true;
 }
 
+static uint32_t vmsvga3d_dxvk_screen_readback_pending_backend(
+    const VMSVGA3DDxvkSurface *surface)
+{
+    bool pending_d3d9 = false;
+    bool pending_d3d11 = false;
+    uint32_t i;
+
+    if (surface == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        pending_d3d9 |= surface->d3d9_screen_readback[i].pending;
+        pending_d3d11 |= surface->d3d11_screen_readback[i].pending;
+    }
+
+    if (pending_d3d9 && pending_d3d11) {
+        return 10;
+    }
+    if (pending_d3d9) {
+        return 9;
+    }
+    if (pending_d3d11) {
+        return 11;
+    }
+    return 0;
+}
+
 static VMSVGA3DDxvkScreenReadbackSlot *
 vmsvga3d_dxvk_screen_readback_free_slot(
     VMSVGA3DDxvkScreenReadbackSlot *slots)
@@ -12635,13 +12663,14 @@ vmsvga3d_dxvk_screen_readback_free_slot(
 
 static VMSVGA3DDxvkScreenReadbackSlot *
 vmsvga3d_dxvk_screen_readback_oldest_slot(
-    VMSVGA3DDxvkScreenReadbackSlot *slots)
+    VMSVGA3DDxvkScreenReadbackSlot *slots, uint64_t min_sequence)
 {
     VMSVGA3DDxvkScreenReadbackSlot *oldest = NULL;
     uint32_t i;
 
     for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
-        if (!slots[i].pending) {
+        if (!slots[i].pending ||
+            (min_sequence != 0 && slots[i].sequence < min_sequence)) {
             continue;
         }
         if (oldest == NULL || slots[i].sequence < oldest->sequence) {
@@ -12734,7 +12763,8 @@ VMSVGA3DDxvkScreenReadbackSubmitResult
 vmsvga3d_dxvk_d3d9_screen_readback_submit(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
     const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
-    uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel)
+    uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel,
+    uint64_t *sequence_out)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkScreenReadbackSlot *slot;
@@ -12746,6 +12776,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
     VMSVGA3DDxvkStretchRect stretch_rect = NULL;
     VMSVGA3DDxvkCreateQuery create_query = NULL;
     VMSVGA3DDxvkQueryIssue issue = NULL;
+    VMSVGA3DDxvkQueryGetData get_data = NULL;
     void *source_surface = NULL;
     uint32_t left;
     uint32_t top;
@@ -12755,8 +12786,12 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
     uint32_t height;
     uint32_t i;
     bool cumulative = false;
+    uint32_t query_data = 0;
     int32_t result;
 
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
     if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
         !surface->d3d9_resident || surface->d3d11_resident ||
         surface->d3d9_resource == NULL || bytes_per_pixel == 0) {
@@ -12864,7 +12899,20 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
     }
 
     result = issue(slot->query, VMSVGA3D_DXVK_D3DISSUE_END);
-    if (!vmsvga3d_dxvk_succeeded(result)) {
+    if (!vmsvga3d_dxvk_succeeded(result) ||
+        !vmsvga3d_dxvk_get_method(
+            slot->query, VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+            &get_data, sizeof(get_data))) {
+        goto fail;
+    }
+
+    /* D3D9 has no D3D11-style explicit nonblocking Flush.  Kick submission
+     * exactly once when the slot is queued, then keep ordinary readiness polls
+     * NOFLUSH.  S_FALSE is the expected nonblocking result here. */
+    result = get_data(slot->query, &query_data, sizeof(query_data),
+                      VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
+    if (result != VMSVGA3D_DXVK_D3D_S_FALSE &&
+        !vmsvga3d_dxvk_succeeded(result)) {
         goto fail;
     }
 
@@ -12880,6 +12928,9 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
         slot->sequence = ++surface->d3d9_screen_readback_sequence;
     }
     slot->pending = true;
+    if (sequence_out != NULL) {
+        *sequence_out = slot->sequence;
+    }
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
@@ -12912,6 +12963,9 @@ fail:
     (void)source_width;
     (void)source_height;
     (void)bytes_per_pixel;
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
     return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
 #endif
 }
@@ -12921,7 +12975,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, bool wait, void *data,
     uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
     struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
-    uint32_t *rect_count)
+    uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkScreenReadbackSlot *slot = NULL;
@@ -12943,6 +12997,9 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
     if (rect_count != NULL) {
         *rect_count = 0;
     }
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
     if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL || data == NULL ||
         rects == NULL || rect_count == NULL || bytes_per_pixel == 0 ||
         row_pitch == 0 || data_size == 0) {
@@ -12951,7 +13008,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 
     if (wait) {
         slot = vmsvga3d_dxvk_screen_readback_oldest_slot(
-            surface->d3d9_screen_readback);
+            surface->d3d9_screen_readback, min_sequence);
         if (slot == NULL) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
         }
@@ -12970,7 +13027,8 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
                 &surface->d3d9_screen_readback[i];
             VMSVGA3DDxvkQueryGetData candidate_get_data = NULL;
 
-            if (!candidate->pending) {
+            if (!candidate->pending ||
+                (min_sequence != 0 && candidate->sequence < min_sequence)) {
                 continue;
             }
             pending = true;
@@ -13099,6 +13157,9 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
         dropped = vmsvga3d_dxvk_screen_readback_drop_older_slots(
             surface->d3d9_screen_readback, slot->sequence);
     }
+    if (sequence_out != NULL) {
+        *sequence_out = slot->sequence;
+    }
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "SCREEN-READBACK backend=d3d9 phase=ready sid=%u seq=%" PRIu64
@@ -13118,6 +13179,10 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
     (void)data_size;
     (void)rects;
     (void)rect_capacity;
+    (void)min_sequence;
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
     if (rect_count != NULL) {
         *rect_count = 0;
     }
@@ -13129,7 +13194,8 @@ VMSVGA3DDxvkScreenReadbackSubmitResult
 vmsvga3d_dxvk_d3d11_screen_readback_submit(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
-    uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel)
+    uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel,
+    uint64_t *sequence_out)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkScreenReadbackSlot *slot;
@@ -13158,6 +13224,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
     bool cumulative = false;
     int32_t result;
 
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
         dxvk->d3d11_context == NULL || surface == NULL ||
         !surface->d3d11_resident || surface->d3d9_resident ||
@@ -13285,6 +13354,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
         slot->sequence = ++surface->d3d11_screen_readback_sequence;
     }
     slot->pending = true;
+    if (sequence_out != NULL) {
+        *sequence_out = slot->sequence;
+    }
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
@@ -13310,6 +13382,9 @@ fail:
     (void)source_width;
     (void)source_height;
     (void)bytes_per_pixel;
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
     return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
 #endif
 }
@@ -13319,7 +13394,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, bool wait, void *data,
     uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
     struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
-    uint32_t *rect_count)
+    uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkScreenReadbackSlot *slot = NULL;
@@ -13340,6 +13415,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     if (rect_count != NULL) {
         *rect_count = 0;
     }
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
         surface == NULL || data == NULL || rects == NULL ||
         rect_count == NULL || bytes_per_pixel == 0 || row_pitch == 0 ||
@@ -13359,7 +13437,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
 
     if (wait) {
         slot = vmsvga3d_dxvk_screen_readback_oldest_slot(
-            surface->d3d11_screen_readback);
+            surface->d3d11_screen_readback, min_sequence);
         if (slot == NULL) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
         }
@@ -13372,7 +13450,8 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
             VMSVGA3DDxvkScreenReadbackSlot *candidate =
                 &surface->d3d11_screen_readback[i];
 
-            if (!candidate->pending) {
+            if (!candidate->pending ||
+                (min_sequence != 0 && candidate->sequence < min_sequence)) {
                 continue;
             }
             pending = true;
@@ -13475,6 +13554,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
         dropped = vmsvga3d_dxvk_screen_readback_drop_older_slots(
             surface->d3d11_screen_readback, slot->sequence);
     }
+    if (sequence_out != NULL) {
+        *sequence_out = slot->sequence;
+    }
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "SCREEN-READBACK backend=d3d11 phase=ready sid=%u seq=%" PRIu64
@@ -13494,6 +13576,10 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     (void)data_size;
     (void)rects;
     (void)rect_capacity;
+    (void)min_sequence;
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
     if (rect_count != NULL) {
         *rect_count = 0;
     }

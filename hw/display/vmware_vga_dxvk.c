@@ -10181,7 +10181,7 @@ bool vmsvga3d_dxvk_d3d11_query_pending(
 #endif
 }
 
-bool vmsvga3d_dxvk_d3d11_any_query_pending(VMSVGA3DDxvk *dxvk)
+static bool vmsvga3d_dxvk_d3d11_any_query_pending(VMSVGA3DDxvk *dxvk)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkQuery *query;

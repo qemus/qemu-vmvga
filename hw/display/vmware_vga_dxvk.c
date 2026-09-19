@@ -44,6 +44,19 @@ typedef struct vmsvga3d_dxvk_input_layout_s VMSVGA3DDxvkInputLayout;
 typedef struct vmsvga3d_dxvk_constant_buffer_s VMSVGA3DDxvkConstantBuffer;
 typedef struct vmsvga3d_dxvk_view_s VMSVGA3DDxvkView;
 
+struct vmsvga3d_dxvk_perf_s {
+    uint64_t shader_invalidations;
+    uint64_t shader_active_hits;
+    uint64_t shader_variant_hits;
+    uint64_t shader_variant_misses;
+    uint64_t shader_variant_evictions;
+    uint64_t dxbc_builds;
+    uint64_t dxbc_build_us;
+    uint64_t native_shader_creates;
+    uint64_t native_shader_create_failures;
+    uint64_t native_shader_create_us;
+};
+
 #define VMSVGA3D_DXVK_D3D9_VERTEX_DECL_CACHE_LIMIT 256u
 #define VMSVGA3D_DXVK_SHADER_VARIANT_LIMIT 4u
 #define VMSVGA3D_DXVK_SCREEN_READBACK_RECTS 32u
@@ -122,6 +135,8 @@ struct vmsvga3d_dxvk_s {
     void *d3d11_blit_rasterizer_state;
     void *d3d11_blit_blend_state;
     bool d3d11_blitter_initialized;
+    struct vmsvga3d_dxvk_perf_s perf;
+    struct vmsvga3d_dxvk_perf_s perf_last;
     bool ready;
     bool d3d11_ready;
 };
@@ -8081,6 +8096,8 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     uint32_t i;
     void *native_shader = NULL;
     bool generated_dxbc = false;
+    int64_t operation_start_us;
+    uint32_t variant_count_before;
     int32_t result;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL) {
@@ -8104,6 +8121,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
      */
     if (shader->active_variant != NULL &&
         shader->active_variant->stream_output_id == variant_stream_output_id) {
+        dxvk->perf.shader_active_hits++;
         return true;
     }
 
@@ -8145,8 +8163,12 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
          * ShaderInfo for the current pipeline and use the finished DXBC bytes as
          * the variant key.
          */
+        operation_start_us = g_get_monotonic_time();
+        dxvk->perf.dxbc_builds++;
         level = vmsvga3d_d3d10_shader_resolve_component_types(&shader->info);
         if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
+            dxvk->perf.dxbc_build_us +=
+                g_get_monotonic_time() - operation_start_us;
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
                 "DX-SHADER-REALIZE cid=%u shid=%u type=%u result=FAIL "
@@ -8156,6 +8178,8 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         }
 
         level = vmsvga3d_d3d10_shader_create_dxbc(&shader->info, &dxbc);
+        dxvk->perf.dxbc_build_us +=
+            g_get_monotonic_time() - operation_start_us;
         if (level == VMSVGA3D_D3D10_LEVEL_INVALID ||
             dxbc.data == NULL || dxbc.size == 0) {
             VMVGA_TRACE_LOCAL(
@@ -8174,6 +8198,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     variant = vmsvga3d_dxvk_d3d11_shader_variant_find(
         shader, bytecode, bytecode_size, variant_stream_output_id);
     if (variant != NULL) {
+        dxvk->perf.shader_variant_hits++;
         vmsvga3d_dxvk_d3d11_shader_variant_activate(shader, variant);
         if (generated_dxbc) {
             vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
@@ -8181,6 +8206,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         return true;
     }
 
+    dxvk->perf.shader_variant_misses++;
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-SHADER-VARIANT cid=%u shid=%u type=%u action=miss "
@@ -8227,12 +8253,16 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
                 decl->component_count, decl->output_slot);
         }
 
+        operation_start_us = g_get_monotonic_time();
+        dxvk->perf.native_shader_creates++;
         result = create_gs_so(
             dxvk->d3d11_device, bytecode, bytecode_size,
             stream_output->declarations, stream_output->declaration_count,
             stream_output->use_explicit_strides ? stream_output->strides : NULL,
             stream_output->stride_count, stream_output->rasterized_stream,
             NULL, &native_shader);
+        dxvk->perf.native_shader_create_us +=
+            g_get_monotonic_time() - operation_start_us;
     } else {
         if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device, method,
                                        &create_shader, sizeof(create_shader))) {
@@ -8246,8 +8276,12 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
             }
             return false;
         }
+        operation_start_us = g_get_monotonic_time();
+        dxvk->perf.native_shader_creates++;
         result = create_shader(
             dxvk->d3d11_device, bytecode, bytecode_size, NULL, &native_shader);
+        dxvk->perf.native_shader_create_us +=
+            g_get_monotonic_time() - operation_start_us;
     }
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
@@ -8257,6 +8291,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         (uint32_t)result, native_shader != NULL ? 1u : 0u,
         vmsvga3d_dxvk_succeeded(result) && native_shader != NULL ? "OK" : "FAIL");
     if (!vmsvga3d_dxvk_succeeded(result) || native_shader == NULL) {
+        dxvk->perf.native_shader_create_failures++;
         if (native_shader != NULL) {
             vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         }
@@ -8266,6 +8301,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         return false;
     }
 
+    variant_count_before = shader->variant_count;
     if (!vmsvga3d_dxvk_d3d11_shader_variant_add(
             shader, native_shader, bytecode, bytecode_size,
             variant_stream_output_id)) {
@@ -8274,6 +8310,9 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
             vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
         }
         return false;
+    }
+    if (variant_count_before >= VMSVGA3D_DXVK_SHADER_VARIANT_LIMIT) {
+        dxvk->perf.shader_variant_evictions++;
     }
 
     if (generated_dxbc) {
@@ -8483,6 +8522,8 @@ bool vmsvga3d_dxvk_d3d11_shader_invalidate(
     if (shader == NULL) {
         return true;
     }
+
+    dxvk->perf.shader_invalidations++;
 
     /* Linkage invalidation makes the current ShaderInfo mutable again but does
      * not invalidate the guest shader program.  Detach the active native

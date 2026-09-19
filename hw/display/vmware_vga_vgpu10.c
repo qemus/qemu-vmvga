@@ -8496,6 +8496,8 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     bool linkage_dirty;
     bool retry = false;
+    int64_t replay_start_us;
+    int64_t linkage_start_us = 0;
     uint32_t stage;
 
     if (context == NULL ||
@@ -8503,6 +8505,8 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
         return;
     }
 
+    s->perf.shader_replays++;
+    replay_start_us = g_get_monotonic_time();
     linkage_dirty =
         (context->renderer_dirty &
          VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE) != 0;
@@ -8513,14 +8517,22 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
      * invalidate pipeline-derived signatures and force native recreation.
      */
     if (linkage_dirty) {
+        s->perf.shader_linkage_refreshes++;
+        linkage_start_us = g_get_monotonic_time();
         if (!vmsvga3d_d3d10_pipeline_reset_linked_signatures_live(
                 s, context, cid)) {
+            s->perf.shader_linkage_us +=
+                g_get_monotonic_time() - linkage_start_us;
+            s->perf.shader_replay_us +=
+                g_get_monotonic_time() - replay_start_us;
             return;
         }
         context->renderer_dirty &=
             ~VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE;
         vmsvga3d_d3d10_pipeline_materialize_signatures_live(s, context, cid);
         vmsvga3d_d3d10_pipeline_propagate_output_types_live(s, context, cid);
+        s->perf.shader_linkage_us +=
+            g_get_monotonic_time() - linkage_start_us;
     }
 
     context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SHADERS;
@@ -8807,8 +8819,10 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
     }
 
     if (retry) {
+        s->perf.shader_retries++;
         context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SHADERS;
     }
+    s->perf.shader_replay_us += g_get_monotonic_time() - replay_start_us;
 }
 
 static void vmsvga3d_d3d10_pipeline_shader_resources_live(
@@ -8881,6 +8895,7 @@ static bool vmsvga3d_d3d10_pipeline_so_targets_live(
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     VMSVGA3DD3D10SOTargetsPlan restore_plan;
     const VMSVGA3DD3D10SOTargetsPlan *plan;
+    int64_t start_us;
 
     if (context == NULL) {
         return false;
@@ -8900,9 +8915,13 @@ static bool vmsvga3d_d3d10_pipeline_so_targets_live(
         plan = &restore_plan;
     }
 
+    start_us = g_get_monotonic_time();
     if (!vmsvga3d_d3d10_so_targets_bind_live(s, cid, plan)) {
+        s->perf.so_realize_failures++;
+        s->perf.so_realize_us += g_get_monotonic_time() - start_us;
         return false;
     }
+    s->perf.so_realize_us += g_get_monotonic_time() - start_us;
 
     context->pending_so_targets_valid = false;
     context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
@@ -8915,6 +8934,142 @@ static bool vmsvga3d_d3d10_pipeline_so_targets_live(
     return true;
 }
 
+#define VMSVGA3D_PERF_REPORT_INTERVAL_US INT64_C(5000000)
+#define VMSVGA3D_PERF_REPORT_POLL_GRANULARITY 32u
+
+static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
+{
+    struct vmsvga_perf_counters_s *p;
+    struct vmsvga_perf_counters_s *l;
+    struct vmsvga3d_dxvk_perf_s *d;
+    struct vmsvga3d_dxvk_perf_s *dl;
+    int64_t now_us;
+    uint64_t elapsed_ms;
+    uint64_t interval_ms;
+
+    if (s == NULL || s->dxvk == NULL) {
+        return;
+    }
+
+    p = &s->perf;
+    d = &s->dxvk->perf;
+    if (p->report_start_us == 0) {
+        now_us = g_get_monotonic_time();
+        p->report_start_us = now_us;
+        p->report_last_us = now_us;
+        s->perf_last = *p;
+        s->dxvk->perf_last = *d;
+        fprintf(stderr,
+                "VMVGA-PROFILE-START interval-ms=5000 tracing-independent=1\n");
+        return;
+    }
+
+    p->report_polls++;
+    if ((p->report_polls % VMSVGA3D_PERF_REPORT_POLL_GRANULARITY) != 0) {
+        return;
+    }
+
+    now_us = g_get_monotonic_time();
+    if (now_us - p->report_last_us < VMSVGA3D_PERF_REPORT_INTERVAL_US) {
+        return;
+    }
+
+    l = &s->perf_last;
+    dl = &s->dxvk->perf_last;
+    elapsed_ms = (uint64_t)(now_us - p->report_start_us) / 1000u;
+    interval_ms = (uint64_t)(now_us - p->report_last_us) / 1000u;
+
+    fprintf(stderr,
+            "VMVGA-PROFILE t-ms=%" PRIu64 " interval-ms=%" PRIu64
+            " pipe=%" PRIu64 " shader-replay=%" PRIu64
+            " replay-us=%" PRIu64 " shader-set=%" PRIu64
+            " shader-change=%" PRIu64 " linkage=%" PRIu64
+            " linkage-us=%" PRIu64
+            " shader-retry=%" PRIu64 " invalidate=%" PRIu64
+            " active-hit=%" PRIu64 " variant-hit=%" PRIu64
+            " variant-miss=%" PRIu64 " variant-evict=%" PRIu64
+            " dxbc=%" PRIu64 " dxbc-us=%" PRIu64
+            " create=%" PRIu64 " create-fail=%" PRIu64
+            " create-us=%" PRIu64 "\n",
+            elapsed_ms, interval_ms,
+            p->pipeline_setups - l->pipeline_setups,
+            p->shader_replays - l->shader_replays,
+            p->shader_replay_us - l->shader_replay_us,
+            p->shader_guest_sets - l->shader_guest_sets,
+            p->shader_guest_changes - l->shader_guest_changes,
+            p->shader_linkage_refreshes - l->shader_linkage_refreshes,
+            p->shader_linkage_us - l->shader_linkage_us,
+            p->shader_retries - l->shader_retries,
+            d->shader_invalidations - dl->shader_invalidations,
+            d->shader_active_hits - dl->shader_active_hits,
+            d->shader_variant_hits - dl->shader_variant_hits,
+            d->shader_variant_misses - dl->shader_variant_misses,
+            d->shader_variant_evictions - dl->shader_variant_evictions,
+            d->dxbc_builds - dl->dxbc_builds,
+            d->dxbc_build_us - dl->dxbc_build_us,
+            d->native_shader_creates - dl->native_shader_creates,
+            d->native_shader_create_failures -
+                dl->native_shader_create_failures,
+            d->native_shader_create_us - dl->native_shader_create_us);
+    fprintf(stderr,
+            "VMVGA-PROFILE-IO t-ms=%" PRIu64
+            " so-guest=%" PRIu64 " so-bind=%" PRIu64
+            " so-fail=%" PRIu64 " so-us=%" PRIu64
+            " present=%" PRIu64 " present-us=%" PRIu64
+            " ctx-switch=%" PRIu64 " ctx-us=%" PRIu64
+            " screen-poll=%" PRIu64
+            " ready=%" PRIu64 " pending=%" PRIu64 " idle=%" PRIu64
+            " poll-fail=%" PRIu64 " poll-us=%" PRIu64
+            " submit=%" PRIu64 " busy=%" PRIu64
+            " submit-fail=%" PRIu64 " drain=%" PRIu64
+            " drain-frames=%" PRIu64 " quiesce=%" PRIu64
+            " quiesce-us=%" PRIu64 " screen-sync=%" PRIu64
+            " screen-sync-us=%" PRIu64 " d3d11-rb=%" PRIu64
+            " d3d11-rb-us=%" PRIu64 " cb-sub=%" PRIu64
+            " cb-exec=%" PRIu64 " cb-reject=%" PRIu64
+            " cb-services=%" PRIu64 " cb-drains=%" PRIu64
+            " cb-drain-buf=%" PRIu64 " cb-drain-us=%" PRIu64
+            " cb-depth=%u cb-max-depth=%u\n",
+            elapsed_ms,
+            p->so_guest_sets - l->so_guest_sets,
+            p->so_native_binds - l->so_native_binds,
+            p->so_realize_failures - l->so_realize_failures,
+            p->so_realize_us - l->so_realize_us,
+            p->present_blts - l->present_blts,
+            p->present_blt_us - l->present_blt_us,
+            p->context_switches - l->context_switches,
+            p->context_switch_us - l->context_switch_us,
+            p->screen_poll_calls - l->screen_poll_calls,
+            p->screen_poll_ready - l->screen_poll_ready,
+            p->screen_poll_pending - l->screen_poll_pending,
+            p->screen_poll_idle - l->screen_poll_idle,
+            p->screen_poll_failed - l->screen_poll_failed,
+            p->screen_poll_us - l->screen_poll_us,
+            p->screen_submit_ok - l->screen_submit_ok,
+            p->screen_submit_busy - l->screen_submit_busy,
+            p->screen_submit_failed - l->screen_submit_failed,
+            p->screen_drains - l->screen_drains,
+            p->screen_drain_frames - l->screen_drain_frames,
+            p->screen_quiesces - l->screen_quiesces,
+            p->screen_quiesce_us - l->screen_quiesce_us,
+            p->screen_sync_readbacks - l->screen_sync_readbacks,
+            p->screen_sync_readback_us - l->screen_sync_readback_us,
+            p->d3d11_readbacks - l->d3d11_readbacks,
+            p->d3d11_readback_us - l->d3d11_readback_us,
+            p->cb_submitted - l->cb_submitted,
+            p->cb_executed - l->cb_executed,
+            p->cb_enqueue_rejects - l->cb_enqueue_rejects,
+            p->cb_services - l->cb_services,
+            p->cb_drains - l->cb_drains,
+            p->cb_drain_buffers - l->cb_drain_buffers,
+            p->cb_drain_us - l->cb_drain_us,
+            s->cb_queue_count, s->cb_queue_depth_max);
+
+    p->report_last_us = now_us;
+    s->perf_last = *p;
+    s->dxvk->perf_last = *d;
+}
+
 /*
  * VirtualBox-style live dxSetupPipeline executor for the vGPU10 stages that
  * are implemented here.
@@ -8922,6 +9077,9 @@ static bool vmsvga3d_d3d10_pipeline_so_targets_live(
 static bool VMSVGA3D_D3D10_LIVE_UNUSED
 vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
 {
+    if (s != NULL) {
+        s->perf.pipeline_setups++;
+    }
     vmsvga3d_d3d10_pipeline_resources_views_ensure_live(s, cid);
     vmsvga3d_d3d10_pipeline_state_realize_live(s, cid);
     vmsvga3d_d3d10_pipeline_output_targets_live(s, cid);
@@ -10036,6 +10194,7 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
         offsets[i] = binding->offset;
     }
 
+    s->perf.so_native_binds++;
     if (!vmsvga3d_dxvk_d3d11_set_stream_output_targets(
             s->dxvk, surfaces, offsets)) {
         return false;
@@ -10054,6 +10213,7 @@ static bool vmsvga3d_d3d10_context_switch_live(
     uint32_t stage;
     uint32_t slot;
     uint32_t new_vb_count;
+    int64_t switch_start_us;
 
     if (s == NULL || s->svga3d == NULL || cid >= SVGA3D_MAX_CONTEXT_IDS) {
         return false;
@@ -10068,6 +10228,8 @@ static bool vmsvga3d_d3d10_context_switch_live(
     if (old_cid == cid) {
         return true;
     }
+    s->perf.context_switches++;
+    switch_start_us = g_get_monotonic_time();
 
     /* Current VirtualBox DX_STATE_TRACKER marks every frontend pipeline state
      * dirty before switching the D3D11 backend context.  The next Draw will
@@ -10157,6 +10319,7 @@ static bool vmsvga3d_d3d10_context_switch_live(
     context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
 
     s->svga3d->active_dx_context_id = cid;
+    s->perf.context_switch_us += g_get_monotonic_time() - switch_start_us;
     return true;
 }
 
@@ -11963,9 +12126,19 @@ static bool vmsvga3d_d3d10_readback_image_live(
     row_count = image->plane_size / image->pitch;
     depth_count = image->data_size / image->plane_size;
 
-    return vmsvga3d_dxvk_d3d11_readback_subresource(
-        s->dxvk, surface->dxvk_surface, subresource, image->data, image->pitch,
-        image->pitch, row_count, image->plane_size, depth_count);
+    {
+        bool result;
+        int64_t start_us = g_get_monotonic_time();
+
+        s->perf.d3d11_readbacks++;
+        result = vmsvga3d_dxvk_d3d11_readback_subresource(
+            s->dxvk, surface->dxvk_surface, subresource, image->data,
+            image->pitch, image->pitch, row_count, image->plane_size,
+            depth_count);
+        s->perf.d3d11_readback_us +=
+            g_get_monotonic_time() - start_us;
+        return result;
+    }
 }
 
 static bool vmsvga3d_d3d10_readback_image_rect_live(
@@ -12018,10 +12191,19 @@ static bool vmsvga3d_d3d10_readback_image_rect_live(
     source_box.bottom = rect->y + rect->h;
     source_box.back = 1;
 
-    return vmsvga3d_dxvk_d3d11_readback_subresource_box(
-        s->dxvk, surface->dxvk_surface, subresource, &source_box,
-        image->data + data_offset, (uint32_t)row_bytes, image->pitch,
-        rect->h, image->plane_size, 1);
+    {
+        bool result;
+        int64_t start_us = g_get_monotonic_time();
+
+        s->perf.d3d11_readbacks++;
+        result = vmsvga3d_dxvk_d3d11_readback_subresource_box(
+            s->dxvk, surface->dxvk_surface, subresource, &source_box,
+            image->data + data_offset, (uint32_t)row_bytes, image->pitch,
+            rect->h, image->plane_size, 1);
+        s->perf.d3d11_readback_us +=
+            g_get_monotonic_time() - start_us;
+        return result;
+    }
 }
 
 
@@ -12073,10 +12255,19 @@ static bool vmsvga3d_d3d10_readback_image_rects_live(
         boxes[i].back = 1;
     }
 
-    return vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
-        s->dxvk, surface->dxvk_surface, subresource, boxes, rect_count,
-        image->data, bytes_per_pixel, image->pitch, image->data_size,
-        secondary_data, secondary_row_pitch, secondary_data_size);
+    {
+        bool result;
+        int64_t start_us = g_get_monotonic_time();
+
+        s->perf.d3d11_readbacks++;
+        result = vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
+            s->dxvk, surface->dxvk_surface, subresource, boxes, rect_count,
+            image->data, bytes_per_pixel, image->pitch, image->data_size,
+            secondary_data, secondary_row_pitch, secondary_data_size);
+        s->perf.d3d11_readback_us +=
+            g_get_monotonic_time() - start_us;
+        return result;
+    }
 }
 
 
@@ -14697,10 +14888,13 @@ static bool vmsvga3d_d3d10_present_blt_live(
     VMSVGA3DDxvkSurface *source_dxvk = NULL;
     bool source_level_supported;
     bool destination_level_supported;
+    int64_t present_start_us;
 
     if (s == NULL || command == NULL) {
         return false;
     }
+    s->perf.present_blts++;
+    present_start_us = g_get_monotonic_time();
 
 #define VMSVGA3D_PRESENTBLT_REJECT(reason)                              \
     do {                                                                \
@@ -14717,6 +14911,8 @@ static bool vmsvga3d_d3d10_present_blt_live(
             command->boxDest.x, command->boxDest.y,                     \
             command->boxDest.z, command->boxDest.w,                     \
             command->boxDest.h, command->boxDest.d, command->mode);    \
+        s->perf.present_blt_us +=                                      \
+            g_get_monotonic_time() - present_start_us;                 \
         return false;                                                   \
     } while (0)
 
@@ -14925,6 +15121,7 @@ present_complete:
         VMSVGA3D_PRESENTBLT_REJECT("dirty-mark");
     }
 #undef VMSVGA3D_PRESENTBLT_REJECT
+    s->perf.present_blt_us += g_get_monotonic_time() - present_start_us;
     return true;
 }
 
@@ -16524,6 +16721,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           memcpy(&command, payload, sizeof(command));
+          s->perf.shader_guest_sets++;
 
           if (vmsvga3d_dx_shader_set_plan(
                   command.shaderId, command.type,
@@ -16534,6 +16732,9 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           old_shader_id = context->shadow.shaderState[plan.stage_index].shaderId;
+          if (old_shader_id != plan.shader_id) {
+              s->perf.shader_guest_changes++;
+          }
           if (!vmsvga3d_state_dx_apply_shader(s, cid, &plan)) {
               return false;
           }
@@ -17108,6 +17309,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               return false;
           }
 
+          s->perf.so_guest_sets++;
           count = (size - header_size) / sizeof(targets[0]);
           if (count > SVGA3D_DX_MAX_SOTARGETS) {
               return false;

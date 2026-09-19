@@ -408,6 +408,9 @@ bool vmsvga3d_dxvk_d3d11_shader_object_define(
 bool vmsvga3d_dxvk_d3d11_shader_object_exists(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
     uint32_t *shader_type);
+bool vmsvga3d_dxvk_d3d11_shader_generation(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t shader_type, uint64_t *generation);
 bool vmsvga3d_dxvk_d3d11_shader_bind_info(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
     struct vmsvga3d_d3d10_shader_info_s *info);
@@ -429,10 +432,15 @@ bool vmsvga3d_dxvk_d3d11_stream_output_cache(
     const struct vmsvga3d_d3d10_stream_output_plan_s *plan);
 bool vmsvga3d_dxvk_d3d11_stream_output_destroy(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t stream_output_id);
+bool vmsvga3d_dxvk_d3d11_pipeline_variant_activate(
+    VMSVGA3DDxvk *dxvk, uint32_t cid,
+    const struct vmsvga3d_d3d10_pipeline_variant_key_s *key,
+    uint32_t stream_output_id);
 bool vmsvga3d_dxvk_d3d11_shader_realize(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
     uint32_t stream_output_id,
-    const struct vmsvga3d_d3d10_stream_output_plan_s *stream_output);
+    const struct vmsvga3d_d3d10_stream_output_plan_s *stream_output,
+    const struct vmsvga3d_d3d10_pipeline_variant_key_s *pipeline_key);
 bool vmsvga3d_dxvk_d3d11_stream_output_proxy_set(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t source_shader_id,
     uint32_t stream_output_id,

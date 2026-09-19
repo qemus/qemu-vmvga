@@ -2232,6 +2232,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     }
 
     case SVGA_3D_CMD_DX_DRAW_INDEXED_INSTANCED_INDIRECT: {
+        s->perf.dx_draw_calls++;
         SVGA3dCmdDXDrawIndexedInstancedIndirect command;
         VMSVGA3DD3D11DrawIndexedInstancedIndirectPlan plan;
         VMSVGA3DDxvkSurface *args_buffer;
@@ -2284,6 +2285,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     }
 
     case SVGA_3D_CMD_DX_DRAW_INSTANCED_INDIRECT: {
+        s->perf.dx_draw_calls++;
         SVGA3dCmdDXDrawInstancedIndirect command;
         VMSVGA3DD3D11DrawInstancedIndirectPlan plan;
         VMSVGA3DDxvkSurface *args_buffer;
@@ -2315,6 +2317,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     }
 
     case SVGA_3D_CMD_DX_DISPATCH: {
+        s->perf.dx_dispatch_calls++;
         SVGA3dCmdDXDispatch command;
         VMSVGA3DD3D11DispatchPlan plan;
         bool success;
@@ -2345,6 +2348,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
     }
 
     case SVGA_3D_CMD_DX_DISPATCH_INDIRECT: {
+        s->perf.dx_dispatch_calls++;
         SVGA3dCmdDXDispatchIndirect command;
         VMSVGA3DD3D11DispatchIndirectPlan plan;
         VMSVGA3DDxvkSurface *args_buffer;

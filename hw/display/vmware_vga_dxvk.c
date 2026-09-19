@@ -59,6 +59,7 @@ struct vmsvga3d_dxvk_perf_s {
 
 #define VMSVGA3D_DXVK_D3D9_VERTEX_DECL_CACHE_LIMIT 256u
 #define VMSVGA3D_DXVK_SHADER_VARIANT_LIMIT 4u
+#define VMSVGA3D_DXVK_SHADER_VARIANT_KEY_LIMIT 4u
 #define VMSVGA3D_DXVK_SCREEN_READBACK_RECTS 32u
 
 typedef struct vmsvga3d_dxvk_d3d9_vertex_declaration_key_s {
@@ -105,6 +106,7 @@ struct vmsvga3d_dxvk_s {
     VMSVGA3DDxvkQuery *d3d11_queries;
     VMSVGA3DDxvkState *d3d11_states;
     VMSVGA3DDxvkShader *d3d11_shaders;
+    uint64_t d3d11_shader_definition_serial;
     VMSVGA3DDxvkStreamOutput *d3d11_stream_outputs;
     VMSVGA3DDxvkInputLayout *d3d11_input_layouts;
     VMSVGA3DDxvkConstantBuffer *d3d11_constant_buffers;
@@ -197,6 +199,37 @@ struct vmsvga3d_dxvk_state_s {
     VMSVGA3DDxvkState *next;
 };
 
+typedef struct vmsvga3d_dxvk_shader_linkage_state_s {
+    bool semantics_complete;
+    bool match_masks_covered;
+    bool input_signature_synthesized;
+    bool output_signature_synthesized;
+    uint32_t pipeline_linked_input_semantic_mask;
+    uint32_t pipeline_linked_input_component_mask;
+    uint32_t pipeline_linked_output_component_mask;
+    uint32_t pipeline_linked_patch_component_mask;
+    uint32_t input_signature_count;
+    uint32_t output_signature_count;
+    uint32_t patch_signature_count;
+    SVGA3dDXShaderSignatureEntry
+        input_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    SVGA3dDXShaderSignatureEntry
+        output_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    SVGA3dDXShaderSignatureEntry
+        patch_signature[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    VMSVGA3DD3D10ShaderSemantic
+        input_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    VMSVGA3DD3D10ShaderSemantic
+        output_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+    VMSVGA3DD3D10ShaderSemantic
+        patch_semantic[VMSVGA3D_D3D10_MAX_SHADER_SIGNATURES];
+} VMSVGA3DDxvkShaderLinkageState;
+
+typedef struct vmsvga3d_dxvk_shader_variant_key_s {
+    VMSVGA3DD3D10PipelineVariantKey key;
+    VMSVGA3DDxvkShaderLinkageState linkage;
+} VMSVGA3DDxvkShaderVariantKey;
+
 /* Native shader variants are keyed by the exact generated DXBC plus the
  * geometry-shader stream-output object used at Create*Shader time.  Linkage
  * inference may generate different DXBC for the same guest shader id, so keep
@@ -208,6 +241,10 @@ struct vmsvga3d_dxvk_shader_variant_s {
     uint8_t *bytecode;
     uint32_t bytecode_size;
     uint32_t stream_output_id;
+    VMSVGA3DDxvkShaderVariantKey
+        pipeline_keys[VMSVGA3D_DXVK_SHADER_VARIANT_KEY_LIMIT];
+    uint32_t pipeline_key_count;
+    uint32_t pipeline_key_next;
     uint64_t last_used;
     VMSVGA3DDxvkShaderVariant *next;
 };
@@ -232,6 +269,7 @@ struct vmsvga3d_dxvk_shader_s {
     uint32_t stream_output_proxy_id;
     VMSVGA3DDxvkShaderVariant *variants;
     VMSVGA3DDxvkShaderVariant *active_variant;
+    uint64_t definition_serial;
     uint64_t variant_serial;
     uint32_t variant_count;
     VMSVGA3DDxvkShader *next;
@@ -7580,8 +7618,84 @@ static void vmsvga3d_dxvk_d3d11_shader_variant_free(
     g_free(variant);
 }
 
-static void vmsvga3d_dxvk_d3d11_shader_variant_activate(
-    VMSVGA3DDxvkShader *shader, VMSVGA3DDxvkShaderVariant *variant)
+static void vmsvga3d_dxvk_d3d11_shader_linkage_capture(
+    const VMSVGA3DD3D10ShaderInfo *info,
+    VMSVGA3DDxvkShaderLinkageState *state)
+{
+    if (info == NULL || state == NULL) {
+        return;
+    }
+
+    memset(state, 0, sizeof(*state));
+    state->semantics_complete = info->semantics_complete;
+    state->match_masks_covered = info->match_masks_covered;
+    state->input_signature_synthesized = info->input_signature_synthesized;
+    state->output_signature_synthesized = info->output_signature_synthesized;
+    state->pipeline_linked_input_semantic_mask =
+        info->pipeline_linked_input_semantic_mask;
+    state->pipeline_linked_input_component_mask =
+        info->pipeline_linked_input_component_mask;
+    state->pipeline_linked_output_component_mask =
+        info->pipeline_linked_output_component_mask;
+    state->pipeline_linked_patch_component_mask =
+        info->pipeline_linked_patch_component_mask;
+    state->input_signature_count = info->input_signature_count;
+    state->output_signature_count = info->output_signature_count;
+    state->patch_signature_count = info->patch_signature_count;
+    memcpy(state->input_signature, info->input_signature,
+           sizeof(state->input_signature));
+    memcpy(state->output_signature, info->output_signature,
+           sizeof(state->output_signature));
+    memcpy(state->patch_signature, info->patch_signature,
+           sizeof(state->patch_signature));
+    memcpy(state->input_semantic, info->input_semantic,
+           sizeof(state->input_semantic));
+    memcpy(state->output_semantic, info->output_semantic,
+           sizeof(state->output_semantic));
+    memcpy(state->patch_semantic, info->patch_semantic,
+           sizeof(state->patch_semantic));
+}
+
+static void vmsvga3d_dxvk_d3d11_shader_linkage_restore(
+    VMSVGA3DD3D10ShaderInfo *info,
+    const VMSVGA3DDxvkShaderLinkageState *state)
+{
+    if (info == NULL || state == NULL) {
+        return;
+    }
+
+    info->semantics_complete = state->semantics_complete;
+    info->match_masks_covered = state->match_masks_covered;
+    info->input_signature_synthesized = state->input_signature_synthesized;
+    info->output_signature_synthesized = state->output_signature_synthesized;
+    info->pipeline_linked_input_semantic_mask =
+        state->pipeline_linked_input_semantic_mask;
+    info->pipeline_linked_input_component_mask =
+        state->pipeline_linked_input_component_mask;
+    info->pipeline_linked_output_component_mask =
+        state->pipeline_linked_output_component_mask;
+    info->pipeline_linked_patch_component_mask =
+        state->pipeline_linked_patch_component_mask;
+    info->input_signature_count = state->input_signature_count;
+    info->output_signature_count = state->output_signature_count;
+    info->patch_signature_count = state->patch_signature_count;
+    memcpy(info->input_signature, state->input_signature,
+           sizeof(info->input_signature));
+    memcpy(info->output_signature, state->output_signature,
+           sizeof(info->output_signature));
+    memcpy(info->patch_signature, state->patch_signature,
+           sizeof(info->patch_signature));
+    memcpy(info->input_semantic, state->input_semantic,
+           sizeof(info->input_semantic));
+    memcpy(info->output_semantic, state->output_semantic,
+           sizeof(info->output_semantic));
+    memcpy(info->patch_semantic, state->patch_semantic,
+           sizeof(info->patch_semantic));
+}
+
+static void vmsvga3d_dxvk_d3d11_shader_variant_activate_key(
+    VMSVGA3DDxvkShader *shader, VMSVGA3DDxvkShaderVariant *variant,
+    const VMSVGA3DDxvkShaderVariantKey *key)
 {
     if (shader == NULL) {
         return;
@@ -7601,6 +7715,16 @@ static void vmsvga3d_dxvk_d3d11_shader_variant_activate(
     shader->bytecode = variant->bytecode;
     shader->bytecode_size = variant->bytecode_size;
     shader->stream_output_id = variant->stream_output_id;
+    if (key != NULL && shader->info_valid) {
+        vmsvga3d_dxvk_d3d11_shader_linkage_restore(
+            &shader->info, &key->linkage);
+    }
+}
+
+static void vmsvga3d_dxvk_d3d11_shader_variant_activate(
+    VMSVGA3DDxvkShader *shader, VMSVGA3DDxvkShaderVariant *variant)
+{
+    vmsvga3d_dxvk_d3d11_shader_variant_activate_key(shader, variant, NULL);
 }
 
 static void vmsvga3d_dxvk_d3d11_shader_variants_clear(
@@ -7638,6 +7762,88 @@ vmsvga3d_dxvk_d3d11_shader_variant_find(
             variant->bytecode_size == bytecode_size &&
             variant->bytecode != NULL &&
             memcmp(variant->bytecode, bytecode, bytecode_size) == 0) {
+            return variant;
+        }
+    }
+    return NULL;
+}
+
+static const VMSVGA3DDxvkShaderVariantKey *
+vmsvga3d_dxvk_d3d11_shader_variant_key_find(
+    const VMSVGA3DDxvkShaderVariant *variant,
+    const VMSVGA3DD3D10PipelineVariantKey *key)
+{
+    uint32_t i;
+
+    if (variant == NULL || key == NULL) {
+        return NULL;
+    }
+
+    for (i = 0; i < variant->pipeline_key_count; i++) {
+        if (memcmp(&variant->pipeline_keys[i].key, key, sizeof(*key)) == 0) {
+            return &variant->pipeline_keys[i];
+        }
+    }
+    return NULL;
+}
+
+static VMSVGA3DDxvkShaderVariantKey *
+vmsvga3d_dxvk_d3d11_shader_variant_key_record(
+    VMSVGA3DDxvkShader *shader, VMSVGA3DDxvkShaderVariant *variant,
+    const VMSVGA3DD3D10PipelineVariantKey *key)
+{
+    const VMSVGA3DDxvkShaderVariantKey *existing;
+    VMSVGA3DDxvkShaderVariantKey *slot;
+    uint32_t index;
+
+    if (shader == NULL || variant == NULL || key == NULL || !shader->info_valid) {
+        return NULL;
+    }
+
+    existing = vmsvga3d_dxvk_d3d11_shader_variant_key_find(variant, key);
+    if (existing != NULL) {
+        return (VMSVGA3DDxvkShaderVariantKey *)existing;
+    }
+
+    if (variant->pipeline_key_count < VMSVGA3D_DXVK_SHADER_VARIANT_KEY_LIMIT) {
+        index = variant->pipeline_key_count++;
+    } else {
+        index = variant->pipeline_key_next++ %
+                VMSVGA3D_DXVK_SHADER_VARIANT_KEY_LIMIT;
+    }
+    slot = &variant->pipeline_keys[index];
+    memset(slot, 0, sizeof(*slot));
+    slot->key = *key;
+    vmsvga3d_dxvk_d3d11_shader_linkage_capture(&shader->info, &slot->linkage);
+    return slot;
+}
+
+static VMSVGA3DDxvkShaderVariant *
+vmsvga3d_dxvk_d3d11_shader_variant_find_pipeline_key(
+    VMSVGA3DDxvkShader *shader,
+    const VMSVGA3DD3D10PipelineVariantKey *key, uint32_t stream_output_id,
+    const VMSVGA3DDxvkShaderVariantKey **matched_key)
+{
+    VMSVGA3DDxvkShaderVariant *variant;
+
+    if (matched_key != NULL) {
+        *matched_key = NULL;
+    }
+    if (shader == NULL || key == NULL) {
+        return NULL;
+    }
+
+    for (variant = shader->variants; variant != NULL; variant = variant->next) {
+        const VMSVGA3DDxvkShaderVariantKey *candidate;
+
+        if (variant->stream_output_id != stream_output_id) {
+            continue;
+        }
+        candidate = vmsvga3d_dxvk_d3d11_shader_variant_key_find(variant, key);
+        if (candidate != NULL) {
+            if (matched_key != NULL) {
+                *matched_key = candidate;
+            }
             return variant;
         }
     }
@@ -7687,7 +7893,8 @@ static void vmsvga3d_dxvk_d3d11_shader_variant_trim(
 
 static bool vmsvga3d_dxvk_d3d11_shader_variant_add(
     VMSVGA3DDxvkShader *shader, void *native_shader,
-    const void *bytecode, uint32_t bytecode_size, uint32_t stream_output_id)
+    const void *bytecode, uint32_t bytecode_size, uint32_t stream_output_id,
+    const VMSVGA3DD3D10PipelineVariantKey *pipeline_key)
 {
     VMSVGA3DDxvkShaderVariant *variant;
 
@@ -7713,6 +7920,10 @@ static bool vmsvga3d_dxvk_d3d11_shader_variant_add(
     variant->next = shader->variants;
     shader->variants = variant;
     shader->variant_count++;
+    if (pipeline_key != NULL) {
+        (void)vmsvga3d_dxvk_d3d11_shader_variant_key_record(
+            shader, variant, pipeline_key);
+    }
     vmsvga3d_dxvk_d3d11_shader_variant_activate(shader, variant);
     vmsvga3d_dxvk_d3d11_shader_variant_trim(shader);
     return true;
@@ -7799,6 +8010,10 @@ bool vmsvga3d_dxvk_d3d11_shader_object_define(
     shader->cid = cid;
     shader->shader_id = shader_id;
     shader->shader_type = shader_type;
+    shader->definition_serial = ++dxvk->d3d11_shader_definition_serial;
+    if (shader->definition_serial == 0) {
+        shader->definition_serial = ++dxvk->d3d11_shader_definition_serial;
+    }
     shader->stream_output_id = SVGA3D_INVALID_ID;
     shader->stream_output_proxy_id = SVGA3D_INVALID_ID;
     shader->next = dxvk->d3d11_shaders;
@@ -7829,6 +8044,26 @@ bool vmsvga3d_dxvk_d3d11_shader_object_exists(
     return true;
 }
 
+bool vmsvga3d_dxvk_d3d11_shader_generation(
+    VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
+    uint32_t shader_type, uint64_t *generation)
+{
+    VMSVGA3DDxvkShader *shader;
+
+    if (dxvk == NULL || generation == NULL) {
+        return false;
+    }
+
+    shader = vmsvga3d_dxvk_d3d11_shader_find(dxvk, cid, shader_id, NULL);
+    if (shader == NULL || shader->shader_type != shader_type ||
+        shader->definition_serial == 0) {
+        return false;
+    }
+
+    *generation = shader->definition_serial;
+    return true;
+}
+
 bool vmsvga3d_dxvk_d3d11_shader_bind_info(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
     VMSVGA3DD3D10ShaderInfo *info)
@@ -7844,15 +8079,21 @@ bool vmsvga3d_dxvk_d3d11_shader_bind_info(
         return false;
     }
 
-    /* A successful guest rebind replaces the shader program itself, unlike a
-     * pipeline-linkage invalidation.  Drop every cached native variant here so
-     * no object compiled from the old guest bytecode can be reused.
+    /* A new binding changes this guest shader definition even when the guest
+     * reuses the same numeric shader id.  Give it a new generation so cached
+     * variants of adjacent shaders cannot match a pipeline key that referred
+     * to the previous definition.  Only this shader's own native variants need
+     * to be discarded; neighbouring variants remain available under their old
+     * generation keys and can be reused if equivalent DXBC is encountered.
      */
     vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
     vmsvga3d_dxvk_d3d11_shader_variants_clear(shader);
-
     if (shader->info_valid) {
         vmsvga3d_d3d10_shader_release(&shader->info);
+    }
+    shader->definition_serial = ++dxvk->d3d11_shader_definition_serial;
+    if (shader->definition_serial == 0) {
+        shader->definition_serial = ++dxvk->d3d11_shader_definition_serial;
     }
 
     shader->info = *info;
@@ -8077,10 +8318,64 @@ bool vmsvga3d_dxvk_d3d11_stream_output_destroy(
     return true;
 }
 
+bool vmsvga3d_dxvk_d3d11_pipeline_variant_activate(
+    VMSVGA3DDxvk *dxvk, uint32_t cid,
+    const VMSVGA3DD3D10PipelineVariantKey *key, uint32_t stream_output_id)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkShader *shaders[VMSVGA3D_D3D10_PIPELINE_GRAPHICS_STAGES] = { 0 };
+    VMSVGA3DDxvkShaderVariant *variants[VMSVGA3D_D3D10_PIPELINE_GRAPHICS_STAGES] = { 0 };
+    const VMSVGA3DDxvkShaderVariantKey
+        *matched[VMSVGA3D_D3D10_PIPELINE_GRAPHICS_STAGES] = { 0 };
+    uint32_t stage;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || key == NULL) {
+        return false;
+    }
+
+    for (stage = 0; stage < VMSVGA3D_D3D10_PIPELINE_GRAPHICS_STAGES; stage++) {
+        uint32_t shader_id = key->shader_ids[stage];
+        uint32_t shader_type = stage + SVGA3D_SHADERTYPE_MIN;
+        uint32_t variant_soid = shader_type == SVGA3D_SHADERTYPE_GS ?
+            stream_output_id : SVGA3D_INVALID_ID;
+
+        if (shader_id == SVGA3D_INVALID_ID) {
+            continue;
+        }
+        shaders[stage] = vmsvga3d_dxvk_d3d11_shader_find(
+            dxvk, cid, shader_id, NULL);
+        if (shaders[stage] == NULL || !shaders[stage]->info_valid ||
+            shaders[stage]->shader_type != shader_type) {
+            return false;
+        }
+        variants[stage] = vmsvga3d_dxvk_d3d11_shader_variant_find_pipeline_key(
+            shaders[stage], key, variant_soid, &matched[stage]);
+        if (variants[stage] == NULL || matched[stage] == NULL) {
+            return false;
+        }
+    }
+
+    for (stage = 0; stage < VMSVGA3D_D3D10_PIPELINE_GRAPHICS_STAGES; stage++) {
+        if (shaders[stage] != NULL) {
+            vmsvga3d_dxvk_d3d11_shader_variant_activate_key(
+                shaders[stage], variants[stage], matched[stage]);
+        }
+    }
+    return true;
+#else
+    (void)dxvk;
+    (void)cid;
+    (void)key;
+    (void)stream_output_id;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d11_shader_realize(
     VMSVGA3DDxvk *dxvk, uint32_t cid, uint32_t shader_id,
     uint32_t stream_output_id,
-    const VMSVGA3DD3D10StreamOutputPlan *stream_output)
+    const VMSVGA3DD3D10StreamOutputPlan *stream_output,
+    const VMSVGA3DD3D10PipelineVariantKey *pipeline_key)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkD3D11CreateShader create_shader = NULL;
@@ -8198,8 +8493,15 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     variant = vmsvga3d_dxvk_d3d11_shader_variant_find(
         shader, bytecode, bytecode_size, variant_stream_output_id);
     if (variant != NULL) {
+        VMSVGA3DDxvkShaderVariantKey *matched_key = NULL;
+
         dxvk->perf.shader_variant_hits++;
-        vmsvga3d_dxvk_d3d11_shader_variant_activate(shader, variant);
+        if (pipeline_key != NULL) {
+            matched_key = vmsvga3d_dxvk_d3d11_shader_variant_key_record(
+                shader, variant, pipeline_key);
+        }
+        vmsvga3d_dxvk_d3d11_shader_variant_activate_key(
+            shader, variant, matched_key);
         if (generated_dxbc) {
             vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
         }
@@ -8304,7 +8606,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     variant_count_before = shader->variant_count;
     if (!vmsvga3d_dxvk_d3d11_shader_variant_add(
             shader, native_shader, bytecode, bytecode_size,
-            variant_stream_output_id)) {
+            variant_stream_output_id, pipeline_key)) {
         vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         if (generated_dxbc) {
             vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
@@ -8325,6 +8627,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     (void)shader_id;
     (void)stream_output_id;
     (void)stream_output;
+    (void)pipeline_key;
     return false;
 #endif
 }

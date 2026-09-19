@@ -407,7 +407,13 @@ struct vmsvga_perf_counters_s {
     uint64_t shader_guest_changes;
     uint64_t shader_linkage_refreshes;
     uint64_t shader_linkage_us;
+    uint64_t shader_key_pipeline_hits;
+    uint64_t shader_key_pipeline_misses;
     uint64_t shader_retries;
+    uint64_t d3d9_draw_calls;
+    uint64_t d3d9_draw_ranges;
+    uint64_t dx_draw_calls;
+    uint64_t dx_dispatch_calls;
     uint64_t so_guest_sets;
     uint64_t so_native_binds;
     uint64_t so_realize_failures;
@@ -422,17 +428,55 @@ struct vmsvga_perf_counters_s {
     uint64_t screen_poll_idle;
     uint64_t screen_poll_failed;
     uint64_t screen_poll_us;
+    uint64_t screen_poll_d3d9;
+    uint64_t screen_poll_d3d9_us;
+    uint64_t screen_poll_d3d11;
+    uint64_t screen_poll_d3d11_us;
     uint64_t screen_submit_ok;
+    uint64_t screen_submit_d3d9;
+    uint64_t screen_submit_d3d9_us;
+    uint64_t screen_submit_d3d11;
+    uint64_t screen_submit_d3d11_us;
     uint64_t screen_submit_busy;
     uint64_t screen_submit_failed;
     uint64_t screen_quiesces;
     uint64_t screen_quiesce_us;
+    uint64_t screen_quiesce_d3d9;
+    uint64_t screen_quiesce_d3d9_us;
+    uint64_t screen_quiesce_d3d11;
+    uint64_t screen_quiesce_d3d11_us;
+    uint64_t screen_quiesce_mixed;
+    uint64_t screen_quiesce_mixed_us;
+    uint64_t screen_quiesce_cpu;
+    uint64_t screen_quiesce_cpu_us;
     uint64_t screen_sync_readbacks;
     uint64_t screen_sync_readback_us;
+    uint64_t screen_sync_d3d9;
+    uint64_t screen_sync_d3d9_us;
+    uint64_t screen_sync_d3d11;
+    uint64_t screen_sync_d3d11_us;
     uint64_t screen_drains;
     uint64_t screen_drain_frames;
     uint64_t d3d11_readbacks;
     uint64_t d3d11_readback_us;
+    uint64_t shadow_readback_d3d9;
+    uint64_t shadow_readback_d3d9_us;
+    uint64_t shadow_readback_d3d11;
+    uint64_t shadow_readback_d3d11_us;
+    uint64_t handoff_d3d9_to_shadow;
+    uint64_t handoff_d3d9_to_shadow_us;
+    uint64_t handoff_d3d11_to_shadow;
+    uint64_t handoff_d3d11_to_shadow_us;
+    uint64_t quiesce_reason_surface_redefine;
+    uint64_t quiesce_reason_surface_destroy;
+    uint64_t quiesce_reason_target_define;
+    uint64_t quiesce_reason_target_destroy;
+    uint64_t quiesce_reason_target_unbind;
+    uint64_t quiesce_reason_target_switch;
+    uint64_t quiesce_reason_handoff_d3d9;
+    uint64_t quiesce_reason_handoff_d3d11;
+    uint64_t quiesce_reason_gb_surface_destroy;
+    uint64_t quiesce_reason_other;
     uint64_t cb_submitted;
     uint64_t cb_executed;
     uint64_t cb_enqueue_rejects;
@@ -10312,7 +10356,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
 
     /* Low-volume performance counters are intentionally independent of the
      * existing trace controls.  Report from the display service point so even
-     * a badly regressed low-FPS workload emits a sample every few seconds.
+     * a badly regressed low-FPS workload still emits about one sample per second.
      */
     vmsvga3d_perf_profile_report(s);
 
@@ -10702,6 +10746,7 @@ static int vmsvga_pre_save(void *opaque)
     }
 
     if (s->screen_direct_active) {
+        s->perf.quiesce_reason_other++;
         if (!vmsvga3d_screen_target_quiesce_live(s) ||
             !vmsvga_screen_direct_materialize(s, "pre-save")) {
             return -EINVAL;

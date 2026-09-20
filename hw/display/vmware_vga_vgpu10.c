@@ -11245,49 +11245,127 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         return false;
     }
 
-    /* Keep one ordered inactive-target presentation obligation.  The display
-     * path services it before publishing the active target; if another switch
-     * arrives before it completes, drain it before creating the next one. */
-    if (s->svga3d->screen_target_retired_pending) {
-        bool retired_pending = false;
-
-        if (!vmsvga3d_screen_target_retired_service_live(
-                s, false, &retired_pending)) {
-            return false;
-        }
-        if (retired_pending) {
-            s->perf.screen_target_retire_waits++;
-            if (!vmsvga3d_screen_target_retired_service_live(
-                    s, true, &retired_pending) || retired_pending) {
-                return false;
-            }
-        }
-    }
-
-    s->perf.screen_target_switches++;
-    if (!vmsvga3d_screen_target_flush_switch_live(s) ||
-        s->svga3d->screen_target_dirty_count != 0) {
-        s->perf.quiesce_reason_target_switch++;
-        if (!vmsvga3d_screen_target_quiesce_live(s)) {
-            return false;
-        }
-    } else if (old_sid != SVGA3D_INVALID_ID &&
-               old_sid < SVGA3D_MAX_SURFACE_IDS) {
-        VMSVGA3DSurface *old_surface = s->svga3d->surfaces[old_sid];
+    /* Keep D3D11 switch retirement independent of guest-surface lifetime.
+     * A successful switch snapshot is detached into renderer-owned staging,
+     * so later DX commands may redefine/destroy the old surface without an
+     * outstanding presentation object pointing back into guest state.
+     *
+     * D3D9 cannot provide the same property: GetRenderTargetData is itself a
+     * synchronous readback.  Do not carry its per-surface ring across a target
+     * switch; collapse any queued snapshot into one synchronous latest-frame
+     * presentation instead. */
+    {
+        VMSVGA3DSurface *old_surface =
+            old_sid != SVGA3D_INVALID_ID && old_sid < SVGA3D_MAX_SURFACE_IDS
+                ? s->svga3d->surfaces[old_sid]
+                : NULL;
+        VMSVGA3DD3D9TransferSurface d3d9_info = {0};
+        bool old_d3d9_resident =
+            old_surface != NULL && old_surface->dxvk_surface != NULL &&
+            vmsvga3d_d3d9_runtime_surface_info(
+                s, old_surface, &d3d9_info) && d3d9_info.resident;
+        bool old_d3d11_resident =
+            old_surface != NULL && old_surface->dxvk_surface != NULL &&
+            vmsvga3d_dxvk_d3d11_surface_resident(old_surface->dxvk_surface);
+        bool old_commit_pending =
+            s->svga3d->screen_target_frontend_commit_pending &&
+            s->svga3d->screen_target_frontend_commit_sid == old_sid;
         uint32_t pending_backend =
             old_surface != NULL && old_surface->dxvk_surface != NULL
                 ? vmsvga3d_dxvk_screen_readback_pending_backend(
                       old_surface->dxvk_surface)
                 : 0;
+        bool switch_quiesced = false;
 
-        if (pending_backend == 9 || pending_backend == 11) {
-            s->svga3d->screen_target_retired_pending = true;
-            s->svga3d->screen_target_retired_sid = old_sid;
-            s->perf.screen_target_retire_armed++;
-        } else if (pending_backend != 0) {
+        s->perf.screen_target_switches++;
+
+        /* A frontend handoff commit is an exceptional transition boundary.
+         * Finish that exact tracked frame before changing its active SID; the
+         * normal high-frequency target-switch path never waits. */
+        if (old_commit_pending) {
             s->perf.quiesce_reason_target_switch++;
             if (!vmsvga3d_screen_target_quiesce_live(s)) {
                 return false;
+            }
+            switch_quiesced = true;
+        }
+
+        if (!switch_quiesced && old_d3d9_resident && !old_d3d11_resident) {
+            if (pending_backend == 9 &&
+                old_surface->screen_target_content_valid &&
+                old_surface->mips != NULL && old_surface->mip_count != 0) {
+                SVGA3dRect full = {
+                    .x = 0,
+                    .y = 0,
+                    .w = old_surface->mips[0].size.width,
+                    .h = old_surface->mips[0].size.height,
+                };
+
+                (void)vmsvga3d_screen_target_mark_dirty_live(
+                    s, old_sid, 0, &full, true);
+            }
+            vmsvga3d_screen_target_discard_active_async_live(s);
+            s->perf.quiesce_reason_target_switch++;
+            if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                return false;
+            }
+            switch_quiesced = true;
+        }
+
+        if (!switch_quiesced) {
+            if (!vmsvga3d_screen_target_flush_switch_live(s) ||
+                s->svga3d->screen_target_dirty_count != 0) {
+                s->perf.quiesce_reason_target_switch++;
+                if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                    return false;
+                }
+                switch_quiesced = true;
+            } else if (s->svga3d->screen_target_frontend_commit_pending &&
+                       s->svga3d->screen_target_frontend_commit_sid == old_sid) {
+                /* The switch flush can itself arm the exact frontend handoff
+                 * frame.  Do not detach that tracked sequence into the generic
+                 * retirement FIFO; finish the exceptional handoff before the
+                 * active SID changes, just as when it was already pending on
+                 * entry. */
+                s->perf.quiesce_reason_target_switch++;
+                if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                    return false;
+                }
+                switch_quiesced = true;
+            } else if (old_d3d11_resident && !old_d3d9_resident &&
+                       old_surface != NULL &&
+                       old_surface->dxvk_surface != NULL) {
+                VMSVGA3DDxvkScreenReadbackRetireResult retire =
+                    vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
+                        s->dxvk, old_surface->dxvk_surface, old_sid);
+
+                if (retire == VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED) {
+                    s->perf.screen_target_retire_armed++;
+                } else if (retire ==
+                           VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
+                    /* Queue pressure is the only normal switch condition that
+                     * may drain detached D3D11 snapshots synchronously. */
+                    s->perf.screen_target_retire_waits++;
+                    s->perf.quiesce_reason_target_switch++;
+                    if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                        return false;
+                    }
+                    switch_quiesced = true;
+                } else if (retire ==
+                           VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED) {
+                    s->perf.screen_target_retire_failures++;
+                    s->perf.quiesce_reason_target_switch++;
+                    if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                        return false;
+                    }
+                    switch_quiesced = true;
+                }
+            } else if (old_d3d9_resident && old_d3d11_resident) {
+                s->perf.quiesce_reason_target_switch++;
+                if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                    return false;
+                }
+                switch_quiesced = true;
             }
         }
     }

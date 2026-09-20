@@ -43,6 +43,8 @@ typedef struct vmsvga3d_dxvk_stream_output_s VMSVGA3DDxvkStreamOutput;
 typedef struct vmsvga3d_dxvk_input_layout_s VMSVGA3DDxvkInputLayout;
 typedef struct vmsvga3d_dxvk_constant_buffer_s VMSVGA3DDxvkConstantBuffer;
 typedef struct vmsvga3d_dxvk_view_s VMSVGA3DDxvkView;
+typedef struct vmsvga3d_dxvk_retired_screen_readback_s
+    VMSVGA3DDxvkRetiredScreenReadback;
 
 struct vmsvga3d_dxvk_perf_s {
     uint64_t shader_invalidations;
@@ -137,6 +139,8 @@ struct vmsvga3d_dxvk_s {
     void *d3d11_blit_rasterizer_state;
     void *d3d11_blit_blend_state;
     bool d3d11_blitter_initialized;
+    VMSVGA3DDxvkRetiredScreenReadback *d3d11_retired_screen_readback;
+    uint64_t d3d11_retired_screen_readback_order;
     struct vmsvga3d_dxvk_perf_s perf;
     struct vmsvga3d_dxvk_perf_s perf_last;
     bool ready;
@@ -323,6 +327,15 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     bool pending;
     VMSVGA3DD3D9Rect rects[VMSVGA3D_DXVK_SCREEN_READBACK_RECTS];
 } VMSVGA3DDxvkScreenReadbackSlot;
+
+#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 8u
+
+struct vmsvga3d_dxvk_retired_screen_readback_s {
+    VMSVGA3DDxvkScreenReadbackSlot
+        slots[VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS];
+    uint32_t sid[VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS];
+    uint64_t order[VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS];
+};
 
 /*
  * Renderer-side lifetime object for one guest SVGA3D surface. D3D9 and D3D11
@@ -2558,6 +2571,7 @@ void vmsvga3d_dxvk_reset_guest_objects(VMSVGA3DDxvk *dxvk,
     (void)reset_d3d11_state;
 #endif
 
+    vmsvga3d_dxvk_d3d11_retired_screen_readback_discard(dxvk);
     vmsvga3d_dxvk_guest_objects_purge(dxvk);
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -2576,6 +2590,7 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk)
     dxvk->d3d11_ready = false;
     dxvk->ready = false;
 
+    vmsvga3d_dxvk_d3d11_retired_screen_readback_discard(dxvk);
     vmsvga3d_dxvk_guest_objects_purge(dxvk);
     {
         void **objects[] = {
@@ -13582,6 +13597,315 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     }
     if (rect_count != NULL) {
         *rect_count = 0;
+    }
+    return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+#endif
+}
+
+VMSVGA3DDxvkScreenReadbackRetireResult
+vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t sid)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkRetiredScreenReadback *retired;
+    VMSVGA3DDxvkScreenReadbackSlot *selected = NULL;
+    VMSVGA3DDxvkScreenReadbackSlot cached;
+    uint32_t free_index = UINT32_MAX;
+    uint32_t i;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
+        surface->owner != dxvk || !surface->d3d11_resident ||
+        surface->d3d9_resident) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+    }
+
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        VMSVGA3DDxvkScreenReadbackSlot *candidate =
+            &surface->d3d11_screen_readback[i];
+
+        if (candidate->pending &&
+            (selected == NULL || candidate->sequence > selected->sequence)) {
+            selected = candidate;
+        }
+    }
+    if (selected == NULL) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_IDLE;
+    }
+
+    if (dxvk->d3d11_retired_screen_readback == NULL) {
+        dxvk->d3d11_retired_screen_readback =
+            g_new0(VMSVGA3DDxvkRetiredScreenReadback, 1);
+        if (dxvk->d3d11_retired_screen_readback == NULL) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+        }
+    }
+    retired = dxvk->d3d11_retired_screen_readback;
+
+    for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
+        if (!retired->slots[i].pending) {
+            free_index = i;
+            break;
+        }
+    }
+    if (free_index == UINT32_MAX) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
+    }
+
+    /* Move ownership of the newest cumulative snapshot out of the guest
+     * surface.  The retired queue owns only the staging/query objects; it has
+     * no reference to the source surface or its renderer resource.  Swap any
+     * cached idle staging objects back into the surface slot for later reuse. */
+    cached = retired->slots[free_index];
+    retired->slots[free_index] = *selected;
+    *selected = cached;
+    retired->sid[free_index] = sid;
+    retired->order[free_index] = ++dxvk->d3d11_retired_screen_readback_order;
+    if (retired->order[free_index] == 0) {
+        retired->order[free_index] =
+            ++dxvk->d3d11_retired_screen_readback_order;
+    }
+
+    /* Every newer submission on the per-surface ring accumulated the damage
+     * of older pending slots.  Once the newest snapshot is detached, older
+     * in-flight copies are redundant and can release their COM references. */
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        VMSVGA3DDxvkScreenReadbackSlot *candidate =
+            &surface->d3d11_screen_readback[i];
+
+        if (candidate != selected && candidate->pending) {
+            vmsvga3d_dxvk_screen_readback_slot_release_d3d11(candidate);
+        }
+    }
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "SCREEN-READBACK backend=d3d11 phase=retire sid=%u seq=%" PRIu64
+        " order=%" PRIu64 " queue=%u",
+        sid, retired->slots[free_index].sequence,
+        retired->order[free_index],
+        vmsvga3d_dxvk_d3d11_retired_screen_readback_count(dxvk));
+    return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED;
+#else
+    (void)dxvk;
+    (void)surface;
+    (void)sid;
+    return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+#endif
+}
+
+uint32_t vmsvga3d_dxvk_d3d11_retired_screen_readback_count(
+    VMSVGA3DDxvk *dxvk)
+{
+    uint32_t count = 0;
+    uint32_t i;
+
+    if (dxvk == NULL || dxvk->d3d11_retired_screen_readback == NULL) {
+        return 0;
+    }
+    for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
+        count += dxvk->d3d11_retired_screen_readback->slots[i].pending ? 1u : 0u;
+    }
+    return count;
+}
+
+void vmsvga3d_dxvk_d3d11_retired_screen_readback_discard(
+    VMSVGA3DDxvk *dxvk)
+{
+    uint32_t i;
+
+    if (dxvk == NULL || dxvk->d3d11_retired_screen_readback == NULL) {
+        return;
+    }
+    for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
+        vmsvga3d_dxvk_screen_readback_slot_release_d3d11(
+            &dxvk->d3d11_retired_screen_readback->slots[i]);
+    }
+    g_free(dxvk->d3d11_retired_screen_readback);
+    dxvk->d3d11_retired_screen_readback = NULL;
+    dxvk->d3d11_retired_screen_readback_order = 0;
+}
+
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
+    VMSVGA3DDxvk *dxvk, bool wait, void *data, uint32_t bytes_per_pixel,
+    uint32_t row_pitch, uint32_t data_size,
+    struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
+    uint32_t *rect_count, uint32_t *sid_out, uint64_t *sequence_out)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkRetiredScreenReadback *retired;
+    VMSVGA3DDxvkScreenReadbackSlot *slot = NULL;
+    VMSVGA3DDxvkD3D11GetData get_data = NULL;
+    VMSVGA3DDxvkD3D11Map map = NULL;
+    VMSVGA3DDxvkD3D11Unmap unmap = NULL;
+    VMSVGA3DDxvkD3D11MappedSubresource mapped = {0};
+    uint32_t slot_index = UINT32_MAX;
+    uint32_t query_data = 0;
+    uint32_t left = UINT32_MAX;
+    uint32_t top = UINT32_MAX;
+    uint32_t right = 0;
+    uint32_t bottom = 0;
+    uint32_t i;
+    int32_t result;
+
+    if (rect_count != NULL) {
+        *rect_count = 0;
+    }
+    if (sid_out != NULL) {
+        *sid_out = SVGA3D_INVALID_ID;
+    }
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
+        data == NULL || rects == NULL || rect_count == NULL ||
+        bytes_per_pixel == 0 || row_pitch == 0 || data_size == 0) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+    }
+
+    retired = dxvk->d3d11_retired_screen_readback;
+    if (retired == NULL) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
+    }
+    for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
+        if (!retired->slots[i].pending) {
+            continue;
+        }
+        if (slot == NULL || retired->order[i] < retired->order[slot_index]) {
+            slot = &retired->slots[i];
+            slot_index = i;
+        }
+    }
+    if (slot == NULL) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
+    }
+
+    if (slot->query == NULL || slot->staging == NULL ||
+        slot->rect_count == 0 || slot->rect_count > rect_capacity ||
+        slot->bytes_per_pixel != bytes_per_pixel ||
+        !vmsvga3d_dxvk_screen_readback_rect_bounds(
+            slot->rects, slot->rect_count, slot->source_width,
+            slot->source_height, &left, &top, &right, &bottom) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_GET_DATA,
+            &get_data, sizeof(get_data)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_MAP,
+            &map, sizeof(map)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UNMAP,
+            &unmap, sizeof(unmap))) {
+        goto fail;
+    }
+
+    if (wait) {
+        do {
+            result = get_data(dxvk->d3d11_context, slot->query, &query_data,
+                              sizeof(query_data), 0);
+            if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+                g_thread_yield();
+            }
+        } while (result == VMSVGA3D_DXVK_D3D_S_FALSE);
+    } else {
+        result = get_data(
+            dxvk->d3d11_context, slot->query, &query_data,
+            sizeof(query_data), VMSVGA3D_DXVK_D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+        }
+    }
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        goto fail;
+    }
+
+    result = map(dxvk->d3d11_context, slot->staging, 0,
+                 VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
+    if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL ||
+        (uint64_t)mapped.row_pitch <
+            (uint64_t)slot->width * bytes_per_pixel) {
+        if (vmsvga3d_dxvk_succeeded(result)) {
+            unmap(dxvk->d3d11_context, slot->staging, 0);
+        }
+        goto fail;
+    }
+
+    for (i = 0; i < slot->rect_count; i++) {
+        const VMSVGA3DD3D9Rect *rect = &slot->rects[i];
+        uint32_t source_x = (uint32_t)rect->left - left;
+        uint32_t source_y = (uint32_t)rect->top - top;
+        uint32_t width = (uint32_t)(rect->right - rect->left);
+        uint32_t height = (uint32_t)(rect->bottom - rect->top);
+        uint64_t row_bytes = (uint64_t)width * bytes_per_pixel;
+        uint64_t destination_offset =
+            (uint64_t)(uint32_t)rect->top * row_pitch +
+            (uint64_t)(uint32_t)rect->left * bytes_per_pixel;
+        uint32_t y;
+
+        if ((uint64_t)source_x * bytes_per_pixel + row_bytes >
+                mapped.row_pitch ||
+            row_bytes > row_pitch || destination_offset > data_size ||
+            row_bytes > (uint64_t)data_size - destination_offset ||
+            (uint64_t)(height - 1) * row_pitch >
+                (uint64_t)data_size - destination_offset - row_bytes) {
+            unmap(dxvk->d3d11_context, slot->staging, 0);
+            goto fail;
+        }
+
+        for (y = 0; y < height; y++) {
+            memcpy((uint8_t *)data +
+                       (size_t)((uint32_t)rect->top + y) * row_pitch +
+                       (size_t)(uint32_t)rect->left * bytes_per_pixel,
+                   (const uint8_t *)mapped.data +
+                       (size_t)(source_y + y) * mapped.row_pitch +
+                       (size_t)source_x * bytes_per_pixel,
+                   (size_t)row_bytes);
+        }
+    }
+
+    unmap(dxvk->d3d11_context, slot->staging, 0);
+    memcpy(rects, slot->rects, slot->rect_count * sizeof(rects[0]));
+    *rect_count = slot->rect_count;
+    if (sid_out != NULL) {
+        *sid_out = retired->sid[slot_index];
+    }
+    if (sequence_out != NULL) {
+        *sequence_out = slot->sequence;
+    }
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "SCREEN-READBACK backend=d3d11 phase=retired-ready sid=%u seq=%" PRIu64
+        " order=%" PRIu64 " rects=%u wait=%u",
+        retired->sid[slot_index], slot->sequence, retired->order[slot_index],
+        slot->rect_count, wait ? 1u : 0u);
+    slot->pending = false;
+    slot->rect_count = 0;
+    retired->sid[slot_index] = SVGA3D_INVALID_ID;
+    retired->order[slot_index] = 0;
+    return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY;
+
+fail:
+    vmsvga3d_dxvk_screen_readback_slot_release_d3d11(slot);
+    retired->sid[slot_index] = SVGA3D_INVALID_ID;
+    retired->order[slot_index] = 0;
+    return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+#else
+    (void)dxvk;
+    (void)wait;
+    (void)data;
+    (void)bytes_per_pixel;
+    (void)row_pitch;
+    (void)data_size;
+    (void)rects;
+    (void)rect_capacity;
+    if (rect_count != NULL) {
+        *rect_count = 0;
+    }
+    if (sid_out != NULL) {
+        *sid_out = SVGA3D_INVALID_ID;
+    }
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
     }
     return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
 #endif

@@ -562,6 +562,15 @@ SVGA3dCmdIntraSurfaceCopy;               /* SVGA_3D_CMD_INTRA_SURFACE_COPY */
 typedef
 #include "vmware_pack_begin.h"
 struct {
+   uint32 srcSid;
+   uint32 destSid;
+}
+#include "vmware_pack_end.h"
+SVGA3dCmdWholeSurfaceCopy;          /* SVGA_3D_CMD_WHOLE_SURFACE_COPY */
+
+typedef
+#include "vmware_pack_begin.h"
+struct {
    SVGA3dSurfaceImageId  src;
    SVGA3dSurfaceImageId  dest;
    SVGA3dBox             boxSrc;

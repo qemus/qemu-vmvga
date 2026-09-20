@@ -13318,6 +13318,8 @@ static const char *vmsvga3d_d3d10_copy_diag_route_name(uint32_t route_cmd)
         return "DX_PRED_CONVERT_REGION";
     case SVGA_3D_CMD_DX_PRED_CONVERT:
         return "DX_PRED_CONVERT";
+    case SVGA_3D_CMD_WHOLE_SURFACE_COPY:
+        return "WHOLE_SURFACE_COPY";
     case SVGA_3D_CMD_DX_PRED_STAGING_COPY:
         return "DX_PRED_STAGING_COPY";
     case SVGA_3D_CMD_DX_STAGING_COPY:
@@ -14514,6 +14516,102 @@ static bool vmsvga3d_d3d10_pred_copy_region_live(
                 s, command->dstSid, plan.destination_subresource, &dirty);
         }
     }
+    return true;
+}
+
+static bool vmsvga3d_d3d10_whole_surface_copy_live(
+    struct vmsvga_state_s *s, uint32_t cid,
+    const SVGA3dCmdWholeSurfaceCopy *command)
+{
+    VMSVGA3DDXContext *context;
+    VMSVGA3DSurface *source;
+    VMSVGA3DSurface *destination;
+    VMSVGA3DD3D10CopyResourcePlan plan;
+    VMSVGA3DD3D10Level level;
+    bool raw_compatible;
+    bool raw_selected;
+
+    if (s == NULL || command == NULL || s->svga3d == NULL ||
+        !vmsvga3d_dxvk_d3d11_ready(s->dxvk) ||
+        command->srcSid >= SVGA3D_MAX_SURFACE_IDS ||
+        command->destSid >= SVGA3D_MAX_SURFACE_IDS) {
+        return false;
+    }
+
+    context = vmsvga3d_dx_context(s, cid);
+    if (context == NULL) {
+        return false;
+    }
+
+    source = s->svga3d->surfaces[command->srcSid];
+    destination = s->svga3d->surfaces[command->destSid];
+    if (source == NULL || destination == NULL) {
+        return false;
+    }
+
+    if (source == destination) {
+        return true;
+    }
+
+    raw_compatible = vmsvga3d_d3d10_raw_copy_compatible(
+        source, destination, true, NULL, NULL);
+    raw_selected =
+        vmsvga3d_dx_level_supported(s, VMSVGA3D_D3D10_LEVEL_10_1) &&
+        raw_compatible;
+    vmsvga3d_d3d10_copy_diag_trace_route(
+        SVGA_3D_CMD_WHOLE_SURFACE_COPY, cid, context, source, destination,
+        true, raw_compatible, raw_selected, false);
+
+    level = vmsvga3d_d3d10_copy_resource_plan(
+        source->format, destination->format, false, false, &plan);
+    if (!vmsvga3d_dx_level_supported(s, level) ||
+        !vmsvga3d_d3d10_copy_surface_materialize_live(
+            s, source, plan.source_create_kind) ||
+        !vmsvga3d_d3d10_copy_surface_materialize_live(
+            s, destination, plan.destination_create_kind)) {
+        return false;
+    }
+
+    if (raw_selected) {
+        if (!vmsvga3d_d3d10_raw_copy_resource_live(
+                s, source, destination, SVGA_3D_CMD_WHOLE_SURFACE_COPY,
+                false)) {
+            return false;
+        }
+
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-COPY-FORMAT kind=whole-resource-raw-compatible cid=%u "
+            "src=%u guest=%u native=%u dst=%u guest=%u native=%u",
+            cid, command->srcSid, source->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
+            command->destSid, destination->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(
+                destination->dxvk_surface));
+    } else {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-COPY-FORMAT kind=whole-resource cid=%u "
+            "src=%u guest=%u native=%u dst=%u guest=%u native=%u "
+            "src-kind=%u dst-kind=%u",
+            cid, command->srcSid, source->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(source->dxvk_surface),
+            command->destSid, destination->format,
+            vmsvga3d_dxvk_d3d11_surface_native_format(
+                destination->dxvk_surface),
+            plan.source_create_kind, plan.destination_create_kind);
+
+        if (!vmsvga3d_dxvk_d3d11_copy_resource(
+                s->dxvk, destination->dxvk_surface, source->dxvk_surface)) {
+            return false;
+        }
+    }
+
+    vmsvga3d_d3d10_1d_d24s8_shadow_invalidate_all(
+        destination, "whole-surface-copy");
+    destination->d3d11_indirect_args_shadow_authoritative = false;
+    (void)vmsvga3d_d3d10_surface_changed_full_live(
+        s, command->destSid, 0);
     return true;
 }
 
@@ -16866,6 +16964,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           memcpy(&command, payload, sizeof(command));
           return vmsvga3d_d3d10_pred_copy_live(
               s, cid, &command, SVGA_3D_CMD_DX_PRED_COPY, false);
+      }
+
+    case SVGA_3D_CMD_WHOLE_SURFACE_COPY: {
+          SVGA3dCmdWholeSurfaceCopy command;
+
+          if (size < sizeof(command)) {
+              return false;
+          }
+
+          memcpy(&command, payload, sizeof(command));
+          return vmsvga3d_d3d10_whole_surface_copy_live(s, cid, &command);
       }
 
     case SVGA_3D_CMD_DX_PRED_CONVERT_REGION: {

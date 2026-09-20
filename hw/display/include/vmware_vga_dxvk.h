@@ -50,6 +50,13 @@ typedef enum vmsvga3d_dxvk_screen_readback_poll_result_e {
     VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY,
 } VMSVGA3DDxvkScreenReadbackPollResult;
 
+typedef enum vmsvga3d_dxvk_screen_readback_retire_result_e {
+    VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED = 0,
+    VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_IDLE,
+    VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY,
+    VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED,
+} VMSVGA3DDxvkScreenReadbackRetireResult;
+
 typedef enum vmsvga3d_dxvk_view_kind_e {
     VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
     VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
@@ -546,6 +553,20 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
     struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
     uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out);
+VMSVGA3DDxvkScreenReadbackRetireResult
+vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t sid);
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
+    VMSVGA3DDxvk *dxvk, bool wait, void *data, uint32_t bytes_per_pixel,
+    uint32_t row_pitch, uint32_t data_size, uint32_t destination_width,
+    uint32_t destination_height,
+    struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
+    uint32_t *rect_count, uint32_t *sid_out, uint64_t *sequence_out);
+uint32_t vmsvga3d_dxvk_d3d11_retired_screen_readback_count(
+    VMSVGA3DDxvk *dxvk);
+void vmsvga3d_dxvk_d3d11_retired_screen_readback_discard(
+    VMSVGA3DDxvk *dxvk);
 void vmsvga3d_dxvk_screen_readback_discard(VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_surface_upload_buffer(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,

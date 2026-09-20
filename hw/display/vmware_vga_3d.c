@@ -10163,26 +10163,19 @@ struct vmsvga_command_buffer_work_s {
 
 static void vmsvga3d_command_buffer_write_status(
     struct vmsvga_state_s *s, uint64_t header_gpa, SVGACBStatus status,
-    uint32_t error_offset, uint32_t processed_offset)
+    uint32_t error_offset)
 {
     uint32_t value;
 
-    /* Publish result metadata before status.  The guest may poll status as
-     * the completion indication and must not observe stale offset data after
-     * it sees a terminal status value. */
+    /* Publish error metadata before status.  The reference SVGA host writes
+     * only status on successful completion and status + errorOffset on a
+     * command error; leave SVGACBHeader.offset untouched. */
     if (status == SVGA_CB_STATUS_COMMAND_ERROR) {
         value = cpu_to_le32(error_offset);
         (void)vmsvga3d_guest_memory_write(
             s, header_gpa + offsetof(SVGACBHeader, errorOffset),
             &value, sizeof(value));
     }
-
-    /* Some guests read back `SVGACBHeader.offset` on completion to determine
-     * how far the parser progressed.  Publish the processed offset before
-     * writing the terminal status value. */
-    value = cpu_to_le32(processed_offset);
-    (void)vmsvga3d_guest_memory_write(
-        s, header_gpa + offsetof(SVGACBHeader, offset), &value, sizeof(value));
 
     value = cpu_to_le32((uint32_t)status);
     (void)vmsvga3d_guest_memory_write(
@@ -10349,8 +10342,7 @@ static uint32_t vmsvga3d_command_buffer_preempt_list(
             assert(s->cb_queue_count != 0);
             s->cb_queue_count--;
             vmsvga3d_command_buffer_write_status(
-                s, work->header_gpa, SVGA_CB_STATUS_PREEMPTED,
-                0, work->header.offset);
+                s, work->header_gpa, SVGA_CB_STATUS_PREEMPTED, 0);
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
                 "CB-ASYNC phase=preempt seq=%" PRIu64
@@ -10556,7 +10548,7 @@ static void vmsvga3d_command_buffer_execute_work(
 
     vmsvga3d_command_buffer_write_status(
         s, work->header_gpa, status,
-        status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0, processed);
+        status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0);
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "CB-COMPLETE kind=%s header=0x%016" PRIx64
@@ -10688,8 +10680,7 @@ static void vmsvga3d_command_buffer_discard(struct vmsvga_state_s *s,
         }
         if (publish_preempted) {
             vmsvga3d_command_buffer_write_status(
-                s, work->header_gpa, SVGA_CB_STATUS_PREEMPTED,
-                0, work->header.offset);
+                s, work->header_gpa, SVGA_CB_STATUS_PREEMPTED, 0);
         }
         discarded++;
         vmsvga3d_command_buffer_work_free(work);
@@ -10918,7 +10909,7 @@ static void vmsvga3d_command_buffer_submit(struct vmsvga_state_s *s,
 out:
     if (status != SVGA_CB_STATUS_NONE) {
         vmsvga3d_command_buffer_write_status(
-            s, header_gpa, status, processed, processed);
+            s, header_gpa, status, processed);
     }
 
     VMVGA_TRACE_LOCAL(

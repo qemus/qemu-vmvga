@@ -476,6 +476,7 @@ struct vmsvga_perf_counters_s {
     uint64_t screen_target_retire_armed;
     uint64_t screen_target_retire_completed;
     uint64_t screen_target_retire_superseded;
+    uint64_t screen_target_retire_coalesced_skips;
     uint64_t screen_target_retire_waits;
     uint64_t screen_target_retire_failures;
     uint64_t screen_target_transition_async_submits;

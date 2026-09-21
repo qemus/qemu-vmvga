@@ -9212,7 +9212,7 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             " qr-stdef=%" PRIu64 " qr-stdestroy=%" PRIu64
             " qr-unbind=%" PRIu64 " st-switch=%" PRIu64
             " retire-arm=%" PRIu64 " retire-done=%" PRIu64
-            " retire-drop=%" PRIu64
+            " retire-drop=%" PRIu64 " retire-skip=%" PRIu64
             " retire-wait=%" PRIu64 " retire-fail=%" PRIu64
             " trans-async=%" PRIu64
             " trans-commit=%" PRIu64 " qr-switch=%" PRIu64
@@ -9261,6 +9261,8 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
                 l->screen_target_retire_completed,
             p->screen_target_retire_superseded -
                 l->screen_target_retire_superseded,
+            p->screen_target_retire_coalesced_skips -
+                l->screen_target_retire_coalesced_skips,
             p->screen_target_retire_waits - l->screen_target_retire_waits,
             p->screen_target_retire_failures -
                 l->screen_target_retire_failures,
@@ -11273,6 +11275,11 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         bool old_commit_pending =
             s->svga3d->screen_target_frontend_commit_pending &&
             s->svga3d->screen_target_frontend_commit_sid == old_sid;
+        bool retire_coalescing =
+            !s->screen_frontend_deferred && !s->screen_handoff_active &&
+            old_d3d11_resident && !old_d3d9_resident &&
+            old_surface != NULL && old_surface->dxvk_surface != NULL &&
+            vmsvga3d_dxvk_d3d11_retired_screen_readback_coalescing(s->dxvk);
         bool switch_quiesced = false;
 
         s->perf.screen_target_switches++;
@@ -11289,8 +11296,49 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         }
 
         if (!switch_quiesced) {
-            if (!vmsvga3d_screen_target_flush_switch_live(s) ||
-                s->svga3d->screen_target_dirty_count != 0) {
+            bool skip_intermediate = retire_coalescing;
+
+            if (skip_intermediate) {
+                bool retired_pending = false;
+
+                /* Keep polling the oldest anchor on every rapid switch, but do
+                 * not move its completion target by submitting another staging
+                 * copy.  If the anchor/checkpoint pair drains during this pass,
+                 * resume the normal switch flush immediately. */
+                if (!vmsvga3d_screen_target_retired_snapshot_service_live(
+                        s, false,
+                        VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES,
+                        VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES,
+                        &retired_pending)) {
+                    return false;
+                }
+                skip_intermediate =
+                    retired_pending &&
+                    vmsvga3d_dxvk_d3d11_retired_screen_readback_coalescing(
+                        s->dxvk);
+            }
+
+            if (skip_intermediate) {
+                /* The detached anchor and checkpoint already own frontend
+                 * publication order.  This old target is an intermediate flip:
+                 * discard its presentation obligation before submit instead of
+                 * flooding the GPU with a readback that will never be shown.
+                 * The BIND that follows marks the newly active target for a
+                 * full-frame presentation, so the current image remains queued
+                 * for catch-up once the checkpoint drains. */
+                if (s->svga3d->screen_target_dirty_count != 0 &&
+                    s->svga3d->screen_target_dirty_sid != old_sid) {
+                    return false;
+                }
+                vmsvga3d_screen_target_async_discard_live(s, old_surface);
+                vmsvga3d_screen_target_write_tracking_reset_live(s, false);
+                s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+                s->svga3d->screen_target_dirty_count = 0;
+                memset(s->svga3d->screen_target_dirty_rects, 0,
+                       sizeof(s->svga3d->screen_target_dirty_rects));
+                s->perf.screen_target_retire_coalesced_skips++;
+            } else if (!vmsvga3d_screen_target_flush_switch_live(s) ||
+                       s->svga3d->screen_target_dirty_count != 0) {
                 s->perf.quiesce_reason_target_switch++;
                 if (!vmsvga3d_screen_target_quiesce_live(s)) {
                     return false;
@@ -11401,12 +11449,12 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                         .h = old_surface->mips[0].size.height,
                     };
 
-                    /* A partial newest snapshot cannot safely supersede older
-                     * targets.  Under residual pressure, queue one full-frame
-                     * replacement while the old target is still active.  The
-                     * D3D11 submit ring accumulates pending damage, making this
-                     * replacement self-contained; retire_latest can then drop
-                     * stale detached presentation history without a GPU wait. */
+                    /* A partial newest snapshot cannot become the checkpoint
+                     * behind the oldest latency anchor.  Under residual
+                     * pressure, queue one full-frame replacement while the old
+                     * target is still active.  The D3D11 submit ring accumulates
+                     * pending damage, making the replacement self-contained;
+                     * retire_latest can then compact only the middle history. */
                     if (vmsvga3d_screen_target_mark_dirty_live(
                             s, old_sid, 0, &full, true) &&
                         vmsvga3d_screen_target_flush_switch_live(s) &&
@@ -11425,9 +11473,9 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                 } else if (retire ==
                            VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
                     /* Pressure survived bounded cleanup and a full-frame
-                     * replacement attempt.  Keep the synchronous path only as
-                     * a last-resort correctness fallback for host/backend
-                     * conditions that prevented safe superseding. */
+                     * checkpoint attempt.  Keep the synchronous path only as a
+                     * last-resort correctness fallback when the oldest anchor
+                     * plus one self-contained checkpoint cannot be retained. */
                     s->perf.screen_target_retire_waits++;
                     s->perf.quiesce_reason_target_switch++;
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {

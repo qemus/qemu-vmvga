@@ -577,6 +577,8 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
     uint32_t *rect_count, uint32_t *sid_out, uint64_t *sequence_out);
 uint32_t vmsvga3d_dxvk_d3d11_retired_screen_readback_count(
     VMSVGA3DDxvk *dxvk);
+bool vmsvga3d_dxvk_d3d11_retired_screen_readback_coalescing(
+    VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_d3d11_retired_screen_readback_peek_bytes(
     VMSVGA3DDxvk *dxvk, uint64_t *bytes_out);
 void vmsvga3d_dxvk_d3d11_retired_screen_readback_discard(

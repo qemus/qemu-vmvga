@@ -343,6 +343,7 @@ struct vmsvga3d_dxvk_retired_screen_readback_s {
         slots[VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS];
     uint32_t sid[VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS];
     uint64_t order[VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS];
+    bool coalesce_active;
 };
 
 /*
@@ -13754,8 +13755,11 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
     VMSVGA3DDxvkRetiredScreenReadback *retired;
     VMSVGA3DDxvkScreenReadbackSlot *selected = NULL;
     uint64_t retired_bytes = 0;
+    uint64_t anchor_bytes = 0;
     uint64_t selected_bytes;
     uint32_t free_index = UINT32_MAX;
+    uint32_t oldest_index = UINT32_MAX;
+    uint32_t pending_count = 0;
     uint32_t superseded = 0;
     uint32_t i;
 
@@ -13802,6 +13806,8 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
     retired = dxvk->d3d11_retired_screen_readback;
 
     for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
+        uint64_t slot_bytes = 0;
+
         if (!retired->slots[i].pending) {
             /* Completed detached snapshots are not a staging cache.  Keep
              * non-pending entries resource-free so the byte budget reflects
@@ -13816,12 +13822,17 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
             }
             continue;
         }
+
+        pending_count++;
+        if (oldest_index == UINT32_MAX ||
+            retired->order[i] < retired->order[oldest_index]) {
+            oldest_index = i;
+        }
         if (retired->slots[i].staging != NULL &&
             retired->slots[i].bytes_per_pixel != 0 &&
             retired->slots[i].width != 0 && retired->slots[i].height != 0) {
             uint64_t slot_pixels =
                 (uint64_t)retired->slots[i].width * retired->slots[i].height;
-            uint64_t slot_bytes;
 
             if (slot_pixels > UINT64_MAX / retired->slots[i].bytes_per_pixel) {
                 return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
@@ -13833,34 +13844,87 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
             retired_bytes += slot_bytes;
         }
     }
-    if (allow_supersede &&
-        (free_index == UINT32_MAX ||
-         retired_bytes >
-             VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES - selected_bytes) &&
-        vmsvga3d_dxvk_screen_readback_slot_is_full_frame(selected)) {
-        /* Detached snapshots are presentation history, not guest GPU state.
-         * A full-frame newest snapshot is self-contained and therefore
-         * supersedes every older unpresented target in the FIFO.  Drop those
-         * stale staging/query objects instead of waiting for the oldest event
-         * merely to display frames that can no longer become visible. */
-        for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
-            if (!retired->slots[i].pending) {
-                continue;
-            }
-            vmsvga3d_dxvk_screen_readback_slot_release_d3d11(
-                &retired->slots[i]);
-            retired->sid[i] = SVGA3D_INVALID_ID;
-            retired->order[i] = 0;
-            superseded++;
-        }
-        retired_bytes = 0;
-        free_index = 0;
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "SCREEN-READBACK backend=d3d11 phase=retire-supersede "
-            "sid=%u seq=%" PRIu64 " dropped=%u",
-            sid, selected->sequence, superseded);
+
+    if (pending_count == 0) {
+        retired->coalesce_active = false;
     }
+
+    if (oldest_index != UINT32_MAX) {
+        VMSVGA3DDxvkScreenReadbackSlot *anchor =
+            &retired->slots[oldest_index];
+        uint64_t anchor_pixels = (uint64_t)anchor->width * anchor->height;
+
+        if (anchor->staging == NULL || anchor->bytes_per_pixel == 0 ||
+            anchor->width == 0 || anchor->height == 0 ||
+            anchor_pixels > UINT64_MAX / anchor->bytes_per_pixel) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
+        }
+        anchor_bytes = anchor_pixels * anchor->bytes_per_pixel;
+    }
+
+    {
+        bool pressure =
+            free_index == UINT32_MAX ||
+            retired_bytes >
+                VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES - selected_bytes;
+        bool coalesce = retired->coalesce_active && pending_count != 0;
+
+        /* Once pressure has established an anchor/checkpoint pair, do not
+         * append more detached snapshots behind it.  The caller gets BUSY on
+         * the conservative first attempt, services the anchor nonblocking,
+         * then may retry with allow_supersede=true. */
+        if (coalesce && !allow_supersede) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
+        }
+
+        if (allow_supersede && (pressure || coalesce) &&
+            vmsvga3d_dxvk_screen_readback_slot_is_full_frame(selected)) {
+            uint32_t compact_free = UINT32_MAX;
+
+            /* Preserve the oldest unpresented snapshot as a latency anchor.
+             * It is closest to GPU completion and therefore the earliest frame
+             * VNC can make visible.  A full-frame newest snapshot is retained
+             * as one checkpoint behind it; only middle presentation history is
+             * expendable.  Never move the anchor forward merely because newer
+             * frames arrive. */
+            if (oldest_index == UINT32_MAX ||
+                anchor_bytes >
+                    VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES -
+                        selected_bytes) {
+                return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
+            }
+            for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
+                if (i == oldest_index) {
+                    continue;
+                }
+                if (retired->slots[i].pending) {
+                    vmsvga3d_dxvk_screen_readback_slot_release_d3d11(
+                        &retired->slots[i]);
+                    retired->sid[i] = SVGA3D_INVALID_ID;
+                    retired->order[i] = 0;
+                    superseded++;
+                }
+                if (!retired->slots[i].pending && compact_free == UINT32_MAX) {
+                    compact_free = i;
+                }
+            }
+            if (compact_free == UINT32_MAX) {
+                return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
+            }
+            retired_bytes = anchor_bytes;
+            free_index = compact_free;
+            retired->coalesce_active = true;
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "SCREEN-READBACK backend=d3d11 phase=retire-coalesce "
+                "anchor-sid=%u anchor-seq=%" PRIu64 " sid=%u seq=%" PRIu64
+                " dropped=%u",
+                retired->sid[oldest_index],
+                retired->slots[oldest_index].sequence,
+                sid, selected->sequence, superseded);
+        }
+    }
+
     if (free_index == UINT32_MAX ||
         retired_bytes >
             VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES - selected_bytes) {
@@ -13894,11 +13958,12 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "SCREEN-READBACK backend=d3d11 phase=retire sid=%u seq=%" PRIu64
-        " order=%" PRIu64 " queue=%u bytes=%" PRIu64,
+        " order=%" PRIu64 " queue=%u bytes=%" PRIu64 " coalesce=%u",
         sid, retired->slots[free_index].sequence,
         retired->order[free_index],
         vmsvga3d_dxvk_d3d11_retired_screen_readback_count(dxvk),
-        retired_bytes + selected_bytes);
+        retired_bytes + selected_bytes,
+        retired->coalesce_active ? 1u : 0u);
     if (superseded_out != NULL) {
         *superseded_out = superseded;
     }
@@ -13928,6 +13993,25 @@ uint32_t vmsvga3d_dxvk_d3d11_retired_screen_readback_count(
         count += dxvk->d3d11_retired_screen_readback->slots[i].pending ? 1u : 0u;
     }
     return count;
+}
+
+bool vmsvga3d_dxvk_d3d11_retired_screen_readback_coalescing(
+    VMSVGA3DDxvk *dxvk)
+{
+    VMSVGA3DDxvkRetiredScreenReadback *retired;
+
+    if (dxvk == NULL || dxvk->d3d11_retired_screen_readback == NULL) {
+        return false;
+    }
+    retired = dxvk->d3d11_retired_screen_readback;
+    if (!retired->coalesce_active) {
+        return false;
+    }
+    if (vmsvga3d_dxvk_d3d11_retired_screen_readback_count(dxvk) == 0) {
+        retired->coalesce_active = false;
+        return false;
+    }
+    return true;
 }
 
 bool vmsvga3d_dxvk_d3d11_retired_screen_readback_peek_bytes(
@@ -14146,6 +14230,10 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
     vmsvga3d_dxvk_screen_readback_slot_release_d3d11(slot);
     retired->sid[slot_index] = SVGA3D_INVALID_ID;
     retired->order[slot_index] = 0;
+    if (retired->coalesce_active &&
+        vmsvga3d_dxvk_d3d11_retired_screen_readback_count(dxvk) == 0) {
+        retired->coalesce_active = false;
+    }
     return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY;
 
 fail:

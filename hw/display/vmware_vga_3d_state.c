@@ -403,7 +403,6 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader_resources(
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     uint32_t c_bound;
     int32_t last_not_null = -1;
-    bool modified = false;
     uint32_t i;
 
     if (context == NULL || plan == NULL || !plan->shadow_update_atomic ||
@@ -423,7 +422,6 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader_resources(
             *shadow_id = plan->ids[i];
             context->shader_resource_modified[plan->stage_index][slot / 64u] |=
                 UINT64_C(1) << (slot % 64u);
-            modified = true;
         }
         if (plan->ids[i] != SVGA3D_INVALID_ID) {
             last_not_null = (int32_t)i;
@@ -437,7 +435,18 @@ static bool VMSVGA3D_DX_STATE_UNUSED vmsvga3d_state_dx_apply_shader_resources(
         context->shader_resource_max_bound[plan->stage_index] = c_bound;
     }
 
-    if (modified) {
+    /* SET_SHADER_RESOURCES is a native binding command, not merely a shadow
+     * mutation.  D3D11 can implicitly NULL an SRV when an overlapping RTV,
+     * DSV, or UAV is bound, while our authoritative guest shadow still holds
+     * the original view ID.  A later guest SET of that same ID must therefore
+     * replay the native binding even though the shadow value did not change.
+     *
+     * Keep shader_resource_modified change-driven: it controls the immediate
+     * pre-draw NULL-unbind used for genuinely new guest bindings.  The stage
+     * dirty bit is command-driven so repeated SETs coalesce to one full-stage
+     * replay at the next pipeline setup.
+     */
+    if (plan->shadow_update_count != 0) {
         context->renderer_dirty |=
             VMSVGA3D_DX_CTX_F_STATE_SRV_VS << plan->stage_index;
     }

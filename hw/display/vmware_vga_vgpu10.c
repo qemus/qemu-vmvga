@@ -7475,20 +7475,19 @@ static void vmsvga3d_d3d10_pipeline_resources_views_ensure_live(
     }
 }
 
-static void vmsvga3d_d3d10_pipeline_output_targets_live(
+static bool vmsvga3d_d3d10_pipeline_output_targets_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
+    bool bound = false;
+    bool safe_unbound;
 
-    if (context == NULL ||
-        (context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET) == 0) {
-        return;
+    if (context == NULL) {
+        return false;
     }
-
-    /* VirtualBox clears the dirty bit before calling dxBindRenderTargetViews
-     * and does not restore it if the backend operation fails.
-     */
-    context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+    if ((context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET) == 0) {
+        return true;
+    }
 
     /* A vgpu11 context with no graphics-UAV history has ordinary RTV/DSV
      * state.  Using OMSetRenderTargetsAndUnorderedAccessViews here would
@@ -7519,27 +7518,51 @@ static void vmsvga3d_d3d10_pipeline_output_targets_live(
                 "reason=uav-overlaps-rtv",
                 cid, context->render_target_count,
                 context->shadow.uavSpliceIndex, uav_count);
-            context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
-            return;
+            goto fail;
         }
 
-        (void)vmsvga3d_d3d11_graphics_uav_bind_live(
-            s->dxvk, cid, context->render_target_count,
-            context->shadow.renderState.renderTargetViewIds,
-            context->shadow.renderState.depthStencilViewId,
-            context->shadow.uavSpliceIndex, uav_count,
-            context->shadow.uaViewIds,
-            (const SVGACOTableDXUAViewEntry *)uav_table->host,
-            uav_table->capacity_entries);
+        bound = vmsvga3d_d3d11_graphics_uav_bind_live(
+                    s->dxvk, cid, context->render_target_count,
+                    context->shadow.renderState.renderTargetViewIds,
+                    context->shadow.renderState.depthStencilViewId,
+                    context->shadow.uavSpliceIndex, uav_count,
+                    context->shadow.uaViewIds,
+                    (const SVGACOTableDXUAViewEntry *)uav_table->host,
+                    uav_table->capacity_entries) !=
+                VMSVGA3D_D3D11_LEVEL_INVALID;
     } else {
-        (void)vmsvga3d_dxvk_d3d11_set_render_targets(
+        bound = vmsvga3d_dxvk_d3d11_set_render_targets(
             s->dxvk, cid, context->render_target_count,
             context->shadow.renderState.renderTargetViewIds,
             context->shadow.renderState.depthStencilViewId,
             context->shadow.uavSpliceIndex);
     }
-}
 
+    if (!bound) {
+        goto fail;
+    }
+
+    /* Only commit the shadow-to-native transition after OM accepted the
+     * complete requested binding.  In particular, a missing replacement RTV
+     * must not clear the dirty bit while the immediate context still holds a
+     * reference to the previous native view. */
+    context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+    return true;
+
+fail:
+    /* A failed realize/bind must never leave the old RTV/DSV active.  D3D11's
+     * immediate context owns its own references, so releasing our cached view
+     * is insufficient.  Clear native outputs, retain the dirty bit for retry,
+     * and make setup fail so no draw can target stale output state. */
+    safe_unbound = vmsvga3d_dxvk_d3d11_set_render_targets(
+        s->dxvk, cid, 0, NULL, SVGA3D_INVALID_ID, 0);
+    context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-OM-BIND cid=%u result=FAIL safe-unbind=%s",
+        cid, safe_unbound ? "OK" : "FAIL");
+    return false;
+}
 
 static void vmsvga3d_d3d11_pipeline_cs_uavs_live(
     struct vmsvga_state_s *s, uint32_t cid)
@@ -9297,7 +9320,9 @@ vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
     }
     vmsvga3d_d3d10_pipeline_resources_views_ensure_live(s, cid);
     vmsvga3d_d3d10_pipeline_state_realize_live(s, cid);
-    vmsvga3d_d3d10_pipeline_output_targets_live(s, cid);
+    if (!vmsvga3d_d3d10_pipeline_output_targets_live(s, cid)) {
+        return false;
+    }
     vmsvga3d_d3d11_pipeline_cs_uavs_live(s, cid);
     vmsvga3d_d3d10_pipeline_constant_buffers_live(s, cid);
     vmsvga3d_d3d10_pipeline_vertex_buffers_live(s, cid);

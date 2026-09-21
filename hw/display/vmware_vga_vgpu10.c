@@ -7550,12 +7550,29 @@ static bool vmsvga3d_d3d10_pipeline_output_targets_live(
     return true;
 
 fail:
-    /* A failed realize/bind must never leave the old RTV/DSV active.  D3D11's
-     * immediate context owns its own references, so releasing our cached view
-     * is insufficient.  Clear native outputs, retain the dirty bit for retry,
-     * and make setup fail so no draw can target stale output state. */
-    safe_unbound = vmsvga3d_dxvk_d3d11_set_render_targets(
-        s->dxvk, cid, 0, NULL, SVGA3D_INVALID_ID, 0);
+    /* A failed realize/bind must never leave old graphics outputs active.
+     * D3D11's immediate context owns its own references, so releasing cached
+     * views is insufficient.  vGPU11 may also have graphics UAVs installed
+     * by OMSetRenderTargetsAndUnorderedAccessViews.  The UAV splice index can
+     * move, so clear the complete vGPU11 graphics-UAV slot range before
+     * retrying the shadow instead of clearing only the current prefix. */
+    if (s->vgpu_generation == VMSVGA_VGPU_11 &&
+        context->uav_max_bound != 0) {
+        uint32_t null_uav_ids[SVGA3D_DX11_1_MAX_UAVIEWS];
+        uint32_t initial_counts[SVGA3D_DX11_1_MAX_UAVIEWS];
+        uint32_t slot;
+
+        for (slot = 0; slot < SVGA3D_DX11_1_MAX_UAVIEWS; slot++) {
+            null_uav_ids[slot] = SVGA3D_INVALID_ID;
+            initial_counts[slot] = UINT32_MAX;
+        }
+        safe_unbound = vmsvga3d_dxvk_d3d11_set_render_targets_and_uavs(
+            s->dxvk, cid, 0, NULL, SVGA3D_INVALID_ID, 0,
+            SVGA3D_DX11_1_MAX_UAVIEWS, null_uav_ids, initial_counts);
+    } else {
+        safe_unbound = vmsvga3d_dxvk_d3d11_set_render_targets(
+            s->dxvk, cid, 0, NULL, SVGA3D_INVALID_ID, 0);
+    }
     context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
@@ -9313,14 +9330,18 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
  * are implemented here.
  */
 static bool VMSVGA3D_D3D10_LIVE_UNUSED
-vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
+vmsvga3d_d3d10_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid,
+                                   bool require_graphics_outputs)
 {
+    bool output_targets_ok;
+
     if (s != NULL) {
         s->perf.pipeline_setups++;
     }
     vmsvga3d_d3d10_pipeline_resources_views_ensure_live(s, cid);
     vmsvga3d_d3d10_pipeline_state_realize_live(s, cid);
-    if (!vmsvga3d_d3d10_pipeline_output_targets_live(s, cid)) {
+    output_targets_ok = vmsvga3d_d3d10_pipeline_output_targets_live(s, cid);
+    if (!output_targets_ok && require_graphics_outputs) {
         return false;
     }
     vmsvga3d_d3d11_pipeline_cs_uavs_live(s, cid);
@@ -9356,7 +9377,13 @@ static void vmsvga3d_d3d10_post_draw_live(VMSVGA3DDXContext *context)
 
 bool vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
 {
-    return vmsvga3d_d3d10_pipeline_setup_live(s, cid);
+    return vmsvga3d_d3d10_pipeline_setup_live(s, cid, true);
+}
+
+bool vmsvga3d_dx_pipeline_setup_compute_live(
+    struct vmsvga_state_s *s, uint32_t cid)
+{
+    return vmsvga3d_d3d10_pipeline_setup_live(s, cid, false);
 }
 
 void vmsvga3d_dx_post_draw_live(struct vmsvga_state_s *s, uint32_t cid)
@@ -9375,7 +9402,7 @@ static bool vmsvga3d_d3d10_draw_live(
         return false;
     }
 
-    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid, true)) {
         return false;
     }
     if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
@@ -9601,7 +9628,7 @@ static bool vmsvga3d_d3d10_draw_indexed_live(
         return false;
     }
 
-    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid, true)) {
         return false;
     }
     if (context->shadow.inputAssembly.topology ==
@@ -9634,7 +9661,7 @@ static bool vmsvga3d_d3d10_draw_instanced_live(
         return false;
     }
 
-    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid, true)) {
         return false;
     }
 
@@ -9666,7 +9693,7 @@ static bool vmsvga3d_d3d10_draw_indexed_instanced_live(
         return false;
     }
 
-    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid, true)) {
         return false;
     }
     /* As in VirtualBox, triangle-fan topology is assert-only for this command;
@@ -9693,7 +9720,7 @@ static bool vmsvga3d_d3d10_draw_auto_live(
         return false;
     }
 
-    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid)) {
+    if (!vmsvga3d_d3d10_pipeline_setup_live(s, cid, true)) {
         return false;
     }
     /* VirtualBox only asserts that triangle fans are not used for DrawAuto and

@@ -333,7 +333,7 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
 #define VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES \
     (UINT64_C(256) * 1024u * 1024u)
 #define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES \
-    (UINT64_C(256) * 1024u * 1024u)
+    VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES
 
 struct vmsvga3d_dxvk_retired_screen_readback_s {
     VMSVGA3DDxvkScreenReadbackSlot

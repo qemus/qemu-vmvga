@@ -18031,9 +18031,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
 
     case SVGA_3D_CMD_DX_DEFINE_RENDERTARGET_VIEW: {
           SVGA3dCmdDXDefineRenderTargetView command;
+          VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
           SVGACOTableDXRTViewEntry *entry;
+          uint32_t slot;
 
-          if (vmsvga3d_dx_context(s, cid) == NULL || size < sizeof(command)) {
+          if (context == NULL || size < sizeof(command)) {
               return false;
           }
 
@@ -18042,13 +18044,30 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           entry = vmsvga3d_dx_cotable_entry_ptr(
               s, cid, SVGA_COTABLE_RTVIEW, command.renderTargetViewId);
 
-          if (entry == NULL) {
+          if (entry == NULL ||
+              !vmsvga3d_dxvk_d3d11_render_target_view_destroy(
+                  s->dxvk, cid, command.renderTargetViewId)) {
               return false;
           }
 
-          /* Match VirtualBox: redefining an RTV only rewrites the COTable
-           * entry.  An already materialized native view is intentionally
-           * left untouched and a currently bound RTV is not dirtied. */
+          /* RTV IDs are reusable COTable handles.  A redefine can point the
+           * same guest ID at a different surface/subresource/format while a
+           * lazily materialized native D3D11 view for the old definition is
+           * still cached.  Drop that native view before rewriting the entry so
+           * the next realize uses the new definition.  If the ID is currently
+           * bound, force OM state replay as well: the D3D11 context itself may
+           * still hold a reference to the old RTV after our cache reference is
+           * released. */
+          for (slot = 0; slot < SVGA3D_MAX_SIMULTANEOUS_RENDER_TARGETS;
+               slot++) {
+              if (context->shadow.renderState.renderTargetViewIds[slot] ==
+                  command.renderTargetViewId) {
+                  context->renderer_dirty |=
+                      VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
+                  break;
+              }
+          }
+
           return vmsvga3d_d3d10_rtv_define_entry(&command, entry) !=
                  VMSVGA3D_D3D10_LEVEL_INVALID;
       }

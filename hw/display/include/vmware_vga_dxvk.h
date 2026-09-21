@@ -57,6 +57,16 @@ typedef enum vmsvga3d_dxvk_screen_readback_retire_result_e {
     VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED,
 } VMSVGA3DDxvkScreenReadbackRetireResult;
 
+typedef struct vmsvga3d_dxvk_screen_pixel_layout_s {
+    uint32_t bytes_per_pixel;
+    uint8_t red_depth;
+    uint8_t green_depth;
+    uint8_t blue_depth;
+    uint8_t red_offset;
+    uint8_t green_offset;
+    uint8_t blue_offset;
+} VMSVGA3DDxvkScreenPixelLayout;
+
 typedef enum vmsvga3d_dxvk_view_kind_e {
     VMSVGA3D_DXVK_VIEW_SHADER_RESOURCE = 0,
     VMSVGA3D_DXVK_VIEW_RENDER_TARGET,
@@ -546,6 +556,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
     uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel,
+    const VMSVGA3DDxvkScreenPixelLayout *pixel_layout,
     uint64_t *sequence_out);
 VMSVGA3DDxvkScreenReadbackPollResult
 vmsvga3d_dxvk_d3d11_screen_readback_poll(

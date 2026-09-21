@@ -322,6 +322,7 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     uint32_t source_width;
     uint32_t source_height;
     uint32_t bytes_per_pixel;
+    VMSVGA3DDxvkScreenPixelLayout pixel_layout;
     uint32_t rect_count;
     uint64_t sequence;
     bool pending;
@@ -329,8 +330,10 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
 } VMSVGA3DDxvkScreenReadbackSlot;
 
 #define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 8u
-#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES \
+#define VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES \
     (UINT64_C(256) * 1024u * 1024u)
+#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES \
+    VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES
 
 struct vmsvga3d_dxvk_retired_screen_readback_s {
     VMSVGA3DDxvkScreenReadbackSlot
@@ -13206,11 +13209,138 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 #endif
 }
 
+static bool vmsvga3d_dxvk_screen_pixel_layout_valid(
+    const VMSVGA3DDxvkScreenPixelLayout *layout)
+{
+    uint32_t bits;
+
+    if (layout == NULL || layout->bytes_per_pixel == 0 ||
+        layout->bytes_per_pixel > sizeof(uint64_t)) {
+        return false;
+    }
+    bits = layout->bytes_per_pixel * 8u;
+    if (layout->red_depth == 0 || layout->green_depth == 0 ||
+        layout->blue_depth == 0 || layout->red_depth > 32 ||
+        layout->green_depth > 32 || layout->blue_depth > 32 ||
+        layout->red_offset >= bits || layout->green_offset >= bits ||
+        layout->blue_offset >= bits ||
+        layout->red_depth > bits - layout->red_offset ||
+        layout->green_depth > bits - layout->green_offset ||
+        layout->blue_depth > bits - layout->blue_offset) {
+        return false;
+    }
+    return true;
+}
+
+static uint64_t vmsvga3d_dxvk_screen_pixel_load(const uint8_t *source,
+                                                  uint32_t bytes)
+{
+    uint64_t pixel = 0;
+    uint32_t i;
+
+    for (i = 0; i < bytes; i++) {
+        pixel |= (uint64_t)source[i] << (i * 8u);
+    }
+    return pixel;
+}
+
+static uint8_t vmsvga3d_dxvk_screen_pixel_channel(uint64_t pixel,
+                                                   uint8_t depth,
+                                                   uint8_t offset)
+{
+    uint64_t mask = (UINT64_C(1) << depth) - 1u;
+    uint64_t value = (pixel >> offset) & mask;
+
+    return (uint8_t)((value * 255u + mask / 2u) / mask);
+}
+
+static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
+    const VMSVGA3DDxvkScreenReadbackSlot *slot,
+    const VMSVGA3DDxvkD3D11MappedSubresource *mapped,
+    uint32_t source_x, uint32_t source_y, uint32_t width, uint32_t height,
+    void *data, uint32_t destination_x, uint32_t destination_y,
+    uint32_t row_pitch, uint32_t data_size)
+{
+    const VMSVGA3DDxvkScreenPixelLayout *layout;
+    uint32_t source_bytes;
+    uint64_t source_row_bytes;
+    uint64_t destination_row_bytes;
+    uint64_t destination_offset;
+    bool passthrough;
+    uint32_t y;
+
+    if (slot == NULL || mapped == NULL || mapped->data == NULL || data == NULL ||
+        width == 0 || height == 0) {
+        return false;
+    }
+    layout = &slot->pixel_layout;
+    if (!vmsvga3d_dxvk_screen_pixel_layout_valid(layout) ||
+        slot->bytes_per_pixel != layout->bytes_per_pixel) {
+        return false;
+    }
+    source_bytes = layout->bytes_per_pixel;
+    if (source_x >= slot->width || source_y >= slot->height ||
+        width > slot->width - source_x || height > slot->height - source_y) {
+        return false;
+    }
+    source_row_bytes = (uint64_t)width * source_bytes;
+    destination_row_bytes = (uint64_t)width * 4u;
+    destination_offset = (uint64_t)destination_y * row_pitch +
+                         (uint64_t)destination_x * 4u;
+
+    if ((uint64_t)source_x * source_bytes + source_row_bytes >
+            mapped->row_pitch ||
+        (uint64_t)destination_x * 4u + destination_row_bytes > row_pitch ||
+        destination_offset > data_size ||
+        destination_row_bytes > (uint64_t)data_size - destination_offset ||
+        (uint64_t)(height - 1u) * row_pitch >
+            (uint64_t)data_size - destination_offset - destination_row_bytes) {
+        return false;
+    }
+
+    passthrough = source_bytes == 4u && layout->blue_depth == 8u &&
+                  layout->green_depth == 8u && layout->red_depth == 8u &&
+                  layout->blue_offset == 0u && layout->green_offset == 8u &&
+                  layout->red_offset == 16u;
+
+    for (y = 0; y < height; y++) {
+        const uint8_t *source =
+            (const uint8_t *)mapped->data +
+            (size_t)(source_y + y) * mapped->row_pitch +
+            (size_t)source_x * source_bytes;
+        uint8_t *destination =
+            (uint8_t *)data + (size_t)(destination_y + y) * row_pitch +
+            (size_t)destination_x * 4u;
+
+        if (passthrough) {
+            memcpy(destination, source, (size_t)destination_row_bytes);
+        } else {
+            uint32_t x;
+
+            for (x = 0; x < width; x++) {
+                uint64_t pixel = vmsvga3d_dxvk_screen_pixel_load(
+                    source + (size_t)x * source_bytes, source_bytes);
+                uint8_t *output = destination + (size_t)x * 4u;
+
+                output[0] = vmsvga3d_dxvk_screen_pixel_channel(
+                    pixel, layout->blue_depth, layout->blue_offset);
+                output[1] = vmsvga3d_dxvk_screen_pixel_channel(
+                    pixel, layout->green_depth, layout->green_offset);
+                output[2] = vmsvga3d_dxvk_screen_pixel_channel(
+                    pixel, layout->red_depth, layout->red_offset);
+                output[3] = 0;
+            }
+        }
+    }
+    return true;
+}
+
 VMSVGA3DDxvkScreenReadbackSubmitResult
 vmsvga3d_dxvk_d3d11_screen_readback_submit(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
     uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel,
+    const VMSVGA3DDxvkScreenPixelLayout *pixel_layout,
     uint64_t *sequence_out)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -13247,7 +13377,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
         dxvk->d3d11_context == NULL || surface == NULL ||
         !surface->d3d11_resident || surface->d3d9_resident ||
         surface->d3d11_resource == NULL || !surface->d3d11_desc.valid ||
-        bytes_per_pixel == 0) {
+        bytes_per_pixel == 0 || pixel_layout == NULL ||
+        pixel_layout->bytes_per_pixel != bytes_per_pixel ||
+        !vmsvga3d_dxvk_screen_pixel_layout_valid(pixel_layout)) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
     }
 
@@ -13297,6 +13429,10 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
 
     width = right - left;
     height = bottom - top;
+    if ((uint64_t)width * height >
+        VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES / bytes_per_pixel) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
+    }
     format = desc->readback_format != 0 ? desc->readback_format : desc->format;
     staging_desc.width = width;
     staging_desc.height = height;
@@ -13365,6 +13501,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
     slot->source_width = source_width;
     slot->source_height = source_height;
     slot->bytes_per_pixel = bytes_per_pixel;
+    slot->pixel_layout = *pixel_layout;
     slot->sequence = ++surface->d3d11_screen_readback_sequence;
     if (slot->sequence == 0) {
         slot->sequence = ++surface->d3d11_screen_readback_sequence;
@@ -13398,6 +13535,7 @@ fail:
     (void)source_width;
     (void)source_height;
     (void)bytes_per_pixel;
+    (void)pixel_layout;
     if (sequence_out != NULL) {
         *sequence_out = 0;
     }
@@ -13436,7 +13574,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     }
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
         surface == NULL || data == NULL || rects == NULL ||
-        rect_count == NULL || bytes_per_pixel == 0 || row_pitch == 0 ||
+        rect_count == NULL || bytes_per_pixel != 4u || row_pitch == 0 ||
         data_size == 0 ||
         !vmsvga3d_dxvk_get_method(
             dxvk->d3d11_context,
@@ -13497,8 +13635,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     }
 
     if (slot->rect_count == 0 || slot->rect_count > rect_capacity ||
-        slot->bytes_per_pixel != bytes_per_pixel || slot->query == NULL ||
-        slot->staging == NULL ||
+        !vmsvga3d_dxvk_screen_pixel_layout_valid(&slot->pixel_layout) ||
+        slot->bytes_per_pixel != slot->pixel_layout.bytes_per_pixel ||
+        slot->query == NULL || slot->staging == NULL ||
         !vmsvga3d_dxvk_screen_readback_rect_bounds(
             slot->rects, slot->rect_count, slot->source_width,
             slot->source_height, &left, &top, &right, &bottom)) {
@@ -13523,7 +13662,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
                  VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL ||
         (uint64_t)mapped.row_pitch <
-            (uint64_t)slot->width * bytes_per_pixel) {
+            (uint64_t)slot->width * slot->bytes_per_pixel) {
         if (vmsvga3d_dxvk_succeeded(result)) {
             unmap(dxvk->d3d11_context, slot->staging, 0);
         }
@@ -13536,30 +13675,13 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
         uint32_t source_y = (uint32_t)rect->top - top;
         uint32_t width = (uint32_t)(rect->right - rect->left);
         uint32_t height = (uint32_t)(rect->bottom - rect->top);
-        uint64_t row_bytes = (uint64_t)width * bytes_per_pixel;
-        uint64_t destination_offset =
-            (uint64_t)(uint32_t)rect->top * row_pitch +
-            (uint64_t)(uint32_t)rect->left * bytes_per_pixel;
-        uint32_t y;
 
-        if ((uint64_t)source_x * bytes_per_pixel + row_bytes >
-                mapped.row_pitch ||
-            row_bytes > row_pitch || destination_offset > data_size ||
-            row_bytes > (uint64_t)data_size - destination_offset ||
-            (uint64_t)(height - 1) * row_pitch >
-                (uint64_t)data_size - destination_offset - row_bytes) {
+        if (!vmsvga3d_dxvk_screen_readback_copy_bgr32(
+                slot, &mapped, source_x, source_y, width, height, data,
+                (uint32_t)rect->left, (uint32_t)rect->top, row_pitch,
+                data_size)) {
             unmap(dxvk->d3d11_context, slot->staging, 0);
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
-        }
-
-        for (y = 0; y < height; y++) {
-            memcpy((uint8_t *)data +
-                       (size_t)((uint32_t)rect->top + y) * row_pitch +
-                       (size_t)(uint32_t)rect->left * bytes_per_pixel,
-                   (const uint8_t *)mapped.data +
-                       (size_t)(source_y + y) * mapped.row_pitch +
-                       (size_t)source_x * bytes_per_pixel,
-                   (size_t)row_bytes);
         }
     }
 
@@ -13803,7 +13925,7 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
     }
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_context == NULL ||
         data == NULL || rects == NULL || rect_count == NULL ||
-        bytes_per_pixel == 0 || row_pitch == 0 || data_size == 0 ||
+        bytes_per_pixel != 4u || row_pitch == 0 || data_size == 0 ||
         destination_width == 0 || destination_height == 0 ||
         (uint64_t)destination_width * bytes_per_pixel > row_pitch) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
@@ -13828,7 +13950,8 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
 
     if (slot->query == NULL || slot->staging == NULL ||
         slot->rect_count == 0 || slot->rect_count > rect_capacity ||
-        slot->bytes_per_pixel != bytes_per_pixel ||
+        !vmsvga3d_dxvk_screen_pixel_layout_valid(&slot->pixel_layout) ||
+        slot->bytes_per_pixel != slot->pixel_layout.bytes_per_pixel ||
         !vmsvga3d_dxvk_screen_readback_rect_bounds(
             slot->rects, slot->rect_count, slot->source_width,
             slot->source_height, &left, &top, &right, &bottom) ||
@@ -13869,7 +13992,7 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
                  VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL ||
         (uint64_t)mapped.row_pitch <
-            (uint64_t)slot->width * bytes_per_pixel) {
+            (uint64_t)slot->width * slot->bytes_per_pixel) {
         if (vmsvga3d_dxvk_succeeded(result)) {
             unmap(dxvk->d3d11_context, slot->staging, 0);
         }
@@ -13884,9 +14007,6 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
         uint32_t destination_y = (uint32_t)rect->top;
         uint32_t width;
         uint32_t height;
-        uint64_t row_bytes;
-        uint64_t destination_offset;
-        uint32_t y;
 
         if (destination_x >= destination_width ||
             destination_y >= destination_height) {
@@ -13899,30 +14019,11 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
         if (width == 0 || height == 0) {
             continue;
         }
-        row_bytes = (uint64_t)width * bytes_per_pixel;
-        destination_offset = (uint64_t)destination_y * row_pitch +
-                             (uint64_t)destination_x * bytes_per_pixel;
-
-        if ((uint64_t)source_x * bytes_per_pixel + row_bytes >
-                mapped.row_pitch ||
-            (uint64_t)destination_x * bytes_per_pixel + row_bytes >
-                row_pitch ||
-            destination_offset > data_size ||
-            row_bytes > (uint64_t)data_size - destination_offset ||
-            (uint64_t)(height - 1) * row_pitch >
-                (uint64_t)data_size - destination_offset - row_bytes) {
+        if (!vmsvga3d_dxvk_screen_readback_copy_bgr32(
+                slot, &mapped, source_x, source_y, width, height, data,
+                destination_x, destination_y, row_pitch, data_size)) {
             unmap(dxvk->d3d11_context, slot->staging, 0);
             goto fail;
-        }
-
-        for (y = 0; y < height; y++) {
-            memcpy((uint8_t *)data +
-                       (size_t)(destination_y + y) * row_pitch +
-                       (size_t)destination_x * bytes_per_pixel,
-                   (const uint8_t *)mapped.data +
-                       (size_t)(source_y + y) * mapped.row_pitch +
-                       (size_t)source_x * bytes_per_pixel,
-                   (size_t)row_bytes);
         }
 
         rects[output_rect_count].left = (int32_t)destination_x;

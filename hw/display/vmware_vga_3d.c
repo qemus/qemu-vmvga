@@ -467,6 +467,13 @@ static bool vmsvga3d_screen_target_flush_switch_live(
 static bool vmsvga3d_screen_target_retired_snapshot_service_live(
     struct vmsvga_state_s *s, bool wait, bool *pending_out);
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s);
+static VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_screen_target_async_poll_present_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    bool d3d9_resident, bool d3d11_resident, bool wait,
+    bool allow_inactive, uint64_t min_sequence, uint64_t *sequence_out);
+static void vmsvga3d_screen_target_async_discard_live(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface);
 static bool vmsvga2d_screen_target_flush_live(struct vmsvga_state_s *s);
 static bool vmsvga2d_screen_target_quiesce_live(struct vmsvga_state_s *s);
 static void vmsvga3d_screen_target_write_tracking_reset_live(

@@ -11270,11 +11270,6 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         bool old_commit_pending =
             s->svga3d->screen_target_frontend_commit_pending &&
             s->svga3d->screen_target_frontend_commit_sid == old_sid;
-        uint32_t pending_backend =
-            old_surface != NULL && old_surface->dxvk_surface != NULL
-                ? vmsvga3d_dxvk_screen_readback_pending_backend(
-                      old_surface->dxvk_surface)
-                : 0;
         bool switch_quiesced = false;
 
         s->perf.screen_target_switches++;
@@ -11283,28 +11278,6 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
          * Finish that exact tracked frame before changing its active SID; the
          * normal high-frequency target-switch path never waits. */
         if (old_commit_pending) {
-            s->perf.quiesce_reason_target_switch++;
-            if (!vmsvga3d_screen_target_quiesce_live(s)) {
-                return false;
-            }
-            switch_quiesced = true;
-        }
-
-        if (!switch_quiesced && old_d3d9_resident && !old_d3d11_resident) {
-            if (pending_backend == 9 &&
-                old_surface->screen_target_content_valid &&
-                old_surface->mips != NULL && old_surface->mip_count != 0) {
-                SVGA3dRect full = {
-                    .x = 0,
-                    .y = 0,
-                    .w = old_surface->mips[0].size.width,
-                    .h = old_surface->mips[0].size.height,
-                };
-
-                (void)vmsvga3d_screen_target_mark_dirty_live(
-                    s, old_sid, 0, &full, true);
-            }
-            vmsvga3d_screen_target_discard_active_async_live(s);
             s->perf.quiesce_reason_target_switch++;
             if (!vmsvga3d_screen_target_quiesce_live(s)) {
                 return false;
@@ -11332,6 +11305,58 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                     return false;
                 }
                 switch_quiesced = true;
+            } else if (old_d3d9_resident && !old_d3d11_resident &&
+                       old_surface != NULL &&
+                       old_surface->dxvk_surface != NULL) {
+                VMSVGA3DDxvkScreenReadbackPollResult poll;
+
+                /* A detached D3D11 snapshot from an even older target still
+                 * owns frontend publication order.  D3D9 has no detached
+                 * retirement path yet, so drain that exceptional cross-backend
+                 * boundary before publishing the D3D9 switch frame. */
+                if (vmsvga3d_dxvk_d3d11_retired_screen_readback_count(
+                        s->dxvk) != 0) {
+                    s->perf.screen_target_retire_waits++;
+                    s->perf.quiesce_reason_target_switch++;
+                    if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                        return false;
+                    }
+                    switch_quiesced = true;
+                } else {
+                    poll = vmsvga3d_screen_target_async_poll_present_live(
+                        s, old_surface, true, false, true, false, 0, NULL);
+
+                    /* Do not discard an in-flight D3D9 ring at a target switch.
+                     * The newest submission is cumulative, so wait for exactly
+                     * that frame and publish it once.  Its event completion also
+                     * orders every older StretchRect submission.  This avoids the
+                     * old discard-while-in-flight lifetime hazard and avoids
+                     * throwing away an already queued copy only to issue a second
+                     * synchronous full-surface readback. */
+                    if (poll != VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY &&
+                        poll != VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE) {
+                        if (old_surface->screen_target_content_valid &&
+                            old_surface->mips != NULL &&
+                            old_surface->mip_count != 0) {
+                            SVGA3dRect full = {
+                                .x = 0,
+                                .y = 0,
+                                .w = old_surface->mips[0].size.width,
+                                .h = old_surface->mips[0].size.height,
+                            };
+
+                            (void)vmsvga3d_screen_target_mark_dirty_live(
+                                s, old_sid, 0, &full, true);
+                        }
+                        vmsvga3d_screen_target_async_discard_live(
+                            s, old_surface);
+                        s->perf.quiesce_reason_target_switch++;
+                        if (!vmsvga3d_screen_target_quiesce_live(s)) {
+                            return false;
+                        }
+                        switch_quiesced = true;
+                    }
+                }
             } else if (old_d3d11_resident && !old_d3d9_resident &&
                        old_surface != NULL &&
                        old_surface->dxvk_surface != NULL) {
@@ -17783,11 +17808,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               return false;
           }
 
-          /* Keep only the newest guest request pending.  Draw setup realizes
-           * the latest plan once, so intermediate SET_SOTARGETS commands that
-           * are overwritten before a draw never reach SOSetTargets().
-           */
-          return vmsvga3d_state_dx_apply_so_targets(s, cid, &plan);
+          /* SET_SOTARGETS is an immediate D3D11 binding operation.  Deferring
+           * it until draw setup can leave the previous SO buffer native-bound
+           * while a following command rebinds that same resource as a vertex,
+           * index or shader input.  D3D11 resolves that hazard by changing
+           * native bindings behind our shadow state.  Record the guest shadow
+           * first, then realize this exact plan immediately as specified by
+           * plan.immediate_bind.  The deferred dirty path remains for restoring
+           * SO state after ClearState/context switches. */
+          return vmsvga3d_state_dx_apply_so_targets(s, cid, &plan) &&
+                 (!plan.immediate_bind ||
+                  vmsvga3d_d3d10_pipeline_so_targets_live(s, cid));
       }
 
     case SVGA_3D_CMD_DX_SET_STREAMOUTPUT: {

@@ -12636,34 +12636,6 @@ static bool vmsvga3d_dxvk_screen_readback_rect_bounds(
     return true;
 }
 
-static uint32_t vmsvga3d_dxvk_screen_readback_pending_backend(
-    const VMSVGA3DDxvkSurface *surface)
-{
-    bool pending_d3d9 = false;
-    bool pending_d3d11 = false;
-    uint32_t i;
-
-    if (surface == NULL) {
-        return 0;
-    }
-
-    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
-        pending_d3d9 |= surface->d3d9_screen_readback[i].pending;
-        pending_d3d11 |= surface->d3d11_screen_readback[i].pending;
-    }
-
-    if (pending_d3d9 && pending_d3d11) {
-        return 10;
-    }
-    if (pending_d3d9) {
-        return 9;
-    }
-    if (pending_d3d11) {
-        return 11;
-    }
-    return 0;
-}
-
 static VMSVGA3DDxvkScreenReadbackSlot *
 vmsvga3d_dxvk_screen_readback_free_slot(
     VMSVGA3DDxvkScreenReadbackSlot *slots)
@@ -12695,6 +12667,25 @@ vmsvga3d_dxvk_screen_readback_oldest_slot(
         }
     }
     return oldest;
+}
+
+static VMSVGA3DDxvkScreenReadbackSlot *
+vmsvga3d_dxvk_screen_readback_newest_slot(
+    VMSVGA3DDxvkScreenReadbackSlot *slots, uint64_t min_sequence)
+{
+    VMSVGA3DDxvkScreenReadbackSlot *newest = NULL;
+    uint32_t i;
+
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        if (!slots[i].pending ||
+            (min_sequence != 0 && slots[i].sequence < min_sequence)) {
+            continue;
+        }
+        if (newest == NULL || slots[i].sequence > newest->sequence) {
+            newest = &slots[i];
+        }
+    }
+    return newest;
 }
 
 static bool vmsvga3d_dxvk_screen_readback_accumulate_pending_bounds(
@@ -13024,7 +13015,13 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
     }
 
     if (wait) {
-        slot = vmsvga3d_dxvk_screen_readback_oldest_slot(
+        /* Every newer D3D9 ScreenTarget submission is cumulative: it copies
+         * the union of all still-pending damage from the current source
+         * contents.  At a switch/quiesce boundary wait for the newest frame,
+         * not the oldest one.  Completion of its event also orders all older
+         * StretchRect work, so those obsolete slots can then be dropped
+         * without releasing resources that are still in flight. */
+        slot = vmsvga3d_dxvk_screen_readback_newest_slot(
             surface->d3d9_screen_readback, min_sequence);
         if (slot == NULL) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
@@ -13170,10 +13167,12 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 
     memcpy(rects, slot->rects, slot->rect_count * sizeof(rects[0]));
     *rect_count = slot->rect_count;
-    if (!wait) {
-        dropped = vmsvga3d_dxvk_screen_readback_drop_older_slots(
-            surface->d3d9_screen_readback, slot->sequence);
-    }
+    /* The selected frame is cumulative, so older pending frames are obsolete
+     * after it has completed regardless of whether this was a normal poll or
+     * a switch-time wait.  drop_older_slots only clears pending metadata; it
+     * deliberately keeps the COM objects cached in their slots. */
+    dropped = vmsvga3d_dxvk_screen_readback_drop_older_slots(
+        surface->d3d9_screen_readback, slot->sequence);
     if (sequence_out != NULL) {
         *sequence_out = slot->sequence;
     }

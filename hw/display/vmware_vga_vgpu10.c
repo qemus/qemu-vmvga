@@ -9214,6 +9214,7 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             " retire-arm=%" PRIu64 " retire-done=%" PRIu64
             " retire-drop=%" PRIu64 " retire-skip=%" PRIu64
             " retire-wait=%" PRIu64 " retire-fail=%" PRIu64
+            " scanout-rebind=%" PRIu64 " scanout-mismatch=%" PRIu64
             " trans-async=%" PRIu64
             " trans-commit=%" PRIu64 " qr-switch=%" PRIu64
             " qr-h9=%" PRIu64
@@ -9266,6 +9267,8 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             p->screen_target_retire_waits - l->screen_target_retire_waits,
             p->screen_target_retire_failures -
                 l->screen_target_retire_failures,
+            p->screen_scanout_rebinds - l->screen_scanout_rebinds,
+            p->screen_scanout_mismatches - l->screen_scanout_mismatches,
             p->screen_target_transition_async_submits -
                 l->screen_target_transition_async_submits,
             p->screen_target_transition_async_commits -

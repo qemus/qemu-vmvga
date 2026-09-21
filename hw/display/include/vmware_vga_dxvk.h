@@ -566,7 +566,8 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out);
 VMSVGA3DDxvkScreenReadbackRetireResult
 vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t sid);
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t sid,
+    bool allow_supersede, uint32_t *superseded_out);
 VMSVGA3DDxvkScreenReadbackPollResult
 vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
     VMSVGA3DDxvk *dxvk, bool wait, void *data, uint32_t bytes_per_pixel,

@@ -13728,9 +13728,27 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
 #endif
 }
 
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+static bool vmsvga3d_dxvk_screen_readback_slot_is_full_frame(
+    const VMSVGA3DDxvkScreenReadbackSlot *slot)
+{
+    const VMSVGA3DD3D9Rect *rect;
+
+    if (slot == NULL || slot->rect_count != 1 || slot->source_width == 0 ||
+        slot->source_height == 0) {
+        return false;
+    }
+    rect = &slot->rects[0];
+    return rect->left == 0 && rect->top == 0 && rect->right > 0 &&
+           rect->bottom > 0 && (uint32_t)rect->right == slot->source_width &&
+           (uint32_t)rect->bottom == slot->source_height;
+}
+#endif
+
 VMSVGA3DDxvkScreenReadbackRetireResult
 vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t sid)
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t sid,
+    bool allow_supersede, uint32_t *superseded_out)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkRetiredScreenReadback *retired;
@@ -13738,8 +13756,12 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
     uint64_t retired_bytes = 0;
     uint64_t selected_bytes;
     uint32_t free_index = UINT32_MAX;
+    uint32_t superseded = 0;
     uint32_t i;
 
+    if (superseded_out != NULL) {
+        *superseded_out = 0;
+    }
     if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
         surface->owner != dxvk || !surface->d3d11_resident ||
         surface->d3d9_resident) {
@@ -13811,11 +13833,37 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
             retired_bytes += slot_bytes;
         }
     }
-    if (free_index == UINT32_MAX) {
-        return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
+    if (allow_supersede &&
+        (free_index == UINT32_MAX ||
+         retired_bytes >
+             VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES - selected_bytes) &&
+        vmsvga3d_dxvk_screen_readback_slot_is_full_frame(selected)) {
+        /* Detached snapshots are presentation history, not guest GPU state.
+         * A full-frame newest snapshot is self-contained and therefore
+         * supersedes every older unpresented target in the FIFO.  Drop those
+         * stale staging/query objects instead of waiting for the oldest event
+         * merely to display frames that can no longer become visible. */
+        for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
+            if (!retired->slots[i].pending) {
+                continue;
+            }
+            vmsvga3d_dxvk_screen_readback_slot_release_d3d11(
+                &retired->slots[i]);
+            retired->sid[i] = SVGA3D_INVALID_ID;
+            retired->order[i] = 0;
+            superseded++;
+        }
+        retired_bytes = 0;
+        free_index = 0;
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "SCREEN-READBACK backend=d3d11 phase=retire-supersede "
+            "sid=%u seq=%" PRIu64 " dropped=%u",
+            sid, selected->sequence, superseded);
     }
-    if (retired_bytes >
-        VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES - selected_bytes) {
+    if (free_index == UINT32_MAX ||
+        retired_bytes >
+            VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES - selected_bytes) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
     }
 
@@ -13851,11 +13899,18 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
         retired->order[free_index],
         vmsvga3d_dxvk_d3d11_retired_screen_readback_count(dxvk),
         retired_bytes + selected_bytes);
+    if (superseded_out != NULL) {
+        *superseded_out = superseded;
+    }
     return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED;
 #else
     (void)dxvk;
     (void)surface;
     (void)sid;
+    (void)allow_supersede;
+    if (superseded_out != NULL) {
+        *superseded_out = 0;
+    }
     return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
 #endif
 }

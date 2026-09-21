@@ -11365,13 +11365,16 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                         s->dxvk, old_surface->dxvk_surface, old_sid);
 
                 if (retire == VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
-                    /* The switch flush serviced the FIFO before submitting the
-                     * current target, but the oldest detached query may have
-                     * completed in the meantime.  Drain every READY entry once
-                     * more and retry the detach before paying the synchronous
-                     * quiesce penalty. */
+                    /* The switch flush serviced a bounded FIFO batch before
+                     * submitting the current target, but more detached queries
+                     * may have completed in the meantime.  Do one larger, still
+                     * bounded, nonblocking cleanup pass and retry the detach
+                     * before paying the synchronous quiesce penalty. */
                     if (!vmsvga3d_screen_target_retired_snapshot_service_live(
-                            s, false, NULL)) {
+                            s, false,
+                            VMSVGA3D_SCREEN_TARGET_RETIRE_PRESSURE_MAX_ENTRIES,
+                            VMSVGA3D_SCREEN_TARGET_RETIRE_PRESSURE_MAX_BYTES,
+                            NULL)) {
                         return false;
                     }
                     retire =
@@ -11383,8 +11386,9 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                     s->perf.screen_target_retire_armed++;
                 } else if (retire ==
                            VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
-                    /* Only a genuinely full queue whose FIFO head is still
-                     * incomplete reaches this expensive fallback. */
+                    /* Slot or byte-budget pressure still remains after the
+                     * bounded nonblocking cleanup/retry.  Only this residual
+                     * pressure reaches the expensive synchronous fallback. */
                     s->perf.screen_target_retire_waits++;
                     s->perf.quiesce_reason_target_switch++;
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {

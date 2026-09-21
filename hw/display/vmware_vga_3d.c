@@ -464,8 +464,15 @@ static void vmsvga3d_clip_present_rect(const SVGA3dCopyRect *rect,
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s);
 static bool vmsvga3d_screen_target_flush_switch_live(
     struct vmsvga_state_s *s);
+#define VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES 4u
+#define VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES \
+    (UINT64_C(32) * 1024u * 1024u)
+#define VMSVGA3D_SCREEN_TARGET_RETIRE_PRESSURE_MAX_ENTRIES 8u
+#define VMSVGA3D_SCREEN_TARGET_RETIRE_PRESSURE_MAX_BYTES \
+    (UINT64_C(64) * 1024u * 1024u)
 static bool vmsvga3d_screen_target_retired_snapshot_service_live(
-    struct vmsvga_state_s *s, bool wait, bool *pending_out);
+    struct vmsvga_state_s *s, bool wait, uint32_t max_ready_entries,
+    uint64_t max_ready_bytes, bool *pending_out);
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s);
 static VMSVGA3DDxvkScreenReadbackPollResult
 vmsvga3d_screen_target_async_poll_present_live(
@@ -14943,7 +14950,8 @@ static bool vmsvga2d_screen_target_quiesce_live(struct vmsvga_state_s *s)
         bool retired_pending = false;
 
         if (!vmsvga3d_screen_target_retired_snapshot_service_live(
-                s, true, &retired_pending) || retired_pending) {
+                s, true, UINT32_MAX, UINT64_MAX, &retired_pending) ||
+            retired_pending) {
             return false;
         }
     }
@@ -16002,7 +16010,8 @@ static bool vmsvga3d_screen_target_retired_snapshot_fail_live(
 }
 
 static bool vmsvga3d_screen_target_retired_snapshot_service_live(
-    struct vmsvga_state_s *s, bool wait, bool *pending_out)
+    struct vmsvga_state_s *s, bool wait, uint32_t max_ready_entries,
+    uint64_t max_ready_bytes, bool *pending_out)
 {
     VMSVGA3DD3D9Rect d3d_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
     uint8_t *screen_base = NULL;
@@ -16011,12 +16020,17 @@ static bool vmsvga3d_screen_target_retired_snapshot_service_live(
     uint32_t rect_count = 0;
     uint32_t retired_sid = SVGA3D_INVALID_ID;
     uint64_t sequence = 0;
+    uint32_t ready_entries = 0;
+    uint64_t ready_bytes = 0;
 
     if (pending_out != NULL) {
         *pending_out = false;
     }
     if (s == NULL || s->dxvk == NULL) {
         return true;
+    }
+    if (!wait && (max_ready_entries == 0 || max_ready_bytes == 0)) {
+        return false;
     }
     if (vmsvga3d_dxvk_d3d11_retired_screen_readback_count(s->dxvk) == 0) {
         return true;
@@ -16029,10 +16043,36 @@ static bool vmsvga3d_screen_target_retired_snapshot_service_live(
 
     for (;;) {
         VMSVGA3DDxvkScreenReadbackPollResult poll;
-        int64_t poll_start_us = g_get_monotonic_time();
+        uint64_t next_bytes = 0;
+        int64_t poll_start_us;
         int64_t poll_elapsed_us;
         uint32_t i;
 
+        /* Nonblocking servicing is latency-bounded.  Always allow the first
+         * completed snapshot so a single large frame cannot starve forever;
+         * after that, stop before exceeding either the per-pass entry budget
+         * or the staging-footprint byte budget.  A wait=true quiesce is an
+         * explicit synchronous drain and intentionally ignores these limits. */
+        if (!wait && ready_entries != 0) {
+            bool have_next_bytes =
+                vmsvga3d_dxvk_d3d11_retired_screen_readback_peek_bytes(
+                    s->dxvk, &next_bytes);
+
+            if (ready_entries >= max_ready_entries ||
+                (have_next_bytes &&
+                 (ready_bytes >= max_ready_bytes ||
+                  next_bytes > max_ready_bytes - ready_bytes))) {
+                if (pending_out != NULL) {
+                    *pending_out = true;
+                }
+                return true;
+            }
+        } else if (!wait) {
+            (void)vmsvga3d_dxvk_d3d11_retired_screen_readback_peek_bytes(
+                s->dxvk, &next_bytes);
+        }
+
+        poll_start_us = g_get_monotonic_time();
         rect_count = 0;
         retired_sid = SVGA3D_INVALID_ID;
         sequence = 0;
@@ -16083,12 +16123,17 @@ static bool vmsvga3d_screen_target_retired_snapshot_service_live(
                 vmsvga_damage_add_visible(s, x, y, w, h);
             }
             s->perf.screen_target_retire_completed++;
+            ready_entries++;
+            if (next_bytes > UINT64_MAX - ready_bytes) {
+                ready_bytes = UINT64_MAX;
+            } else {
+                ready_bytes += next_bytes;
+            }
 
-            /* A completed detached snapshot never requires a GPU wait.  Keep
-             * draining consecutive READY entries in FIFO order so a display
-             * pass can catch up after a burst of rapid target switches.  The
-             * first incomplete head still stops a nonblocking pass immediately,
-             * so this never turns normal servicing into a wait. */
+            /* Drain only consecutive READY entries and only within the caller's
+             * nonblocking budget.  This catches up after short switch bursts
+             * without letting one display refresh map/copy the full detached
+             * retirement byte budget. */
             if (vmsvga3d_dxvk_d3d11_retired_screen_readback_count(s->dxvk) == 0) {
                 return true;
             }
@@ -16116,7 +16161,9 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     bool retired_pending = false;
 
     if (!vmsvga3d_screen_target_retired_snapshot_service_live(
-            s, false, &retired_pending)) {
+            s, false, VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES,
+            VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES,
+            &retired_pending)) {
         return false;
     }
     if (retired_pending) {
@@ -16131,11 +16178,13 @@ static bool vmsvga3d_screen_target_flush_switch_live(
     bool retired_pending = false;
 
     /* Preserve FIFO publication order across rapid A->B->C switches without
-     * waiting for A.  Service one detached snapshot nonblocking.  If an older
-     * snapshot remains, B may submit a new staging copy but must not poll, map
-     * or publish any B frame yet; the switch will detach B behind A. */
+     * waiting for A.  Retire a bounded batch of already-ready snapshots.  If
+     * an older snapshot remains, B may submit a new staging copy but must not
+     * poll, map or publish any B frame yet; the switch will detach B behind A. */
     if (!vmsvga3d_screen_target_retired_snapshot_service_live(
-            s, false, &retired_pending)) {
+            s, false, VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES,
+            VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES,
+            &retired_pending)) {
         return false;
     }
     return vmsvga3d_screen_target_flush_live_mode(
@@ -16165,7 +16214,8 @@ static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s)
         bool retired_pending = false;
 
         if (!vmsvga3d_screen_target_retired_snapshot_service_live(
-                s, true, &retired_pending) || retired_pending) {
+                s, true, UINT32_MAX, UINT64_MAX, &retired_pending) ||
+            retired_pending) {
             result = false;
             goto out;
         }

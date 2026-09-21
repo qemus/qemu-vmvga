@@ -11364,12 +11364,31 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                     vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
                         s->dxvk, old_surface->dxvk_surface, old_sid);
 
+                if (retire == VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
+                    /* The switch flush serviced a bounded FIFO batch before
+                     * submitting the current target, but more detached queries
+                     * may have completed in the meantime.  Do one larger, still
+                     * bounded, nonblocking cleanup pass and retry the detach
+                     * before paying the synchronous quiesce penalty. */
+                    if (!vmsvga3d_screen_target_retired_snapshot_service_live(
+                            s, false,
+                            VMSVGA3D_SCREEN_TARGET_RETIRE_PRESSURE_MAX_ENTRIES,
+                            VMSVGA3D_SCREEN_TARGET_RETIRE_PRESSURE_MAX_BYTES,
+                            NULL)) {
+                        return false;
+                    }
+                    retire =
+                        vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
+                            s->dxvk, old_surface->dxvk_surface, old_sid);
+                }
+
                 if (retire == VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED) {
                     s->perf.screen_target_retire_armed++;
                 } else if (retire ==
                            VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
-                    /* Queue pressure is the only normal switch condition that
-                     * may drain detached D3D11 snapshots synchronously. */
+                    /* Slot or byte-budget pressure still remains after the
+                     * bounded nonblocking cleanup/retry.  Only this residual
+                     * pressure reaches the expensive synchronous fallback. */
                     s->perf.screen_target_retire_waits++;
                     s->perf.quiesce_reason_target_switch++;
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {

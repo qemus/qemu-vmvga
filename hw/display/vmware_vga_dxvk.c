@@ -329,7 +329,10 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     VMSVGA3DD3D9Rect rects[VMSVGA3D_DXVK_SCREEN_READBACK_RECTS];
 } VMSVGA3DDxvkScreenReadbackSlot;
 
-#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 8u
+/* The byte budget is the hard resource bound.  Keep enough metadata slots
+ * to absorb short bursts of rapid ScreenTarget switches without turning a
+ * transient GPU lag into an immediate synchronous quiesce. */
+#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 32u
 #define VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES \
     (UINT64_C(256) * 1024u * 1024u)
 #define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES \
@@ -13870,6 +13873,44 @@ uint32_t vmsvga3d_dxvk_d3d11_retired_screen_readback_count(
         count += dxvk->d3d11_retired_screen_readback->slots[i].pending ? 1u : 0u;
     }
     return count;
+}
+
+bool vmsvga3d_dxvk_d3d11_retired_screen_readback_peek_bytes(
+    VMSVGA3DDxvk *dxvk, uint64_t *bytes_out)
+{
+    VMSVGA3DDxvkRetiredScreenReadback *retired;
+    VMSVGA3DDxvkScreenReadbackSlot *slot = NULL;
+    uint32_t slot_index = UINT32_MAX;
+    uint64_t pixels;
+    uint32_t i;
+
+    if (bytes_out != NULL) {
+        *bytes_out = 0;
+    }
+    if (dxvk == NULL || bytes_out == NULL ||
+        dxvk->d3d11_retired_screen_readback == NULL) {
+        return false;
+    }
+    retired = dxvk->d3d11_retired_screen_readback;
+    for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
+        if (!retired->slots[i].pending) {
+            continue;
+        }
+        if (slot == NULL || retired->order[i] < retired->order[slot_index]) {
+            slot = &retired->slots[i];
+            slot_index = i;
+        }
+    }
+    if (slot == NULL || slot->width == 0 || slot->height == 0 ||
+        slot->bytes_per_pixel == 0) {
+        return false;
+    }
+    pixels = (uint64_t)slot->width * slot->height;
+    if (pixels > UINT64_MAX / slot->bytes_per_pixel) {
+        return false;
+    }
+    *bytes_out = pixels * slot->bytes_per_pixel;
+    return true;
 }
 
 void vmsvga3d_dxvk_d3d11_retired_screen_readback_discard(

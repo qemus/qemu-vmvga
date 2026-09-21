@@ -329,7 +329,10 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     VMSVGA3DD3D9Rect rects[VMSVGA3D_DXVK_SCREEN_READBACK_RECTS];
 } VMSVGA3DDxvkScreenReadbackSlot;
 
-#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 8u
+/* The byte budget is the hard resource bound.  Keep enough metadata slots
+ * to absorb short bursts of rapid ScreenTarget switches without turning a
+ * transient GPU lag into an immediate synchronous quiesce. */
+#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 32u
 #define VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES \
     (UINT64_C(256) * 1024u * 1024u)
 #define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES \

@@ -16084,17 +16084,11 @@ static bool vmsvga3d_screen_target_retired_snapshot_service_live(
             }
             s->perf.screen_target_retire_completed++;
 
-            /* Normal display refresh retires at most one detached snapshot per
-             * pass.  This avoids bunching multiple Map/copy operations into a
-             * single frame while preserving FIFO presentation ordering. */
-            if (!wait) {
-                if (pending_out != NULL) {
-                    *pending_out =
-                        vmsvga3d_dxvk_d3d11_retired_screen_readback_count(
-                            s->dxvk) != 0;
-                }
-                return true;
-            }
+            /* A completed detached snapshot never requires a GPU wait.  Keep
+             * draining consecutive READY entries in FIFO order so a display
+             * pass can catch up after a burst of rapid target switches.  The
+             * first incomplete head still stops a nonblocking pass immediately,
+             * so this never turns normal servicing into a wait. */
             if (vmsvga3d_dxvk_d3d11_retired_screen_readback_count(s->dxvk) == 0) {
                 return true;
             }

@@ -11364,12 +11364,27 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                     vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
                         s->dxvk, old_surface->dxvk_surface, old_sid);
 
+                if (retire == VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
+                    /* The switch flush serviced the FIFO before submitting the
+                     * current target, but the oldest detached query may have
+                     * completed in the meantime.  Drain every READY entry once
+                     * more and retry the detach before paying the synchronous
+                     * quiesce penalty. */
+                    if (!vmsvga3d_screen_target_retired_snapshot_service_live(
+                            s, false, NULL)) {
+                        return false;
+                    }
+                    retire =
+                        vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
+                            s->dxvk, old_surface->dxvk_surface, old_sid);
+                }
+
                 if (retire == VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED) {
                     s->perf.screen_target_retire_armed++;
                 } else if (retire ==
                            VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
-                    /* Queue pressure is the only normal switch condition that
-                     * may drain detached D3D11 snapshots synchronously. */
+                    /* Only a genuinely full queue whose FIFO head is still
+                     * incomplete reaches this expensive fallback. */
                     s->perf.screen_target_retire_waits++;
                     s->perf.quiesce_reason_target_switch++;
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {

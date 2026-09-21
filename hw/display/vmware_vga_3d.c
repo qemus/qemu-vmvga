@@ -13466,6 +13466,77 @@ static bool vmsvga3d_gb_screen_target_entry_read(
                                 sizeof(*entry), entry, sizeof(*entry));
 }
 
+static bool vmsvga3d_screen_target_scanout_alias_matches_live(
+    struct vmsvga_state_s *s, uint8_t *expected_base,
+    uint32_t expected_stride)
+{
+    DisplaySurface *front;
+
+    if (s == NULL || expected_base == NULL || expected_stride == 0 ||
+        !s->screen_defined || !s->active_valid || s->screen_width == 0 ||
+        s->screen_height == 0) {
+        return false;
+    }
+
+    front = qemu_console_surface(s->vga.con);
+    return front != NULL && surface_data(front) == expected_base &&
+           surface_width(front) > 0 && surface_height(front) > 0 &&
+           surface_stride(front) > 0 &&
+           (uint32_t)surface_width(front) == s->screen_width &&
+           (uint32_t)surface_height(front) == s->screen_height &&
+           surface_bits_per_pixel(front) == 32 &&
+           (uint32_t)surface_stride(front) == expected_stride;
+}
+
+static bool vmsvga3d_screen_target_scanout_alias_ensure_live(
+    struct vmsvga_state_s *s)
+{
+    uint8_t *expected_base = NULL;
+    size_t expected_size = 0;
+    uint32_t expected_stride = 0;
+    uint64_t required;
+
+    if (s == NULL) {
+        return false;
+    }
+
+    /* A deferred/held frontend intentionally points at the previous image.
+     * Its transition commit or first post-hold size check performs the rebind
+     * before accumulated/full damage reaches the frontend. */
+    if (s->screen_frontend_deferred || s->screen_frontend_hold_frames != 0) {
+        return true;
+    }
+
+    if (!vmsvga_screen_storage(
+            s, &expected_base, &expected_size, &expected_stride)) {
+        s->perf.screen_scanout_mismatches++;
+        return false;
+    }
+
+    required = (uint64_t)expected_stride * s->screen_height;
+    if (required == 0 || required > expected_size) {
+        s->perf.screen_scanout_mismatches++;
+        return false;
+    }
+
+    if (vmsvga3d_screen_target_scanout_alias_matches_live(
+            s, expected_base, expected_stride)) {
+        return true;
+    }
+
+    /* A lifecycle rebuild can leave QEMU bound to the previous storage
+     * generation even though readback into screen_storage keeps succeeding. */
+    vmsvga_check_size(s);
+    if (vmsvga3d_screen_target_scanout_alias_matches_live(
+            s, expected_base, expected_stride)) {
+        s->perf.screen_scanout_rebinds++;
+        return true;
+    }
+
+    s->perf.screen_scanout_mismatches++;
+    return false;
+}
+
 static bool vmsvga3d_screen_target_present_live(
     struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource,
     const SVGA3dRect *rect, bool readback, bool copy_to_screen,
@@ -13573,9 +13644,16 @@ static bool vmsvga3d_screen_target_present_live(
                 s, surface, image, desc, &copy, true)) {
             return false;
         }
-    } else if (!vmsvga3d_present_screen_rect_damage_only(
-                   s, surface, image, desc, &copy)) {
-        return false;
+    } else {
+        /* The renderer/readback path has already populated screen_storage.
+         * Damage-only publication is valid only if the frontend aliases that
+         * exact storage generation.  Lifecycle rebuilds can leave QEMU bound
+         * to an older mirror even though readback itself continues to succeed. */
+        if (!vmsvga3d_screen_target_scanout_alias_ensure_live(s) ||
+            !vmsvga3d_present_screen_rect_damage_only(
+                s, surface, image, desc, &copy)) {
+            return false;
+        }
     }
 
     if (trace_rgb) {
@@ -16090,6 +16168,9 @@ static bool vmsvga3d_screen_target_retired_snapshot_service_live(
         if (poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY) {
             s->perf.screen_poll_ready++;
             if (retired_sid == SVGA3D_INVALID_ID || sequence == 0) {
+                return vmsvga3d_screen_target_retired_snapshot_fail_live(s);
+            }
+            if (!vmsvga3d_screen_target_scanout_alias_ensure_live(s)) {
                 return vmsvga3d_screen_target_retired_snapshot_fail_live(s);
             }
             for (i = 0; i < rect_count; i++) {

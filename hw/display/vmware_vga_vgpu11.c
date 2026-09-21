@@ -2336,7 +2336,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
          * Dispatch and the same dxPostDraw cleanup afterwards.  Its
          * force-all-SRVs workaround is intentionally excluded for DXVK.
          */
-        if (!vmsvga3d_dx_pipeline_setup_live(s, cid)) {
+        if (!vmsvga3d_dx_pipeline_setup_compute_live(s, cid)) {
             return false;
         }
         success = vmsvga3d_d3d11_dispatch_live(
@@ -2366,7 +2366,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
-        if (!vmsvga3d_dx_pipeline_setup_live(s, cid)) {
+        if (!vmsvga3d_dx_pipeline_setup_compute_live(s, cid)) {
             return false;
         }
         success = vmsvga3d_d3d11_dispatch_indirect_live(

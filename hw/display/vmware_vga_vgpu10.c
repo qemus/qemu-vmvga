@@ -9380,7 +9380,7 @@ bool vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid)
     return vmsvga3d_d3d10_pipeline_setup_live(s, cid, true);
 }
 
-bool vmsvga3d_dx_pipeline_setup_compute_live(
+static bool vmsvga3d_dx_pipeline_setup_compute_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
     return vmsvga3d_d3d10_pipeline_setup_live(s, cid, false);

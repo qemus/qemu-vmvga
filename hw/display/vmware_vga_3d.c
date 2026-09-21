@@ -466,8 +466,6 @@ static bool vmsvga3d_screen_target_flush_switch_live(
     struct vmsvga_state_s *s);
 static bool vmsvga3d_screen_target_retired_snapshot_service_live(
     struct vmsvga_state_s *s, bool wait, bool *pending_out);
-static void vmsvga3d_screen_target_discard_active_async_live(
-    struct vmsvga_state_s *s);
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s);
 static bool vmsvga2d_screen_target_flush_live(struct vmsvga_state_s *s);
 static bool vmsvga2d_screen_target_quiesce_live(struct vmsvga_state_s *s);
@@ -15969,25 +15967,6 @@ static bool vmsvga3d_screen_target_retired_snapshot_service_live(
 
         s->perf.screen_poll_failed++;
         return vmsvga3d_screen_target_retired_snapshot_fail_live(s);
-    }
-}
-
-static void vmsvga3d_screen_target_discard_active_async_live(
-    struct vmsvga_state_s *s)
-{
-    uint32_t sid;
-    VMSVGA3DSurface *surface;
-
-    if (s == NULL || s->svga3d == NULL) {
-        return;
-    }
-    sid = s->svga3d->active_screen_target_sid;
-    if (sid == SVGA3D_INVALID_ID || sid >= SVGA3D_MAX_SURFACE_IDS) {
-        return;
-    }
-    surface = s->svga3d->surfaces[sid];
-    if (surface != NULL && surface->dxvk_surface != NULL) {
-        vmsvga3d_screen_target_async_discard_live(s, surface);
     }
 }
 

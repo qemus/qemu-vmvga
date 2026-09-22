@@ -11248,6 +11248,16 @@ static bool vmsvga3d_d3d10_mob_subresource_layout_live(
     return false;
 }
 
+static void vmsvga3d_d3d10_screen_target_note_quiesce_reason(
+    struct vmsvga_state_s *s, uint32_t sid)
+{
+    if (sid == SVGA3D_INVALID_ID) {
+        s->perf.quiesce_reason_target_unbind++;
+    } else {
+        s->perf.quiesce_reason_target_switch++;
+    }
+}
+
 static bool vmsvga3d_d3d10_screen_target_bind_live(
     struct vmsvga_state_s *s, uint32_t sid)
 {
@@ -11264,49 +11274,41 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         if (old_sid == sid) {
             return true;
         }
-        s->perf.quiesce_reason_target_unbind++;
-        if (!vmsvga3d_screen_target_quiesce_live(s)) {
+        surface = NULL;
+    } else {
+        if (sid >= SVGA3D_MAX_SURFACE_IDS) {
             return false;
         }
-        if (s->screen_direct_active &&
-            !vmsvga_screen_direct_detach(s, "target-unbind")) {
+
+        surface = s->svga3d->surfaces[sid];
+        if (surface == NULL || surface->mips == NULL ||
+            surface->mip_count == 0) {
             return false;
         }
-        s->svga3d->active_screen_target_sid = sid;
-        s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
-        return true;
+
+        if (old_sid == sid) {
+            return true;
+        }
+
+        /*
+         * Binding a ScreenTarget selects presentation metadata, not a rendering
+         * backend.  In particular, Windows 7 can bind a GB ScreenTarget and later
+         * render to that same surface through the legacy SVGA3D/D3D9 command path.
+         * Materializing it as D3D11 here would make the surface D3D11-resident and
+         * prevent the D3D9 backend from subsequently materializing it as a render
+         * target.  Let the first actual rendering/copy operation choose residency.
+         */
+        if (surface->format == SVGA3D_BUFFER ||
+            (surface->surface_flags & SVGA3D_SURFACE_SCREENTARGET) == 0 ||
+            (surface->surface_flags &
+             (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) != 0 ||
+            surface->mips[0].size.depth != 1) {
+            return false;
+        }
     }
 
-    if (sid >= SVGA3D_MAX_SURFACE_IDS) {
-        return false;
-    }
-
-    surface = s->svga3d->surfaces[sid];
-    if (surface == NULL || surface->mips == NULL || surface->mip_count == 0) {
-        return false;
-    }
-
-    /*
-     * Binding a ScreenTarget selects presentation metadata, not a rendering
-     * backend.  In particular, Windows 7 can bind a GB ScreenTarget and later
-     * render to that same surface through the legacy SVGA3D/D3D9 command path.
-     * Materializing it as D3D11 here would make the surface D3D11-resident and
-     * prevent the D3D9 backend from subsequently materializing it as a render
-     * target.  Let the first actual rendering/copy operation choose residency.
-     */
-    if (old_sid == sid) {
-        return true;
-    }
-
-    if (surface->format == SVGA3D_BUFFER ||
-        (surface->surface_flags & SVGA3D_SURFACE_SCREENTARGET) == 0 ||
-        (surface->surface_flags & (SVGA3D_SURFACE_1D | SVGA3D_SURFACE_VOLUME)) != 0 ||
-        surface->mips[0].size.depth != 1) {
-        return false;
-    }
-
-    /* Keep D3D11 switch retirement independent of guest-surface lifetime.
-     * A successful switch snapshot is detached into renderer-owned staging,
+    /* Keep D3D11 switch/unbind retirement independent of guest-surface
+     * lifetime.  A successful snapshot is detached into renderer-owned staging,
      * so later DX commands may redefine/destroy the old surface without an
      * outstanding presentation object pointing back into guest state.
      *
@@ -11331,19 +11333,22 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
             s->svga3d->screen_target_frontend_commit_pending &&
             s->svga3d->screen_target_frontend_commit_sid == old_sid;
         bool retire_coalescing =
+            sid != SVGA3D_INVALID_ID &&
             !s->screen_frontend_deferred && !s->screen_handoff_active &&
             old_d3d11_resident && !old_d3d9_resident &&
             old_surface != NULL && old_surface->dxvk_surface != NULL &&
             vmsvga3d_dxvk_d3d11_retired_screen_readback_coalescing(s->dxvk);
         bool switch_quiesced = false;
 
-        s->perf.screen_target_switches++;
+        if (sid != SVGA3D_INVALID_ID) {
+            s->perf.screen_target_switches++;
+        }
 
         /* A frontend handoff commit is an exceptional transition boundary.
          * Finish that exact tracked frame before changing its active SID; the
          * normal high-frequency target-switch path never waits. */
         if (old_commit_pending) {
-            s->perf.quiesce_reason_target_switch++;
+            vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
             if (!vmsvga3d_screen_target_quiesce_live(s)) {
                 return false;
             }
@@ -11394,7 +11399,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                 s->perf.screen_target_retire_coalesced_skips++;
             } else if (!vmsvga3d_screen_target_flush_switch_live(s) ||
                        s->svga3d->screen_target_dirty_count != 0) {
-                s->perf.quiesce_reason_target_switch++;
+                vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                 if (!vmsvga3d_screen_target_quiesce_live(s)) {
                     return false;
                 }
@@ -11406,7 +11411,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                  * retirement FIFO; finish the exceptional handoff before the
                  * active SID changes, just as when it was already pending on
                  * entry. */
-                s->perf.quiesce_reason_target_switch++;
+                vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                 if (!vmsvga3d_screen_target_quiesce_live(s)) {
                     return false;
                 }
@@ -11423,7 +11428,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                 if (vmsvga3d_dxvk_d3d11_retired_screen_readback_count(
                         s->dxvk) != 0) {
                     s->perf.screen_target_retire_waits++;
-                    s->perf.quiesce_reason_target_switch++;
+                    vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {
                         return false;
                     }
@@ -11456,7 +11461,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                         }
                         vmsvga3d_screen_target_async_discard_live(
                             s, old_surface);
-                        s->perf.quiesce_reason_target_switch++;
+                        vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                         if (!vmsvga3d_screen_target_quiesce_live(s)) {
                             return false;
                         }
@@ -11532,7 +11537,7 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                      * last-resort correctness fallback when the oldest anchor
                      * plus one self-contained checkpoint cannot be retained. */
                     s->perf.screen_target_retire_waits++;
-                    s->perf.quiesce_reason_target_switch++;
+                    vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {
                         return false;
                     }
@@ -11540,14 +11545,14 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                 } else if (retire ==
                            VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED) {
                     s->perf.screen_target_retire_failures++;
-                    s->perf.quiesce_reason_target_switch++;
+                    vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {
                         return false;
                     }
                     switch_quiesced = true;
                 }
             } else if (old_d3d9_resident && old_d3d11_resident) {
-                s->perf.quiesce_reason_target_switch++;
+                vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                 if (!vmsvga3d_screen_target_quiesce_live(s)) {
                     return false;
                 }
@@ -11556,8 +11561,15 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         }
     }
     if (s->screen_direct_active &&
-        !vmsvga_screen_direct_detach(s, "target-switch")) {
+        !vmsvga_screen_direct_detach(
+            s, sid == SVGA3D_INVALID_ID ? "target-unbind" : "target-switch")) {
         return false;
+    }
+
+    if (sid == SVGA3D_INVALID_ID) {
+        s->svga3d->active_screen_target_sid = sid;
+        s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+        return true;
     }
 
     /*

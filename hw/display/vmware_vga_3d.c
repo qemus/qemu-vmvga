@@ -15526,10 +15526,10 @@ static bool vmsvga3d_screen_target_flush_live_mode(
         return true;
     }
 
-    /* An older detached D3D11 snapshot owns frontend publication order.
-     * A switch may still queue the current target into its own async staging
-     * ring, but it must not publish anything from the active target until the
-     * detached FIFO has advanced. */
+    /* A detached D3D11 checkpoint owns frontend publication order.  A switch
+     * may still queue the current target into its own async staging ring, but
+     * it must not publish anything from the active target until that fixed
+     * checkpoint has advanced. */
     if (!defer_active_publish && !vmsvga3d_legacy_present_flush_live(s)) {
         return false;
     }
@@ -16152,10 +16152,11 @@ static bool vmsvga3d_screen_target_flush_switch_live(
 {
     bool retired_pending = false;
 
-    /* Preserve FIFO publication order across rapid A->B->C switches without
+    /* Preserve publication order across ordinary A->B->C switches without
      * waiting for A.  Retire a bounded batch of already-ready snapshots.  If
-     * an older snapshot remains, B may submit a new staging copy but must not
-     * poll, map or publish any B frame yet; the switch will detach B behind A. */
+     * retired work remains, B may submit a new staging copy but must not poll,
+     * map or publish it yet; pressure handling may later replace stale history
+     * with one self-contained fixed checkpoint. */
     if (!vmsvga3d_screen_target_retired_snapshot_service_live(
             s, false, VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES,
             VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES,

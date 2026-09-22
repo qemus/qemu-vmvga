@@ -311,6 +311,16 @@ struct vmsvga3d_dxvk_constant_buffer_s {
     VMSVGA3DDxvkConstantBuffer *next;
 };
 
+typedef struct vmsvga3d_dxvk_screen_pixel_layout_s {
+    uint32_t bytes_per_pixel;
+    uint8_t red_depth;
+    uint8_t green_depth;
+    uint8_t blue_depth;
+    uint8_t red_offset;
+    uint8_t green_offset;
+    uint8_t blue_offset;
+} VMSVGA3DDxvkScreenPixelLayout;
+
 typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     void *render_target;
     void *staging;
@@ -322,7 +332,6 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     uint32_t source_width;
     uint32_t source_height;
     uint32_t bytes_per_pixel;
-    VMSVGA3DDxvkScreenPixelLayout pixel_layout;
     uint32_t rect_count;
     uint64_t sequence;
     bool pending;
@@ -13213,6 +13222,161 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 #endif
 }
 
+/* vmware_vga_dxvk.c is included before vmware_vga_vgpu10.c in the
+ * amalgamated build, so the DXGI enum declared there is not visible here.
+ * Keep the small ABI subset needed by ScreenTarget readback local and
+ * prefixed; these numeric values are the public DXGI_FORMAT ABI values. */
+enum {
+    VMSVGA3D_DXVK_DXGI_R16G16B16A16_TYPELESS = 9,
+    VMSVGA3D_DXVK_DXGI_R16G16B16A16_UNORM = 11,
+    VMSVGA3D_DXVK_DXGI_R10G10B10A2_TYPELESS = 23,
+    VMSVGA3D_DXVK_DXGI_R10G10B10A2_UNORM = 24,
+    VMSVGA3D_DXVK_DXGI_R8G8B8A8_TYPELESS = 27,
+    VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM = 28,
+    VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM_SRGB = 29,
+    VMSVGA3D_DXVK_DXGI_B5G6R5_UNORM = 85,
+    VMSVGA3D_DXVK_DXGI_B5G5R5A1_UNORM = 86,
+    VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM = 87,
+    VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM = 88,
+    VMSVGA3D_DXVK_DXGI_B8G8R8A8_TYPELESS = 90,
+    VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM_SRGB = 91,
+    VMSVGA3D_DXVK_DXGI_B8G8R8X8_TYPELESS = 92,
+    VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM_SRGB = 93,
+    VMSVGA3D_DXVK_DXGI_B4G4R4A4_UNORM = 115,
+};
+
+/* Screen readback staging is created from d3d11_desc.readback_format, not
+ * from the guest SVGA format.  Keep compatibility and pixel interpretation
+ * tied to that exact backend format: CopySubresourceRegion has no HRESULT, so
+ * a bad resource/staging pairing can otherwise look like a completed query
+ * while leaving stale (often zero) staging pixels behind. */
+static uint32_t vmsvga3d_dxvk_screen_readback_format_family(
+    uint32_t format)
+{
+    switch (format) {
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_B8G8R8A8_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_B8G8R8X8_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_R8G8B8A8_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_R10G10B10A2_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R10G10B10A2_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_R10G10B10A2_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_R16G16B16A16_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R16G16B16A16_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_R16G16B16A16_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_B5G6R5_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B5G5R5A1_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B4G4R4A4_UNORM:
+        return format;
+    default:
+        return 0;
+    }
+}
+
+static bool vmsvga3d_dxvk_screen_readback_formats_compatible(
+    uint32_t resource_format, uint32_t readback_format)
+{
+    uint32_t resource_family =
+        vmsvga3d_dxvk_screen_readback_format_family(resource_format);
+    uint32_t readback_family =
+        vmsvga3d_dxvk_screen_readback_format_family(readback_format);
+
+    return resource_family != 0 && resource_family == readback_family;
+}
+
+static bool vmsvga3d_dxvk_screen_pixel_layout_from_format(
+    uint32_t format, VMSVGA3DDxvkScreenPixelLayout *layout)
+{
+    VMSVGA3DDxvkScreenPixelLayout value = {0};
+
+    switch (format) {
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_TYPELESS:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_TYPELESS:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM_SRGB:
+        value.bytes_per_pixel = 4;
+        value.blue_depth = 8;
+        value.green_depth = 8;
+        value.red_depth = 8;
+        value.blue_offset = 0;
+        value.green_offset = 8;
+        value.red_offset = 16;
+        break;
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM_SRGB:
+        value.bytes_per_pixel = 4;
+        value.red_depth = 8;
+        value.green_depth = 8;
+        value.blue_depth = 8;
+        value.red_offset = 0;
+        value.green_offset = 8;
+        value.blue_offset = 16;
+        break;
+    case VMSVGA3D_DXVK_DXGI_B5G6R5_UNORM:
+        value.bytes_per_pixel = 2;
+        value.blue_depth = 5;
+        value.green_depth = 6;
+        value.red_depth = 5;
+        value.blue_offset = 0;
+        value.green_offset = 5;
+        value.red_offset = 11;
+        break;
+    case VMSVGA3D_DXVK_DXGI_B5G5R5A1_UNORM:
+        value.bytes_per_pixel = 2;
+        value.blue_depth = 5;
+        value.green_depth = 5;
+        value.red_depth = 5;
+        value.blue_offset = 0;
+        value.green_offset = 5;
+        value.red_offset = 10;
+        break;
+    case VMSVGA3D_DXVK_DXGI_B4G4R4A4_UNORM:
+        value.bytes_per_pixel = 2;
+        value.blue_depth = 4;
+        value.green_depth = 4;
+        value.red_depth = 4;
+        value.blue_offset = 0;
+        value.green_offset = 4;
+        value.red_offset = 8;
+        break;
+    case VMSVGA3D_DXVK_DXGI_R10G10B10A2_UNORM:
+        value.bytes_per_pixel = 4;
+        value.red_depth = 10;
+        value.green_depth = 10;
+        value.blue_depth = 10;
+        value.red_offset = 0;
+        value.green_offset = 10;
+        value.blue_offset = 20;
+        break;
+    case VMSVGA3D_DXVK_DXGI_R16G16B16A16_UNORM:
+        value.bytes_per_pixel = 8;
+        value.red_depth = 16;
+        value.green_depth = 16;
+        value.blue_depth = 16;
+        value.red_offset = 0;
+        value.green_offset = 16;
+        value.blue_offset = 32;
+        break;
+    default:
+        return false;
+    }
+
+    if (layout != NULL) {
+        *layout = value;
+    }
+    return true;
+}
+
 static bool vmsvga3d_dxvk_screen_pixel_layout_valid(
     const VMSVGA3DDxvkScreenPixelLayout *layout)
 {
@@ -13234,6 +13398,84 @@ static bool vmsvga3d_dxvk_screen_pixel_layout_valid(
         return false;
     }
     return true;
+}
+
+static bool vmsvga3d_dxvk_screen_readback_slot_layout(
+    const VMSVGA3DDxvkScreenReadbackSlot *slot,
+    VMSVGA3DDxvkScreenPixelLayout *layout)
+{
+    VMSVGA3DDxvkScreenPixelLayout value;
+
+    if (slot == NULL ||
+        !vmsvga3d_dxvk_screen_pixel_layout_from_format(slot->format, &value) ||
+        !vmsvga3d_dxvk_screen_pixel_layout_valid(&value) ||
+        slot->bytes_per_pixel != value.bytes_per_pixel) {
+        return false;
+    }
+    if (layout != NULL) {
+        *layout = value;
+    }
+    return true;
+}
+
+/* Resolve the complete converted-readback contract from the native D3D11
+ * resource.  The staging texture is created with readback_format, so both
+ * eligibility and pixel interpretation must come from that exact format. */
+static bool vmsvga3d_dxvk_d3d11_screen_readback_format(
+    VMSVGA3DDxvkSurface *surface, uint32_t bytes_per_pixel,
+    VMSVGA3DDxvkScreenPixelLayout *layout, uint32_t *format_out)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    const VMSVGA3DD3D10CreateDesc *desc;
+    VMSVGA3DDxvkScreenPixelLayout value;
+    uint32_t format;
+
+    if (surface == NULL || !surface->d3d11_resident || surface->d3d9_resident ||
+        surface->d3d11_resource == NULL || !surface->d3d11_desc.valid ||
+        bytes_per_pixel == 0) {
+        return false;
+    }
+
+    desc = &surface->d3d11_desc;
+    if (desc->resource_dimension !=
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
+        desc->mip_levels == 0 || desc->array_size == 0 ||
+        desc->sample_count != 1) {
+        return false;
+    }
+
+    format = desc->readback_format != 0 ? desc->readback_format : desc->format;
+    if (!vmsvga3d_dxvk_screen_readback_formats_compatible(
+            desc->format, format) ||
+        !vmsvga3d_dxvk_screen_pixel_layout_from_format(format, &value) ||
+        !vmsvga3d_dxvk_screen_pixel_layout_valid(&value) ||
+        value.bytes_per_pixel != bytes_per_pixel) {
+        return false;
+    }
+
+    if (layout != NULL) {
+        *layout = value;
+    }
+    if (format_out != NULL) {
+        *format_out = format;
+    }
+    return true;
+#else
+    (void)surface;
+    (void)bytes_per_pixel;
+    (void)layout;
+    if (format_out != NULL) {
+        *format_out = 0;
+    }
+    return false;
+#endif
+}
+
+bool vmsvga3d_dxvk_d3d11_screen_readback_supported(
+    VMSVGA3DDxvkSurface *surface, uint32_t bytes_per_pixel)
+{
+    return vmsvga3d_dxvk_d3d11_screen_readback_format(
+        surface, bytes_per_pixel, NULL, NULL);
 }
 
 static uint64_t vmsvga3d_dxvk_screen_pixel_load(const uint8_t *source,
@@ -13265,7 +13507,8 @@ static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
     void *data, uint32_t destination_x, uint32_t destination_y,
     uint32_t row_pitch, uint32_t data_size)
 {
-    const VMSVGA3DDxvkScreenPixelLayout *layout;
+    VMSVGA3DDxvkScreenPixelLayout layout_value;
+    const VMSVGA3DDxvkScreenPixelLayout *layout = &layout_value;
     uint32_t source_bytes;
     uint64_t source_row_bytes;
     uint64_t destination_row_bytes;
@@ -13277,9 +13520,7 @@ static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
         width == 0 || height == 0) {
         return false;
     }
-    layout = &slot->pixel_layout;
-    if (!vmsvga3d_dxvk_screen_pixel_layout_valid(layout) ||
-        slot->bytes_per_pixel != layout->bytes_per_pixel) {
+    if (!vmsvga3d_dxvk_screen_readback_slot_layout(slot, &layout_value)) {
         return false;
     }
     source_bytes = layout->bytes_per_pixel;
@@ -13344,7 +13585,6 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_count,
     uint32_t source_width, uint32_t source_height, uint32_t bytes_per_pixel,
-    const VMSVGA3DDxvkScreenPixelLayout *pixel_layout,
     uint64_t *sequence_out)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
@@ -13362,6 +13602,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
         .misc_flags = 0,
     };
     const VMSVGA3DD3D10CreateDesc *desc;
+    VMSVGA3DDxvkScreenPixelLayout pixel_layout;
     uint64_t max_subresources;
     uint32_t left;
     uint32_t top;
@@ -13381,9 +13622,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
         dxvk->d3d11_context == NULL || surface == NULL ||
         !surface->d3d11_resident || surface->d3d9_resident ||
         surface->d3d11_resource == NULL || !surface->d3d11_desc.valid ||
-        bytes_per_pixel == 0 || pixel_layout == NULL ||
-        pixel_layout->bytes_per_pixel != bytes_per_pixel ||
-        !vmsvga3d_dxvk_screen_pixel_layout_valid(pixel_layout)) {
+        bytes_per_pixel == 0) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
     }
 
@@ -13404,6 +13643,11 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
             VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
         desc->mip_levels == 0 || desc->array_size == 0 ||
         desc->sample_count != 1 || subresource >= max_subresources) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
+    }
+
+    if (!vmsvga3d_dxvk_d3d11_screen_readback_format(
+            surface, bytes_per_pixel, &pixel_layout, &format)) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
     }
 
@@ -13437,7 +13681,6 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
         VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES / bytes_per_pixel) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
     }
-    format = desc->readback_format != 0 ? desc->readback_format : desc->format;
     staging_desc.width = width;
     staging_desc.height = height;
     staging_desc.mip_levels = 1;
@@ -13505,7 +13748,6 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
     slot->source_width = source_width;
     slot->source_height = source_height;
     slot->bytes_per_pixel = bytes_per_pixel;
-    slot->pixel_layout = *pixel_layout;
     slot->sequence = ++surface->d3d11_screen_readback_sequence;
     if (slot->sequence == 0) {
         slot->sequence = ++surface->d3d11_screen_readback_sequence;
@@ -13539,7 +13781,6 @@ fail:
     (void)source_width;
     (void)source_height;
     (void)bytes_per_pixel;
-    (void)pixel_layout;
     if (sequence_out != NULL) {
         *sequence_out = 0;
     }
@@ -13639,8 +13880,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     }
 
     if (slot->rect_count == 0 || slot->rect_count > rect_capacity ||
-        !vmsvga3d_dxvk_screen_pixel_layout_valid(&slot->pixel_layout) ||
-        slot->bytes_per_pixel != slot->pixel_layout.bytes_per_pixel ||
+        !vmsvga3d_dxvk_screen_readback_slot_layout(slot, NULL) ||
         slot->query == NULL || slot->staging == NULL ||
         !vmsvga3d_dxvk_screen_readback_rect_bounds(
             slot->rects, slot->rect_count, slot->source_width,
@@ -14130,8 +14370,7 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
 
     if (slot->query == NULL || slot->staging == NULL ||
         slot->rect_count == 0 || slot->rect_count > rect_capacity ||
-        !vmsvga3d_dxvk_screen_pixel_layout_valid(&slot->pixel_layout) ||
-        slot->bytes_per_pixel != slot->pixel_layout.bytes_per_pixel ||
+        !vmsvga3d_dxvk_screen_readback_slot_layout(slot, NULL) ||
         !vmsvga3d_dxvk_screen_readback_rect_bounds(
             slot->rects, slot->rect_count, slot->source_width,
             slot->source_height, &left, &top, &right, &bottom) ||

@@ -711,7 +711,9 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3D11_MAP_READ 1u
 #define VMSVGA3D_DXVK_D3D11_QUERY_EVENT 0u
 #define VMSVGA3D_DXVK_D3D11_ASYNC_GETDATA_DONOTFLUSH 0x1u
+#define VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT 0x100000u
 #define VMSVGA3D_DXVK_D3D11_MAP_WRITE_DISCARD 4u
+#define VMSVGA3D_DXVK_DXGI_ERROR_WAS_STILL_DRAWING ((int32_t)0x887a000au)
 #define VMSVGA3D_DXVK_D3D11_FILTER_ANISOTROPIC 0x55u
 #define VMSVGA3D_DXVK_D3D11_TEXTURE_ADDRESS_WRAP 1u
 #define VMSVGA3D_DXVK_D3D11_COMPARISON_ALWAYS 8u
@@ -13960,8 +13962,12 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
         }
     }
 
-    result = map(dxvk->d3d11_context, slot->staging, 0,
-                 VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
+    result = map(
+        dxvk->d3d11_context, slot->staging, 0, VMSVGA3D_DXVK_D3D11_MAP_READ,
+        wait ? 0 : VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    if (!wait && result == VMSVGA3D_DXVK_DXGI_ERROR_WAS_STILL_DRAWING) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+    }
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL ||
         (uint64_t)mapped.row_pitch <
             (uint64_t)slot->width * slot->bytes_per_pixel) {
@@ -14465,8 +14471,12 @@ vmsvga3d_dxvk_d3d11_retired_screen_readback_poll(
         goto fail;
     }
 
-    result = map(dxvk->d3d11_context, slot->staging, 0,
-                 VMSVGA3D_DXVK_D3D11_MAP_READ, 0, &mapped);
+    result = map(
+        dxvk->d3d11_context, slot->staging, 0, VMSVGA3D_DXVK_D3D11_MAP_READ,
+        wait ? 0 : VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    if (!wait && result == VMSVGA3D_DXVK_DXGI_ERROR_WAS_STILL_DRAWING) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+    }
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL ||
         (uint64_t)mapped.row_pitch <
             (uint64_t)slot->width * slot->bytes_per_pixel) {

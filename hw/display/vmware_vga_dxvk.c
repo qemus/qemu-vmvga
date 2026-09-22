@@ -13222,6 +13222,29 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 #endif
 }
 
+/* vmware_vga_dxvk.c is included before vmware_vga_vgpu10.c in the
+ * amalgamated build, so the DXGI enum declared there is not visible here.
+ * Keep the small ABI subset needed by ScreenTarget readback local and
+ * prefixed; these numeric values are the public DXGI_FORMAT ABI values. */
+enum {
+    VMSVGA3D_DXVK_DXGI_R16G16B16A16_TYPELESS = 9,
+    VMSVGA3D_DXVK_DXGI_R16G16B16A16_UNORM = 11,
+    VMSVGA3D_DXVK_DXGI_R10G10B10A2_TYPELESS = 23,
+    VMSVGA3D_DXVK_DXGI_R10G10B10A2_UNORM = 24,
+    VMSVGA3D_DXVK_DXGI_R8G8B8A8_TYPELESS = 27,
+    VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM = 28,
+    VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM_SRGB = 29,
+    VMSVGA3D_DXVK_DXGI_B5G6R5_UNORM = 85,
+    VMSVGA3D_DXVK_DXGI_B5G5R5A1_UNORM = 86,
+    VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM = 87,
+    VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM = 88,
+    VMSVGA3D_DXVK_DXGI_B8G8R8A8_TYPELESS = 90,
+    VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM_SRGB = 91,
+    VMSVGA3D_DXVK_DXGI_B8G8R8X8_TYPELESS = 92,
+    VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM_SRGB = 93,
+    VMSVGA3D_DXVK_DXGI_B4G4R4A4_UNORM = 115,
+};
+
 /* Screen readback staging is created from d3d11_desc.readback_format, not
  * from the guest SVGA format.  Keep compatibility and pixel interpretation
  * tied to that exact backend format: CopySubresourceRegion has no HRESULT, so
@@ -13231,27 +13254,27 @@ static uint32_t vmsvga3d_dxvk_screen_readback_format_family(
     uint32_t format)
 {
     switch (format) {
-    case DXGI_B8G8R8A8_UNORM:
-    case DXGI_B8G8R8A8_UNORM_SRGB:
-    case DXGI_B8G8R8A8_TYPELESS:
-        return DXGI_B8G8R8A8_TYPELESS;
-    case DXGI_B8G8R8X8_UNORM:
-    case DXGI_B8G8R8X8_UNORM_SRGB:
-    case DXGI_B8G8R8X8_TYPELESS:
-        return DXGI_B8G8R8X8_TYPELESS;
-    case DXGI_R8G8B8A8_UNORM:
-    case DXGI_R8G8B8A8_UNORM_SRGB:
-    case DXGI_R8G8B8A8_TYPELESS:
-        return DXGI_R8G8B8A8_TYPELESS;
-    case DXGI_R10G10B10A2_UNORM:
-    case DXGI_R10G10B10A2_TYPELESS:
-        return DXGI_R10G10B10A2_TYPELESS;
-    case DXGI_R16G16B16A16_UNORM:
-    case DXGI_R16G16B16A16_TYPELESS:
-        return DXGI_R16G16B16A16_TYPELESS;
-    case DXGI_B5G6R5_UNORM:
-    case DXGI_B5G5R5A1_UNORM:
-    case DXGI_B4G4R4A4_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_B8G8R8A8_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_B8G8R8X8_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_R8G8B8A8_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_R10G10B10A2_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R10G10B10A2_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_R10G10B10A2_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_R16G16B16A16_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R16G16B16A16_TYPELESS:
+        return VMSVGA3D_DXVK_DXGI_R16G16B16A16_TYPELESS;
+    case VMSVGA3D_DXVK_DXGI_B5G6R5_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B5G5R5A1_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B4G4R4A4_UNORM:
         return format;
     default:
         return 0;
@@ -13275,12 +13298,12 @@ static bool vmsvga3d_dxvk_screen_pixel_layout_from_format(
     VMSVGA3DDxvkScreenPixelLayout value = {0};
 
     switch (format) {
-    case DXGI_B8G8R8A8_UNORM:
-    case DXGI_B8G8R8X8_UNORM:
-    case DXGI_B8G8R8A8_TYPELESS:
-    case DXGI_B8G8R8A8_UNORM_SRGB:
-    case DXGI_B8G8R8X8_TYPELESS:
-    case DXGI_B8G8R8X8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_TYPELESS:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8A8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_TYPELESS:
+    case VMSVGA3D_DXVK_DXGI_B8G8R8X8_UNORM_SRGB:
         value.bytes_per_pixel = 4;
         value.blue_depth = 8;
         value.green_depth = 8;
@@ -13289,8 +13312,8 @@ static bool vmsvga3d_dxvk_screen_pixel_layout_from_format(
         value.green_offset = 8;
         value.red_offset = 16;
         break;
-    case DXGI_R8G8B8A8_UNORM:
-    case DXGI_R8G8B8A8_UNORM_SRGB:
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R8G8B8A8_UNORM_SRGB:
         value.bytes_per_pixel = 4;
         value.red_depth = 8;
         value.green_depth = 8;
@@ -13299,7 +13322,7 @@ static bool vmsvga3d_dxvk_screen_pixel_layout_from_format(
         value.green_offset = 8;
         value.blue_offset = 16;
         break;
-    case DXGI_B5G6R5_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B5G6R5_UNORM:
         value.bytes_per_pixel = 2;
         value.blue_depth = 5;
         value.green_depth = 6;
@@ -13308,7 +13331,7 @@ static bool vmsvga3d_dxvk_screen_pixel_layout_from_format(
         value.green_offset = 5;
         value.red_offset = 11;
         break;
-    case DXGI_B5G5R5A1_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B5G5R5A1_UNORM:
         value.bytes_per_pixel = 2;
         value.blue_depth = 5;
         value.green_depth = 5;
@@ -13317,7 +13340,7 @@ static bool vmsvga3d_dxvk_screen_pixel_layout_from_format(
         value.green_offset = 5;
         value.red_offset = 10;
         break;
-    case DXGI_B4G4R4A4_UNORM:
+    case VMSVGA3D_DXVK_DXGI_B4G4R4A4_UNORM:
         value.bytes_per_pixel = 2;
         value.blue_depth = 4;
         value.green_depth = 4;
@@ -13326,7 +13349,7 @@ static bool vmsvga3d_dxvk_screen_pixel_layout_from_format(
         value.green_offset = 4;
         value.red_offset = 8;
         break;
-    case DXGI_R10G10B10A2_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R10G10B10A2_UNORM:
         value.bytes_per_pixel = 4;
         value.red_depth = 10;
         value.green_depth = 10;
@@ -13335,7 +13358,7 @@ static bool vmsvga3d_dxvk_screen_pixel_layout_from_format(
         value.green_offset = 10;
         value.blue_offset = 20;
         break;
-    case DXGI_R16G16B16A16_UNORM:
+    case VMSVGA3D_DXVK_DXGI_R16G16B16A16_UNORM:
         value.bytes_per_pixel = 8;
         value.red_depth = 16;
         value.green_depth = 16;

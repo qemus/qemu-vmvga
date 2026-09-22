@@ -15157,111 +15157,6 @@ static bool vmsvga3d_screen_target_direct_format_compatible(
     return true;
 }
 
-static bool vmsvga3d_screen_target_d3d11_async_layout(
-    const VMSVGA3DSurface *surface, const struct svga3d_surface_desc *desc,
-    VMSVGA3DDxvkScreenPixelLayout *layout)
-{
-    VMSVGA3DD3D10Format native;
-    VMSVGA3DDxvkScreenPixelLayout value = {0};
-
-    if (surface == NULL || desc == NULL || desc->block_size.width != 1 ||
-        desc->block_size.height != 1 || desc->block_size.depth != 1 ||
-        desc->bytes_per_block == 0 ||
-        desc->bytes_per_block > sizeof(uint64_t) ||
-        desc->pitch_bytes_per_block != desc->bytes_per_block ||
-        desc->bitDepth.blue == 0 || desc->bitDepth.green == 0 ||
-        desc->bitDepth.red == 0) {
-        return false;
-    }
-
-    /* The mapped staging bytes use the native typed DXGI readback format,
-     * which can differ in channel order from the guest SVGA descriptor (for
-     * example legacy A2R10G10B10).  Describe the native byte layout here so
-     * conversion never depends on guest-memory channel order. */
-    native = vmsvga3d_d3d10_surface_format(surface->format);
-    switch (native.dxgi_format) {
-    case DXGI_B8G8R8A8_UNORM:
-    case DXGI_B8G8R8X8_UNORM:
-    case DXGI_B8G8R8A8_TYPELESS:
-    case DXGI_B8G8R8A8_UNORM_SRGB:
-    case DXGI_B8G8R8X8_TYPELESS:
-    case DXGI_B8G8R8X8_UNORM_SRGB:
-        value.bytes_per_pixel = 4;
-        value.blue_depth = 8;
-        value.green_depth = 8;
-        value.red_depth = 8;
-        value.blue_offset = 0;
-        value.green_offset = 8;
-        value.red_offset = 16;
-        break;
-    case DXGI_R8G8B8A8_UNORM:
-    case DXGI_R8G8B8A8_UNORM_SRGB:
-        value.bytes_per_pixel = 4;
-        value.red_depth = 8;
-        value.green_depth = 8;
-        value.blue_depth = 8;
-        value.red_offset = 0;
-        value.green_offset = 8;
-        value.blue_offset = 16;
-        break;
-    case DXGI_B5G6R5_UNORM:
-        value.bytes_per_pixel = 2;
-        value.blue_depth = 5;
-        value.green_depth = 6;
-        value.red_depth = 5;
-        value.blue_offset = 0;
-        value.green_offset = 5;
-        value.red_offset = 11;
-        break;
-    case DXGI_B5G5R5A1_UNORM:
-        value.bytes_per_pixel = 2;
-        value.blue_depth = 5;
-        value.green_depth = 5;
-        value.red_depth = 5;
-        value.blue_offset = 0;
-        value.green_offset = 5;
-        value.red_offset = 10;
-        break;
-    case DXGI_B4G4R4A4_UNORM:
-        value.bytes_per_pixel = 2;
-        value.blue_depth = 4;
-        value.green_depth = 4;
-        value.red_depth = 4;
-        value.blue_offset = 0;
-        value.green_offset = 4;
-        value.red_offset = 8;
-        break;
-    case DXGI_R10G10B10A2_UNORM:
-        value.bytes_per_pixel = 4;
-        value.red_depth = 10;
-        value.green_depth = 10;
-        value.blue_depth = 10;
-        value.red_offset = 0;
-        value.green_offset = 10;
-        value.blue_offset = 20;
-        break;
-    case DXGI_R16G16B16A16_UNORM:
-        value.bytes_per_pixel = 8;
-        value.red_depth = 16;
-        value.green_depth = 16;
-        value.blue_depth = 16;
-        value.red_offset = 0;
-        value.green_offset = 16;
-        value.blue_offset = 32;
-        break;
-    default:
-        return false;
-    }
-
-    if (value.bytes_per_pixel != desc->bytes_per_block) {
-        return false;
-    }
-    if (layout != NULL) {
-        *layout = value;
-    }
-    return true;
-}
-
 static VMSVGA3DDxvkScreenReadbackPollResult
 vmsvga3d_screen_target_async_poll_present_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
@@ -15303,15 +15198,16 @@ vmsvga3d_screen_target_async_poll_present_live(
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
     }
 
-    /* D3D9 still requires native BGR32 scanout storage.  D3D11 carries the
-     * guest pixel layout with each staging slot and converts into BGR32 only
-     * after the asynchronous copy completes. */
+    /* D3D9 still requires native BGR32 scanout storage.  D3D11 derives
+     * conversion from the exact typed DXGI format used by its staging texture
+     * and converts into BGR32 only after the asynchronous copy completes. */
     if (d3d9_resident && !d3d11_resident) {
         if (!vmsvga3d_screen_target_direct_format_compatible(surface, desc)) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
         }
     } else if (d3d11_resident && !d3d9_resident) {
-        if (!vmsvga3d_screen_target_d3d11_async_layout(surface, desc, NULL)) {
+        if (!vmsvga3d_dxvk_d3d11_screen_readback_supported(
+                surface->dxvk_surface, desc->bytes_per_block)) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
         }
     } else {
@@ -15439,7 +15335,6 @@ vmsvga3d_screen_target_async_submit_live(
     VMSVGA3DD3D9Rect d3d_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
     VMSVGA3DSurfaceImage *image;
     const struct svga3d_surface_desc *desc;
-    VMSVGA3DDxvkScreenPixelLayout pixel_layout;
     VMSVGA3DDxvkScreenReadbackSubmitResult result;
     int64_t submit_start_us = 0;
     int64_t submit_elapsed_us = 0;
@@ -15484,15 +15379,15 @@ vmsvga3d_screen_target_async_submit_live(
         s->perf.screen_submit_d3d9++;
         s->perf.screen_submit_d3d9_us += submit_elapsed_us;
     } else if (d3d11_resident && !d3d9_resident) {
-        if (!vmsvga3d_screen_target_d3d11_async_layout(
-                surface, desc, &pixel_layout)) {
+        if (!vmsvga3d_dxvk_d3d11_screen_readback_supported(
+                surface->dxvk_surface, bytes_per_pixel)) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
         }
         submit_start_us = g_get_monotonic_time();
         result = vmsvga3d_dxvk_d3d11_screen_readback_submit(
             s->dxvk, surface->dxvk_surface, 0, d3d_rects, rect_count,
             image->size.width, image->size.height, bytes_per_pixel,
-            &pixel_layout, sequence_out);
+            sequence_out);
         submit_elapsed_us = g_get_monotonic_time() - submit_start_us;
         s->perf.screen_submit_d3d11++;
         s->perf.screen_submit_d3d11_us += submit_elapsed_us;
@@ -15819,8 +15714,9 @@ static bool vmsvga3d_screen_target_flush_live_mode(
                     d3d9_resident && !d3d11_resident
                         ? direct_format
                         : d3d11_resident && !d3d9_resident
-                              ? vmsvga3d_screen_target_d3d11_async_layout(
-                                    surface, desc, NULL)
+                              ? vmsvga3d_dxvk_d3d11_screen_readback_supported(
+                                    surface->dxvk_surface,
+                                    desc->bytes_per_block)
                               : false;
 
                 if ((direct_format || async_format) &&

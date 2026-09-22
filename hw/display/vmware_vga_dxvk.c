@@ -14159,7 +14159,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
          * append more detached snapshots behind it.  The conservative first
          * attempt returns BUSY so the caller can do bounded cleanup and ensure
          * the replacement is a full frame before allowing supersession. */
-        if (coalesce && !allow_supersede) {
+        if (coalesce &&
+            (!allow_supersede ||
+             !vmsvga3d_dxvk_screen_readback_slot_is_full_frame(selected))) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
         }
 

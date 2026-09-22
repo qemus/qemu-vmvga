@@ -15207,7 +15207,7 @@ vmsvga3d_screen_target_async_poll_present_live(
         }
     } else if (d3d11_resident && !d3d9_resident) {
         if (!vmsvga3d_dxvk_d3d11_screen_readback_supported(
-                surface->dxvk_surface, desc->bytes_per_block)) {
+                surface->dxvk_surface)) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
         }
     } else {
@@ -15380,14 +15380,13 @@ vmsvga3d_screen_target_async_submit_live(
         s->perf.screen_submit_d3d9_us += submit_elapsed_us;
     } else if (d3d11_resident && !d3d9_resident) {
         if (!vmsvga3d_dxvk_d3d11_screen_readback_supported(
-                surface->dxvk_surface, bytes_per_pixel)) {
+                surface->dxvk_surface)) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
         }
         submit_start_us = g_get_monotonic_time();
         result = vmsvga3d_dxvk_d3d11_screen_readback_submit(
             s->dxvk, surface->dxvk_surface, 0, d3d_rects, rect_count,
-            image->size.width, image->size.height, bytes_per_pixel,
-            sequence_out);
+            image->size.width, image->size.height, sequence_out);
         submit_elapsed_us = g_get_monotonic_time() - submit_start_us;
         s->perf.screen_submit_d3d11++;
         s->perf.screen_submit_d3d11_us += submit_elapsed_us;
@@ -15715,8 +15714,7 @@ static bool vmsvga3d_screen_target_flush_live_mode(
                         ? direct_format
                         : d3d11_resident && !d3d9_resident
                               ? vmsvga3d_dxvk_d3d11_screen_readback_supported(
-                                    surface->dxvk_surface,
-                                    desc->bytes_per_block)
+                                    surface->dxvk_surface)
                               : false;
 
                 if ((direct_format || async_format) &&

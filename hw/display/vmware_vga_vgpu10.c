@@ -11359,33 +11359,20 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
             bool skip_intermediate = retire_coalescing;
 
             if (skip_intermediate) {
-                bool retired_pending = false;
-
-                /* Keep polling the oldest anchor on every rapid switch, but do
-                 * not move its completion target by submitting another staging
-                 * copy.  If the anchor/checkpoint pair drains during this pass,
-                 * resume the normal switch flush immediately. */
-                if (!vmsvga3d_screen_target_retired_snapshot_service_live(
-                        s, false,
-                        VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES,
-                        VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES,
-                        &retired_pending)) {
-                    return false;
-                }
-                skip_intermediate =
-                    retired_pending &&
-                    vmsvga3d_dxvk_d3d11_retired_screen_readback_coalescing(
-                        s->dxvk);
-            }
-
-            if (skip_intermediate) {
-                /* The detached anchor and checkpoint already own frontend
-                 * publication order.  This old target is an intermediate flip:
-                 * discard its presentation obligation before submit instead of
-                 * flooding the GPU with a readback that will never be shown.
-                 * The BIND that follows marks the newly active target for a
-                 * full-frame presentation, so the current image remains queued
-                 * for catch-up once the checkpoint drains. */
+                /* Pressure already selected one fixed full-frame checkpoint.
+                 * Do not poll it from every guest target switch: display refresh
+                 * owns retirement servicing, and repeated switch-side polling
+                 * only burns CPU while the GPU is still working.  Also do not
+                 * submit a replacement here, which would move the finish line
+                 * and recreate the earlier starvation mode.
+                 *
+                 * The detached checkpoint owns frontend publication order.
+                 * This old target is an intermediate flip: discard its
+                 * presentation obligation before submit instead of flooding the
+                 * GPU with a readback that will never be shown.  The BIND that
+                 * follows marks the newly active target for a full-frame
+                 * presentation, so the current image remains queued for catch-up
+                 * once the fixed checkpoint drains. */
                 if (s->svga3d->screen_target_dirty_count != 0 &&
                     s->svga3d->screen_target_dirty_sid != old_sid) {
                     return false;
@@ -11509,12 +11496,12 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                         .h = old_surface->mips[0].size.height,
                     };
 
-                    /* A partial newest snapshot cannot become the checkpoint
-                     * behind the oldest latency anchor.  Under residual
-                     * pressure, queue one full-frame replacement while the old
-                     * target is still active.  The D3D11 submit ring accumulates
-                     * pending damage, making the replacement self-contained;
-                     * retire_latest can then compact only the middle history. */
+                    /* A partial newest snapshot cannot supersede retired
+                     * presentation history.  Under residual pressure, queue one
+                     * full-frame replacement while the old target is still
+                     * active.  The D3D11 submit ring accumulates pending damage,
+                     * making the replacement self-contained; retire_latest can
+                     * then replace the stale backlog with one fixed checkpoint. */
                     if (vmsvga3d_screen_target_mark_dirty_live(
                             s, old_sid, 0, &full, true) &&
                         vmsvga3d_screen_target_flush_switch_live(s) &&
@@ -11534,8 +11521,8 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                            VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
                     /* Pressure survived bounded cleanup and a full-frame
                      * checkpoint attempt.  Keep the synchronous path only as a
-                     * last-resort correctness fallback when the oldest anchor
-                     * plus one self-contained checkpoint cannot be retained. */
+                     * last-resort correctness fallback when one self-contained
+                     * checkpoint cannot be retained. */
                     s->perf.screen_target_retire_waits++;
                     vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {

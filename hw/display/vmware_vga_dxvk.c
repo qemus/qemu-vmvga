@@ -397,6 +397,15 @@ struct vmsvga3d_dxvk_surface_s {
     void *d3d11_readback_staging_2d;
     uint32_t d3d11_readback_staging_width;
     uint32_t d3d11_readback_staging_height;
+    /* Dedicated full-subresource staging object for yieldable CPU-shadow
+     * readback.  Unlike generic boxed readback storage, a pending copy must
+     * remain immutable across command-buffer retries. */
+    void *d3d11_shadow_readback_staging;
+    uint32_t d3d11_shadow_readback_width;
+    uint32_t d3d11_shadow_readback_height;
+    uint32_t d3d11_shadow_readback_format;
+    uint32_t d3d11_shadow_readback_subresource;
+    bool d3d11_shadow_readback_pending;
     VMSVGA3DDxvkScreenReadbackSlot
         d3d11_screen_readback[VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS];
     uint64_t d3d11_screen_readback_sequence;
@@ -3561,6 +3570,11 @@ static void vmsvga3d_dxvk_surface_evict_d3d11(
                               VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         surface->d3d11_readback_staging_2d = NULL;
     }
+    if (surface->d3d11_shadow_readback_staging != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_shadow_readback_staging,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        surface->d3d11_shadow_readback_staging = NULL;
+    }
     if (surface->d3d11_resource != NULL) {
         vmsvga3d_dxvk_release(surface->d3d11_resource,
                               VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
@@ -3569,6 +3583,11 @@ static void vmsvga3d_dxvk_surface_evict_d3d11(
 #endif
     surface->d3d11_readback_staging_width = 0;
     surface->d3d11_readback_staging_height = 0;
+    surface->d3d11_shadow_readback_width = 0;
+    surface->d3d11_shadow_readback_height = 0;
+    surface->d3d11_shadow_readback_format = 0;
+    surface->d3d11_shadow_readback_subresource = 0;
+    surface->d3d11_shadow_readback_pending = false;
     memset(&surface->d3d11_desc, 0, sizeof(surface->d3d11_desc));
     surface->d3d11_resident = false;
 }
@@ -10452,6 +10471,220 @@ bool vmsvga3d_dxvk_d3d11_update_subresource(
     (void)row_pitch;
     (void)depth_pitch;
     return false;
+#endif
+}
+
+static void vmsvga3d_dxvk_d3d11_shadow_readback_release(
+    VMSVGA3DDxvkSurface *surface)
+{
+    if (surface == NULL) {
+        return;
+    }
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    if (surface->d3d11_shadow_readback_staging != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_shadow_readback_staging,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        surface->d3d11_shadow_readback_staging = NULL;
+    }
+#endif
+    surface->d3d11_shadow_readback_width = 0;
+    surface->d3d11_shadow_readback_height = 0;
+    surface->d3d11_shadow_readback_format = 0;
+    surface->d3d11_shadow_readback_subresource = 0;
+    surface->d3d11_shadow_readback_pending = false;
+}
+
+void vmsvga3d_dxvk_d3d11_readback_async_cancel(
+    VMSVGA3DDxvkSurface *surface)
+{
+    vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
+}
+
+VMSVGA3DDxvkReadbackResult
+vmsvga3d_dxvk_d3d11_readback_subresource_async(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    void *data, uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
+    uint32_t depth_pitch, uint32_t depth_count)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D11CreateTexture2D create_texture2d = NULL;
+    VMSVGA3DDxvkD3D11CopySubresourceRegion copy_region = NULL;
+    VMSVGA3DDxvkD3D11Map map = NULL;
+    VMSVGA3DDxvkD3D11Unmap unmap = NULL;
+    VMSVGA3DDxvkD3D11Flush flush = NULL;
+    VMSVGA3DDxvkD3D11MappedSubresource mapped = {0};
+    VMSVGA3DDxvkD3D11Texture2DDesc staging_desc = {0};
+    const VMSVGA3DD3D10CreateDesc *desc;
+    uint64_t max_subresources;
+    uint32_t mip_level;
+    uint32_t source_width;
+    uint32_t source_height;
+    uint32_t format;
+    uint32_t y;
+    int32_t result;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL ||
+        dxvk->d3d11_context == NULL || surface == NULL || data == NULL ||
+        row_bytes == 0 || row_pitch < row_bytes || row_count == 0 ||
+        depth_pitch == 0 || depth_count == 0) {
+        return VMSVGA3D_DXVK_READBACK_FAILED;
+    }
+    if (surface->d3d9_resident) {
+        return VMSVGA3D_DXVK_READBACK_UNSUPPORTED;
+    }
+    if (!surface->d3d11_resident) {
+        return VMSVGA3D_DXVK_READBACK_COMPLETE;
+    }
+    if (surface->d3d11_resource == NULL || !surface->d3d11_desc.valid) {
+        return VMSVGA3D_DXVK_READBACK_FAILED;
+    }
+
+    desc = &surface->d3d11_desc;
+    if (desc->resource_dimension !=
+            VMSVGA3D_DXVK_D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
+        desc->sample_count != 1 || desc->mip_levels == 0 ||
+        desc->array_size == 0 || depth_count != 1 ||
+        desc->usage == VMSVGA3D_DXVK_D3D11_USAGE_STAGING) {
+        return VMSVGA3D_DXVK_READBACK_UNSUPPORTED;
+    }
+
+    max_subresources = (uint64_t)desc->mip_levels * desc->array_size;
+    if (subresource >= max_subresources ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_device,
+            VMSVGA3D_DXVK_ID3D11DEVICE_CREATE_TEXTURE2D,
+            &create_texture2d, sizeof(create_texture2d)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context,
+            VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_COPY_SUBRESOURCE_REGION,
+            &copy_region, sizeof(copy_region)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_MAP,
+            &map, sizeof(map)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_UNMAP,
+            &unmap, sizeof(unmap)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d11_context, VMSVGA3D_DXVK_ID3D11DEVICECONTEXT_FLUSH,
+            &flush, sizeof(flush))) {
+        return VMSVGA3D_DXVK_READBACK_FAILED;
+    }
+
+    mip_level = subresource % desc->mip_levels;
+    source_width = MAX(1u, desc->width >> mip_level);
+    source_height = MAX(1u, desc->height >> mip_level);
+    format = desc->readback_format != 0 ? desc->readback_format : desc->format;
+
+    if (surface->d3d11_shadow_readback_pending) {
+        if (surface->d3d11_shadow_readback_staging == NULL ||
+            surface->d3d11_shadow_readback_subresource != subresource ||
+            surface->d3d11_shadow_readback_width != source_width ||
+            surface->d3d11_shadow_readback_height != source_height ||
+            surface->d3d11_shadow_readback_format != format) {
+            vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
+            return VMSVGA3D_DXVK_READBACK_FAILED;
+        }
+    } else {
+        if (surface->d3d11_shadow_readback_staging == NULL ||
+            surface->d3d11_shadow_readback_width != source_width ||
+            surface->d3d11_shadow_readback_height != source_height ||
+            surface->d3d11_shadow_readback_format != format) {
+            void *new_staging = NULL;
+
+            staging_desc.width = source_width;
+            staging_desc.height = source_height;
+            staging_desc.mip_levels = 1;
+            staging_desc.array_size = 1;
+            staging_desc.format = format;
+            staging_desc.sample_desc.count = 1;
+            staging_desc.usage = VMSVGA3D_DXVK_D3D11_USAGE_STAGING;
+            staging_desc.cpu_access_flags =
+                VMSVGA3D_DXVK_D3D11_CPU_ACCESS_READ;
+            result = create_texture2d(dxvk->d3d11_device, &staging_desc,
+                                      NULL, &new_staging);
+            if (!vmsvga3d_dxvk_succeeded(result) || new_staging == NULL) {
+                if (new_staging != NULL) {
+                    vmsvga3d_dxvk_release(
+                        new_staging, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+                }
+                return VMSVGA3D_DXVK_READBACK_FAILED;
+            }
+            if (surface->d3d11_shadow_readback_staging != NULL) {
+                vmsvga3d_dxvk_release(
+                    surface->d3d11_shadow_readback_staging,
+                    VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+            }
+            surface->d3d11_shadow_readback_staging = new_staging;
+            surface->d3d11_shadow_readback_width = source_width;
+            surface->d3d11_shadow_readback_height = source_height;
+            surface->d3d11_shadow_readback_format = format;
+        }
+
+        copy_region(dxvk->d3d11_context,
+                    surface->d3d11_shadow_readback_staging, 0,
+                    0, 0, 0, surface->d3d11_resource, subresource, NULL);
+        surface->d3d11_shadow_readback_subresource = subresource;
+        surface->d3d11_shadow_readback_pending = true;
+        /* We intentionally stop command-buffer execution while this snapshot
+         * is pending, so submit the copy explicitly instead of relying on
+         * later renderer traffic to flush DXVK's immediate-context batch. */
+        flush(dxvk->d3d11_context);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SHADOW-READBACK phase=submit sid=%u sub=%u size=%ux%u",
+            surface->sid, subresource, source_width, source_height);
+    }
+
+    result = map(dxvk->d3d11_context,
+                 surface->d3d11_shadow_readback_staging, 0,
+                 VMSVGA3D_DXVK_D3D11_MAP_READ,
+                 VMSVGA3D_DXVK_D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    if (result == VMSVGA3D_DXVK_DXGI_ERROR_WAS_STILL_DRAWING) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SHADOW-READBACK phase=pending sid=%u sub=%u",
+            surface->sid, subresource);
+        return VMSVGA3D_DXVK_READBACK_PENDING;
+    }
+    if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
+        vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "DX-SHADOW-READBACK phase=map-fail sid=%u sub=%u hr=0x%08x",
+            surface->sid, subresource, (uint32_t)result);
+        return VMSVGA3D_DXVK_READBACK_FAILED;
+    }
+
+    if (mapped.row_pitch < row_bytes) {
+        unmap(dxvk->d3d11_context,
+              surface->d3d11_shadow_readback_staging, 0);
+        vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
+        return VMSVGA3D_DXVK_READBACK_FAILED;
+    }
+    for (y = 0; y < row_count; y++) {
+        memcpy((uint8_t *)data + (size_t)y * row_pitch,
+               (const uint8_t *)mapped.data + (size_t)y * mapped.row_pitch,
+               row_bytes);
+    }
+    unmap(dxvk->d3d11_context,
+          surface->d3d11_shadow_readback_staging, 0);
+    vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "DX-SHADOW-READBACK phase=ready sid=%u sub=%u",
+        surface->sid, subresource);
+    return VMSVGA3D_DXVK_READBACK_COMPLETE;
+#else
+    (void)dxvk;
+    (void)surface;
+    (void)subresource;
+    (void)data;
+    (void)row_bytes;
+    (void)row_pitch;
+    (void)row_count;
+    (void)depth_pitch;
+    (void)depth_count;
+    return VMSVGA3D_DXVK_READBACK_UNSUPPORTED;
 #endif
 }
 

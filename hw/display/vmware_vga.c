@@ -565,6 +565,7 @@ struct vmsvga_state_s {
     bool cb_bh_running;
     bool cb_shadow_yield_allowed;
     bool cb_shadow_yield_pending;
+    bool cb_screen_target_yield_pending;
     uint32_t cb_shadow_yield_sid;
     uint32_t cb_shadow_yield_subresource;
     uint64_t *cb_shadow_journal;
@@ -7968,10 +7969,11 @@ static SVGACBStatus vmsvga_command_buffer_process(
             break;
         }
 
-        /* A yieldable shadow readback intentionally rewinds the current
-         * command.  Preserve all bytes consumed before it and leave the guest
+        /* A yieldable GPU readback intentionally rewinds the current command.
+         * Preserve all bytes consumed before it and leave the guest
          * command-buffer status at NONE so the same command can resume later. */
-        if (s->cb_shadow_yield_pending) {
+        if (s->cb_shadow_yield_pending ||
+            s->cb_screen_target_yield_pending) {
             status = SVGA_CB_STATUS_NONE;
             consumed = MIN(consumed, size);
             break;
@@ -10405,10 +10407,10 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
      */
     vmsvga3d_perf_profile_report(s);
 
-    /* A yieldable COMMAND_BUFFERS_2 shadow readback is retried from the
-     * regular display-service cadence.  Do not reschedule it directly from
-     * the command-buffer BH: that would spin the main loop while the GPU is
-     * still busy and starve the very display updates this path protects. */
+    /* A yieldable COMMAND_BUFFERS_2 GPU readback is retried from the regular
+     * display-service cadence.  Do not reschedule it directly from the
+     * command-buffer BH: that would spin the main loop while the GPU is still
+     * busy and starve the very display updates this path protects. */
     if (s->cb_yield_waiting && s->cb_active_work != NULL &&
         s->cb_bh != NULL && !s->cb_bh_running) {
         qemu_bh_schedule(s->cb_bh);

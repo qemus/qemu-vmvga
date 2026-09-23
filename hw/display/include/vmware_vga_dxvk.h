@@ -245,10 +245,24 @@ bool vmsvga3d_dxvk_d3d11_update_subresource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d10_box_s *box, const void *data,
     uint32_t row_pitch, uint32_t depth_pitch);
+typedef enum vmsvga3d_dxvk_readback_result_e {
+    VMSVGA3D_DXVK_READBACK_FAILED = 0,
+    VMSVGA3D_DXVK_READBACK_COMPLETE,
+    VMSVGA3D_DXVK_READBACK_PENDING,
+    VMSVGA3D_DXVK_READBACK_UNSUPPORTED,
+} VMSVGA3DDxvkReadbackResult;
+
 bool vmsvga3d_dxvk_d3d11_readback_subresource(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     void *data, uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
     uint32_t depth_pitch, uint32_t depth_count);
+VMSVGA3DDxvkReadbackResult
+vmsvga3d_dxvk_d3d11_readback_subresource_async(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
+    void *data, uint32_t row_bytes, uint32_t row_pitch, uint32_t row_count,
+    uint32_t depth_pitch, uint32_t depth_count);
+void vmsvga3d_dxvk_d3d11_readback_async_cancel(
+    VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_d3d11_readback_subresource_box(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,
     const struct vmsvga3d_d3d10_box_s *source_box, void *data,

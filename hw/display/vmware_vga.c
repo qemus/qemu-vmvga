@@ -463,6 +463,9 @@ struct vmsvga_perf_counters_s {
     uint64_t shadow_readback_d3d9_us;
     uint64_t shadow_readback_d3d11;
     uint64_t shadow_readback_d3d11_us;
+    uint64_t shadow_readback_d3d11_yields;
+    uint64_t shadow_readback_d3d11_pending_retries;
+    uint64_t shadow_readback_d3d11_resumes;
     uint64_t handoff_d3d9_to_shadow;
     uint64_t handoff_d3d9_to_shadow_us;
     uint64_t handoff_d3d11_to_shadow;
@@ -549,6 +552,7 @@ struct vmsvga_state_s {
     struct vmsvga_command_buffer_work_s *cb_prepend_tail;
     struct vmsvga_command_buffer_work_s *cb_queue_head;
     struct vmsvga_command_buffer_work_s *cb_queue_tail;
+    struct vmsvga_command_buffer_work_s *cb_active_work;
     uint32_t cb_queue_count;
     uint32_t cb_queue_depth_max;
     uint64_t cb_queue_sequence;
@@ -559,6 +563,19 @@ struct vmsvga_state_s {
     struct vmsvga_perf_counters_s perf;
     struct vmsvga_perf_counters_s perf_last;
     bool cb_bh_running;
+    bool cb_shadow_yield_allowed;
+    bool cb_shadow_yield_pending;
+    uint32_t cb_shadow_yield_sid;
+    uint32_t cb_shadow_yield_subresource;
+    uint64_t *cb_shadow_journal;
+    uint32_t cb_shadow_journal_count;
+    uint32_t cb_shadow_journal_capacity;
+    uint32_t cb_shadow_exec_base_offset;
+    uint32_t cb_shadow_packet_offset;
+    bool cb_shadow_packet_valid;
+    bool cb_shadow_packet_side_effect_done;
+    bool cb_shadow_journal_oom;
+    bool cb_yield_waiting;
     uint32_t fifo_size;
     uint32_t fifo_min;
     uint32_t fifo_max;
@@ -6061,7 +6078,15 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
     /* Keep register-command-buffer and legacy FIFO side effects ordered.
      * Private FIFO parsing for a queued command buffer sets
      * cb_fifo_scratch_in_use, so it must not recursively drain its own queue. */
-    if (!s->cb_fifo_scratch_in_use && s->cb_queue_count != 0) {
+    if (!s->cb_fifo_scratch_in_use && s->cb_active_work != NULL &&
+        s->cb_yield_waiting) {
+        if (vmsvga_fifo_has_reg(s, SVGA_FIFO_BUSY)) {
+            s->fifo[SVGA_FIFO_BUSY] = cpu_to_le32(1);
+        }
+        return;
+    }
+    if (!s->cb_fifo_scratch_in_use &&
+        (s->cb_active_work != NULL || s->cb_queue_count != 0)) {
         vmsvga3d_command_buffer_drain(s, "fifo-order");
     }
 
@@ -7943,7 +7968,16 @@ static SVGACBStatus vmsvga_command_buffer_process(
             break;
         }
 
-        /* A rewind/stall or malformed command made no forward progress. */
+        /* A yieldable shadow readback intentionally rewinds the current
+         * command.  Preserve all bytes consumed before it and leave the guest
+         * command-buffer status at NONE so the same command can resume later. */
+        if (s->cb_shadow_yield_pending) {
+            status = SVGA_CB_STATUS_NONE;
+            consumed = MIN(consumed, size);
+            break;
+        }
+
+        /* Any other rewind/stall or malformed command is a command error. */
         if (s->fifo_stop == previous_stop || consumed > size) {
             status = SVGA_CB_STATUS_COMMAND_ERROR;
             consumed = MIN(consumed, size);
@@ -10371,6 +10405,15 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
      */
     vmsvga3d_perf_profile_report(s);
 
+    /* A yieldable COMMAND_BUFFERS_2 shadow readback is retried from the
+     * regular display-service cadence.  Do not reschedule it directly from
+     * the command-buffer BH: that would spin the main loop while the GPU is
+     * still busy and starve the very display updates this path protects. */
+    if (s->cb_yield_waiting && s->cb_active_work != NULL &&
+        s->cb_bh != NULL && !s->cb_bh_running) {
+        qemu_bh_schedule(s->cb_bh);
+    }
+
     if (!s->enable || !s->config) {
         vmsvga_trace_display_path(s, VMSVGA_TRACE_DISPLAY_VGA);
         s->svga_surface_bound = false;
@@ -11652,6 +11695,14 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->cb_queue_bytes = 0;
     s->cb_queue_drains = 0;
     s->cb_bh_running = false;
+    s->cb_shadow_journal = NULL;
+    s->cb_shadow_journal_count = 0;
+    s->cb_shadow_journal_capacity = 0;
+    s->cb_shadow_exec_base_offset = 0;
+    s->cb_shadow_packet_offset = 0;
+    s->cb_shadow_packet_valid = false;
+    s->cb_shadow_packet_side_effect_done = false;
+    s->cb_shadow_journal_oom = false;
     s->cb_fifo_scratch = NULL;
     s->cb_fifo_scratch_capacity = 0;
     s->cb_fifo_scratch_in_use = false;
@@ -11884,6 +11935,9 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     g_clear_pointer(&s->chip.cb_fifo_scratch, g_free);
     s->chip.cb_fifo_scratch_capacity = 0;
     s->chip.cb_fifo_scratch_in_use = false;
+    g_clear_pointer(&s->chip.cb_shadow_journal, g_free);
+    s->chip.cb_shadow_journal_count = 0;
+    s->chip.cb_shadow_journal_capacity = 0;
     g_clear_pointer(&s->chip.d3d_payload_scratch, g_free);
     s->chip.d3d_payload_scratch_capacity = 0;
     s->chip.d3d_payload_scratch_in_use = false;

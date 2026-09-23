@@ -462,8 +462,6 @@ static void vmsvga3d_clip_present_rect(const SVGA3dCopyRect *rect,
                                        uint32_t dst_height,
                                        SVGA3dCopyRect *clipped);
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s);
-static bool vmsvga3d_screen_target_flush_switch_live(
-    struct vmsvga_state_s *s);
 #define VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES 4u
 #define VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES \
     (UINT64_C(32) * 1024u * 1024u)
@@ -16427,24 +16425,6 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     return vmsvga3d_screen_target_flush_live_mode(s, true, false, false);
 }
 
-static bool vmsvga3d_screen_target_flush_switch_live(
-    struct vmsvga_state_s *s)
-{
-    bool retired_pending = false;
-
-    /* Preserve publication order without waiting.  The detached D3D11 path
-     * is a single-frame mailbox; if that frame is still pending, the switch
-     * path must not publish the active target ahead of it. */
-    if (!vmsvga3d_screen_target_retired_snapshot_service_live(
-            s, false, VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES,
-            VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES,
-            &retired_pending)) {
-        return false;
-    }
-    return vmsvga3d_screen_target_flush_live_mode(
-        s, true, true, retired_pending);
-}
-
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s)
 {
     struct vmsvga3d_state_s *state;
@@ -16911,13 +16891,11 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 entry.image.sid = cpu_to_le32(body->image.sid);
                 entry.image.face = cpu_to_le32(body->image.face);
                 entry.image.mipmap = cpu_to_le32(body->image.mipmap);
-                if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SCREENTARGET, body->stid,
-                                           sizeof(entry), &entry, sizeof(entry))) {
-                    break;
-                }
             }
             old_active_sid = s->svga3d->active_screen_target_sid;
-            if (!vmsvga3d_d3d10_screen_target_bind_live(s, body->image.sid)) {
+            if (!vmsvga3d_d3d10_screen_target_bind_live(
+                    s, body->image.sid, body->stid,
+                    body->image.sid != old_sid ? &entry : NULL)) {
                 break;
             }
             if (body->image.sid != old_sid) {

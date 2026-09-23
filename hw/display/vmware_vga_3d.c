@@ -462,6 +462,8 @@ static void vmsvga3d_clip_present_rect(const SVGA3dCopyRect *rect,
                                        uint32_t dst_height,
                                        SVGA3dCopyRect *clipped);
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s);
+#define VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS 1u
+#define VMSVGA_CB_SCREEN_TARGET_RETRY_MAX_MS 8u
 #define VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES 4u
 #define VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES \
     (UINT64_C(32) * 1024u * 1024u)
@@ -482,7 +484,8 @@ static VMSVGA3DDxvkScreenReadbackPollResult
 vmsvga3d_screen_target_async_poll_present_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     bool d3d9_resident, bool d3d11_resident, bool wait,
-    bool allow_inactive, uint64_t min_sequence, uint64_t *sequence_out);
+    bool allow_inactive, bool exact_sequence, uint64_t min_sequence,
+    uint64_t *sequence_out);
 static void vmsvga3d_screen_target_async_discard_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface);
 static bool vmsvga2d_screen_target_flush_live(struct vmsvga_state_s *s);
@@ -533,6 +536,8 @@ struct vmsvga3d_state_s {
     SVGA3dRect screen_target_dirty_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
     bool screen_target_barrier_active;
     uint32_t screen_target_barrier_sid;
+    uint64_t screen_target_barrier_sequence;
+    uint32_t screen_target_barrier_retry_ms;
     uint32_t screen_target_barrier_dirty_count;
     SVGA3dRect screen_target_barrier_dirty_rects[
         VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
@@ -2391,6 +2396,8 @@ vmsvga3d_state_ensure(struct vmsvga_state_s *s)
             s->svga3d->active_screen_target_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_barrier_sid = SVGA3D_INVALID_ID;
+            s->svga3d->screen_target_barrier_retry_ms =
+                VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS;
             s->svga3d->screen_target_frontend_commit_sid = SVGA3D_INVALID_ID;
             s->svga3d->screen_target_frontend_commit_backend = 0;
             s->svga3d->screen_target_frontend_commit_sequence = 0;
@@ -10336,7 +10343,6 @@ static bool vmsvga3d_clear_readback_targets(
 
 #define VMSVGA_CB_BH_MAX_BUFFERS 8u
 #define VMSVGA_CB_BH_MAX_BYTES (4u * 1024u * 1024u)
-#define VMSVGA_CB_SCREEN_TARGET_RETRY_MS 1
 
 struct vmsvga_command_buffer_work_s {
     struct vmsvga_command_buffer_work_s *next;
@@ -10693,10 +10699,22 @@ static void vmsvga3d_command_buffer_screen_target_retry_cancel(
 static void vmsvga3d_command_buffer_screen_target_retry_arm(
     struct vmsvga_state_s *s)
 {
+    uint32_t delay_ms = VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS;
+
+    if (s != NULL && s->svga3d != NULL &&
+        s->svga3d->screen_target_barrier_active) {
+        delay_ms = s->svga3d->screen_target_barrier_retry_ms;
+        if (delay_ms < VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS) {
+            delay_ms = VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS;
+        } else if (delay_ms > VMSVGA_CB_SCREEN_TARGET_RETRY_MAX_MS) {
+            delay_ms = VMSVGA_CB_SCREEN_TARGET_RETRY_MAX_MS;
+        }
+        s->svga3d->screen_target_barrier_retry_ms =
+            MIN(delay_ms * 2u, VMSVGA_CB_SCREEN_TARGET_RETRY_MAX_MS);
+    }
     if (s != NULL && s->cb_screen_target_retry_timer != NULL) {
         timer_mod(s->cb_screen_target_retry_timer,
-                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
-                      VMSVGA_CB_SCREEN_TARGET_RETRY_MS);
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + delay_ms);
     }
 }
 
@@ -15503,7 +15521,8 @@ static VMSVGA3DDxvkScreenReadbackPollResult
 vmsvga3d_screen_target_async_poll_present_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
     bool d3d9_resident, bool d3d11_resident, bool wait,
-    bool allow_inactive, uint64_t min_sequence, uint64_t *sequence_out)
+    bool allow_inactive, bool exact_sequence, uint64_t min_sequence,
+    uint64_t *sequence_out)
 {
     const struct svga3d_surface_desc *desc = NULL;
     VMSVGA3DD3D9Rect d3d_rects[VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS];
@@ -15575,11 +15594,19 @@ vmsvga3d_screen_target_async_poll_present_live(
             d3d_rects, G_N_ELEMENTS(d3d_rects), &rect_count,
             effective_min_sequence, &completed_sequence);
     } else if (d3d11_resident && !d3d9_resident) {
-        poll = vmsvga3d_dxvk_d3d11_screen_readback_poll(
-            s->dxvk, surface->dxvk_surface, wait, screen_base,
-            4, screen_stride, screen_size,
-            d3d_rects, G_N_ELEMENTS(d3d_rects), &rect_count,
-            effective_min_sequence, &completed_sequence);
+        if (exact_sequence) {
+            poll = vmsvga3d_dxvk_d3d11_screen_readback_poll_sequence(
+                s->dxvk, surface->dxvk_surface, wait, screen_base,
+                4, screen_stride, screen_size,
+                d3d_rects, G_N_ELEMENTS(d3d_rects), &rect_count,
+                effective_min_sequence, &completed_sequence);
+        } else {
+            poll = vmsvga3d_dxvk_d3d11_screen_readback_poll(
+                s->dxvk, surface->dxvk_surface, wait, screen_base,
+                4, screen_stride, screen_size,
+                d3d_rects, G_N_ELEMENTS(d3d_rects), &rect_count,
+                effective_min_sequence, &completed_sequence);
+        }
     } else {
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
     }
@@ -15799,7 +15826,7 @@ static bool vmsvga3d_screen_target_async_drain_live(
         VMSVGA3DDxvkScreenReadbackPollResult poll =
             vmsvga3d_screen_target_async_poll_present_live(
                 s, surface, d3d9_resident, d3d11_resident, true, false,
-                0, NULL);
+                false, 0, NULL);
 
         if (poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE) {
             if (drained != 0) {
@@ -15898,7 +15925,7 @@ static bool vmsvga3d_screen_target_flush_live_mode(
             s, commit_surface,
             state->screen_target_frontend_commit_backend == 9,
             state->screen_target_frontend_commit_backend == 11, false, false,
-            state->screen_target_frontend_commit_sequence, NULL);
+            false, state->screen_target_frontend_commit_sequence, NULL);
         if (commit_poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING) {
             return true;
         }
@@ -15937,7 +15964,7 @@ static bool vmsvga3d_screen_target_flush_live_mode(
                 }
                 poll = vmsvga3d_screen_target_async_poll_present_live(
                     s, surface, d3d9_resident, d3d11_resident, false, false,
-                    0, NULL);
+                    false, 0, NULL);
                 if (poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED) {
                     if (preserve_async_failure) {
                         return false;
@@ -16096,7 +16123,7 @@ static bool vmsvga3d_screen_target_flush_live_mode(
                 } else if (!defer_active_publish) {
                     poll = vmsvga3d_screen_target_async_poll_present_live(
                         s, surface, d3d9_resident, d3d11_resident, false,
-                        false, 0, NULL);
+                        false, false, 0, NULL);
                 }
 
                 if (poll != VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED) {
@@ -16482,6 +16509,9 @@ static void vmsvga3d_screen_target_barrier_clear_live(
     state = s->svga3d;
     state->screen_target_barrier_active = false;
     state->screen_target_barrier_sid = SVGA3D_INVALID_ID;
+    state->screen_target_barrier_sequence = 0;
+    state->screen_target_barrier_retry_ms =
+        VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS;
     state->screen_target_barrier_dirty_count = 0;
     memset(state->screen_target_barrier_dirty_rects, 0,
            sizeof(state->screen_target_barrier_dirty_rects));
@@ -16505,6 +16535,9 @@ static void vmsvga3d_screen_target_barrier_capture_live(
                 (uint32_t)VMSVGA3D_SCREEN_TARGET_DAMAGE_RECTS);
     state->screen_target_barrier_active = true;
     state->screen_target_barrier_sid = state->active_screen_target_sid;
+    state->screen_target_barrier_sequence = 0;
+    state->screen_target_barrier_retry_ms =
+        VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS;
     state->screen_target_barrier_dirty_count = count;
     if (count != 0) {
         memcpy(state->screen_target_barrier_dirty_rects,
@@ -16614,6 +16647,7 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
     struct vmsvga3d_state_s *state;
     VMSVGA3DSurface *surface;
     VMSVGA3DD3D9TransferSurface d3d9_info = {0};
+    SVGA3dRect full_rect;
     uint32_t sid;
     bool d3d9_resident;
     bool d3d11_resident;
@@ -16632,7 +16666,8 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
         return true;
     }
     surface = state->surfaces[sid];
-    if (surface == NULL || surface->dxvk_surface == NULL) {
+    if (surface == NULL || surface->dxvk_surface == NULL ||
+        surface->mips == NULL || surface->mip_count == 0) {
         vmsvga3d_screen_target_barrier_restore_live(s, true);
         return vmsvga3d_screen_target_quiesce_live(s);
     }
@@ -16662,9 +16697,7 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
         return vmsvga3d_screen_target_quiesce_live(s);
     }
 
-    /* An explicit command-buffer drain must finish synchronously.  Restore the
-     * captured presentation obligation before discarding the pending staging
-     * copy so the fallback cannot mistake an empty dirty queue for completion. */
+    /* An explicit command-buffer drain must finish synchronously. */
     if (state->screen_target_barrier_active &&
         !s->cb_shadow_yield_allowed) {
         vmsvga3d_screen_target_barrier_restore_live(s, true);
@@ -16680,22 +16713,77 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
             return true;
         }
         vmsvga3d_screen_target_barrier_capture_live(s);
+
+        /* The ordinary display mailbox is intentionally lossy.  A BIND
+         * barrier cannot inherit one of those snapshots because it must know
+         * exactly which old-target frame has satisfied presentation ordering.
+         * Replace any pre-existing mailbox snapshot with one full-frame
+         * barrier-owned submission from the still-active old target. */
+        if (have_pending) {
+            vmsvga3d_screen_target_async_discard_live(s, surface);
+        }
     }
 
-    /* Submit or poll the old target without changing its logical ownership.
-     * The barrier snapshot preserves the presentation obligation after the
-     * normal async path transfers dirty ownership into a staging slot. */
-    if (!vmsvga3d_screen_target_flush_live_mode(s, true, true, false)) {
+    full_rect.x = 0;
+    full_rect.y = 0;
+    full_rect.w = surface->mips[0].size.width;
+    full_rect.h = surface->mips[0].size.height;
+    if (full_rect.w == 0 || full_rect.h == 0 ||
+        full_rect.w > s->screen_width || full_rect.h > s->screen_height) {
         vmsvga3d_screen_target_barrier_restore_live(s, true);
         return vmsvga3d_screen_target_quiesce_live(s);
     }
 
-    if (state->screen_target_dirty_count != 0 ||
-        vmsvga3d_dxvk_d3d11_screen_readback_pending(surface->dxvk_surface)) {
+    if (state->screen_target_barrier_sequence == 0) {
+        const struct svga3d_surface_desc *desc =
+            svga3dsurface_get_desc(surface->format);
+        VMSVGA3DDxvkScreenReadbackSubmitResult submit;
+        uint64_t sequence = 0;
+
+        if (desc == NULL || desc->format != surface->format) {
+            vmsvga3d_screen_target_barrier_restore_live(s, true);
+            return vmsvga3d_screen_target_quiesce_live(s);
+        }
+        submit = vmsvga3d_screen_target_async_submit_live(
+            s, surface, false, true, &full_rect, 1,
+            desc->bytes_per_block, &sequence);
+        if (submit != VMSVGA3D_DXVK_SCREEN_READBACK_SUBMITTED ||
+            sequence == 0) {
+            vmsvga3d_screen_target_barrier_restore_live(s, true);
+            return vmsvga3d_screen_target_quiesce_live(s);
+        }
+
+        state->screen_target_barrier_sequence = sequence;
+        state->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+        state->screen_target_dirty_count = 0;
+        memset(state->screen_target_dirty_rects, 0,
+               sizeof(state->screen_target_dirty_rects));
+        state->screen_target_full_present_pending = false;
+        vmsvga3d_screen_target_write_tracking_reset_live(s, true);
         if (pending_out != NULL) {
             *pending_out = true;
         }
         return true;
+    }
+
+    {
+        uint64_t completed_sequence = 0;
+        VMSVGA3DDxvkScreenReadbackPollResult poll =
+            vmsvga3d_screen_target_async_poll_present_live(
+                s, surface, false, true, false, false, true,
+                state->screen_target_barrier_sequence, &completed_sequence);
+
+        if (poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING) {
+            if (pending_out != NULL) {
+                *pending_out = true;
+            }
+            return true;
+        }
+        if (poll != VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY ||
+            completed_sequence != state->screen_target_barrier_sequence) {
+            vmsvga3d_screen_target_barrier_restore_live(s, true);
+            return vmsvga3d_screen_target_quiesce_live(s);
+        }
     }
 
     vmsvga3d_screen_target_barrier_clear_live(s);

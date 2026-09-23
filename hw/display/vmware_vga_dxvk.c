@@ -14108,12 +14108,13 @@ fail:
 #endif
 }
 
-VMSVGA3DDxvkScreenReadbackPollResult
-vmsvga3d_dxvk_d3d11_screen_readback_poll(
+static VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d11_screen_readback_poll_internal(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, bool wait, void *data,
     uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
     struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
-    uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out)
+    uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out,
+    bool exact_sequence)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkScreenReadbackSlot *slot = NULL;
@@ -14155,8 +14156,55 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     }
 
     if (wait) {
-        slot = vmsvga3d_dxvk_screen_readback_oldest_slot(
-            surface->d3d11_screen_readback, min_sequence);
+        if (exact_sequence) {
+            if (min_sequence == 0) {
+                return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+            }
+            for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+                VMSVGA3DDxvkScreenReadbackSlot *candidate =
+                    &surface->d3d11_screen_readback[i];
+
+                if (candidate->pending &&
+                    candidate->sequence == min_sequence) {
+                    slot = candidate;
+                    break;
+                }
+            }
+        } else {
+            slot = vmsvga3d_dxvk_screen_readback_oldest_slot(
+                surface->d3d11_screen_readback, min_sequence);
+        }
+        if (slot == NULL) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
+        }
+    } else if (exact_sequence) {
+        if (min_sequence == 0) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+        }
+        for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+            VMSVGA3DDxvkScreenReadbackSlot *candidate =
+                &surface->d3d11_screen_readback[i];
+
+            if (!candidate->pending ||
+                candidate->sequence != min_sequence) {
+                continue;
+            }
+            if (candidate->query == NULL) {
+                return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+            }
+            result = get_data(
+                dxvk->d3d11_context, candidate->query, &query_data,
+                sizeof(query_data),
+                VMSVGA3D_DXVK_D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+                return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+            }
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+            }
+            slot = candidate;
+            break;
+        }
         if (slot == NULL) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
         }
@@ -14256,7 +14304,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     unmap(dxvk->d3d11_context, slot->staging, 0);
     memcpy(rects, slot->rects, slot->rect_count * sizeof(rects[0]));
     *rect_count = slot->rect_count;
-    if (!wait) {
+    if (!wait && !exact_sequence) {
         dropped = vmsvga3d_dxvk_screen_readback_drop_older_slots(
             surface->d3d11_screen_readback, slot->sequence);
     }
@@ -14283,6 +14331,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     (void)rects;
     (void)rect_capacity;
     (void)min_sequence;
+    (void)exact_sequence;
     if (sequence_out != NULL) {
         *sequence_out = 0;
     }
@@ -14291,6 +14340,30 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll(
     }
     return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
 #endif
+}
+
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d11_screen_readback_poll(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, bool wait, void *data,
+    uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
+    struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
+    uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out)
+{
+    return vmsvga3d_dxvk_d3d11_screen_readback_poll_internal(
+        dxvk, surface, wait, data, bytes_per_pixel, row_pitch, data_size,
+        rects, rect_capacity, rect_count, min_sequence, sequence_out, false);
+}
+
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d11_screen_readback_poll_sequence(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, bool wait, void *data,
+    uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
+    struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
+    uint32_t *rect_count, uint64_t sequence, uint64_t *sequence_out)
+{
+    return vmsvga3d_dxvk_d3d11_screen_readback_poll_internal(
+        dxvk, surface, wait, data, bytes_per_pixel, row_pitch, data_size,
+        rects, rect_capacity, rect_count, sequence, sequence_out, true);
 }
 
 #if defined(CONFIG_LINUX) && defined(__ELF__)

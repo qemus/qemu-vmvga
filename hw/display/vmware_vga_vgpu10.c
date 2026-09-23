@@ -9246,6 +9246,9 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             " sync11=%" PRIu64 " sync11-us=%" PRIu64
             " shadow9=%" PRIu64 " shadow9-us=%" PRIu64
             " shadow11=%" PRIu64 " shadow11-us=%" PRIu64
+            " shadow11-yield=%" PRIu64
+            " shadow11-pending=%" PRIu64
+            " shadow11-resume=%" PRIu64
             " handoff9=%" PRIu64 " handoff9-us=%" PRIu64
             " handoff11=%" PRIu64 " handoff11-us=%" PRIu64
             " qr-redef=%" PRIu64 " qr-destroy=%" PRIu64
@@ -9285,6 +9288,12 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             p->shadow_readback_d3d9_us - l->shadow_readback_d3d9_us,
             p->shadow_readback_d3d11 - l->shadow_readback_d3d11,
             p->shadow_readback_d3d11_us - l->shadow_readback_d3d11_us,
+            p->shadow_readback_d3d11_yields -
+                l->shadow_readback_d3d11_yields,
+            p->shadow_readback_d3d11_pending_retries -
+                l->shadow_readback_d3d11_pending_retries,
+            p->shadow_readback_d3d11_resumes -
+                l->shadow_readback_d3d11_resumes,
             p->handoff_d3d9_to_shadow - l->handoff_d3d9_to_shadow,
             p->handoff_d3d9_to_shadow_us - l->handoff_d3d9_to_shadow_us,
             p->handoff_d3d11_to_shadow - l->handoff_d3d11_to_shadow,

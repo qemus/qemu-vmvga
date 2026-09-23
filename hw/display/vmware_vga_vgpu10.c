@@ -11268,7 +11268,8 @@ static void vmsvga3d_d3d10_screen_target_note_quiesce_reason(
 }
 
 static bool vmsvga3d_d3d10_screen_target_bind_live(
-    struct vmsvga_state_s *s, uint32_t sid)
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t stid,
+    const SVGAOTableScreenTargetEntry *new_entry)
 {
     VMSVGA3DSurface *surface;
     uint32_t old_sid;
@@ -11337,6 +11338,12 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
     if (s->screen_direct_active &&
         !vmsvga_screen_direct_detach(
             s, sid == SVGA3D_INVALID_ID ? "target-unbind" : "target-switch")) {
+        return false;
+    }
+    if (new_entry != NULL &&
+        !vmsvga3d_otable_write(s, SVGA_OTABLE_SCREENTARGET, stid,
+                                sizeof(*new_entry), new_entry,
+                                sizeof(*new_entry))) {
         return false;
     }
 

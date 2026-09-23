@@ -16891,13 +16891,11 @@ static bool vmsvga3d_handle_gb_screen_target(struct vmsvga_state_s *s,
                 entry.image.sid = cpu_to_le32(body->image.sid);
                 entry.image.face = cpu_to_le32(body->image.face);
                 entry.image.mipmap = cpu_to_le32(body->image.mipmap);
-                if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SCREENTARGET, body->stid,
-                                           sizeof(entry), &entry, sizeof(entry))) {
-                    break;
-                }
             }
             old_active_sid = s->svga3d->active_screen_target_sid;
-            if (!vmsvga3d_d3d10_screen_target_bind_live(s, body->image.sid)) {
+            if (!vmsvga3d_d3d10_screen_target_bind_live(
+                    s, body->image.sid, body->stid,
+                    body->image.sid != old_sid ? &entry : NULL)) {
                 break;
             }
             if (body->image.sid != old_sid) {

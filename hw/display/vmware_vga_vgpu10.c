@@ -11332,12 +11332,16 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         bool old_commit_pending =
             s->svga3d->screen_target_frontend_commit_pending &&
             s->svga3d->screen_target_frontend_commit_sid == old_sid;
-        bool retire_coalescing =
-            sid != SVGA3D_INVALID_ID &&
+        bool retired_mailbox_pending =
             !s->screen_frontend_deferred && !s->screen_handoff_active &&
             old_d3d11_resident && !old_d3d9_resident &&
             old_surface != NULL && old_surface->dxvk_surface != NULL &&
-            vmsvga3d_dxvk_d3d11_retired_screen_readback_coalescing(s->dxvk);
+            vmsvga3d_dxvk_d3d11_retired_screen_readback_count(s->dxvk) != 0;
+        bool old_d3d11_readback_pending =
+            old_d3d11_resident && !old_d3d9_resident &&
+            old_surface != NULL && old_surface->dxvk_surface != NULL &&
+            vmsvga3d_dxvk_d3d11_screen_readback_pending(
+                old_surface->dxvk_surface);
         bool switch_quiesced = false;
 
         if (sid != SVGA3D_INVALID_ID) {
@@ -11356,23 +11360,17 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         }
 
         if (!switch_quiesced) {
-            bool skip_intermediate = retire_coalescing;
+            bool skip_intermediate = retired_mailbox_pending;
 
             if (skip_intermediate) {
-                /* Pressure already selected one fixed full-frame checkpoint.
-                 * Do not poll it from every guest target switch: display refresh
-                 * owns retirement servicing, and repeated switch-side polling
-                 * only burns CPU while the GPU is still working.  Also do not
-                 * submit a replacement here, which would move the finish line
-                 * and recreate the earlier starvation mode.
-                 *
-                 * The detached checkpoint owns frontend publication order.
-                 * This old target is an intermediate flip: discard its
-                 * presentation obligation before submit instead of flooding the
-                 * GPU with a readback that will never be shown.  The BIND that
-                 * follows marks the newly active target for a full-frame
-                 * presentation, so the current image remains queued for catch-up
-                 * once the fixed checkpoint drains. */
+                /* One detached snapshot already owns frontend publication.
+                 * Treat later flips as mailbox updates instead of queue entries:
+                 * do not poll or replace the in-flight snapshot and do not issue
+                 * another GPU readback for this old target.  A following valid
+                 * BIND is a full-frame presentation boundary, so the newest
+                 * target remains dirty and will be captured after the mailbox
+                 * frame completes; an unbind simply leaves this mailbox frame
+                 * as the last old-target publication. */
                 if (s->svga3d->screen_target_dirty_count != 0 &&
                     s->svga3d->screen_target_dirty_sid != old_sid) {
                     return false;
@@ -11385,7 +11383,8 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                        sizeof(s->svga3d->screen_target_dirty_rects));
                 s->perf.screen_target_retire_coalesced_skips++;
             } else if (!vmsvga3d_screen_target_flush_switch_live(s) ||
-                       s->svga3d->screen_target_dirty_count != 0) {
+                       (s->svga3d->screen_target_dirty_count != 0 &&
+                        !old_d3d11_readback_pending)) {
                 vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                 if (!vmsvga3d_screen_target_quiesce_live(s)) {
                     return false;
@@ -11496,12 +11495,9 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                         .h = old_surface->mips[0].size.height,
                     };
 
-                    /* A partial newest snapshot cannot supersede retired
-                     * presentation history.  Under residual pressure, queue one
-                     * full-frame replacement while the old target is still
-                     * active.  The D3D11 submit ring accumulates pending damage,
-                     * making the replacement self-contained; retire_latest can
-                     * then replace the stale backlog with one fixed checkpoint. */
+                    /* An exceptional mailbox replacement must be
+                     * self-contained.  Promote the old target to one full-frame
+                     * submission before retrying the explicit replacement. */
                     if (vmsvga3d_screen_target_mark_dirty_live(
                             s, old_sid, 0, &full, true) &&
                         vmsvga3d_screen_target_flush_switch_live(s) &&
@@ -11516,13 +11512,29 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
                 }
 
                 if (retire == VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED) {
+                    /* If an earlier display refresh already had the mailbox
+                     * snapshot in flight, newer damage on this old target is
+                     * intentionally superseded by the target selected by the
+                     * BIND we are processing.  Do not carry stale dirty ownership
+                     * across the flip. */
+                    if (s->svga3d->screen_target_dirty_count != 0) {
+                        if (s->svga3d->screen_target_dirty_sid != old_sid) {
+                            return false;
+                        }
+                        s->svga3d->screen_target_dirty_sid = SVGA3D_INVALID_ID;
+                        s->svga3d->screen_target_dirty_count = 0;
+                        memset(s->svga3d->screen_target_dirty_rects, 0,
+                               sizeof(s->svga3d->screen_target_dirty_rects));
+                        vmsvga3d_screen_target_write_tracking_reset_live(
+                            s, false);
+                    }
                     s->perf.screen_target_retire_armed++;
                 } else if (retire ==
                            VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY) {
-                    /* Pressure survived bounded cleanup and a full-frame
-                     * checkpoint attempt.  Keep the synchronous path only as a
-                     * last-resort correctness fallback when one self-contained
-                     * checkpoint cannot be retained. */
+                    /* The single mailbox snapshot still could not be
+                     * retained after bounded cleanup and a full-frame retry.
+                     * Keep the synchronous path only as the last-resort
+                     * correctness fallback. */
                     s->perf.screen_target_retire_waits++;
                     vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
                     if (!vmsvga3d_screen_target_quiesce_live(s)) {

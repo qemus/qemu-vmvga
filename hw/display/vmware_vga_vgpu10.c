@@ -11328,13 +11328,24 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
      * Preserve that optimized barrier instead of speculatively coalescing
      * across guest flips.
      */
+    if (s->cb_shadow_yield_allowed) {
+        bool pending = false;
+
+        if (!vmsvga3d_screen_target_quiesce_yieldable_live(s, &pending)) {
+            return false;
+        }
+        if (pending) {
+            s->cb_screen_target_yield_pending = true;
+            return false;
+        }
+    } else if (!vmsvga3d_screen_target_quiesce_live(s)) {
+        return false;
+    }
+
     if (sid != SVGA3D_INVALID_ID) {
         s->perf.screen_target_switches++;
     }
     vmsvga3d_d3d10_screen_target_note_quiesce_reason(s, sid);
-    if (!vmsvga3d_screen_target_quiesce_live(s)) {
-        return false;
-    }
     if (s->screen_direct_active &&
         !vmsvga_screen_direct_detach(
             s, sid == SVGA3D_INVALID_ID ? "target-unbind" : "target-switch")) {

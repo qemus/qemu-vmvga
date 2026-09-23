@@ -472,6 +472,8 @@ static bool vmsvga3d_screen_target_retired_snapshot_service_live(
     struct vmsvga_state_s *s, bool wait, uint32_t max_ready_entries,
     uint64_t max_ready_bytes, bool *pending_out);
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s);
+static bool vmsvga3d_screen_target_quiesce_yieldable_live(
+    struct vmsvga_state_s *s, bool *pending_out);
 static VMSVGA3DDxvkScreenReadbackPollResult
 vmsvga3d_screen_target_async_poll_present_live(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
@@ -10703,12 +10705,16 @@ static bool vmsvga3d_command_buffer_execute_work(
          * command does not repeat a copy that already executed before yield. */
         vmsvga3d_command_buffer_shadow_pending_cancel(s);
     }
+    if (!allow_yield) {
+        s->cb_screen_target_yield_pending = false;
+    }
     if (!work->shadow_yielded) {
         vmsvga3d_command_buffer_shadow_journal_clear(s);
     }
     s->cb_shadow_exec_base_offset = work->header.offset;
     s->cb_shadow_yield_allowed = allow_yield;
     s->cb_shadow_yield_pending = false;
+    s->cb_screen_target_yield_pending = false;
     status = vmsvga_command_buffer_process(
         s, dx_context,
         work->commands != NULL ? work->commands + work->header.offset : NULL,
@@ -10716,14 +10722,19 @@ static bool vmsvga3d_command_buffer_execute_work(
     s->cb_shadow_yield_allowed = false;
     processed = work->header.offset + local_offset;
 
-    if (status == SVGA_CB_STATUS_NONE && s->cb_shadow_yield_pending &&
+    if (status == SVGA_CB_STATUS_NONE &&
+        (s->cb_shadow_yield_pending || s->cb_screen_target_yield_pending) &&
         allow_yield) {
+        bool shadow_yield = s->cb_shadow_yield_pending;
+
         work->header.offset = processed;
-        if (!work->shadow_yielded) {
-            work->shadow_yielded = true;
-            s->perf.shadow_readback_d3d11_yields++;
-        } else {
-            s->perf.shadow_readback_d3d11_pending_retries++;
+        if (shadow_yield) {
+            if (!work->shadow_yielded) {
+                work->shadow_yielded = true;
+                s->perf.shadow_readback_d3d11_yields++;
+            } else {
+                s->perf.shadow_readback_d3d11_pending_retries++;
+            }
         }
         s->cb_yield_waiting = true;
         VMVGA_TRACE_LOCAL(
@@ -10767,6 +10778,7 @@ static bool vmsvga3d_command_buffer_execute_work(
     }
     s->cb_yield_waiting = false;
     s->cb_shadow_yield_pending = false;
+    s->cb_screen_target_yield_pending = false;
     s->cb_shadow_exec_base_offset = 0;
     vmsvga3d_command_buffer_shadow_journal_clear(s);
     vmsvga3d_command_buffer_write_status(
@@ -10962,6 +10974,7 @@ static void vmsvga3d_command_buffer_discard(struct vmsvga_state_s *s,
     s->cb_yield_waiting = false;
     s->cb_shadow_yield_allowed = false;
     s->cb_shadow_yield_pending = false;
+    s->cb_screen_target_yield_pending = false;
 
     while (s->cb_queue_count != 0) {
         struct vmsvga_command_buffer_work_s *work =
@@ -16425,6 +16438,68 @@ static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s)
     return vmsvga3d_screen_target_flush_live_mode(s, true, false, false);
 }
 
+static bool vmsvga3d_screen_target_quiesce_yieldable_live(
+    struct vmsvga_state_s *s, bool *pending_out)
+{
+    struct vmsvga3d_state_s *state;
+    VMSVGA3DSurface *surface;
+    VMSVGA3DD3D9TransferSurface d3d9_info = {0};
+    uint32_t sid;
+    bool d3d9_resident;
+    bool d3d11_resident;
+
+    if (pending_out != NULL) {
+        *pending_out = false;
+    }
+    if (s == NULL || s->svga3d == NULL) {
+        return true;
+    }
+
+    state = s->svga3d;
+    sid = state->active_screen_target_sid;
+    if (sid == SVGA3D_INVALID_ID || sid >= SVGA3D_MAX_SURFACE_IDS) {
+        return true;
+    }
+    surface = state->surfaces[sid];
+    if (surface == NULL || surface->dxvk_surface == NULL) {
+        return vmsvga3d_screen_target_quiesce_live(s);
+    }
+
+    d3d9_resident =
+        vmsvga3d_d3d9_runtime_surface_info(s, surface, &d3d9_info) &&
+        d3d9_info.resident;
+    d3d11_resident =
+        vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface);
+
+    /* Only the pure D3D11 path has a fully nonblocking staging/readback
+     * implementation.  Keep D3D9, mixed residency, frontend handoff and any
+     * legacy detached retirement state on the proven synchronous barrier. */
+    if (d3d9_resident || !d3d11_resident ||
+        !vmsvga3d_dxvk_d3d11_screen_readback_supported(
+            surface->dxvk_surface) ||
+        s->screen_frontend_deferred || s->screen_handoff_active ||
+        state->screen_target_frontend_commit_pending ||
+        vmsvga3d_dxvk_d3d11_retired_screen_readback_count(s->dxvk) != 0) {
+        return vmsvga3d_screen_target_quiesce_live(s);
+    }
+
+    /* Submit or poll the old target without changing its logical ownership.
+     * flush_live_mode() clears dirty damage only after it has been captured in
+     * the per-surface async ring.  While either captured work or unsent damage
+     * remains, the BIND packet must yield and retry with the old SID active. */
+    if (!vmsvga3d_screen_target_flush_live_mode(s, true, true, false)) {
+        return vmsvga3d_screen_target_quiesce_live(s);
+    }
+
+    if (state->screen_target_dirty_count != 0 ||
+        vmsvga3d_dxvk_d3d11_screen_readback_pending(surface->dxvk_surface)) {
+        if (pending_out != NULL) {
+            *pending_out = true;
+        }
+    }
+    return true;
+}
+
 static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s)
 {
     struct vmsvga3d_state_s *state;
@@ -18507,14 +18582,16 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
     if (info->handler != NULL) {
         bool handled = info->handler(s, cmd, len, fifo_start);
 
-        return s->cb_shadow_yield_pending ? false : handled;
+        return (s->cb_shadow_yield_pending ||
+                s->cb_screen_target_yield_pending) ? false : handled;
     }
 
     if (vmsvga3d_is_dx_command(cmd)) {
         bool handled =
             vmsvga3d_fifo_dx_command(s, dx_context, cmd, len, fifo_start);
 
-        return s->cb_shadow_yield_pending ? false : handled;
+        return (s->cb_shadow_yield_pending ||
+                s->cb_screen_target_yield_pending) ? false : handled;
     }
 
     if (info->action == VMSVGA3D_COMMAND_STALL) {

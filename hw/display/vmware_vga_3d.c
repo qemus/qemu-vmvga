@@ -10116,13 +10116,12 @@ static bool vmsvga3d_command_buffer_shadow_journal_add(
         new_capacity = s->cb_shadow_journal_capacity != 0
                            ? s->cb_shadow_journal_capacity * 2u
                            : 8u;
-        if (new_capacity < s->cb_shadow_journal_capacity ||
-            (size_t)new_capacity > SIZE_MAX / sizeof(*entries)) {
+        if (new_capacity < s->cb_shadow_journal_capacity) {
             s->cb_shadow_journal_oom = true;
             return false;
         }
-        entries = g_try_realloc(
-            s->cb_shadow_journal, (size_t)new_capacity * sizeof(*entries));
+        entries = g_try_realloc_n(s->cb_shadow_journal,
+                                  new_capacity, sizeof(*entries));
         if (entries == NULL) {
             s->cb_shadow_journal_oom = true;
             return false;

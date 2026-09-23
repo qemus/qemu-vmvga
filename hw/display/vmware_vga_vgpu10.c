@@ -11282,6 +11282,12 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
 
     if (sid == SVGA3D_INVALID_ID) {
         if (old_sid == sid) {
+            if (new_entry != NULL &&
+                !vmsvga3d_otable_write(s, SVGA_OTABLE_SCREENTARGET, stid,
+                                        sizeof(*new_entry), new_entry,
+                                        sizeof(*new_entry))) {
+                return false;
+            }
             return true;
         }
         surface = NULL;
@@ -11297,6 +11303,12 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         }
 
         if (old_sid == sid) {
+            if (new_entry != NULL &&
+                !vmsvga3d_otable_write(s, SVGA_OTABLE_SCREENTARGET, stid,
+                                        sizeof(*new_entry), new_entry,
+                                        sizeof(*new_entry))) {
+                return false;
+            }
             return true;
         }
 
@@ -11328,7 +11340,8 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
      * Preserve that optimized barrier instead of speculatively coalescing
      * across guest flips.
      */
-    if (s->cb_shadow_yield_allowed) {
+    if (s->cb_shadow_yield_allowed ||
+        s->svga3d->screen_target_barrier_active) {
         bool pending = false;
 
         if (!vmsvga3d_screen_target_quiesce_yieldable_live(s, &pending)) {

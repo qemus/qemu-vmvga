@@ -1671,7 +1671,14 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
-        operation_ok = vmsvga3d_d3d10_buffer_copy_live(s, &copy);
+        if (vmsvga3d_command_buffer_shadow_packet_side_effect_done(s)) {
+            operation_ok = true;
+        } else {
+            operation_ok = vmsvga3d_d3d10_buffer_copy_live(s, &copy);
+            if (operation_ok) {
+                vmsvga3d_command_buffer_shadow_packet_side_effect_mark(s);
+            }
+        }
         if (operation_ok && command.readback != 0) {
             SVGA3dCmdDXReadbackSubResource readback = {
                 .sid = command.dest,
@@ -1721,9 +1728,12 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
          * CopyResource is a predicated resource-manipulation command, so the
          * existing whole-resource copy path supplies the required behavior.
          */
-        if (!vmsvga3d_d3d10_pred_copy_live(
-                s, cid, &copy, SVGA_3D_CMD_DX_PRED_STAGING_COPY, false)) {
-            return false;
+        if (!vmsvga3d_command_buffer_shadow_packet_side_effect_done(s)) {
+            if (!vmsvga3d_d3d10_pred_copy_live(
+                    s, cid, &copy, SVGA_3D_CMD_DX_PRED_STAGING_COPY, false)) {
+                return false;
+            }
+            vmsvga3d_command_buffer_shadow_packet_side_effect_mark(s);
         }
 
         if (command.readback != 0) {
@@ -1782,16 +1792,23 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
-        operation_ok = vmsvga3d_d3d10_pred_copy_live(
-            s, cid, &copy, SVGA_3D_CMD_DX_STAGING_COPY, predicate_enabled);
-        if (operation_ok && predicate_enabled) {
-            /* pred_copy_live conservatively suppresses ScreenTarget provenance
-             * whenever the guest shadow has an active predicate.  This command
-             * disabled that predicate natively, so its successful write is
-             * proven and must be recorded explicitly.  Match the ordinary copy
-             * helpers by treating display bookkeeping as non-fatal. */
-            (void)vmsvga3d_d3d10_surface_changed_full_live(
-                s, command.dstSid, 0);
+        if (vmsvga3d_command_buffer_shadow_packet_side_effect_done(s)) {
+            operation_ok = true;
+        } else {
+            operation_ok = vmsvga3d_d3d10_pred_copy_live(
+                s, cid, &copy, SVGA_3D_CMD_DX_STAGING_COPY, predicate_enabled);
+            if (operation_ok && predicate_enabled) {
+                /* pred_copy_live conservatively suppresses ScreenTarget provenance
+                 * whenever the guest shadow has an active predicate.  This command
+                 * disabled that predicate natively, so its successful write is
+                 * proven and must be recorded explicitly.  Match the ordinary copy
+                 * helpers by treating display bookkeeping as non-fatal. */
+                (void)vmsvga3d_d3d10_surface_changed_full_live(
+                    s, command.dstSid, 0);
+            }
+            if (operation_ok) {
+                vmsvga3d_command_buffer_shadow_packet_side_effect_mark(s);
+            }
         }
         if (operation_ok && command.readback != 0) {
             operation_ok =
@@ -1840,10 +1857,13 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         copy.srcSubResource = command.srcSubResource;
         copy.box = command.box;
 
-        if (!vmsvga3d_d3d10_pred_copy_region_live(
-                s, cid, &copy, SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION,
-                false)) {
-            return false;
+        if (!vmsvga3d_command_buffer_shadow_packet_side_effect_done(s)) {
+            if (!vmsvga3d_d3d10_pred_copy_region_live(
+                    s, cid, &copy, SVGA_3D_CMD_DX_PRED_STAGING_COPY_REGION,
+                    false)) {
+                return false;
+            }
+            vmsvga3d_command_buffer_shadow_packet_side_effect_mark(s);
         }
 
         /* A staging readback makes the destination's guest backing coherent

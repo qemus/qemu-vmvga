@@ -10474,13 +10474,30 @@ bool vmsvga3d_dxvk_d3d11_update_subresource(
 #endif
 }
 
-void vmsvga3d_dxvk_d3d11_readback_async_cancel(
+static void vmsvga3d_dxvk_d3d11_shadow_readback_release(
     VMSVGA3DDxvkSurface *surface)
 {
     if (surface == NULL) {
         return;
     }
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    if (surface->d3d11_shadow_readback_staging != NULL) {
+        vmsvga3d_dxvk_release(surface->d3d11_shadow_readback_staging,
+                              VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
+        surface->d3d11_shadow_readback_staging = NULL;
+    }
+#endif
+    surface->d3d11_shadow_readback_width = 0;
+    surface->d3d11_shadow_readback_height = 0;
+    surface->d3d11_shadow_readback_format = 0;
+    surface->d3d11_shadow_readback_subresource = 0;
     surface->d3d11_shadow_readback_pending = false;
+}
+
+void vmsvga3d_dxvk_d3d11_readback_async_cancel(
+    VMSVGA3DDxvkSurface *surface)
+{
+    vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
 }
 
 VMSVGA3DDxvkReadbackResult
@@ -10629,7 +10646,7 @@ vmsvga3d_dxvk_d3d11_readback_subresource_async(
         return VMSVGA3D_DXVK_READBACK_PENDING;
     }
     if (!vmsvga3d_dxvk_succeeded(result) || mapped.data == NULL) {
-        surface->d3d11_shadow_readback_pending = false;
+        vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "DX-SHADOW-READBACK phase=map-fail sid=%u sub=%u hr=0x%08x",
@@ -10640,7 +10657,7 @@ vmsvga3d_dxvk_d3d11_readback_subresource_async(
     if (mapped.row_pitch < row_bytes) {
         unmap(dxvk->d3d11_context,
               surface->d3d11_shadow_readback_staging, 0);
-        surface->d3d11_shadow_readback_pending = false;
+        vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
         return VMSVGA3D_DXVK_READBACK_FAILED;
     }
     for (y = 0; y < row_count; y++) {
@@ -10650,7 +10667,7 @@ vmsvga3d_dxvk_d3d11_readback_subresource_async(
     }
     unmap(dxvk->d3d11_context,
           surface->d3d11_shadow_readback_staging, 0);
-    surface->d3d11_shadow_readback_pending = false;
+    vmsvga3d_dxvk_d3d11_shadow_readback_release(surface);
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-SHADOW-READBACK phase=ready sid=%u sub=%u",

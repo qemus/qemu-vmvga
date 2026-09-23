@@ -10022,6 +10022,118 @@ static bool vmsvga3d_surface_presented_live(
 #include "vmware_vga_vgpu9.c"
 #undef VMSVGA3D_D3D9_RUNTIME_INTEGRATION
 
+static void vmsvga3d_command_buffer_shadow_journal_clear(
+    struct vmsvga_state_s *s)
+{
+    if (s == NULL) {
+        return;
+    }
+    s->cb_shadow_journal_count = 0;
+    s->cb_shadow_packet_valid = false;
+    s->cb_shadow_packet_side_effect_done = false;
+    s->cb_shadow_journal_oom = false;
+}
+
+static void vmsvga3d_command_buffer_shadow_packet_begin(
+    struct vmsvga_state_s *s, uint32_t fifo_start)
+{
+    uint64_t packet_offset;
+
+    if (s == NULL || !s->cb_shadow_yield_allowed ||
+        fifo_start < s->fifo_min) {
+        return;
+    }
+
+    packet_offset = (uint64_t)s->cb_shadow_exec_base_offset +
+                    (fifo_start - s->fifo_min);
+    if (packet_offset > UINT32_MAX) {
+        s->cb_shadow_journal_count = 0;
+        s->cb_shadow_packet_valid = false;
+        s->cb_shadow_packet_side_effect_done = false;
+        s->cb_shadow_journal_oom = true;
+        return;
+    }
+
+    if (!s->cb_shadow_packet_valid ||
+        s->cb_shadow_packet_offset != (uint32_t)packet_offset) {
+        s->cb_shadow_journal_count = 0;
+        s->cb_shadow_packet_offset = (uint32_t)packet_offset;
+        s->cb_shadow_packet_valid = true;
+        s->cb_shadow_packet_side_effect_done = false;
+        s->cb_shadow_journal_oom = false;
+    }
+}
+
+static bool vmsvga3d_command_buffer_shadow_packet_side_effect_done(
+    const struct vmsvga_state_s *s)
+{
+    return s != NULL && s->cb_shadow_packet_valid &&
+           s->cb_shadow_packet_side_effect_done;
+}
+
+static void vmsvga3d_command_buffer_shadow_packet_side_effect_mark(
+    struct vmsvga_state_s *s)
+{
+    if (s == NULL || !s->cb_shadow_yield_allowed ||
+        !s->cb_shadow_packet_valid) {
+        return;
+    }
+    s->cb_shadow_packet_side_effect_done = true;
+}
+
+static bool vmsvga3d_command_buffer_shadow_journal_contains(
+    const struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource)
+{
+    uint64_t key = ((uint64_t)sid << 32) | subresource;
+    uint32_t i;
+
+    if (s == NULL || !s->cb_shadow_packet_valid) {
+        return false;
+    }
+    for (i = 0; i < s->cb_shadow_journal_count; i++) {
+        if (s->cb_shadow_journal[i] == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vmsvga3d_command_buffer_shadow_journal_add(
+    struct vmsvga_state_s *s, uint32_t sid, uint32_t subresource)
+{
+    uint64_t key = ((uint64_t)sid << 32) | subresource;
+    uint64_t *entries;
+    uint32_t new_capacity;
+
+    if (s == NULL || !s->cb_shadow_packet_valid) {
+        return false;
+    }
+    if (vmsvga3d_command_buffer_shadow_journal_contains(
+            s, sid, subresource)) {
+        return true;
+    }
+    if (s->cb_shadow_journal_count == s->cb_shadow_journal_capacity) {
+        new_capacity = s->cb_shadow_journal_capacity != 0
+                           ? s->cb_shadow_journal_capacity * 2u
+                           : 8u;
+        if (new_capacity < s->cb_shadow_journal_capacity ||
+            (size_t)new_capacity > SIZE_MAX / sizeof(*entries)) {
+            s->cb_shadow_journal_oom = true;
+            return false;
+        }
+        entries = g_try_realloc(
+            s->cb_shadow_journal, (size_t)new_capacity * sizeof(*entries));
+        if (entries == NULL) {
+            s->cb_shadow_journal_oom = true;
+            return false;
+        }
+        s->cb_shadow_journal = entries;
+        s->cb_shadow_journal_capacity = new_capacity;
+    }
+    s->cb_shadow_journal[s->cb_shadow_journal_count++] = key;
+    return true;
+}
+
 /* Generic SVGA3D commands must synchronize the renderer that actually owns
  * a surface before they inspect or modify the canonical CPU shadow.  Keep
  * that backend selection here instead of open-coding D3D11 assumptions in
@@ -10072,7 +10184,16 @@ static bool vmsvga3d_surface_readback_to_shadow(
         backend = "d3d11";
         s->perf.shadow_readback_d3d11++;
         readback_start_us = g_get_monotonic_time();
-        if (s->cb_shadow_yield_allowed) {
+        if (s->cb_shadow_yield_allowed && !s->cb_shadow_journal_oom &&
+            vmsvga3d_command_buffer_shadow_journal_contains(
+                s, surface->sid, subresource)) {
+            success = true;
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "DX-SHADOW-READBACK phase=journal-hit sid=%u sub=%u",
+                surface->sid, subresource);
+        } else if (s->cb_shadow_yield_allowed &&
+                   !s->cb_shadow_journal_oom) {
             VMSVGA3DDxvkReadbackResult result;
             uint32_t row_count;
             uint32_t depth_count;
@@ -10101,6 +10222,10 @@ static bool vmsvga3d_surface_readback_to_shadow(
                     s, surface, image, subresource);
             } else {
                 success = result == VMSVGA3D_DXVK_READBACK_COMPLETE;
+            }
+            if (success) {
+                (void)vmsvga3d_command_buffer_shadow_journal_add(
+                    s, surface->sid, subresource);
             }
         } else {
             success = vmsvga3d_d3d11_readback_shadow_image(
@@ -10540,6 +10665,11 @@ static uint32_t vmsvga3d_command_buffer_max_size(
     return SVGA_CB_MAX_SIZE;
 }
 
+static void vmsvga3d_command_buffer_shadow_pending_cancel(
+    struct vmsvga_state_s *s);
+static void vmsvga3d_command_buffer_shadow_yield_cancel(
+    struct vmsvga_state_s *s);
+
 static bool vmsvga3d_command_buffer_execute_work(
     struct vmsvga_state_s *s, struct vmsvga_command_buffer_work_s *work,
     bool allow_yield)
@@ -10570,6 +10700,16 @@ static bool vmsvga3d_command_buffer_execute_work(
     /* COMMAND_BUFFERS_2 carries the normal SVGA command stream.  The
      * DX_CONTEXT flag supplies metadata for DX commands in that stream; it
      * does not select a different command encoding. */
+    if (!allow_yield && s->cb_shadow_yield_pending) {
+        /* Explicit drains must finish synchronously.  Abandon only the
+         * preserved staging snapshot: keep packet replay state so a composite
+         * command does not repeat a copy that already executed before yield. */
+        vmsvga3d_command_buffer_shadow_pending_cancel(s);
+    }
+    if (!work->shadow_yielded) {
+        vmsvga3d_command_buffer_shadow_journal_clear(s);
+    }
+    s->cb_shadow_exec_base_offset = work->header.offset;
     s->cb_shadow_yield_allowed = allow_yield;
     s->cb_shadow_yield_pending = false;
     status = vmsvga_command_buffer_process(
@@ -10630,6 +10770,8 @@ static bool vmsvga3d_command_buffer_execute_work(
     }
     s->cb_yield_waiting = false;
     s->cb_shadow_yield_pending = false;
+    s->cb_shadow_exec_base_offset = 0;
+    vmsvga3d_command_buffer_shadow_journal_clear(s);
     vmsvga3d_command_buffer_write_status(
         s, work->header_gpa, status,
         status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0);
@@ -10764,20 +10906,34 @@ static void vmsvga3d_command_buffer_drain(struct vmsvga_state_s *s,
         s->cb_queue_count, s->cb_queue_drains);
 }
 
-static void vmsvga3d_command_buffer_shadow_yield_cancel(
+static void vmsvga3d_command_buffer_shadow_pending_cancel(
     struct vmsvga_state_s *s)
 {
     VMSVGA3DSurface *surface = NULL;
 
-    if (s == NULL || !s->cb_shadow_yield_pending || s->svga3d == NULL ||
-        s->cb_shadow_yield_sid >= SVGA3D_MAX_SURFACE_IDS) {
+    if (s == NULL) {
         return;
     }
-    surface = s->svga3d->surfaces[s->cb_shadow_yield_sid];
-    if (surface != NULL && surface->dxvk_surface != NULL) {
-        vmsvga3d_dxvk_d3d11_readback_async_cancel(surface->dxvk_surface);
+    if (s->cb_shadow_yield_pending && s->svga3d != NULL &&
+        s->cb_shadow_yield_sid < SVGA3D_MAX_SURFACE_IDS) {
+        surface = s->svga3d->surfaces[s->cb_shadow_yield_sid];
+        if (surface != NULL && surface->dxvk_surface != NULL) {
+            vmsvga3d_dxvk_d3d11_readback_async_cancel(
+                surface->dxvk_surface);
+        }
     }
     s->cb_shadow_yield_pending = false;
+}
+
+static void vmsvga3d_command_buffer_shadow_yield_cancel(
+    struct vmsvga_state_s *s)
+{
+    if (s == NULL) {
+        return;
+    }
+    vmsvga3d_command_buffer_shadow_pending_cancel(s);
+    s->cb_shadow_exec_base_offset = 0;
+    vmsvga3d_command_buffer_shadow_journal_clear(s);
 }
 
 static void vmsvga3d_command_buffer_discard(struct vmsvga_state_s *s,
@@ -18290,6 +18446,8 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
     const VMSVGA3DCommandInfo *info;
     uint32_t payload_size = UINT32_MAX;
     bool trace_3d;
+
+    vmsvga3d_command_buffer_shadow_packet_begin(s, fifo_start);
 
     if (!s->svga3d_capable) {
         /*

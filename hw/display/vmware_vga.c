@@ -567,6 +567,14 @@ struct vmsvga_state_s {
     bool cb_shadow_yield_pending;
     uint32_t cb_shadow_yield_sid;
     uint32_t cb_shadow_yield_subresource;
+    uint64_t *cb_shadow_journal;
+    uint32_t cb_shadow_journal_count;
+    uint32_t cb_shadow_journal_capacity;
+    uint32_t cb_shadow_exec_base_offset;
+    uint32_t cb_shadow_packet_offset;
+    bool cb_shadow_packet_valid;
+    bool cb_shadow_packet_side_effect_done;
+    bool cb_shadow_journal_oom;
     bool cb_yield_waiting;
     uint32_t fifo_size;
     uint32_t fifo_min;
@@ -7963,7 +7971,7 @@ static SVGACBStatus vmsvga_command_buffer_process(
         /* A yieldable shadow readback intentionally rewinds the current
          * command.  Preserve all bytes consumed before it and leave the guest
          * command-buffer status at NONE so the same command can resume later. */
-        if (s->fifo_stop == previous_stop && s->cb_shadow_yield_pending) {
+        if (s->cb_shadow_yield_pending) {
             status = SVGA_CB_STATUS_NONE;
             consumed = MIN(consumed, size);
             break;
@@ -11687,6 +11695,14 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->cb_queue_bytes = 0;
     s->cb_queue_drains = 0;
     s->cb_bh_running = false;
+    s->cb_shadow_journal = NULL;
+    s->cb_shadow_journal_count = 0;
+    s->cb_shadow_journal_capacity = 0;
+    s->cb_shadow_exec_base_offset = 0;
+    s->cb_shadow_packet_offset = 0;
+    s->cb_shadow_packet_valid = false;
+    s->cb_shadow_packet_side_effect_done = false;
+    s->cb_shadow_journal_oom = false;
     s->cb_fifo_scratch = NULL;
     s->cb_fifo_scratch_capacity = 0;
     s->cb_fifo_scratch_in_use = false;
@@ -11919,6 +11935,9 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
     g_clear_pointer(&s->chip.cb_fifo_scratch, g_free);
     s->chip.cb_fifo_scratch_capacity = 0;
     s->chip.cb_fifo_scratch_in_use = false;
+    g_clear_pointer(&s->chip.cb_shadow_journal, g_free);
+    s->chip.cb_shadow_journal_count = 0;
+    s->chip.cb_shadow_journal_capacity = 0;
     g_clear_pointer(&s->chip.d3d_payload_scratch, g_free);
     s->chip.d3d_payload_scratch_capacity = 0;
     s->chip.d3d_payload_scratch_in_use = false;

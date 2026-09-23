@@ -562,7 +562,6 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_D3DLOCK_DISCARD 0x00002000u
 #define VMSVGA3D_DXVK_D3DQUERYTYPE_EVENT 8u
 #define VMSVGA3D_DXVK_D3DISSUE_END 1u
-#define VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH 0u
 #define VMSVGA3D_DXVK_D3DGETDATA_FLUSH 0x1u
 #define VMSVGA3D_DXVK_D3DSBT_ALL 1u
 
@@ -13318,7 +13317,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 
             result = candidate_get_data(
                 candidate->query, &query_data, sizeof(query_data),
-                VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH);
+                VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
             if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
                 continue;
             }

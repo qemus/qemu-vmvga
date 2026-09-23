@@ -32,6 +32,7 @@
 #include "qemu/osdep.h" /* Required to be the first #include */
 #include "qapi/error.h"
 #include "qemu/main-loop.h"
+#include "qemu/timer.h"
 #include "exec/target_page.h"
 #include "trace.h"
 #include "hw/i386/vmport-vmvga.h"
@@ -548,6 +549,7 @@ struct vmsvga_state_s {
     uint32_t sync;
     QEMUBH *fifo_bh;
     QEMUBH *cb_bh;
+    QEMUTimer *cb_screen_target_retry_timer;
     struct vmsvga_command_buffer_work_s *cb_prepend_head;
     struct vmsvga_command_buffer_work_s *cb_prepend_tail;
     struct vmsvga_command_buffer_work_s *cb_queue_head;
@@ -10407,12 +10409,13 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
      */
     vmsvga3d_perf_profile_report(s);
 
-    /* A yieldable COMMAND_BUFFERS_2 GPU readback is retried from the regular
-     * display-service cadence.  Do not reschedule it directly from the
-     * command-buffer BH: that would spin the main loop while the GPU is still
-     * busy and starve the very display updates this path protects. */
-    if (s->cb_yield_waiting && s->cb_active_work != NULL &&
-        s->cb_bh != NULL && !s->cb_bh_running) {
+    /* A yieldable COMMAND_BUFFERS_2 shadow readback is retried from the
+     * regular display-service cadence.  ScreenTarget barriers use their own
+     * one-shot command-buffer retry timer so presentation progress does not
+     * depend on a frontend refresh. */
+    if (s->cb_yield_waiting && !s->cb_screen_target_yield_pending &&
+        s->cb_active_work != NULL && s->cb_bh != NULL &&
+        !s->cb_bh_running) {
         qemu_bh_schedule(s->cb_bh);
     }
 
@@ -11629,6 +11632,8 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                                       &dev->mem_reentrancy_guard);
     s->cb_bh = qemu_bh_new_guarded(vmsvga3d_command_buffer_bh, s,
                                     &dev->mem_reentrancy_guard);
+    s->cb_screen_target_retry_timer = timer_new_ms(
+        QEMU_CLOCK_VIRTUAL, vmsvga3d_command_buffer_retry_timer, s);
 
     vmsvga_trace_display_path_reset(s);
     vmsvga_trace_flight_reset(s);
@@ -11917,6 +11922,11 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
         s->chip.fifo_bh = NULL;
     }
     vmsvga3d_command_buffer_discard(&s->chip, false, "unrealize");
+    if (s->chip.cb_screen_target_retry_timer != NULL) {
+        timer_del(s->chip.cb_screen_target_retry_timer);
+        timer_free(s->chip.cb_screen_target_retry_timer);
+        s->chip.cb_screen_target_retry_timer = NULL;
+    }
     if (s->chip.cb_bh != NULL) {
         qemu_bh_delete(s->chip.cb_bh);
         s->chip.cb_bh = NULL;

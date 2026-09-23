@@ -10336,6 +10336,7 @@ static bool vmsvga3d_clear_readback_targets(
 
 #define VMSVGA_CB_BH_MAX_BUFFERS 8u
 #define VMSVGA_CB_BH_MAX_BYTES (4u * 1024u * 1024u)
+#define VMSVGA_CB_SCREEN_TARGET_RETRY_MS 1
 
 struct vmsvga_command_buffer_work_s {
     struct vmsvga_command_buffer_work_s *next;
@@ -10681,6 +10682,35 @@ static void vmsvga3d_command_buffer_shadow_pending_cancel(
 static void vmsvga3d_command_buffer_shadow_yield_cancel(
     struct vmsvga_state_s *s);
 
+static void vmsvga3d_command_buffer_screen_target_retry_cancel(
+    struct vmsvga_state_s *s)
+{
+    if (s != NULL && s->cb_screen_target_retry_timer != NULL) {
+        timer_del(s->cb_screen_target_retry_timer);
+    }
+}
+
+static void vmsvga3d_command_buffer_screen_target_retry_arm(
+    struct vmsvga_state_s *s)
+{
+    if (s != NULL && s->cb_screen_target_retry_timer != NULL) {
+        timer_mod(s->cb_screen_target_retry_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+                      VMSVGA_CB_SCREEN_TARGET_RETRY_MS);
+    }
+}
+
+static void vmsvga3d_command_buffer_retry_timer(void *opaque)
+{
+    struct vmsvga_state_s *s = opaque;
+
+    if (s != NULL && s->cb_yield_waiting &&
+        s->cb_screen_target_yield_pending && s->cb_active_work != NULL &&
+        s->cb_bh != NULL && !s->cb_bh_running) {
+        qemu_bh_schedule(s->cb_bh);
+    }
+}
+
 static bool vmsvga3d_command_buffer_execute_work(
     struct vmsvga_state_s *s, struct vmsvga_command_buffer_work_s *work,
     bool allow_yield)
@@ -10695,6 +10725,7 @@ static bool vmsvga3d_command_buffer_execute_work(
     assert(work != NULL);
     assert(work->context < SVGA_CB_CONTEXT_MAX);
 
+    vmsvga3d_command_buffer_screen_target_retry_cancel(s);
     processed = work->header.offset;
     dx_context = (work->header.flags & SVGA_CB_FLAG_DX_CONTEXT) != 0
                      ? work->header.dxContext
@@ -10749,6 +10780,9 @@ static bool vmsvga3d_command_buffer_execute_work(
             }
         }
         s->cb_yield_waiting = true;
+        if (s->cb_screen_target_yield_pending) {
+            vmsvga3d_command_buffer_screen_target_retry_arm(s);
+        }
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "CB-ASYNC phase=yield seq=%" PRIu64
@@ -10884,6 +10918,7 @@ static void vmsvga3d_command_buffer_drain(struct vmsvga_state_s *s,
     if (s == NULL || s->cb_bh_running) {
         return;
     }
+    vmsvga3d_command_buffer_screen_target_retry_cancel(s);
     if (s->cb_bh != NULL) {
         qemu_bh_cancel(s->cb_bh);
     }
@@ -10966,6 +11001,7 @@ static void vmsvga3d_command_buffer_discard(struct vmsvga_state_s *s,
     if (s == NULL) {
         return;
     }
+    vmsvga3d_command_buffer_screen_target_retry_cancel(s);
     if (s->cb_bh != NULL) {
         qemu_bh_cancel(s->cb_bh);
     }

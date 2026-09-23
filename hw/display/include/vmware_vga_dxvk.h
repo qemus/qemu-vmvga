@@ -543,6 +543,8 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
     uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out);
 bool vmsvga3d_dxvk_d3d11_screen_readback_supported(
     VMSVGA3DDxvkSurface *surface);
+bool vmsvga3d_dxvk_d3d11_screen_readback_pending(
+    VMSVGA3DDxvkSurface *surface);
 VMSVGA3DDxvkScreenReadbackSubmitResult
 vmsvga3d_dxvk_d3d11_screen_readback_submit(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t subresource,

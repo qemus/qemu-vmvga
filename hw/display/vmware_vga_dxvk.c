@@ -349,10 +349,10 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     VMSVGA3DD3D9Rect rects[VMSVGA3D_DXVK_SCREEN_READBACK_RECTS];
 } VMSVGA3DDxvkScreenReadbackSlot;
 
-/* The byte budget is the hard resource bound.  Keep enough metadata slots
- * to absorb short bursts of rapid ScreenTarget switches without turning a
- * transient GPU lag into an immediate synchronous quiesce. */
-#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 32u
+/* Detached D3D11 presentation is a mailbox, not a frame queue.  Keep one
+ * renderer-owned snapshot in flight and let later ScreenTarget flips collapse
+ * into the newest active target until that snapshot has been published. */
+#define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 1u
 #define VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES \
     (UINT64_C(256) * 1024u * 1024u)
 #define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES \
@@ -13537,6 +13537,26 @@ bool vmsvga3d_dxvk_d3d11_screen_readback_supported(
     return vmsvga3d_dxvk_d3d11_screen_readback_source(surface, NULL);
 }
 
+bool vmsvga3d_dxvk_d3d11_screen_readback_pending(
+    VMSVGA3DDxvkSurface *surface)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    uint32_t i;
+
+    if (surface == NULL) {
+        return false;
+    }
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        if (surface->d3d11_screen_readback[i].pending) {
+            return true;
+        }
+    }
+#else
+    (void)surface;
+#endif
+    return false;
+}
+
 static uint64_t vmsvga3d_dxvk_screen_pixel_load(const uint8_t *source,
                                                   uint32_t bytes)
 {
@@ -13681,6 +13701,13 @@ vmsvga3d_dxvk_d3d11_screen_readback_submit(
         !surface->d3d11_resident || surface->d3d9_resident ||
         surface->d3d11_resource == NULL || !surface->d3d11_desc.valid) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
+    }
+
+    /* D3D11 ScreenTarget readback is a mailbox.  Do not queue another GPU
+     * staging copy while the current snapshot is pending; the caller retains
+     * newer damage and submits it after this snapshot is published. */
+    if (vmsvga3d_dxvk_d3d11_screen_readback_pending(surface)) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_BUSY;
     }
 
     if (!vmsvga3d_dxvk_screen_readback_accumulate_pending_bounds(
@@ -14155,10 +14182,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
                 VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES - selected_bytes;
         bool coalesce = retired->coalesce_active && pending_count != 0;
 
-        /* Once pressure establishes a self-contained checkpoint, do not
-         * append more detached snapshots behind it.  The conservative first
-         * attempt returns BUSY so the caller can do bounded cleanup and ensure
-         * the replacement is a full frame before allowing supersession. */
+        /* A detached D3D11 snapshot is the single mailbox publication.  A
+         * second detach is BUSY unless an exceptional caller explicitly
+         * replaces it with a self-contained full frame. */
         if (coalesce &&
             (!allow_supersede ||
              !vmsvga3d_dxvk_screen_readback_slot_is_full_frame(selected))) {
@@ -14169,11 +14195,9 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
             vmsvga3d_dxvk_screen_readback_slot_is_full_frame(selected)) {
             uint32_t compact_free = UINT32_MAX;
 
-            /* A complete newest frame makes every older detached presentation
-             * obsolete.  Replace the entire backlog with one fixed checkpoint
-             * rather than retaining an old latency anchor that can head-of-line
-             * block the frontend.  Coalescing then prevents later rapid switches
-             * from moving this checkpoint forward before it completes. */
+            /* Exceptional lifecycle paths may need to replace the mailbox
+             * publication.  Only a complete frame is eligible, so older partial
+             * contents can never be mixed with the replacement. */
             for (i = 0; i < VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS; i++) {
                 if (retired->slots[i].pending) {
                     vmsvga3d_dxvk_screen_readback_slot_release_d3d11(
@@ -14194,7 +14218,7 @@ vmsvga3d_dxvk_d3d11_screen_readback_retire_latest(
             retired->coalesce_active = true;
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
-                "SCREEN-READBACK backend=d3d11 phase=retire-checkpoint "
+                "SCREEN-READBACK backend=d3d11 phase=retire-mailbox-replace "
                 "sid=%u seq=%" PRIu64 " dropped=%u",
                 sid, selected->sequence, superseded);
         }

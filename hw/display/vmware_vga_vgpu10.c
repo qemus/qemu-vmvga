@@ -10495,6 +10495,39 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
 }
 
 
+static bool vmsvga3d_d3d10_so_targets_unbind_native_live(
+    struct vmsvga_state_s *s, uint32_t cid)
+{
+    VMSVGA3DDXContext *context;
+    VMSVGA3DDxvkSurface *surfaces[SVGA3D_DX_MAX_SOTARGETS] = { NULL };
+    uint32_t offsets[SVGA3D_DX_MAX_SOTARGETS] = { 0 };
+
+    if (s == NULL || s->svga3d == NULL ||
+        !vmsvga3d_dxvk_d3d11_ready(s->dxvk)) {
+        return false;
+    }
+
+    context = vmsvga3d_dx_context(s, cid);
+    if (context == NULL) {
+        return false;
+    }
+
+    /* SET_SOTARGETS must stop the previous native SO bindings from affecting
+     * subsequent VB/IB/SRV commands immediately.  Do not bind the new table
+     * yet: later input-state commands can otherwise make D3D11 resolve a
+     * hazard behind our guest shadow before the draw.  The exact new plan is
+     * already pending and draw setup realizes it after VB/IB/SRV state. */
+    s->perf.so_native_binds++;
+    if (!vmsvga3d_dxvk_d3d11_set_stream_output_targets(
+            s->dxvk, surfaces, offsets)) {
+        return false;
+    }
+
+    context->stream_output_target_count = 0;
+    return true;
+}
+
+
 static bool vmsvga3d_d3d10_context_switch_live(
     struct vmsvga_state_s *s, uint32_t cid)
 {
@@ -17786,17 +17819,15 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               return false;
           }
 
-          /* SET_SOTARGETS is an immediate D3D11 binding operation.  Deferring
-           * it until draw setup can leave the previous SO buffer native-bound
-           * while a following command rebinds that same resource as a vertex,
-           * index or shader input.  D3D11 resolves that hazard by changing
-           * native bindings behind our shadow state.  Record the guest shadow
-           * first, then realize this exact plan immediately as specified by
-           * plan.immediate_bind.  The deferred dirty path remains for restoring
-           * SO state after ClearState/context switches. */
+          /* SET_SOTARGETS changes the native hazard boundary immediately, but
+           * binding the new SO table here lets later VB/IB/SRV commands make
+           * D3D11 silently alter those bindings behind our guest shadow.
+           * Record the exact guest plan first, unbind the previous native SO
+           * table now, and let draw setup bind the pending new table after the
+           * input state has been realized. */
           return vmsvga3d_state_dx_apply_so_targets(s, cid, &plan) &&
                  (!plan.immediate_bind ||
-                  vmsvga3d_d3d10_pipeline_so_targets_live(s, cid));
+                  vmsvga3d_d3d10_so_targets_unbind_native_live(s, cid));
       }
 
     case SVGA_3D_CMD_DX_SET_STREAMOUTPUT: {

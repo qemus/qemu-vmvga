@@ -2674,7 +2674,6 @@ static bool vmsvga3d_dxvk_handoff_d3d11_to_shadow(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface)
 {
     uint32_t subresource;
-    int64_t start_us;
     bool result = false;
 
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
@@ -2682,13 +2681,6 @@ static bool vmsvga3d_dxvk_handoff_d3d11_to_shadow(
         return true;
     }
 
-    s->perf.handoff_d3d11_to_shadow++;
-    start_us = g_get_monotonic_time();
-
-    if (s->svga3d != NULL &&
-        s->svga3d->active_screen_target_sid == surface->sid) {
-        s->perf.quiesce_reason_handoff_d3d11++;
-    }
     if (s->svga3d != NULL &&
         s->svga3d->active_screen_target_sid == surface->sid &&
         !vmsvga3d_screen_target_quiesce_live(s)) {
@@ -2718,8 +2710,6 @@ static bool vmsvga3d_dxvk_handoff_d3d11_to_shadow(
     result = true;
 
 out:
-    s->perf.handoff_d3d11_to_shadow_us +=
-        g_get_monotonic_time() - start_us;
     return result;
 }
 

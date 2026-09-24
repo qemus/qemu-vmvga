@@ -400,110 +400,6 @@ struct vmsvga_trace_devcap_s {
 
 struct vmsvga_command_buffer_work_s;
 
-struct vmsvga_perf_counters_s {
-    uint64_t pipeline_setups;
-    uint64_t shader_replays;
-    uint64_t shader_replay_us;
-    uint64_t shader_guest_sets;
-    uint64_t shader_guest_changes;
-    uint64_t shader_linkage_refreshes;
-    uint64_t shader_linkage_us;
-    uint64_t shader_key_pipeline_hits;
-    uint64_t shader_key_pipeline_misses;
-    uint64_t shader_retries;
-    uint64_t d3d9_draw_calls;
-    uint64_t d3d9_draw_ranges;
-    uint64_t dx_draw_calls;
-    uint64_t dx_dispatch_calls;
-    uint64_t so_guest_sets;
-    uint64_t so_native_binds;
-    uint64_t so_realize_failures;
-    uint64_t so_realize_us;
-    uint64_t present_blts;
-    uint64_t present_blt_us;
-    uint64_t context_switches;
-    uint64_t context_switch_us;
-    uint64_t screen_poll_calls;
-    uint64_t screen_poll_ready;
-    uint64_t screen_poll_pending;
-    uint64_t screen_poll_idle;
-    uint64_t screen_poll_failed;
-    uint64_t screen_poll_us;
-    uint64_t screen_poll_d3d9;
-    uint64_t screen_poll_d3d9_us;
-    uint64_t screen_poll_d3d11;
-    uint64_t screen_poll_d3d11_us;
-    uint64_t screen_submit_ok;
-    uint64_t screen_submit_d3d9;
-    uint64_t screen_submit_d3d9_us;
-    uint64_t screen_submit_d3d11;
-    uint64_t screen_submit_d3d11_us;
-    uint64_t screen_submit_busy;
-    uint64_t screen_submit_failed;
-    uint64_t screen_quiesces;
-    uint64_t screen_quiesce_us;
-    uint64_t screen_quiesce_d3d9;
-    uint64_t screen_quiesce_d3d9_us;
-    uint64_t screen_quiesce_d3d11;
-    uint64_t screen_quiesce_d3d11_us;
-    uint64_t screen_quiesce_mixed;
-    uint64_t screen_quiesce_mixed_us;
-    uint64_t screen_quiesce_cpu;
-    uint64_t screen_quiesce_cpu_us;
-    uint64_t screen_sync_readbacks;
-    uint64_t screen_sync_readback_us;
-    uint64_t screen_sync_d3d9;
-    uint64_t screen_sync_d3d9_us;
-    uint64_t screen_sync_d3d11;
-    uint64_t screen_sync_d3d11_us;
-    uint64_t screen_drains;
-    uint64_t screen_drain_frames;
-    uint64_t d3d11_readbacks;
-    uint64_t d3d11_readback_us;
-    uint64_t shadow_readback_d3d9;
-    uint64_t shadow_readback_d3d9_us;
-    uint64_t shadow_readback_d3d11;
-    uint64_t shadow_readback_d3d11_us;
-    uint64_t shadow_readback_d3d11_yields;
-    uint64_t shadow_readback_d3d11_pending_retries;
-    uint64_t shadow_readback_d3d11_resumes;
-    uint64_t handoff_d3d9_to_shadow;
-    uint64_t handoff_d3d9_to_shadow_us;
-    uint64_t handoff_d3d11_to_shadow;
-    uint64_t handoff_d3d11_to_shadow_us;
-    uint64_t quiesce_reason_surface_redefine;
-    uint64_t quiesce_reason_surface_destroy;
-    uint64_t quiesce_reason_target_define;
-    uint64_t quiesce_reason_target_destroy;
-    uint64_t quiesce_reason_target_unbind;
-    uint64_t screen_target_switches;
-    uint64_t screen_target_retire_armed;
-    uint64_t screen_target_retire_completed;
-    uint64_t screen_target_retire_superseded;
-    uint64_t screen_target_retire_coalesced_skips;
-    uint64_t screen_target_retire_waits;
-    uint64_t screen_target_retire_failures;
-    uint64_t screen_scanout_rebinds;
-    uint64_t screen_scanout_mismatches;
-    uint64_t screen_target_transition_async_submits;
-    uint64_t screen_target_transition_async_commits;
-    uint64_t quiesce_reason_target_switch;
-    uint64_t quiesce_reason_handoff_d3d9;
-    uint64_t quiesce_reason_handoff_d3d11;
-    uint64_t quiesce_reason_gb_surface_destroy;
-    uint64_t quiesce_reason_other;
-    uint64_t cb_submitted;
-    uint64_t cb_executed;
-    uint64_t cb_enqueue_rejects;
-    uint64_t cb_services;
-    uint64_t cb_drains;
-    uint64_t cb_drain_buffers;
-    uint64_t cb_drain_us;
-    uint64_t report_polls;
-    int64_t report_start_us;
-    int64_t report_last_us;
-};
-
 enum vmsvga_vgpu_generation_e {
     VMSVGA_VGPU_AUTO = 0,
     VMSVGA_VGPU_9 = 9,
@@ -556,14 +452,7 @@ struct vmsvga_state_s {
     struct vmsvga_command_buffer_work_s *cb_queue_tail;
     struct vmsvga_command_buffer_work_s *cb_active_work;
     uint32_t cb_queue_count;
-    uint32_t cb_queue_depth_max;
     uint64_t cb_queue_sequence;
-    uint64_t cb_queue_submitted;
-    uint64_t cb_queue_executed;
-    uint64_t cb_queue_bytes;
-    uint64_t cb_queue_drains;
-    struct vmsvga_perf_counters_s perf;
-    struct vmsvga_perf_counters_s perf_last;
     bool cb_bh_running;
     bool cb_shadow_yield_allowed;
     bool cb_shadow_yield_pending;
@@ -10403,12 +10292,6 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     vmsvga3d_d3d9_process_pending_gb_queries(s, "DISPLAY");
     vmsvga3d_d3d10_process_pending_queries(s, "DISPLAY");
 
-    /* Low-volume performance counters are intentionally independent of the
-     * existing trace controls.  Report from the display service point so even
-     * a badly regressed low-FPS workload still emits about one sample per second.
-     */
-    vmsvga3d_perf_profile_report(s);
-
     /* A display refresh may opportunistically wake a yielded shadow
      * readback.  The shared one-shot command-buffer retry timer guarantees
      * forward progress even when frontend refresh cadence collapses. */
@@ -10640,12 +10523,7 @@ static void vmsvga_reset(DeviceState *dev)
     s->sync = 0;
     s->irq_mask = 0;
     s->irq_status = 0;
-    s->cb_queue_depth_max = 0;
     s->cb_queue_sequence = 0;
-    s->cb_queue_submitted = 0;
-    s->cb_queue_executed = 0;
-    s->cb_queue_bytes = 0;
-    s->cb_queue_drains = 0;
     s->cursor = 0;
     s->cursor_x = 0;
     s->cursor_y = 0;
@@ -10804,7 +10682,6 @@ static int vmsvga_pre_save(void *opaque)
     }
 
     if (s->screen_direct_active) {
-        s->perf.quiesce_reason_other++;
         if (!vmsvga3d_screen_target_quiesce_live(s) ||
             !vmsvga_screen_direct_materialize(s, "pre-save")) {
             return -EINVAL;
@@ -11694,12 +11571,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->cb_queue_head = NULL;
     s->cb_queue_tail = NULL;
     s->cb_queue_count = 0;
-    s->cb_queue_depth_max = 0;
     s->cb_queue_sequence = 0;
-    s->cb_queue_submitted = 0;
-    s->cb_queue_executed = 0;
-    s->cb_queue_bytes = 0;
-    s->cb_queue_drains = 0;
     s->cb_bh_running = false;
     s->cb_shadow_journal = NULL;
     s->cb_shadow_journal_count = 0;

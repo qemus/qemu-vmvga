@@ -9328,29 +9328,6 @@ static void vmsvga3d_perf_profile_report(struct vmsvga_state_s *s)
             p->quiesce_reason_gb_surface_destroy -
                 l->quiesce_reason_gb_surface_destroy,
             p->quiesce_reason_other - l->quiesce_reason_other);
-    fprintf(stderr,
-            "VMVGA-PROFILE-POLL11 t-ms=%" PRIu64
-            " exact-pending=%" PRIu64 " exact-pending-us=%" PRIu64
-            " exact-ready=%" PRIu64 " exact-ready-us=%" PRIu64
-            " normal-pending=%" PRIu64 " normal-pending-us=%" PRIu64
-            " normal-ready=%" PRIu64 " normal-ready-us=%" PRIu64 "\n",
-            elapsed_ms,
-            p->screen_poll_d3d11_exact_pending -
-                l->screen_poll_d3d11_exact_pending,
-            p->screen_poll_d3d11_exact_pending_us -
-                l->screen_poll_d3d11_exact_pending_us,
-            p->screen_poll_d3d11_exact_ready -
-                l->screen_poll_d3d11_exact_ready,
-            p->screen_poll_d3d11_exact_ready_us -
-                l->screen_poll_d3d11_exact_ready_us,
-            p->screen_poll_d3d11_normal_pending -
-                l->screen_poll_d3d11_normal_pending,
-            p->screen_poll_d3d11_normal_pending_us -
-                l->screen_poll_d3d11_normal_pending_us,
-            p->screen_poll_d3d11_normal_ready -
-                l->screen_poll_d3d11_normal_ready,
-            p->screen_poll_d3d11_normal_ready_us -
-                l->screen_poll_d3d11_normal_ready_us);
 
     p->report_last_us = now_us;
     s->perf_last = *p;

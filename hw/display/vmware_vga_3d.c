@@ -464,6 +464,7 @@ static void vmsvga3d_clip_present_rect(const SVGA3dCopyRect *rect,
 static bool vmsvga3d_screen_target_flush_live(struct vmsvga_state_s *s);
 #define VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS 1u
 #define VMSVGA_CB_SCREEN_TARGET_RETRY_MAX_MS 8u
+#define VMSVGA_CB_SHADOW_RETRY_MS 8u
 #define VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES 4u
 #define VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES \
     (UINT64_C(32) * 1024u * 1024u)
@@ -10691,21 +10692,21 @@ static void vmsvga3d_command_buffer_shadow_pending_cancel(
 static void vmsvga3d_command_buffer_shadow_yield_cancel(
     struct vmsvga_state_s *s);
 
-static void vmsvga3d_command_buffer_screen_target_retry_cancel(
+static void vmsvga3d_command_buffer_retry_cancel(
     struct vmsvga_state_s *s)
 {
-    if (s != NULL && s->cb_screen_target_retry_timer != NULL) {
-        timer_del(s->cb_screen_target_retry_timer);
+    if (s != NULL && s->cb_retry_timer != NULL) {
+        timer_del(s->cb_retry_timer);
     }
 }
 
-static void vmsvga3d_command_buffer_screen_target_retry_arm(
+static void vmsvga3d_command_buffer_retry_arm(
     struct vmsvga_state_s *s)
 {
-    uint32_t delay_ms = VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS;
+    uint32_t delay_ms = VMSVGA_CB_SHADOW_RETRY_MS;
 
-    if (s != NULL && s->svga3d != NULL &&
-        s->svga3d->screen_target_barrier_active) {
+    if (s != NULL && s->cb_screen_target_yield_pending &&
+        s->svga3d != NULL && s->svga3d->screen_target_barrier_active) {
         delay_ms = s->svga3d->screen_target_barrier_retry_ms;
         if (delay_ms < VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS) {
             delay_ms = VMSVGA_CB_SCREEN_TARGET_RETRY_MIN_MS;
@@ -10715,8 +10716,8 @@ static void vmsvga3d_command_buffer_screen_target_retry_arm(
         s->svga3d->screen_target_barrier_retry_ms =
             MIN(delay_ms * 2u, VMSVGA_CB_SCREEN_TARGET_RETRY_MAX_MS);
     }
-    if (s != NULL && s->cb_screen_target_retry_timer != NULL) {
-        timer_mod(s->cb_screen_target_retry_timer,
+    if (s != NULL && s->cb_retry_timer != NULL) {
+        timer_mod(s->cb_retry_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + delay_ms);
     }
 }
@@ -10726,8 +10727,9 @@ static void vmsvga3d_command_buffer_retry_timer(void *opaque)
     struct vmsvga_state_s *s = opaque;
 
     if (s != NULL && s->cb_yield_waiting &&
-        s->cb_screen_target_yield_pending && s->cb_active_work != NULL &&
-        s->cb_bh != NULL && !s->cb_bh_running) {
+        (s->cb_shadow_yield_pending || s->cb_screen_target_yield_pending) &&
+        s->cb_active_work != NULL && s->cb_bh != NULL &&
+        !s->cb_bh_running) {
         qemu_bh_schedule(s->cb_bh);
     }
 }
@@ -10746,7 +10748,7 @@ static bool vmsvga3d_command_buffer_execute_work(
     assert(work != NULL);
     assert(work->context < SVGA_CB_CONTEXT_MAX);
 
-    vmsvga3d_command_buffer_screen_target_retry_cancel(s);
+    vmsvga3d_command_buffer_retry_cancel(s);
     processed = work->header.offset;
     dx_context = (work->header.flags & SVGA_CB_FLAG_DX_CONTEXT) != 0
                      ? work->header.dxContext
@@ -10801,9 +10803,7 @@ static bool vmsvga3d_command_buffer_execute_work(
             }
         }
         s->cb_yield_waiting = true;
-        if (s->cb_screen_target_yield_pending) {
-            vmsvga3d_command_buffer_screen_target_retry_arm(s);
-        }
+        vmsvga3d_command_buffer_retry_arm(s);
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "CB-ASYNC phase=yield seq=%" PRIu64
@@ -10939,7 +10939,7 @@ static void vmsvga3d_command_buffer_drain(struct vmsvga_state_s *s,
     if (s == NULL || s->cb_bh_running) {
         return;
     }
-    vmsvga3d_command_buffer_screen_target_retry_cancel(s);
+    vmsvga3d_command_buffer_retry_cancel(s);
     if (s->cb_bh != NULL) {
         qemu_bh_cancel(s->cb_bh);
     }
@@ -11022,7 +11022,7 @@ static void vmsvga3d_command_buffer_discard(struct vmsvga_state_s *s,
     if (s == NULL) {
         return;
     }
-    vmsvga3d_command_buffer_screen_target_retry_cancel(s);
+    vmsvga3d_command_buffer_retry_cancel(s);
     if (s->cb_bh != NULL) {
         qemu_bh_cancel(s->cb_bh);
     }

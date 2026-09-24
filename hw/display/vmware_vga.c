@@ -549,7 +549,7 @@ struct vmsvga_state_s {
     uint32_t sync;
     QEMUBH *fifo_bh;
     QEMUBH *cb_bh;
-    QEMUTimer *cb_screen_target_retry_timer;
+    QEMUTimer *cb_retry_timer;
     struct vmsvga_command_buffer_work_s *cb_prepend_head;
     struct vmsvga_command_buffer_work_s *cb_prepend_tail;
     struct vmsvga_command_buffer_work_s *cb_queue_head;
@@ -10409,10 +10409,9 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
      */
     vmsvga3d_perf_profile_report(s);
 
-    /* A yieldable COMMAND_BUFFERS_2 shadow readback is retried from the
-     * regular display-service cadence.  ScreenTarget barriers use their own
-     * one-shot command-buffer retry timer so presentation progress does not
-     * depend on a frontend refresh. */
+    /* A display refresh may opportunistically wake a yielded shadow
+     * readback.  The shared one-shot command-buffer retry timer guarantees
+     * forward progress even when frontend refresh cadence collapses. */
     if (s->cb_yield_waiting && !s->cb_screen_target_yield_pending &&
         s->cb_active_work != NULL && s->cb_bh != NULL &&
         !s->cb_bh_running) {
@@ -11632,7 +11631,7 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
                                       &dev->mem_reentrancy_guard);
     s->cb_bh = qemu_bh_new_guarded(vmsvga3d_command_buffer_bh, s,
                                     &dev->mem_reentrancy_guard);
-    s->cb_screen_target_retry_timer = timer_new_ms(
+    s->cb_retry_timer = timer_new_ms(
         QEMU_CLOCK_VIRTUAL, vmsvga3d_command_buffer_retry_timer, s);
 
     vmsvga_trace_display_path_reset(s);
@@ -11922,10 +11921,10 @@ static void pci_vmsvga_uninit(PCIDevice *dev)
         s->chip.fifo_bh = NULL;
     }
     vmsvga3d_command_buffer_discard(&s->chip, false, "unrealize");
-    if (s->chip.cb_screen_target_retry_timer != NULL) {
-        timer_del(s->chip.cb_screen_target_retry_timer);
-        timer_free(s->chip.cb_screen_target_retry_timer);
-        s->chip.cb_screen_target_retry_timer = NULL;
+    if (s->chip.cb_retry_timer != NULL) {
+        timer_del(s->chip.cb_retry_timer);
+        timer_free(s->chip.cb_retry_timer);
+        s->chip.cb_retry_timer = NULL;
     }
     if (s->chip.cb_bh != NULL) {
         qemu_bh_delete(s->chip.cb_bh);

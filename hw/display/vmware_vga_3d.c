@@ -15623,23 +15623,6 @@ vmsvga3d_screen_target_async_poll_present_live(
     } else if (d3d11_resident && !d3d9_resident) {
         s->perf.screen_poll_d3d11++;
         s->perf.screen_poll_d3d11_us += poll_elapsed_us;
-        if (exact_sequence) {
-            if (poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING) {
-                s->perf.screen_poll_d3d11_exact_pending++;
-                s->perf.screen_poll_d3d11_exact_pending_us += poll_elapsed_us;
-            } else if (poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY) {
-                s->perf.screen_poll_d3d11_exact_ready++;
-                s->perf.screen_poll_d3d11_exact_ready_us += poll_elapsed_us;
-            }
-        } else {
-            if (poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING) {
-                s->perf.screen_poll_d3d11_normal_pending++;
-                s->perf.screen_poll_d3d11_normal_pending_us += poll_elapsed_us;
-            } else if (poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY) {
-                s->perf.screen_poll_d3d11_normal_ready++;
-                s->perf.screen_poll_d3d11_normal_ready_us += poll_elapsed_us;
-            }
-        }
     }
     switch (poll) {
     case VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY:

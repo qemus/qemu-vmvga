@@ -16590,7 +16590,10 @@ static void vmsvga3d_screen_target_barrier_restore_live(
         vmsvga3d_screen_target_async_discard_live(s, surface);
     }
 
-    if (state->active_screen_target_sid == sid && surface != NULL) {
+    if (state->active_screen_target_sid == sid && surface != NULL &&
+        surface->mips != NULL && surface->mip_count != 0 &&
+        surface->mips[0].size.width != 0 &&
+        surface->mips[0].size.height != 0) {
         /* Reconstruct only guest presentation obligations.  Renderer writes
          * outside these rectangles were never presented and must not become
          * visible merely because the asynchronous barrier failed. */

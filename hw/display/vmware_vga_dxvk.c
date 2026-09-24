@@ -280,6 +280,8 @@ struct vmsvga3d_dxvk_shader_s {
 };
 
 static void vmsvga3d_dxvk_d3d11_shader_free(VMSVGA3DDxvkShader *shader);
+static void vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(
+    VMSVGA3DDxvkShader *shader);
 
 /* Stream-output declarations use D3D11 semantic names/indices even though
  * the guest object names output registers.  Cache the resolved declaration
@@ -7765,6 +7767,15 @@ static void vmsvga3d_dxvk_d3d11_shader_variant_activate_key(
 {
     if (shader == NULL) {
         return;
+    }
+
+    /* The VS stream-output proxy is created from the active variant's DXBC.
+     * A different linkage variant can carry a different output signature even
+     * though the guest shader id and stream-output object are unchanged.  Do
+     * not reuse a proxy compiled from the previous variant.
+     */
+    if (shader->active_variant != variant) {
+        vmsvga3d_dxvk_d3d11_shader_stream_output_proxy_release(shader);
     }
 
     shader->active_variant = variant;

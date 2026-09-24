@@ -46,19 +46,6 @@ typedef struct vmsvga3d_dxvk_view_s VMSVGA3DDxvkView;
 typedef struct vmsvga3d_dxvk_retired_screen_readback_s
     VMSVGA3DDxvkRetiredScreenReadback;
 
-struct vmsvga3d_dxvk_perf_s {
-    uint64_t shader_invalidations;
-    uint64_t shader_active_hits;
-    uint64_t shader_variant_hits;
-    uint64_t shader_variant_misses;
-    uint64_t shader_variant_evictions;
-    uint64_t dxbc_builds;
-    uint64_t dxbc_build_us;
-    uint64_t native_shader_creates;
-    uint64_t native_shader_create_failures;
-    uint64_t native_shader_create_us;
-};
-
 #define VMSVGA3D_DXVK_D3D9_VERTEX_DECL_CACHE_LIMIT 256u
 #define VMSVGA3D_DXVK_SHADER_VARIANT_LIMIT 4u
 #define VMSVGA3D_DXVK_SHADER_VARIANT_KEY_LIMIT 4u
@@ -141,8 +128,6 @@ struct vmsvga3d_dxvk_s {
     bool d3d11_blitter_initialized;
     VMSVGA3DDxvkRetiredScreenReadback *d3d11_retired_screen_readback;
     uint64_t d3d11_retired_screen_readback_order;
-    struct vmsvga3d_dxvk_perf_s perf;
-    struct vmsvga3d_dxvk_perf_s perf_last;
     bool ready;
     bool d3d11_ready;
 };
@@ -8468,8 +8453,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     uint32_t i;
     void *native_shader = NULL;
     bool generated_dxbc = false;
-    int64_t operation_start_us;
-    uint32_t variant_count_before;
     int32_t result;
 
     if (!vmsvga3d_dxvk_ready(dxvk) || dxvk->d3d11_device == NULL) {
@@ -8493,7 +8476,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
      */
     if (shader->active_variant != NULL &&
         shader->active_variant->stream_output_id == variant_stream_output_id) {
-        dxvk->perf.shader_active_hits++;
         return true;
     }
 
@@ -8535,12 +8517,8 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
          * ShaderInfo for the current pipeline and use the finished DXBC bytes as
          * the variant key.
          */
-        operation_start_us = g_get_monotonic_time();
-        dxvk->perf.dxbc_builds++;
         level = vmsvga3d_d3d10_shader_resolve_component_types(&shader->info);
         if (level == VMSVGA3D_D3D10_LEVEL_INVALID) {
-            dxvk->perf.dxbc_build_us +=
-                g_get_monotonic_time() - operation_start_us;
             VMVGA_TRACE_LOCAL(
                 VMVGA_TRACE_3D,
                 "DX-SHADER-REALIZE cid=%u shid=%u type=%u result=FAIL "
@@ -8550,8 +8528,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         }
 
         level = vmsvga3d_d3d10_shader_create_dxbc(&shader->info, &dxbc);
-        dxvk->perf.dxbc_build_us +=
-            g_get_monotonic_time() - operation_start_us;
         if (level == VMSVGA3D_D3D10_LEVEL_INVALID ||
             dxbc.data == NULL || dxbc.size == 0) {
             VMVGA_TRACE_LOCAL(
@@ -8572,7 +8548,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
     if (variant != NULL) {
         VMSVGA3DDxvkShaderVariantKey *matched_key = NULL;
 
-        dxvk->perf.shader_variant_hits++;
         if (pipeline_key != NULL) {
             matched_key = vmsvga3d_dxvk_d3d11_shader_variant_key_record(
                 shader, variant, pipeline_key);
@@ -8585,7 +8560,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         return true;
     }
 
-    dxvk->perf.shader_variant_misses++;
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "DX-SHADER-VARIANT cid=%u shid=%u type=%u action=miss "
@@ -8632,16 +8606,12 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
                 decl->component_count, decl->output_slot);
         }
 
-        operation_start_us = g_get_monotonic_time();
-        dxvk->perf.native_shader_creates++;
         result = create_gs_so(
             dxvk->d3d11_device, bytecode, bytecode_size,
             stream_output->declarations, stream_output->declaration_count,
             stream_output->use_explicit_strides ? stream_output->strides : NULL,
             stream_output->stride_count, stream_output->rasterized_stream,
             NULL, &native_shader);
-        dxvk->perf.native_shader_create_us +=
-            g_get_monotonic_time() - operation_start_us;
     } else {
         if (!vmsvga3d_dxvk_get_method(dxvk->d3d11_device, method,
                                        &create_shader, sizeof(create_shader))) {
@@ -8655,12 +8625,8 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
             }
             return false;
         }
-        operation_start_us = g_get_monotonic_time();
-        dxvk->perf.native_shader_creates++;
         result = create_shader(
             dxvk->d3d11_device, bytecode, bytecode_size, NULL, &native_shader);
-        dxvk->perf.native_shader_create_us +=
-            g_get_monotonic_time() - operation_start_us;
     }
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
@@ -8670,7 +8636,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         (uint32_t)result, native_shader != NULL ? 1u : 0u,
         vmsvga3d_dxvk_succeeded(result) && native_shader != NULL ? "OK" : "FAIL");
     if (!vmsvga3d_dxvk_succeeded(result) || native_shader == NULL) {
-        dxvk->perf.native_shader_create_failures++;
         if (native_shader != NULL) {
             vmsvga3d_dxvk_release(native_shader, VMSVGA3D_DXVK_IUNKNOWN_RELEASE);
         }
@@ -8680,7 +8645,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         return false;
     }
 
-    variant_count_before = shader->variant_count;
     if (!vmsvga3d_dxvk_d3d11_shader_variant_add(
             shader, native_shader, bytecode, bytecode_size,
             variant_stream_output_id, pipeline_key)) {
@@ -8690,10 +8654,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         }
         return false;
     }
-    if (variant_count_before >= VMSVGA3D_DXVK_SHADER_VARIANT_LIMIT) {
-        dxvk->perf.shader_variant_evictions++;
-    }
-
     if (generated_dxbc) {
         vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
     }
@@ -8902,8 +8862,6 @@ bool vmsvga3d_dxvk_d3d11_shader_invalidate(
     if (shader == NULL) {
         return true;
     }
-
-    dxvk->perf.shader_invalidations++;
 
     /* Linkage invalidation makes the current ShaderInfo mutable again but does
      * not invalidate the guest shader program.  Detach the active native
@@ -13896,6 +13854,8 @@ static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
     uint64_t destination_row_bytes;
     uint64_t destination_offset;
     bool passthrough;
+    bool rgba8_to_bgrx8;
+    bool contiguous;
     uint32_t y;
 
     if (slot == NULL || mapped == NULL || mapped->data == NULL || data == NULL ||
@@ -13929,6 +13889,25 @@ static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
                   layout->green_depth == 8u && layout->red_depth == 8u &&
                   layout->blue_offset == 0u && layout->green_offset == 8u &&
                   layout->red_offset == 16u;
+    rgba8_to_bgrx8 = source_bytes == 4u && layout->blue_depth == 8u &&
+                     layout->green_depth == 8u && layout->red_depth == 8u &&
+                     layout->red_offset == 0u && layout->green_offset == 8u &&
+                     layout->blue_offset == 16u;
+    contiguous = source_x == 0u && destination_x == 0u &&
+                 source_row_bytes == mapped->row_pitch &&
+                 destination_row_bytes == row_pitch;
+
+    if (passthrough && contiguous &&
+        destination_row_bytes <= SIZE_MAX / height) {
+        const uint8_t *source =
+            (const uint8_t *)mapped->data +
+            (size_t)source_y * mapped->row_pitch;
+        uint8_t *destination =
+            (uint8_t *)data + (size_t)destination_y * row_pitch;
+
+        memcpy(destination, source, (size_t)destination_row_bytes * height);
+        return true;
+    }
 
     for (y = 0; y < height; y++) {
         const uint8_t *source =
@@ -13941,6 +13920,18 @@ static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
 
         if (passthrough) {
             memcpy(destination, source, (size_t)destination_row_bytes);
+        } else if (rgba8_to_bgrx8) {
+            uint32_t x;
+
+            for (x = 0; x < width; x++) {
+                const uint8_t *input = source + (size_t)x * 4u;
+                uint8_t *output = destination + (size_t)x * 4u;
+
+                output[0] = input[2];
+                output[1] = input[1];
+                output[2] = input[0];
+                output[3] = 0;
+            }
         } else {
             uint32_t x;
 

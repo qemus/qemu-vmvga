@@ -433,6 +433,14 @@ struct vmsvga_perf_counters_s {
     uint64_t screen_poll_d3d9_us;
     uint64_t screen_poll_d3d11;
     uint64_t screen_poll_d3d11_us;
+    uint64_t screen_poll_d3d11_exact_pending;
+    uint64_t screen_poll_d3d11_exact_pending_us;
+    uint64_t screen_poll_d3d11_exact_ready;
+    uint64_t screen_poll_d3d11_exact_ready_us;
+    uint64_t screen_poll_d3d11_normal_pending;
+    uint64_t screen_poll_d3d11_normal_pending_us;
+    uint64_t screen_poll_d3d11_normal_ready;
+    uint64_t screen_poll_d3d11_normal_ready_us;
     uint64_t screen_submit_ok;
     uint64_t screen_submit_d3d9;
     uint64_t screen_submit_d3d9_us;

@@ -309,6 +309,17 @@ struct vmsvga_cursor_source_s {
 #define VMVGA_TRACE_STREAM  1
 #define VMVGA_TRACE_FIFO    1
 #define VMVGA_TRACE_3D      1
+
+/*
+ * High-volume diagnostics are intentionally disabled in normal debug builds.
+ * Flip an individual flag to 1 only for a focused investigation; the regular
+ * trace keeps semantic state changes, synchronization and all failure paths.
+ */
+#define VMVGA_TRACE_DEEP_FIFO          0
+#define VMVGA_TRACE_DEEP_D3D9_DRAW     0
+#define VMVGA_TRACE_DEEP_D3D9_STATE    0
+#define VMVGA_TRACE_DEEP_SHADER_CONST  0
+
 #define VMVGA_TRACE_DEVCAP  1
 #define VMVGA_TRACE_FLIGHT  1
 #define VMVGA_TRACE_QEMU    1
@@ -400,6 +411,7 @@ struct vmsvga_trace_devcap_s {
 
 struct vmsvga_command_buffer_work_s;
 
+
 enum vmsvga_vgpu_generation_e {
     VMSVGA_VGPU_AUTO = 0,
     VMSVGA_VGPU_9 = 9,
@@ -452,7 +464,12 @@ struct vmsvga_state_s {
     struct vmsvga_command_buffer_work_s *cb_queue_tail;
     struct vmsvga_command_buffer_work_s *cb_active_work;
     uint32_t cb_queue_count;
+    uint32_t cb_queue_depth_max;
     uint64_t cb_queue_sequence;
+    uint64_t cb_queue_submitted;
+    uint64_t cb_queue_executed;
+    uint64_t cb_queue_bytes;
+    uint64_t cb_queue_drains;
     bool cb_bh_running;
     bool cb_shadow_yield_allowed;
     bool cb_shadow_yield_pending;
@@ -6063,7 +6080,7 @@ static void vmsvga_fifo_run(struct vmsvga_state_s *s, bool flush_damage,
             vmsvga_trace_fifo_record(s, cmd, is_3d, supported_3d);
         }
 
-        if (trace_flight) {
+        if (trace_flight && VMVGA_TRACE_DEEP_FIFO) {
             const char *name = vmsvga_trace_fifo_cmd_name(cmd);
 
             if (name != NULL) {
@@ -10292,6 +10309,7 @@ static VMVGA_GFX_UPDATE_RET vmsvga_update_display(void *opaque)
     vmsvga3d_d3d9_process_pending_gb_queries(s, "DISPLAY");
     vmsvga3d_d3d10_process_pending_queries(s, "DISPLAY");
 
+
     /* A display refresh may opportunistically wake a yielded shadow
      * readback.  The shared one-shot command-buffer retry timer guarantees
      * forward progress even when frontend refresh cadence collapses. */
@@ -10523,7 +10541,12 @@ static void vmsvga_reset(DeviceState *dev)
     s->sync = 0;
     s->irq_mask = 0;
     s->irq_status = 0;
+    s->cb_queue_depth_max = 0;
     s->cb_queue_sequence = 0;
+    s->cb_queue_submitted = 0;
+    s->cb_queue_executed = 0;
+    s->cb_queue_bytes = 0;
+    s->cb_queue_drains = 0;
     s->cursor = 0;
     s->cursor_x = 0;
     s->cursor_y = 0;
@@ -11571,7 +11594,12 @@ static void vmsvga_init(DeviceState *dev, struct vmsvga_state_s *s,
     s->cb_queue_head = NULL;
     s->cb_queue_tail = NULL;
     s->cb_queue_count = 0;
+    s->cb_queue_depth_max = 0;
     s->cb_queue_sequence = 0;
+    s->cb_queue_submitted = 0;
+    s->cb_queue_executed = 0;
+    s->cb_queue_bytes = 0;
+    s->cb_queue_drains = 0;
     s->cb_bh_running = false;
     s->cb_shadow_journal = NULL;
     s->cb_shadow_journal_count = 0;

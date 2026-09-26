@@ -46,6 +46,7 @@ typedef struct vmsvga3d_dxvk_view_s VMSVGA3DDxvkView;
 typedef struct vmsvga3d_dxvk_retired_screen_readback_s
     VMSVGA3DDxvkRetiredScreenReadback;
 
+
 #define VMSVGA3D_DXVK_D3D9_VERTEX_DECL_CACHE_LIMIT 256u
 #define VMSVGA3D_DXVK_SHADER_VARIANT_LIMIT 4u
 #define VMSVGA3D_DXVK_SHADER_VARIANT_KEY_LIMIT 4u
@@ -515,6 +516,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_GET_SURFACE_LEVEL 18u
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_LOCK_RECT 19u
 #define VMSVGA3D_DXVK_IDIRECT3DTEXTURE9_UNLOCK_RECT 20u
+#define VMSVGA3D_DXVK_IDIRECT3DCUBETEXTURE9_GET_CUBE_MAP_SURFACE 18u
 #define VMSVGA3D_DXVK_IDIRECT3DCUBETEXTURE9_LOCK_RECT 19u
 #define VMSVGA3D_DXVK_IDIRECT3DCUBETEXTURE9_UNLOCK_RECT 20u
 #define VMSVGA3D_DXVK_IDIRECT3DVOLUMETEXTURE9_LOCK_BOX 19u
@@ -914,6 +916,8 @@ typedef int32_t (*VMSVGA3DDxvkTextureLockRect)(void *texture, uint32_t level,
                                                uint32_t flags);
 typedef int32_t (*VMSVGA3DDxvkTextureUnlockRect)(void *texture,
                                                  uint32_t level);
+typedef int32_t (*VMSVGA3DDxvkCubeTextureGetCubeMapSurface)(
+    void *texture, uint32_t face, uint32_t level, void **surface);
 typedef int32_t (*VMSVGA3DDxvkCubeTextureLockRect)(
     void *texture, uint32_t face, uint32_t level, void *locked_rect,
     const void *rect, uint32_t flags);
@@ -8605,7 +8609,6 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
                 decl->semantic_index, decl->start_component,
                 decl->component_count, decl->output_slot);
         }
-
         result = create_gs_so(
             dxvk->d3d11_device, bytecode, bytecode_size,
             stream_output->declarations, stream_output->declaration_count,
@@ -8654,6 +8657,7 @@ bool vmsvga3d_dxvk_d3d11_shader_realize(
         }
         return false;
     }
+
     if (generated_dxbc) {
         vmsvga3d_d3d10_shader_dxbc_release(&dxbc);
     }
@@ -8862,6 +8866,7 @@ bool vmsvga3d_dxvk_d3d11_shader_invalidate(
     if (shader == NULL) {
         return true;
     }
+
 
     /* Linkage invalidation makes the current ShaderInfo mutable again but does
      * not invalidate the guest shader program.  Detach the active native
@@ -11808,6 +11813,7 @@ static bool vmsvga3d_dxvk_surface_level_acquire(
     void **d3d_surface)
 {
     VMSVGA3DDxvkTextureGetSurfaceLevel get_surface_level = NULL;
+    VMSVGA3DDxvkCubeTextureGetCubeMapSurface get_cube_map_surface = NULL;
     void *object;
     int32_t result;
 
@@ -11829,6 +11835,29 @@ static bool vmsvga3d_dxvk_surface_level_acquire(
             return false;
         }
         result = get_surface_level(object, level, d3d_surface);
+        return vmsvga3d_dxvk_succeeded(result) && *d3d_surface != NULL;
+    }
+
+    if (surface->d3d9_resource_type ==
+        VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE) {
+        uint32_t face;
+        uint32_t mip;
+
+        if (surface->d3d9_levels == 0) {
+            return false;
+        }
+
+        face = level / surface->d3d9_levels;
+        mip = level % surface->d3d9_levels;
+        if (face >= 6 ||
+            !vmsvga3d_dxvk_get_method(
+                object,
+                VMSVGA3D_DXVK_IDIRECT3DCUBETEXTURE9_GET_CUBE_MAP_SURFACE,
+                &get_cube_map_surface, sizeof(get_cube_map_surface))) {
+            return false;
+        }
+
+        result = get_cube_map_surface(object, face, mip, d3d_surface);
         return vmsvga3d_dxvk_succeeded(result) && *d3d_surface != NULL;
     }
 
@@ -13854,8 +13883,7 @@ static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
     uint64_t destination_row_bytes;
     uint64_t destination_offset;
     bool passthrough;
-    bool rgba8_to_bgrx8;
-    bool contiguous;
+    bool rgba8;
     uint32_t y;
 
     if (slot == NULL || mapped == NULL || mapped->data == NULL || data == NULL ||
@@ -13889,16 +13917,13 @@ static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
                   layout->green_depth == 8u && layout->red_depth == 8u &&
                   layout->blue_offset == 0u && layout->green_offset == 8u &&
                   layout->red_offset == 16u;
-    rgba8_to_bgrx8 = source_bytes == 4u && layout->blue_depth == 8u &&
-                     layout->green_depth == 8u && layout->red_depth == 8u &&
-                     layout->red_offset == 0u && layout->green_offset == 8u &&
-                     layout->blue_offset == 16u;
-    contiguous = source_x == 0u && destination_x == 0u &&
-                 source_row_bytes == mapped->row_pitch &&
-                 destination_row_bytes == row_pitch;
+    rgba8 = source_bytes == 4u && layout->red_depth == 8u &&
+            layout->green_depth == 8u && layout->blue_depth == 8u &&
+            layout->red_offset == 0u && layout->green_offset == 8u &&
+            layout->blue_offset == 16u;
 
-    if (passthrough && contiguous &&
-        destination_row_bytes <= SIZE_MAX / height) {
+    if (passthrough && source_row_bytes == mapped->row_pitch &&
+        destination_row_bytes == row_pitch) {
         const uint8_t *source =
             (const uint8_t *)mapped->data +
             (size_t)source_y * mapped->row_pitch;
@@ -13920,7 +13945,7 @@ static bool vmsvga3d_dxvk_screen_readback_copy_bgr32(
 
         if (passthrough) {
             memcpy(destination, source, (size_t)destination_row_bytes);
-        } else if (rgba8_to_bgrx8) {
+        } else if (rgba8) {
             uint32_t x;
 
             for (x = 0; x < width; x++) {

@@ -11069,22 +11069,21 @@ static bool vmsvga3d_d3d10_screen_target_bind_live(
         }
     }
 
-    /* A ScreenTarget switch is a presentation-ordering barrier.  Pending
-     * damage belongs to the old SID and must be consumed before the new SID
-     * becomes active; dropping it can skip a guest-requested DWM frame.
-     *
-     * The quiesce path is already selective: it is an O(1) no-op when no
-     * presentation damage is queued, reads back only queued rectangles,
-     * narrows a full D3D9 presentation to tracked writer damage when possible,
-     * and performs no GPU readback when the CPU shadow is authoritative.
-     * Preserve that optimized barrier instead of speculatively coalescing
-     * across guest flips.
+    /* A ScreenTarget switch is a presentation-ordering boundary.  The
+     * yieldable quiesce path keeps D3D11's exact-snapshot barrier, while pure
+     * D3D9 can transfer its cumulative renderer-owned snapshots into a detached
+     * mailbox and let the new SID become active immediately.  Later D3D9 flips
+     * may coalesce behind that mailbox until display servicing publishes it.
+     * Lifecycle and unsupported paths still use the synchronous quiesce below.
      */
     if (s->cb_shadow_yield_allowed ||
         s->svga3d->screen_target_barrier_active) {
         bool pending = false;
 
-        if (!vmsvga3d_screen_target_quiesce_yieldable_live(s, &pending)) {
+        if (!vmsvga3d_screen_target_quiesce_yieldable_live(
+                s, old_sid != SVGA3D_INVALID_ID &&
+                       sid != SVGA3D_INVALID_ID,
+                &pending)) {
             return false;
         }
         if (pending) {

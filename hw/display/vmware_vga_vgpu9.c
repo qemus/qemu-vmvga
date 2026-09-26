@@ -741,9 +741,28 @@ static void vmsvga3d_d3d9_texture_plan(
         plan->fallback.usage = fallback_usage;
         plan->has_fallback = true;
     } else {
+        uint32_t primary_usage =
+            plan->base_usage | D3D9_USAGE_RENDERTARGET;
+
+        /* Ordinary 2D textures are created render-target capable when the
+         * format supports it so a later target bind need not rematerialize the
+         * resource.  DXT textures cannot use that speculative path; keep only
+         * usage explicitly requested by the guest and avoid a guaranteed
+         * CreateTexture failure before falling back to a usable texture. */
+        switch (surface->format) {
+        case SVGA3D_DXT1:
+        case SVGA3D_DXT2:
+        case SVGA3D_DXT3:
+        case SVGA3D_DXT4:
+        case SVGA3D_DXT5:
+            primary_usage = plan->base_usage;
+            break;
+        default:
+            break;
+        }
+
         vmsvga3d_d3d9_create_desc(&plan->primary, D3D9_RTYPE_TEXTURE, surface,
-                                  surface->mip_levels,
-                                  plan->base_usage | D3D9_USAGE_RENDERTARGET,
+                                  surface->mip_levels, primary_usage,
                                   plan->actual_format, D3D9_POOL_DEFAULT);
         plan->primary.depth = 1;
         plan->primary.shared_handle = true;

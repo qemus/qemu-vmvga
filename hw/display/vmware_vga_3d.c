@@ -18668,14 +18668,6 @@ static bool vmsvga3d_is_dx_command(uint32_t cmd)
 static bool vmsvga3d_trace_fifo_command(uint32_t cmd)
 {
     switch (cmd) {
-    case SVGA_3D_CMD_SURFACE_DEFINE:
-    case SVGA_3D_CMD_SURFACE_DEFINE_V2:
-    case SVGA_3D_CMD_SURFACE_DESTROY:
-    case SVGA_3D_CMD_SURFACE_COPY:
-    case SVGA_3D_CMD_SURFACE_STRETCHBLT:
-    case SVGA_3D_CMD_SURFACE_DMA:
-    case SVGA_3D_CMD_CONTEXT_DEFINE:
-    case SVGA_3D_CMD_CONTEXT_DESTROY:
     case SVGA_3D_CMD_SETTRANSFORM:
     case SVGA_3D_CMD_SETZRANGE:
     case SVGA_3D_CMD_SETRENDERSTATE:
@@ -18686,16 +18678,28 @@ static bool vmsvga3d_trace_fifo_command(uint32_t cmd)
     case SVGA_3D_CMD_SETLIGHTENABLED:
     case SVGA_3D_CMD_SETVIEWPORT:
     case SVGA_3D_CMD_SETCLIPPLANE:
-    case SVGA_3D_CMD_CLEAR:
+    case SVGA_3D_CMD_SET_SHADER:
+    case SVGA_3D_CMD_SETSCISSORRECT:
+        /* High-frequency D3D9 state changes have dedicated deep tracing. */
+        return VMVGA_TRACE_DEEP_D3D9_STATE;
     case SVGA_3D_CMD_DRAW_PRIMITIVES:
+        /* Keep the compact D3D9 draw result in the normal trace. */
+        return VMVGA_TRACE_DEEP_D3D9_DRAW;
+    case SVGA_3D_CMD_SURFACE_DEFINE:
+    case SVGA_3D_CMD_SURFACE_DEFINE_V2:
+    case SVGA_3D_CMD_SURFACE_DESTROY:
+    case SVGA_3D_CMD_SURFACE_COPY:
+    case SVGA_3D_CMD_SURFACE_STRETCHBLT:
+    case SVGA_3D_CMD_SURFACE_DMA:
+    case SVGA_3D_CMD_CONTEXT_DEFINE:
+    case SVGA_3D_CMD_CONTEXT_DESTROY:
+    case SVGA_3D_CMD_CLEAR:
     case SVGA_3D_CMD_PRESENT:
     case SVGA_3D_CMD_PRESENT_READBACK:
     case SVGA_3D_CMD_BLIT_SURFACE_TO_SCREEN:
     case SVGA_3D_CMD_SHADER_DEFINE:
     case SVGA_3D_CMD_SHADER_DESTROY:
-    case SVGA_3D_CMD_SET_SHADER:
     case SVGA_3D_CMD_SET_SHADER_CONST:
-    case SVGA_3D_CMD_SETSCISSORRECT:
     case SVGA_3D_CMD_GENERATE_MIPMAPS:
     case SVGA_3D_CMD_INTRA_SURFACE_COPY:
         return true;

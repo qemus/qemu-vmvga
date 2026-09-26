@@ -4817,7 +4817,8 @@ static bool vmsvga3d_handle_set_render_state(struct vmsvga_state_s *s,
     body = payload;
     states = (SVGA3dRenderState *)(body + 1);
     count = (size - sizeof(*body)) / sizeof(*states);
-    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D)) {
+    if (VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D) &&
+        VMVGA_TRACE_DEEP_D3D9_STATE) {
         uint32_t i;
 
         for (i = 0; i < count; i++) {
@@ -5642,12 +5643,14 @@ static bool vmsvga3d_handle_set_gb_shader_consts_inline(
         }
     }
 
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "GB-SHADER-CONSTS cid=%u reg=%u shader=%u ctype=%u count=%u "
-        "result=%s",
-        body->cid, body->regStart, body->shaderType, body->constType, count,
-        applied ? "OK" : "IGNORED");
+    if (!applied || VMVGA_TRACE_DEEP_SHADER_CONST) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-SHADER-CONSTS cid=%u reg=%u shader=%u ctype=%u count=%u "
+            "result=%s",
+            body->cid, body->regStart, body->shaderType, body->constType, count,
+            applied ? "OK" : "IGNORED");
+    }
 
     vmsvga3d_fifo_release_payload(s, payload);
     return true;
@@ -6343,7 +6346,7 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     rects = (SVGA3dRect *)(body + 1);
     rect_count = rect_bytes / sizeof(SVGA3dRect);
     trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
-    if (trace_3d) {
+    if (trace_3d && VMVGA_TRACE_DEEP_D3D9_STATE) {
         VMSVGA3DContext *context = vmsvga3d_context(s, body->cid);
         uint32_t color_sid = SVGA3D_INVALID_ID;
         uint32_t depth_sid = SVGA3D_INVALID_ID;
@@ -6398,7 +6401,9 @@ static bool vmsvga3d_handle_clear(struct vmsvga_state_s *s,
     }
 
     VMVGA_TRACE_LOCAL_CACHED(
-        trace_3d,
+        trace_3d &&
+            (VMVGA_TRACE_DEEP_D3D9_STATE ||
+             accel != VMSVGA3D_D3D9_ACCEL_COMPLETE || !wrote),
         "D3D9-CLEAR result cid=%u accel=%u wrote=%u",
         body->cid, (uint32_t)accel, wrote ? 1u : 0u);
     vmsvga3d_fifo_release_payload(s, payload);
@@ -10478,14 +10483,17 @@ static bool vmsvga3d_command_buffer_enqueue(
     }
 
     s->cb_queue_count++;
+    s->cb_queue_depth_max = MAX(s->cb_queue_depth_max, s->cb_queue_count);
+    s->cb_queue_submitted++;
+    s->cb_queue_bytes += header->length - header->offset;
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "CB-ASYNC phase=enqueue seq=%" PRIu64 " kind=%s header=0x%016" PRIx64
-        " context=%u id=0x%016" PRIx64 " bytes=%u depth=%u",
+        " context=%u id=0x%016" PRIx64 " bytes=%u depth=%u max-depth=%u",
         work->sequence, prepend ? "PREPEND" : "COMMAND", header_gpa,
         context, header->id, header->length - header->offset,
-        s->cb_queue_count);
+        s->cb_queue_count, s->cb_queue_depth_max);
 
     if (s->cb_bh != NULL && !s->cb_bh_running &&
         !(s->cb_active_work != NULL && s->cb_yield_waiting)) {
@@ -10833,6 +10841,7 @@ static bool vmsvga3d_command_buffer_execute_work(
         status == SVGA_CB_STATUS_COMMAND_ERROR ? processed : 0,
         irq_flags, work->sequence, s->cb_queue_count);
     vmsvga3d_command_buffer_raise_irq(s, irq_flags);
+    s->cb_queue_executed++;
     vmsvga3d_command_buffer_work_free(work);
     return true;
 }
@@ -10881,8 +10890,10 @@ static void vmsvga3d_command_buffer_bh(void *opaque)
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "CB-ASYNC phase=service buffers=%u bytes=%" PRIu64
-        " depth=%u waiting=%u",
+        " depth=%u submitted=%" PRIu64 " executed=%" PRIu64
+        " waiting=%u",
         buffers, bytes, s->cb_queue_count,
+        s->cb_queue_submitted, s->cb_queue_executed,
         s->cb_yield_waiting ? 1u : 0u);
 
     if (!s->cb_yield_waiting &&
@@ -10927,12 +10938,16 @@ static void vmsvga3d_command_buffer_drain(struct vmsvga_state_s *s,
         s->cb_active_work = NULL;
     }
     s->cb_bh_running = false;
+    if (drained != 0) {
+        s->cb_queue_drains++;
+    }
+
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "CB-ASYNC phase=drain reason=%s buffers=%u bytes=%" PRIu64
-        " depth=%u",
+        " depth=%u drains=%" PRIu64,
         reason != NULL ? reason : "unspecified", drained, bytes,
-        s->cb_queue_count);
+        s->cb_queue_count, s->cb_queue_drains);
 }
 
 static void vmsvga3d_command_buffer_shadow_pending_cancel(
@@ -14030,6 +14045,28 @@ static bool vmsvga3d_screen_target_clip_rect(
     return rect->w != 0 && rect->h != 0;
 }
 
+static bool vmsvga3d_screen_target_rects_in_scanout(
+    const struct vmsvga_state_s *s, const SVGA3dRect *rects,
+    uint32_t rect_count)
+{
+    uint32_t i;
+
+    if (s == NULL || (rect_count != 0 && rects == NULL)) {
+        return false;
+    }
+
+    for (i = 0; i < rect_count; i++) {
+        if (rects[i].x >= s->screen_width ||
+            rects[i].y >= s->screen_height ||
+            rects[i].w > s->screen_width - rects[i].x ||
+            rects[i].h > s->screen_height - rects[i].y) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static SVGA3dRect vmsvga3d_screen_target_rect_union(
     const SVGA3dRect *a, const SVGA3dRect *b)
 {
@@ -15968,17 +16005,10 @@ static bool vmsvga3d_screen_target_flush_live_mode(
                     vmsvga_screen_storage(s, &screen_base, &screen_size,
                                           &screen_stride) &&
                     screen_size <= UINT32_MAX) {
-                    bool rects_in_bounds = true;
+                    bool rects_in_bounds =
+                        vmsvga3d_screen_target_rects_in_scanout(
+                            s, rects, rect_count);
 
-                    for (i = 0; i < rect_count; i++) {
-                        if (rects[i].x >= s->screen_width ||
-                            rects[i].y >= s->screen_height ||
-                            rects[i].w > s->screen_width - rects[i].x ||
-                            rects[i].h > s->screen_height - rects[i].y) {
-                            rects_in_bounds = false;
-                            break;
-                        }
-                    }
                     direct_candidate = direct_format && rects_in_bounds;
                     async_candidate = async_format && rects_in_bounds;
                 }
@@ -16065,6 +16095,7 @@ static bool vmsvga3d_screen_target_flush_live_mode(
             if (defer_active_publish) {
                 return false;
             }
+
 
             if (d3d9_resident) {
                 batch_readback =
@@ -16626,6 +16657,13 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
             vmsvga3d_screen_target_barrier_capture_live(s);
         }
 
+        if (!vmsvga3d_screen_target_rects_in_scanout(
+                s, state->screen_target_barrier_dirty_rects,
+                state->screen_target_barrier_dirty_count)) {
+            vmsvga3d_screen_target_barrier_restore_live(s, false);
+            return vmsvga3d_screen_target_quiesce_live(s);
+        }
+
         if (state->screen_target_barrier_dirty_count != 0) {
             VMSVGA3DDxvkScreenReadbackSubmitResult submit;
             uint64_t sequence = 0;
@@ -16838,6 +16876,7 @@ static bool vmsvga3d_screen_target_quiesce_live(struct vmsvga_state_s *s)
             goto out;
         }
     }
+
     if (!vmsvga3d_screen_target_async_drain_live(s)) {
         result = false;
         goto out;
@@ -17611,9 +17650,6 @@ static bool vmsvga3d_handle_destroy_gb_surface(struct vmsvga_state_s *s,
 
     if (size >= sizeof(*body)) {
         body = payload;
-        if (s != NULL && s->svga3d != NULL &&
-            body->sid == s->svga3d->active_screen_target_sid) {
-        }
         if (s != NULL && s->svga3d != NULL &&
             body->sid == s->svga3d->active_screen_target_sid &&
             !vmsvga3d_screen_target_quiesce_live(s)) {
@@ -18821,7 +18857,7 @@ static bool vmsvga3d_fifo_command(struct vmsvga_state_s *s,
     info = vmsvga3d_command_info(cmd);
     trace_3d = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
 
-    if (trace_3d) {
+    if (trace_3d && VMVGA_TRACE_DEEP_FIFO) {
         if (*len >= 2) {
             uint32_t raw_size = 0;
 

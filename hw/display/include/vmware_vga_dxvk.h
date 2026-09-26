@@ -663,8 +663,9 @@ void *vmsvga3d_dxvk_shader_create(VMSVGA3DDxvk *dxvk, uint32_t stage,
 void vmsvga3d_dxvk_shader_destroy(void *shader);
 bool vmsvga3d_dxvk_shader_bind(VMSVGA3DDxvk *dxvk, uint32_t stage,
                                void *shader);
-bool vmsvga3d_dxvk_shader_constant(VMSVGA3DDxvk *dxvk, uint32_t target,
-                                   uint32_t reg, const uint32_t values[4]);
+bool vmsvga3d_dxvk_shader_constants(VMSVGA3DDxvk *dxvk, uint32_t target,
+                                    uint32_t reg, uint32_t count,
+                                    const uint32_t *values);
 void *vmsvga3d_dxvk_vertex_declaration_create(
     VMSVGA3DDxvk *dxvk,
     const struct vmsvga3d_d3d9_vertex_element_s *elements);

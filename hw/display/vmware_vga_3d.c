@@ -16839,8 +16839,7 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
      * snapshot is a second exact obligation.  Submit only those guest-visible
      * rectangles; renderer-only writes outside them must stay hidden. */
     if (state->screen_target_barrier_dirty_count != 0) {
-        const struct svga3d_surface_desc *desc =
-            svga3dsurface_get_desc(surface->format);
+        desc = svga3dsurface_get_desc(surface->format);
         VMSVGA3DDxvkScreenReadbackSubmitResult submit;
         uint64_t sequence = 0;
 

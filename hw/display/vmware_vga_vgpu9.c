@@ -3058,17 +3058,6 @@ static bool vmsvga3d_dxvk_bind_context_target(
     return true;
 }
 
-static uint32_t vmsvga3d_legacy_dirty_first_bit(uint64_t value)
-{
-    uint32_t bit = 0;
-
-    while ((value & UINT64_C(1)) == 0) {
-        value >>= 1;
-        bit++;
-    }
-    return bit;
-}
-
 static bool vmsvga3d_dxvk_apply_context_targets(
     struct vmsvga_state_s *s, VMSVGA3DContext *context, bool full_replay)
 {
@@ -3568,6 +3557,7 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
                 vmsvga3d_d3d9_shader_const_target(
                     type, (SVGA3dShaderConstType)ctype);
             uint64_t *dirty = NULL;
+            uint32_t packed_values[SVGA3D_CONSTREG_MAX * 4u];
             uint32_t reg;
 
             if (constants == NULL || limit == 0 ||
@@ -3589,34 +3579,40 @@ static bool vmsvga3d_dxvk_apply_context_shaders(
                 return false;
             }
 
-            if (full_replay) {
-                for (reg = 0; reg < limit; reg++) {
-                    if (constants[reg].valid &&
-                        !vmsvga3d_dxvk_shader_constant(
-                            s->dxvk, target, reg, constants[reg].values)) {
-                        return false;
-                    }
+            for (reg = 0; reg < limit;) {
+                uint32_t run_start;
+                uint32_t run_count = 0;
+
+                while (reg < limit &&
+                       (!constants[reg].valid ||
+                        (!full_replay &&
+                         (dirty[reg / 64u] &
+                          (UINT64_C(1) << (reg % 64u))) == 0))) {
+                    reg++;
                 }
-            } else {
-                uint32_t word_count = (limit + 63u) / 64u;
-                uint32_t word;
+                if (reg == limit) {
+                    break;
+                }
 
-                for (word = 0; word < word_count; word++) {
-                    uint64_t pending = dirty[word];
-
-                    while (pending != 0) {
-                        uint32_t bit =
-                            vmsvga3d_legacy_dirty_first_bit(pending);
-
-                        reg = word * 64u + bit;
-                        if (reg < limit && constants[reg].valid &&
-                            !vmsvga3d_dxvk_shader_constant(
-                                s->dxvk, target, reg,
-                                constants[reg].values)) {
-                            return false;
-                        }
-                        pending &= pending - 1;
+                run_start = reg;
+                while (reg < limit && constants[reg].valid &&
+                       (full_replay ||
+                        (dirty[reg / 64u] &
+                         (UINT64_C(1) << (reg % 64u))) != 0)) {
+                    if (ctype == SVGA3D_CONST_TYPE_BOOL) {
+                        packed_values[run_count] = constants[reg].values[0];
+                    } else {
+                        memcpy(&packed_values[run_count * 4u],
+                               constants[reg].values,
+                               sizeof(constants[reg].values));
                     }
+                    run_count++;
+                    reg++;
+                }
+
+                if (!vmsvga3d_dxvk_shader_constants(
+                        s->dxvk, target, run_start, run_count, packed_values)) {
+                    return false;
                 }
             }
         }

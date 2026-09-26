@@ -8647,7 +8647,6 @@ static void vmsvga3d_d3d10_pipeline_shaders_setup_live(
         (context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_SHADERS) == 0) {
         return;
     }
-
     linkage_dirty =
         (context->renderer_dirty &
          VMSVGA3D_DX_CTX_F_STATE_SHADER_LINKAGE) != 0;
@@ -9056,7 +9055,6 @@ static bool vmsvga3d_d3d10_pipeline_so_targets_live(
         }
         plan = &restore_plan;
     }
-
     if (!vmsvga3d_d3d10_so_targets_bind_live(s, cid, plan)) {
         return false;
     }
@@ -10273,6 +10271,7 @@ static bool vmsvga3d_d3d10_context_switch_live(
     if (old_cid == cid) {
         return true;
     }
+
     /* Current VirtualBox DX_STATE_TRACKER marks every frontend pipeline state
      * dirty before switching the D3D11 backend context.  The next Draw will
      * therefore replay the complete new-context state from its shadow MOB.
@@ -12199,9 +12198,9 @@ static bool vmsvga3d_d3d10_readback_image_live(
     depth_count = image->data_size / image->plane_size;
 
     return vmsvga3d_dxvk_d3d11_readback_subresource(
-        s->dxvk, surface->dxvk_surface, subresource, image->data,
-        image->pitch, image->pitch, row_count, image->plane_size,
-        depth_count);
+            s->dxvk, surface->dxvk_surface, subresource, image->data,
+            image->pitch, image->pitch, row_count, image->plane_size,
+            depth_count);
 }
 
 static bool vmsvga3d_d3d10_readback_image_rect_live(
@@ -12255,9 +12254,9 @@ static bool vmsvga3d_d3d10_readback_image_rect_live(
     source_box.back = 1;
 
     return vmsvga3d_dxvk_d3d11_readback_subresource_box(
-        s->dxvk, surface->dxvk_surface, subresource, &source_box,
-        image->data + data_offset, (uint32_t)row_bytes, image->pitch,
-        rect->h, image->plane_size, 1);
+            s->dxvk, surface->dxvk_surface, subresource, &source_box,
+            image->data + data_offset, (uint32_t)row_bytes, image->pitch,
+            rect->h, image->plane_size, 1);
 }
 
 
@@ -12310,9 +12309,9 @@ static bool vmsvga3d_d3d10_readback_image_rects_live(
     }
 
     return vmsvga3d_dxvk_d3d11_readback_subresource_boxes(
-        s->dxvk, surface->dxvk_surface, subresource, boxes, rect_count,
-        image->data, bytes_per_pixel, image->pitch, image->data_size,
-        secondary_data, secondary_row_pitch, secondary_data_size);
+            s->dxvk, surface->dxvk_surface, subresource, boxes, rect_count,
+            image->data, bytes_per_pixel, image->pitch, image->data_size,
+            secondary_data, secondary_row_pitch, secondary_data_size);
 }
 
 
@@ -15035,6 +15034,7 @@ static bool vmsvga3d_d3d10_present_blt_live(
     if (s == NULL || command == NULL) {
         return false;
     }
+
 #define VMSVGA3D_PRESENTBLT_REJECT(reason)                              \
     do {                                                                \
         VMVGA_TRACE_LOCAL(                                              \

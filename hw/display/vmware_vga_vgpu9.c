@@ -2984,10 +2984,13 @@ static bool vmsvga3d_dxvk_bind_context_target(
     }
 
     surface = s->svga3d->surfaces[target->sid];
-    VMVGA_TRACE_LOCAL(
-        VMVGA_TRACE_3D,
-        "D3D9-TARGET bind sid=%u face=%u mip=%u use=%u depth=%u surface=%p",
-        target->sid, target->face, target->mipmap, use, depth_stencil, surface);
+    if (VMVGA_TRACE_DEEP_D3D9_STATE) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-TARGET bind sid=%u face=%u mip=%u use=%u depth=%u surface=%p",
+            target->sid, target->face, target->mipmap, use, depth_stencil,
+            surface);
+    }
 
     if (!vmsvga3d_dxvk_surface_level_index(surface, target, &image, &level)) {
         VMVGA_TRACE_LOCAL(
@@ -2996,16 +2999,24 @@ static bool vmsvga3d_dxvk_bind_context_target(
         return false;
     }
 
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "D3D9-TARGET image sid=%u level=%u image=%p",
+    if (VMVGA_TRACE_DEEP_D3D9_STATE) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-TARGET image sid=%u level=%u image=%p",
             target->sid, level, image);
+    }
 
     if (!vmsvga3d_dxvk_materialize_surface(s, surface, use, true)) {
         VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "D3D9-TARGET fail sid=%u stage=materialize", target->sid);
         return false;
     }
 
-    VMVGA_TRACE_LOCAL(VMVGA_TRACE_3D, "D3D9-TARGET materialized sid=%u dxvk_surface=%p",
+    if (VMVGA_TRACE_DEEP_D3D9_STATE) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D9-TARGET materialized sid=%u dxvk_surface=%p",
             target->sid, surface->dxvk_surface);
+    }
 
     if (depth_stencil) {
         if (!vmsvga3d_dxvk_set_depth_stencil(s->dxvk,
@@ -3379,7 +3390,7 @@ static bool vmsvga3d_dxvk_apply_context_textures(
                         return false;
                     }
                     VMVGA_TRACE_LOCAL_CACHED(
-                        trace_3d,
+                        trace_3d && VMVGA_TRACE_DEEP_D3D9_STATE,
                         "D3D9-TEXTURE stage=unbind sampler=%u result=OK",
                         plan.stage);
                 } else {
@@ -3424,7 +3435,7 @@ static bool vmsvga3d_dxvk_apply_context_textures(
                         return false;
                     }
 
-                    if (trace_3d) {
+                    if (trace_3d && VMVGA_TRACE_DEEP_D3D9_STATE) {
                         VMSVGA3DD3D9TransferSurface trace_info = { 0 };
                         const VMSVGA3DSurfaceImage *trace_image =
                             surface->mip_count != 0 && surface->mips != NULL
@@ -3623,6 +3634,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     bool reset_state = false;
     bool full_replay = false;
     bool trace = VMVGA_TRACE_LOCAL_ENABLED(VMVGA_TRACE_3D);
+    bool deep_draw = trace && VMVGA_TRACE_DEEP_D3D9_DRAW;
     const char *failure_stage = NULL;
     uint32_t failure_range = UINT32_MAX;
 
@@ -3647,7 +3659,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
 
-    if (trace) {
+    if (deep_draw) {
         fprintf(stderr,
                 "VMVGA-D3D9-DRAW begin cid=%u decls=%u ranges=%u divisors=%u "
                 "rt0=%u:%u:%u depth=%u:%u:%u viewport=%u,%u/%ux%u "
@@ -3715,7 +3727,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
         goto out;
     }
 
-    if (trace) {
+    if (deep_draw) {
         fprintf(stderr, "VMVGA-D3D9-DRAW layout streams=%u\n", stream_count);
         for (i = 0; i < vertex_decl_count; i++) {
             fprintf(stderr,
@@ -3810,20 +3822,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
             failure_stage = "materialize-vertex-buffer";
             goto out;
         }
-        if (trace) {
-            const uint8_t *bytes = surface->mips[0].data;
-            uint32_t byte_count = (uint32_t)surface->storage_bytes;
-            uint32_t checksum = UINT32_C(2166136261);
-            uint32_t j;
-
-            /* This byte walk is deliberately inside the exact runtime trace
-             * guard.  The baseline already had this per-stream trace branch,
-             * so disabled tracing gains no extra hot-path branch here. */
-            for (j = 0; j < byte_count; j++) {
-                checksum ^= bytes[j];
-                checksum *= UINT32_C(16777619);
-            }
-
+        if (deep_draw) {
             fprintf(stderr,
                     "VMVGA-D3D9-DRAW stream-bind[%u] sid=%u storage=%llu "
                     "dxvk=%p offset=%u stride=%u frequency=0x%08x\n",
@@ -3831,10 +3830,6 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                     (unsigned long long)surface->storage_bytes,
                     surface->dxvk_surface, streams[i].source_offset,
                     streams[i].stride, streams[i].frequency);
-            fprintf(stderr,
-                    "VMVGA-D3D9-BUFFER sid=%u role=vertex bytes=%u "
-                    "checksum=fnv1a32:%08x result=OK\n",
-                    surface->sid, byte_count, checksum);
         }
         if (!vmsvga3d_dxvk_set_stream_source(
                 s->dxvk, i, surface->dxvk_surface, streams[i].source_offset,
@@ -3866,7 +3861,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
     vertex_buffer_bytes = (uint32_t)s->svga3d
                               ->surfaces[vertex_decls[0].array.surfaceId]
                               ->storage_bytes;
-    if (trace) {
+    if (deep_draw) {
         fprintf(stderr,
                 "VMVGA-D3D9-DRAW batch streams=%u begin_scene=%u end_scene=%u "
                 "vertex_buffer_bytes=%u\n",
@@ -3889,7 +3884,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
             goto out;
         }
 
-        if (trace) {
+        if (deep_draw) {
             fprintf(stderr,
                     "VMVGA-D3D9-DRAW plan[%u] action=%u prim=%u count=%u "
                     "start_vertex=%u index_sid=%u unbind=%u sync_index=%u "
@@ -3919,7 +3914,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                 failure_stage = "draw-primitive";
                 goto out;
             }
-            if (trace) {
+            if (deep_draw) {
                 fprintf(stderr,
                         "VMVGA-D3D9-DRAW issued[%u] nonindexed prim=%u "
                         "start=%u count=%u\n",
@@ -3948,30 +3943,13 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                 failure_stage = "materialize-index-buffer";
                 goto out;
             }
-            if (trace) {
-                const uint8_t *bytes = index_surface->mips[0].data;
-                uint32_t byte_count = (uint32_t)index_surface->storage_bytes;
-                uint32_t checksum = UINT32_C(2166136261);
-                uint32_t j;
-
-                /* As above, checksum preparation is trace-only and remains
-                 * behind the pre-existing per-index-buffer trace branch. */
-                for (j = 0; j < byte_count; j++) {
-                    checksum ^= bytes[j];
-                    checksum *= UINT32_C(16777619);
-                }
-
+            if (deep_draw) {
                 fprintf(stderr,
                         "VMVGA-D3D9-DRAW index-bind[%u] sid=%u storage=%llu "
                         "dxvk=%p width=%u\n",
                         i, plan.index_surface_id,
                         (unsigned long long)index_surface->storage_bytes,
                         index_surface->dxvk_surface, ranges[i].indexWidth);
-                fprintf(stderr,
-                        "VMVGA-D3D9-BUFFER sid=%u role=index bytes=%u "
-                        "index_width=%u checksum=fnv1a32:%08x result=OK\n",
-                        index_surface->sid, byte_count, ranges[i].indexWidth,
-                        checksum);
             }
             if (!vmsvga3d_dxvk_set_indices(s->dxvk,
                                            index_surface->dxvk_surface)) {
@@ -3989,7 +3967,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_draw_primitives(
                 failure_stage = "draw-indexed-primitive";
                 goto out;
             }
-            if (trace) {
+            if (deep_draw) {
                 fprintf(stderr,
                         "VMVGA-D3D9-DRAW issued[%u] indexed prim=%u base=%d "
                         "min=%u vertices=%u start=%u count=%u\n",
@@ -4050,8 +4028,20 @@ out:
     }
 
     if (trace && success) {
-        fprintf(stderr, "VMVGA-D3D9-DRAW complete cid=%u ranges=%u\n",
-                cid, range_count);
+        fprintf(stderr,
+                "VMVGA-D3D9-DRAW result=OK cid=%u ranges=%u streams=%u "
+                "rt0=%u:%u:%u depth=%u:%u:%u vs=%u ps=%u\n",
+                cid, range_count, stream_count,
+                context->render_targets[SVGA3D_RT_COLOR0].sid,
+                context->render_targets[SVGA3D_RT_COLOR0].face,
+                context->render_targets[SVGA3D_RT_COLOR0].mipmap,
+                context->render_targets[SVGA3D_RT_DEPTH].sid,
+                context->render_targets[SVGA3D_RT_DEPTH].face,
+                context->render_targets[SVGA3D_RT_DEPTH].mipmap,
+                context->bound_shader[SVGA3D_SHADERTYPE_VS -
+                                      SVGA3D_SHADERTYPE_MIN],
+                context->bound_shader[SVGA3D_SHADERTYPE_PS -
+                                      SVGA3D_SHADERTYPE_MIN]);
     }
 
     return success ? VMSVGA3D_D3D9_ACCEL_COMPLETE

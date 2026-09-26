@@ -15831,17 +15831,18 @@ out:
 
 static bool vmsvga3d_dxvk_d3d9_clear_targets_match(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *const color_targets[8],
-    const uint32_t color_levels[8], uint32_t highest_target,
+    const uint32_t color_levels[8], uint32_t target_count,
     VMSVGA3DDxvkSurface *depth_stencil, uint32_t depth_stencil_level)
 {
     uint32_t i;
 
     if (dxvk == NULL || color_targets == NULL || color_levels == NULL ||
-        highest_target >= G_N_ELEMENTS(dxvk->d3d9_bound_render_targets)) {
+        target_count == 0 ||
+        target_count > G_N_ELEMENTS(dxvk->d3d9_bound_render_targets)) {
         return false;
     }
 
-    for (i = 0; i <= highest_target; i++) {
+    for (i = 0; i < target_count; i++) {
         if (!dxvk->d3d9_bound_render_target_valid[i] ||
             dxvk->d3d9_bound_render_targets[i] != color_targets[i] ||
             (color_targets[i] != NULL &&
@@ -15887,6 +15888,7 @@ bool vmsvga3d_dxvk_clear(
     VMSVGA3DD3D9Rect saved_scissor;
     VMSVGA3DD3D9Viewport saved_viewport;
     uint32_t highest_target = 0;
+    uint32_t target_count;
     uint32_t i;
     int32_t result;
     bool have_saved_depth = false;
@@ -15939,6 +15941,16 @@ bool vmsvga3d_dxvk_clear(
             highest_target = i;
         }
     }
+    target_count = MAX(highest_target + 1u, 4u);
+    target_count = MIN(
+        target_count,
+        (uint32_t)G_N_ELEMENTS(dxvk->d3d9_bound_render_targets));
+
+    /* D3D9 draw-state replay owns native MRT0 through MRT3.  Even when a clear
+     * only names RT0, a guest target change can leave a higher native MRT
+     * stale until the next draw replays target state.  Treat the four native
+     * MRT slots as one binding set, while preserving the old behavior if a
+     * guest clear explicitly references a higher slot. */
 
     /* The normal draw path already keeps the native render-target and
      * depth/stencil bindings cached.  When those cached bindings exactly match
@@ -15947,7 +15959,7 @@ bool vmsvga3d_dxvk_clear(
      * disturb the viewport, so only the temporary full-target scissor needs to
      * be saved and restored. */
     if (vmsvga3d_dxvk_d3d9_clear_targets_match(
-            dxvk, color_targets, color_levels, highest_target, depth_stencil,
+            dxvk, color_targets, color_levels, target_count, depth_stencil,
             depth_stencil_level)) {
         bool scissor_changed;
 
@@ -15980,7 +15992,7 @@ bool vmsvga3d_dxvk_clear(
         return success;
     }
 
-    for (i = 0; i <= highest_target; i++) {
+    for (i = 0; i < target_count; i++) {
         result = get_render_target(dxvk->d3d9_device, i, &saved_targets[i]);
         if (!vmsvga3d_dxvk_succeeded(result)) {
             saved_targets[i] = NULL;
@@ -16041,7 +16053,7 @@ bool vmsvga3d_dxvk_clear(
     vmsvga3d_dxvk_d3d9_target_cache_invalidate(dxvk);
     state_mutated = true;
 
-    for (i = 0; i <= highest_target; i++) {
+    for (i = 0; i < target_count; i++) {
         result = set_render_target(dxvk->d3d9_device, i, bound_targets[i]);
         if (!vmsvga3d_dxvk_succeeded(result)) {
             goto restore;
@@ -16065,7 +16077,7 @@ bool vmsvga3d_dxvk_clear(
 
 restore:
     if (state_mutated) {
-        for (i = 0; i <= highest_target; i++) {
+        for (i = 0; i < target_count; i++) {
             result = set_render_target(dxvk->d3d9_device, i,
                                        saved_targets[i]);
             if (!vmsvga3d_dxvk_succeeded(result)) {

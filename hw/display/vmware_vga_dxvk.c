@@ -15829,6 +15829,34 @@ out:
 #endif
 }
 
+static bool vmsvga3d_dxvk_d3d9_clear_targets_match(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *const color_targets[8],
+    const uint32_t color_levels[8], uint32_t target_count,
+    VMSVGA3DDxvkSurface *depth_stencil, uint32_t depth_stencil_level)
+{
+    uint32_t i;
+
+    if (dxvk == NULL || color_targets == NULL || color_levels == NULL ||
+        target_count == 0 ||
+        target_count > G_N_ELEMENTS(dxvk->d3d9_bound_render_targets)) {
+        return false;
+    }
+
+    for (i = 0; i < target_count; i++) {
+        if (!dxvk->d3d9_bound_render_target_valid[i] ||
+            dxvk->d3d9_bound_render_targets[i] != color_targets[i] ||
+            (color_targets[i] != NULL &&
+             dxvk->d3d9_bound_render_target_levels[i] != color_levels[i])) {
+            return false;
+        }
+    }
+
+    return dxvk->d3d9_bound_depth_stencil_valid &&
+           dxvk->d3d9_bound_depth_stencil == depth_stencil &&
+           (depth_stencil == NULL ||
+            dxvk->d3d9_bound_depth_stencil_level == depth_stencil_level);
+}
+
 bool vmsvga3d_dxvk_clear(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *const color_targets[8],
     const uint32_t color_levels[8], VMSVGA3DDxvkSurface *depth_stencil,
@@ -15851,14 +15879,24 @@ bool vmsvga3d_dxvk_clear(
     void *bound_targets[8] = { 0 };
     void *saved_depth_stencil = NULL;
     void *bound_depth_stencil = NULL;
+    VMSVGA3DDxvkSurface *cached_targets[SVGA3D_MAX_RENDER_TARGETS];
+    uint32_t cached_target_levels[SVGA3D_MAX_RENDER_TARGETS];
+    bool cached_target_valid[SVGA3D_MAX_RENDER_TARGETS];
+    VMSVGA3DDxvkSurface *cached_depth_stencil = NULL;
+    uint32_t cached_depth_stencil_level = 0;
+    bool cached_depth_stencil_valid = false;
     VMSVGA3DD3D9Rect saved_scissor;
     VMSVGA3DD3D9Viewport saved_viewport;
     uint32_t highest_target = 0;
+    uint32_t target_count;
     uint32_t i;
     int32_t result;
     bool have_saved_depth = false;
     bool have_saved_scissor = false;
     bool have_saved_viewport = false;
+    bool target_state_saved = true;
+    bool target_state_restored = true;
+    bool target_cache_saved = false;
     bool state_mutated = false;
     bool success = false;
 
@@ -15903,11 +15941,62 @@ bool vmsvga3d_dxvk_clear(
             highest_target = i;
         }
     }
+    target_count = MAX(highest_target + 1u, 4u);
+    target_count = MIN(
+        target_count,
+        (uint32_t)G_N_ELEMENTS(dxvk->d3d9_bound_render_targets));
 
-    for (i = 0; i <= highest_target; i++) {
+    /* D3D9 draw-state replay owns native MRT0 through MRT3.  Even when a clear
+     * only names RT0, a guest target change can leave a higher native MRT
+     * stale until the next draw replays target state.  Treat the four native
+     * MRT slots as one binding set, while preserving the old behavior if a
+     * guest clear explicitly references a higher slot. */
+
+    /* The normal draw path already keeps the native render-target and
+     * depth/stencil bindings cached.  When those cached bindings exactly match
+     * this clear, do not query, replace and restore the entire target set.
+     * Keeping the targets bound also means SetRenderTarget cannot implicitly
+     * disturb the viewport, so only the temporary full-target scissor needs to
+     * be saved and restored. */
+    if (vmsvga3d_dxvk_d3d9_clear_targets_match(
+            dxvk, color_targets, color_levels, target_count, depth_stencil,
+            depth_stencil_level)) {
+        bool scissor_changed;
+
+        result = get_scissor(dxvk->d3d9_device, &saved_scissor);
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            return false;
+        }
+        scissor_changed = saved_scissor.left != clear_scissor->left ||
+                          saved_scissor.top != clear_scissor->top ||
+                          saved_scissor.right != clear_scissor->right ||
+                          saved_scissor.bottom != clear_scissor->bottom;
+        if (scissor_changed) {
+            result = set_scissor(dxvk->d3d9_device, clear_scissor);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                (void)set_scissor(dxvk->d3d9_device, &saved_scissor);
+                return false;
+            }
+        }
+
+        result = clear(dxvk->d3d9_device, rect_count, rects, flags, color,
+                       depth, stencil);
+        success = vmsvga3d_dxvk_succeeded(result);
+
+        if (scissor_changed) {
+            result = set_scissor(dxvk->d3d9_device, &saved_scissor);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                success = false;
+            }
+        }
+        return success;
+    }
+
+    for (i = 0; i < target_count; i++) {
         result = get_render_target(dxvk->d3d9_device, i, &saved_targets[i]);
         if (!vmsvga3d_dxvk_succeeded(result)) {
             saved_targets[i] = NULL;
+            target_state_saved = false;
             if (i == 0) {
                 goto restore;
             }
@@ -15923,6 +16012,7 @@ bool vmsvga3d_dxvk_clear(
     have_saved_depth = vmsvga3d_dxvk_succeeded(result);
     if (!have_saved_depth) {
         saved_depth_stencil = NULL;
+        target_state_saved = false;
     }
 
     if (depth_stencil != NULL &&
@@ -15945,13 +16035,25 @@ bool vmsvga3d_dxvk_clear(
     }
     have_saved_viewport = true;
 
-    /* This helper temporarily bypasses the cached target setters below.  Drop
-     * the cache before changing native targets so a partial failure or restore
-     * failure can never leave a stale binding recorded. */
+    /* This helper temporarily bypasses the cached target setters below.
+     * Preserve the cache metadata so a completely successful native restore
+     * can keep the next draw/clear on its cached path.  Any incomplete state
+     * query or restore still leaves the cache invalid, matching the old safe
+     * behavior. */
+    memcpy(cached_targets, dxvk->d3d9_bound_render_targets,
+           sizeof(cached_targets));
+    memcpy(cached_target_levels, dxvk->d3d9_bound_render_target_levels,
+           sizeof(cached_target_levels));
+    memcpy(cached_target_valid, dxvk->d3d9_bound_render_target_valid,
+           sizeof(cached_target_valid));
+    cached_depth_stencil = dxvk->d3d9_bound_depth_stencil;
+    cached_depth_stencil_level = dxvk->d3d9_bound_depth_stencil_level;
+    cached_depth_stencil_valid = dxvk->d3d9_bound_depth_stencil_valid;
+    target_cache_saved = true;
     vmsvga3d_dxvk_d3d9_target_cache_invalidate(dxvk);
     state_mutated = true;
 
-    for (i = 0; i <= highest_target; i++) {
+    for (i = 0; i < target_count; i++) {
         result = set_render_target(dxvk->d3d9_device, i, bound_targets[i]);
         if (!vmsvga3d_dxvk_succeeded(result)) {
             goto restore;
@@ -15975,11 +16077,12 @@ bool vmsvga3d_dxvk_clear(
 
 restore:
     if (state_mutated) {
-        for (i = 0; i <= highest_target; i++) {
+        for (i = 0; i < target_count; i++) {
             result = set_render_target(dxvk->d3d9_device, i,
                                        saved_targets[i]);
             if (!vmsvga3d_dxvk_succeeded(result)) {
                 success = false;
+                target_state_restored = false;
             }
         }
 
@@ -15987,6 +16090,22 @@ restore:
                                    have_saved_depth ? saved_depth_stencil : NULL);
         if (!vmsvga3d_dxvk_succeeded(result)) {
             success = false;
+            target_state_restored = false;
+        }
+
+        if (target_cache_saved && target_state_saved &&
+            target_state_restored) {
+            memcpy(dxvk->d3d9_bound_render_targets, cached_targets,
+                   sizeof(cached_targets));
+            memcpy(dxvk->d3d9_bound_render_target_levels,
+                   cached_target_levels, sizeof(cached_target_levels));
+            memcpy(dxvk->d3d9_bound_render_target_valid, cached_target_valid,
+                   sizeof(cached_target_valid));
+            dxvk->d3d9_bound_depth_stencil = cached_depth_stencil;
+            dxvk->d3d9_bound_depth_stencil_level =
+                cached_depth_stencil_level;
+            dxvk->d3d9_bound_depth_stencil_valid =
+                cached_depth_stencil_valid;
         }
 
         if (have_saved_scissor) {

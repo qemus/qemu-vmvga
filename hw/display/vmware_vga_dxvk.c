@@ -43,6 +43,8 @@ typedef struct vmsvga3d_dxvk_stream_output_s VMSVGA3DDxvkStreamOutput;
 typedef struct vmsvga3d_dxvk_input_layout_s VMSVGA3DDxvkInputLayout;
 typedef struct vmsvga3d_dxvk_constant_buffer_s VMSVGA3DDxvkConstantBuffer;
 typedef struct vmsvga3d_dxvk_view_s VMSVGA3DDxvkView;
+typedef struct vmsvga3d_dxvk_d3d9_retired_screen_readback_s
+    VMSVGA3DDxvkD3D9RetiredScreenReadback;
 typedef struct vmsvga3d_dxvk_retired_screen_readback_s
     VMSVGA3DDxvkRetiredScreenReadback;
 
@@ -88,6 +90,7 @@ struct vmsvga3d_dxvk_s {
     VMSVGA3DDxvkSurface *d3d9_bound_depth_stencil;
     uint32_t d3d9_bound_depth_stencil_level;
     bool d3d9_bound_depth_stencil_valid;
+    VMSVGA3DDxvkD3D9RetiredScreenReadback *d3d9_retired_screen_readback;
     void *d3d11_device;
     void *d3d11_device1;
     void *d3d11_context;
@@ -336,12 +339,26 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     VMSVGA3DD3D9Rect rects[VMSVGA3D_DXVK_SCREEN_READBACK_RECTS];
 } VMSVGA3DDxvkScreenReadbackSlot;
 
+/* D3D9 snapshots are renderer-owned render targets followed by EVENT queries.
+ * A target switch can therefore detach every still-in-flight ring slot without
+ * touching guest surface contents.  Only the newest cumulative slot is ever
+ * copied back to the CPU; the older slots stay alive solely until that newest
+ * EVENT proves all preceding StretchRect work has completed. */
+struct vmsvga3d_dxvk_d3d9_retired_screen_readback_s {
+    VMSVGA3DDxvkScreenReadbackSlot
+        slots[VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS];
+    uint32_t sid;
+    uint32_t selected_index;
+};
+
 /* Detached D3D11 presentation is a mailbox, not a frame queue.  Keep one
  * renderer-owned snapshot in flight and let later ScreenTarget flips collapse
  * into the newest active target until that snapshot has been published. */
 #define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_SLOTS 1u
 #define VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES \
     (UINT64_C(256) * 1024u * 1024u)
+#define VMSVGA3D_DXVK_D3D9_RETIRED_SCREEN_READBACK_BYTES \
+    VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES
 #define VMSVGA3D_DXVK_RETIRED_SCREEN_READBACK_BYTES \
     VMSVGA3D_DXVK_SCREEN_READBACK_SLOT_BYTES
 
@@ -2598,6 +2615,7 @@ void vmsvga3d_dxvk_reset_guest_objects(VMSVGA3DDxvk *dxvk,
     (void)reset_d3d11_state;
 #endif
 
+    vmsvga3d_dxvk_d3d9_retired_screen_readback_discard(dxvk);
     vmsvga3d_dxvk_d3d11_retired_screen_readback_discard(dxvk);
     vmsvga3d_dxvk_guest_objects_purge(dxvk);
 
@@ -2617,6 +2635,7 @@ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk)
     dxvk->d3d11_ready = false;
     dxvk->ready = false;
 
+    vmsvga3d_dxvk_d3d9_retired_screen_readback_discard(dxvk);
     vmsvga3d_dxvk_d3d11_retired_screen_readback_discard(dxvk);
     vmsvga3d_dxvk_guest_objects_purge(dxvk);
     {
@@ -13036,6 +13055,9 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
         surface->d3d9_resource == NULL || bytes_per_pixel == 0) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
     }
+    if (dxvk->d3d9_retired_screen_readback != NULL) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_BUSY;
+    }
 
     if (!vmsvga3d_dxvk_screen_readback_accumulate_pending_bounds(
             surface->d3d9_screen_readback, rects, rect_count,
@@ -13051,7 +13073,53 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
     slot = vmsvga3d_dxvk_screen_readback_free_slot(
         surface->d3d9_screen_readback);
     if (slot == NULL) {
-        return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_BUSY;
+        VMSVGA3DDxvkScreenReadbackSlot *newest =
+            vmsvga3d_dxvk_screen_readback_newest_slot(
+                surface->d3d9_screen_readback, 0);
+
+        /* The ring is a cumulative mailbox.  If an older EVENT is already
+         * complete, its snapshot can be discarded without GetRenderTargetData:
+         * a newer pending snapshot contains all of its presentation damage.
+         * This is primarily useful at a ScreenTarget switch, where making one
+         * slot available is enough to queue the final cumulative snapshot. */
+        for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+            VMSVGA3DDxvkScreenReadbackSlot *candidate =
+                &surface->d3d9_screen_readback[i];
+            VMSVGA3DDxvkQueryGetData candidate_get_data = NULL;
+
+            if (!candidate->pending || candidate == newest) {
+                continue;
+            }
+            if (candidate->query == NULL ||
+                !vmsvga3d_dxvk_get_method(
+                    candidate->query,
+                    VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+                    &candidate_get_data, sizeof(candidate_get_data))) {
+                return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
+            }
+            result = candidate_get_data(
+                candidate->query, &query_data, sizeof(query_data),
+                VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH);
+            if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+                continue;
+            }
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_FAILED;
+            }
+
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "SCREEN-READBACK backend=d3d9 phase=reap-obsolete sid=%u "
+                "seq=%" PRIu64 " newest=%" PRIu64,
+                surface->sid, candidate->sequence,
+                newest != NULL ? newest->sequence : 0);
+            vmsvga3d_dxvk_screen_readback_slot_release_d3d9(candidate);
+            slot = candidate;
+            break;
+        }
+        if (slot == NULL) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_SUBMIT_BUSY;
+        }
     }
 
     if (!vmsvga3d_dxvk_surface_level_acquire(surface, false, level,
@@ -14398,6 +14466,381 @@ vmsvga3d_dxvk_d3d11_screen_readback_poll_internal(
     }
     if (rect_count != NULL) {
         *rect_count = 0;
+    }
+    return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+#endif
+}
+
+VMSVGA3DDxvkScreenReadbackRetireResult
+vmsvga3d_dxvk_d3d9_screen_readback_retire_latest(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t sid)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D9RetiredScreenReadback *retired;
+    VMSVGA3DDxvkScreenReadbackSlot *selected = NULL;
+    uint32_t selected_index = UINT32_MAX;
+    uint32_t pending_count = 0;
+    uint64_t retained_bytes = 0;
+    uint32_t i;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
+        surface->owner != dxvk || !surface->d3d9_resident ||
+        surface->d3d11_resident) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+    }
+    if (dxvk->d3d9_retired_screen_readback != NULL) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
+    }
+
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        VMSVGA3DDxvkScreenReadbackSlot *candidate =
+            &surface->d3d9_screen_readback[i];
+
+        uint64_t pixels;
+        uint64_t object_bytes;
+        uint64_t slot_bytes;
+
+        if (!candidate->pending) {
+            continue;
+        }
+        if (candidate->query == NULL || candidate->render_target == NULL ||
+            candidate->staging == NULL || candidate->width == 0 ||
+            candidate->height == 0 || candidate->bytes_per_pixel == 0 ||
+            candidate->rect_count == 0) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+        }
+
+        pixels = (uint64_t)candidate->width * candidate->height;
+        if (pixels > UINT64_MAX / candidate->bytes_per_pixel) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+        }
+        object_bytes = pixels * candidate->bytes_per_pixel;
+        if (object_bytes > UINT64_MAX / 2u) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+        }
+        slot_bytes = object_bytes * 2u;
+        if (slot_bytes > VMSVGA3D_DXVK_D3D9_RETIRED_SCREEN_READBACK_BYTES ||
+            retained_bytes >
+                VMSVGA3D_DXVK_D3D9_RETIRED_SCREEN_READBACK_BYTES -
+                    slot_bytes) {
+            VMVGA_TRACE_LOCAL(
+                VMVGA_TRACE_3D,
+                "SCREEN-READBACK backend=d3d9 phase=retire-budget sid=%u "
+                "bytes=%" PRIu64 " next=%" PRIu64 " limit=%" PRIu64,
+                sid, retained_bytes, slot_bytes,
+                VMSVGA3D_DXVK_D3D9_RETIRED_SCREEN_READBACK_BYTES);
+            return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_BUSY;
+        }
+        retained_bytes += slot_bytes;
+        pending_count++;
+        if (selected == NULL || candidate->sequence > selected->sequence) {
+            selected = candidate;
+            selected_index = i;
+        }
+    }
+    if (selected == NULL || selected_index == UINT32_MAX) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_IDLE;
+    }
+    retired = g_try_new0(VMSVGA3DDxvkD3D9RetiredScreenReadback, 1);
+    if (retired == NULL) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+    }
+    retired->sid = sid;
+    retired->selected_index = selected_index;
+
+    /* Move every in-flight slot, not just the newest one.  The older render
+     * targets may still be referenced by queued StretchRect commands.  The
+     * newest EVENT orders those commands, after which the entire mailbox can
+     * be released safely without ever reading the older snapshots back. */
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        if (!surface->d3d9_screen_readback[i].pending) {
+            continue;
+        }
+        retired->slots[i] = surface->d3d9_screen_readback[i];
+        memset(&surface->d3d9_screen_readback[i], 0,
+               sizeof(surface->d3d9_screen_readback[i]));
+    }
+    dxvk->d3d9_retired_screen_readback = retired;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "SCREEN-READBACK backend=d3d9 phase=retire sid=%u seq=%" PRIu64
+        " slots=%u bytes=%" PRIu64,
+        sid, retired->slots[selected_index].sequence, pending_count,
+        retained_bytes);
+    return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRED;
+#else
+    (void)dxvk;
+    (void)surface;
+    (void)sid;
+    return VMSVGA3D_DXVK_SCREEN_READBACK_RETIRE_FAILED;
+#endif
+}
+
+uint32_t vmsvga3d_dxvk_d3d9_retired_screen_readback_count(
+    VMSVGA3DDxvk *dxvk)
+{
+    return dxvk != NULL && dxvk->d3d9_retired_screen_readback != NULL
+               ? 1u
+               : 0u;
+}
+
+bool vmsvga3d_dxvk_d3d9_retired_screen_readback_peek_bytes(
+    VMSVGA3DDxvk *dxvk, uint64_t *bytes_out)
+{
+    VMSVGA3DDxvkD3D9RetiredScreenReadback *retired;
+    VMSVGA3DDxvkScreenReadbackSlot *slot;
+    uint64_t pixels;
+
+    if (bytes_out != NULL) {
+        *bytes_out = 0;
+    }
+    if (dxvk == NULL || bytes_out == NULL ||
+        dxvk->d3d9_retired_screen_readback == NULL) {
+        return false;
+    }
+    retired = dxvk->d3d9_retired_screen_readback;
+    if (retired->selected_index >= VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS) {
+        return false;
+    }
+    slot = &retired->slots[retired->selected_index];
+    if (!slot->pending || slot->width == 0 || slot->height == 0 ||
+        slot->bytes_per_pixel == 0) {
+        return false;
+    }
+    pixels = (uint64_t)slot->width * slot->height;
+    if (pixels > UINT64_MAX / slot->bytes_per_pixel) {
+        return false;
+    }
+    *bytes_out = pixels * slot->bytes_per_pixel;
+    return true;
+}
+
+void vmsvga3d_dxvk_d3d9_retired_screen_readback_discard(
+    VMSVGA3DDxvk *dxvk)
+{
+    uint32_t i;
+
+    if (dxvk == NULL || dxvk->d3d9_retired_screen_readback == NULL) {
+        return;
+    }
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        vmsvga3d_dxvk_screen_readback_slot_release_d3d9(
+            &dxvk->d3d9_retired_screen_readback->slots[i]);
+    }
+    g_free(dxvk->d3d9_retired_screen_readback);
+    dxvk->d3d9_retired_screen_readback = NULL;
+}
+
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d9_retired_screen_readback_poll(
+    VMSVGA3DDxvk *dxvk, bool wait, void *data, uint32_t bytes_per_pixel,
+    uint32_t row_pitch, uint32_t data_size, uint32_t destination_width,
+    uint32_t destination_height,
+    struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
+    uint32_t *rect_count, uint32_t *sid_out, uint64_t *sequence_out)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkD3D9RetiredScreenReadback *retired;
+    VMSVGA3DDxvkScreenReadbackSlot *slot;
+    VMSVGA3DDxvkQueryGetData get_data = NULL;
+    VMSVGA3DDxvkGetRenderTargetData get_render_target_data = NULL;
+    VMSVGA3DDxvkSurfaceLockRect lock_rect = NULL;
+    VMSVGA3DDxvkSurfaceUnlockRect unlock_rect = NULL;
+    VMSVGA3DDxvkLockedRect locked = {0};
+    uint32_t query_data = 0;
+    uint32_t left = UINT32_MAX;
+    uint32_t top = UINT32_MAX;
+    uint32_t right = 0;
+    uint32_t bottom = 0;
+    uint32_t output_rect_count = 0;
+    uint32_t i;
+    int32_t result;
+
+    if (rect_count != NULL) {
+        *rect_count = 0;
+    }
+    if (sid_out != NULL) {
+        *sid_out = SVGA3D_INVALID_ID;
+    }
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
+    if (!vmsvga3d_dxvk_ready(dxvk) || data == NULL || rects == NULL ||
+        rect_count == NULL || bytes_per_pixel == 0 || row_pitch == 0 ||
+        data_size == 0 || destination_width == 0 || destination_height == 0 ||
+        (uint64_t)destination_width * bytes_per_pixel > row_pitch) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+    }
+
+    retired = dxvk->d3d9_retired_screen_readback;
+    if (retired == NULL) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
+    }
+    if (retired->selected_index >= VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS) {
+        goto fail;
+    }
+    slot = &retired->slots[retired->selected_index];
+    if (!slot->pending || slot->query == NULL || slot->render_target == NULL ||
+        slot->staging == NULL || slot->rect_count == 0 ||
+        slot->rect_count > rect_capacity ||
+        slot->bytes_per_pixel != bytes_per_pixel ||
+        !vmsvga3d_dxvk_screen_readback_rect_bounds(
+            slot->rects, slot->rect_count, slot->source_width,
+            slot->source_height, &left, &top, &right, &bottom) ||
+        !vmsvga3d_dxvk_get_method(
+            slot->query, VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+            &get_data, sizeof(get_data))) {
+        goto fail;
+    }
+
+    if (wait) {
+        do {
+            result = get_data(slot->query, &query_data, sizeof(query_data),
+                              VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
+            if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+                g_thread_yield();
+            }
+        } while (result == VMSVGA3D_DXVK_D3D_S_FALSE);
+    } else {
+        result = get_data(slot->query, &query_data, sizeof(query_data),
+                          VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH);
+        if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+        }
+    }
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        goto fail;
+    }
+
+    if (!vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device,
+            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_RENDER_TARGET_DATA,
+            &get_render_target_data, sizeof(get_render_target_data)) ||
+        !vmsvga3d_dxvk_get_method(
+            slot->staging, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_LOCK_RECT,
+            &lock_rect, sizeof(lock_rect)) ||
+        !vmsvga3d_dxvk_get_method(
+            slot->staging, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_UNLOCK_RECT,
+            &unlock_rect, sizeof(unlock_rect))) {
+        goto fail;
+    }
+
+    result = get_render_target_data(dxvk->d3d9_device, slot->render_target,
+                                    slot->staging);
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        goto fail;
+    }
+    result = lock_rect(slot->staging, &locked, NULL,
+                       VMSVGA3D_DXVK_D3DLOCK_READONLY);
+    if (!vmsvga3d_dxvk_succeeded(result) || locked.bits == NULL ||
+        locked.pitch < 0 ||
+        (uint64_t)(uint32_t)locked.pitch <
+            (uint64_t)slot->width * bytes_per_pixel) {
+        if (vmsvga3d_dxvk_succeeded(result)) {
+            unlock_rect(slot->staging);
+        }
+        goto fail;
+    }
+
+    for (i = 0; i < slot->rect_count; i++) {
+        const VMSVGA3DD3D9Rect *rect = &slot->rects[i];
+        uint32_t destination_x = (uint32_t)rect->left;
+        uint32_t destination_y = (uint32_t)rect->top;
+        uint32_t source_x;
+        uint32_t source_y;
+        uint32_t width;
+        uint32_t height;
+        uint64_t row_bytes;
+        uint64_t destination_offset;
+        uint32_t y;
+
+        if (destination_x >= destination_width ||
+            destination_y >= destination_height) {
+            continue;
+        }
+        width = MIN((uint32_t)(rect->right - rect->left),
+                    destination_width - destination_x);
+        height = MIN((uint32_t)(rect->bottom - rect->top),
+                     destination_height - destination_y);
+        if (width == 0 || height == 0) {
+            continue;
+        }
+        source_x = destination_x - left;
+        source_y = destination_y - top;
+        row_bytes = (uint64_t)width * bytes_per_pixel;
+        destination_offset =
+            (uint64_t)destination_y * row_pitch +
+            (uint64_t)destination_x * bytes_per_pixel;
+        if ((uint64_t)source_x * bytes_per_pixel + row_bytes >
+                (uint32_t)locked.pitch ||
+            source_y >= slot->height || height > slot->height - source_y ||
+            row_bytes > row_pitch || destination_offset > data_size ||
+            row_bytes > (uint64_t)data_size - destination_offset ||
+            (uint64_t)(height - 1) * row_pitch >
+                (uint64_t)data_size - destination_offset - row_bytes) {
+            unlock_rect(slot->staging);
+            goto fail;
+        }
+
+        for (y = 0; y < height; y++) {
+            memcpy((uint8_t *)data +
+                       (size_t)(destination_y + y) * row_pitch +
+                       (size_t)destination_x * bytes_per_pixel,
+                   (const uint8_t *)locked.bits +
+                       (size_t)(source_y + y) * (uint32_t)locked.pitch +
+                       (size_t)source_x * bytes_per_pixel,
+                   (size_t)row_bytes);
+        }
+
+        rects[output_rect_count].left = (int32_t)destination_x;
+        rects[output_rect_count].top = (int32_t)destination_y;
+        rects[output_rect_count].right = (int32_t)(destination_x + width);
+        rects[output_rect_count].bottom = (int32_t)(destination_y + height);
+        output_rect_count++;
+    }
+
+    result = unlock_rect(slot->staging);
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        goto fail;
+    }
+    *rect_count = output_rect_count;
+    if (sid_out != NULL) {
+        *sid_out = retired->sid;
+    }
+    if (sequence_out != NULL) {
+        *sequence_out = slot->sequence;
+    }
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "SCREEN-READBACK backend=d3d9 phase=retired-ready sid=%u seq=%" PRIu64
+        " rects=%u wait=%u",
+        retired->sid, slot->sequence, output_rect_count, wait ? 1u : 0u);
+    vmsvga3d_dxvk_d3d9_retired_screen_readback_discard(dxvk);
+    return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY;
+
+fail:
+    vmsvga3d_dxvk_d3d9_retired_screen_readback_discard(dxvk);
+    return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+#else
+    (void)dxvk;
+    (void)wait;
+    (void)data;
+    (void)bytes_per_pixel;
+    (void)row_pitch;
+    (void)data_size;
+    (void)destination_width;
+    (void)destination_height;
+    (void)rects;
+    (void)rect_capacity;
+    if (rect_count != NULL) {
+        *rect_count = 0;
+    }
+    if (sid_out != NULL) {
+        *sid_out = SVGA3D_INVALID_ID;
+    }
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
     }
     return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
 #endif

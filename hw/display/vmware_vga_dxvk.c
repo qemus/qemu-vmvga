@@ -13505,6 +13505,87 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 #endif
 }
 
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d9_screen_readback_discard_completed(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    uint64_t *sequence_out)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkScreenReadbackSlot *newest;
+    VMSVGA3DDxvkQueryGetData get_data = NULL;
+    uint32_t query_data = 0;
+    uint32_t released = 0;
+    uint64_t completed_sequence;
+    uint32_t i;
+    int32_t result;
+
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
+    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
+        surface->owner != dxvk || !surface->d3d9_resident ||
+        surface->d3d11_resident) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+    }
+
+    newest = vmsvga3d_dxvk_screen_readback_newest_slot(
+        surface->d3d9_screen_readback, 0);
+    if (newest == NULL) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE;
+    }
+    if (newest->sequence == 0 || newest->query == NULL ||
+        newest->render_target == NULL || newest->staging == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            newest->query, VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+            &get_data, sizeof(get_data))) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+    }
+
+    /* The newest EVENT orders every older cumulative StretchRect on the same
+     * D3D9 device.  Coalescing does not need any of those pixels, so once that
+     * event completes all cached ring resources can be released without a
+     * synchronous GetRenderTargetData. */
+    result = get_data(newest->query, &query_data, sizeof(query_data),
+                      VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH);
+    if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+    }
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+    }
+
+    completed_sequence = newest->sequence;
+    if (sequence_out != NULL) {
+        *sequence_out = completed_sequence;
+    }
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        VMSVGA3DDxvkScreenReadbackSlot *slot =
+            &surface->d3d9_screen_readback[i];
+
+        if (slot->render_target != NULL || slot->staging != NULL ||
+            slot->query != NULL) {
+            released++;
+        }
+        vmsvga3d_dxvk_screen_readback_slot_release_d3d9(slot);
+    }
+    surface->d3d9_screen_readback_sequence = 0;
+
+    VMVGA_TRACE_LOCAL(
+        VMVGA_TRACE_3D,
+        "SCREEN-READBACK backend=d3d9 phase=discard-completed sid=%u "
+        "seq=%" PRIu64 " slots=%u",
+        surface->sid, completed_sequence, released);
+    return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY;
+#else
+    (void)dxvk;
+    (void)surface;
+    if (sequence_out != NULL) {
+        *sequence_out = 0;
+    }
+    return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+#endif
+}
+
 /* vmware_vga_dxvk.c is included before vmware_vga_vgpu10.c in the
  * amalgamated build, so the DXGI enum declared there is not visible here.
  * Keep the small ABI subset needed by ScreenTarget readback local and

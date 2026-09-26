@@ -16566,7 +16566,25 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
         !state->screen_target_barrier_active &&
         (state->screen_target_dirty_count == 0 ||
          state->screen_target_dirty_sid == sid)) {
+        VMSVGA3DDxvkScreenReadbackPollResult discard;
+        uint64_t discarded_sequence = 0;
         uint32_t dropped = state->screen_target_dirty_count;
+
+        discard = vmsvga3d_dxvk_d3d9_screen_readback_discard_completed(
+            s->dxvk, surface->dxvk_surface, &discarded_sequence);
+        if (discard == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING) {
+            if (pending_out != NULL) {
+                *pending_out = true;
+            }
+            return true;
+        }
+        if (discard == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED) {
+            return vmsvga3d_screen_target_quiesce_live(s);
+        }
+        if (discard != VMSVGA3D_DXVK_SCREEN_READBACK_POLL_IDLE &&
+            discard != VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY) {
+            return vmsvga3d_screen_target_quiesce_live(s);
+        }
 
         state->screen_target_dirty_sid = SVGA3D_INVALID_ID;
         state->screen_target_dirty_count = 0;
@@ -16577,8 +16595,8 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "SCREEN-READBACK backend=d3d9 phase=coalesce-switch sid=%u "
-            "rects=%u",
-            sid, dropped);
+            "rects=%u discarded-seq=%" PRIu64,
+            sid, dropped, discarded_sequence);
         return true;
     }
 

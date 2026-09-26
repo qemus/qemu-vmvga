@@ -16664,6 +16664,28 @@ static bool vmsvga3d_screen_target_quiesce_yieldable_live(
             return vmsvga3d_screen_target_quiesce_live(s);
         }
 
+        /* Normal display refresh deliberately leaves a yielded ScreenTarget
+         * barrier alone.  If an older D3D9 mailbox owns publication order,
+         * service it from the retry itself so BUSY can make forward progress. */
+        if (vmsvga3d_dxvk_d3d9_retired_screen_readback_count(s->dxvk) != 0) {
+            bool retired_pending = false;
+
+            if (!vmsvga3d_screen_target_retired_snapshot_service_live(
+                    s, false,
+                    VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_ENTRIES,
+                    VMSVGA3D_SCREEN_TARGET_RETIRE_REFRESH_MAX_BYTES,
+                    &retired_pending)) {
+                vmsvga3d_screen_target_barrier_restore_live(s, false);
+                return vmsvga3d_screen_target_quiesce_live(s);
+            }
+            if (retired_pending) {
+                if (pending_out != NULL) {
+                    *pending_out = true;
+                }
+                return true;
+            }
+        }
+
         if (state->screen_target_barrier_dirty_count != 0) {
             VMSVGA3DDxvkScreenReadbackSubmitResult submit;
             uint64_t sequence = 0;

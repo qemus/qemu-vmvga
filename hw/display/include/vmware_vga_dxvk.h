@@ -555,6 +555,22 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
     uint32_t bytes_per_pixel, uint32_t row_pitch, uint32_t data_size,
     struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
     uint32_t *rect_count, uint64_t min_sequence, uint64_t *sequence_out);
+VMSVGA3DDxvkScreenReadbackRetireResult
+vmsvga3d_dxvk_d3d9_screen_readback_retire_latest(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t sid);
+VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d9_retired_screen_readback_poll(
+    VMSVGA3DDxvk *dxvk, bool wait, void *data, uint32_t bytes_per_pixel,
+    uint32_t row_pitch, uint32_t data_size, uint32_t destination_width,
+    uint32_t destination_height,
+    struct vmsvga3d_d3d9_rect_s *rects, uint32_t rect_capacity,
+    uint32_t *rect_count, uint32_t *sid_out, uint64_t *sequence_out);
+uint32_t vmsvga3d_dxvk_d3d9_retired_screen_readback_count(
+    VMSVGA3DDxvk *dxvk);
+bool vmsvga3d_dxvk_d3d9_retired_screen_readback_peek_bytes(
+    VMSVGA3DDxvk *dxvk, uint64_t *bytes_out);
+void vmsvga3d_dxvk_d3d9_retired_screen_readback_discard(
+    VMSVGA3DDxvk *dxvk);
 bool vmsvga3d_dxvk_d3d11_screen_readback_supported(
     VMSVGA3DDxvkSurface *surface);
 bool vmsvga3d_dxvk_d3d11_screen_readback_pending(

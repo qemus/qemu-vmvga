@@ -16071,18 +16071,22 @@ bool vmsvga3d_dxvk_shader_bind(VMSVGA3DDxvk *dxvk, uint32_t stage,
 #endif
 }
 
-bool vmsvga3d_dxvk_shader_constant(VMSVGA3DDxvk *dxvk, uint32_t target,
-                                   uint32_t reg, const uint32_t values[4])
+bool vmsvga3d_dxvk_shader_constants(VMSVGA3DDxvk *dxvk, uint32_t target,
+                                    uint32_t reg, uint32_t count,
+                                    const uint32_t *values)
 {
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkComFunction entry;
+    union {
+        float f[SVGA3D_CONSTREG_MAX * 4u];
+        int32_t i[SVGA3D_CONSTINTREG_MAX * 4u];
+        int32_t b[SVGA3D_CONSTBOOLREG_MAX];
+    } converted;
     int32_t result;
     uint32_t method;
-    int32_t boolean_value;
-    int32_t int_values[4];
-    float float_values[4];
+    uint32_t i;
 
-    if (!vmsvga3d_dxvk_ready(dxvk) || values == NULL) {
+    if (!vmsvga3d_dxvk_ready(dxvk) || values == NULL || count == 0) {
         return false;
     }
 
@@ -16117,20 +16121,34 @@ bool vmsvga3d_dxvk_shader_constant(VMSVGA3DDxvk *dxvk, uint32_t target,
     if (target == VMSVGA3D_D3D9_CONST_TARGET_VS_BOOL ||
         target == VMSVGA3D_D3D9_CONST_TARGET_PS_BOOL) {
         VMSVGA3DDxvkSetShaderConstantB set_constant = NULL;
+
+        if (count > SVGA3D_CONSTBOOLREG_MAX) {
+            return false;
+        }
+        for (i = 0; i < count; i++) {
+            converted.b[i] = values[i] != 0;
+        }
         memcpy(&set_constant, &entry, sizeof(set_constant));
-        boolean_value = values[0] != 0;
-        result = set_constant(dxvk->d3d9_device, reg, &boolean_value, 1);
+        result = set_constant(dxvk->d3d9_device, reg, converted.b, count);
     } else if (target == VMSVGA3D_D3D9_CONST_TARGET_VS_INT ||
                target == VMSVGA3D_D3D9_CONST_TARGET_PS_INT) {
         VMSVGA3DDxvkSetShaderConstantI set_constant = NULL;
+
+        if (count > SVGA3D_CONSTINTREG_MAX) {
+            return false;
+        }
+        memcpy(converted.i, values, (size_t)count * 4u * sizeof(values[0]));
         memcpy(&set_constant, &entry, sizeof(set_constant));
-        memcpy(int_values, values, sizeof(int_values));
-        result = set_constant(dxvk->d3d9_device, reg, int_values, 1);
+        result = set_constant(dxvk->d3d9_device, reg, converted.i, count);
     } else {
         VMSVGA3DDxvkSetShaderConstantF set_constant = NULL;
+
+        if (count > SVGA3D_CONSTREG_MAX) {
+            return false;
+        }
+        memcpy(converted.f, values, (size_t)count * 4u * sizeof(values[0]));
         memcpy(&set_constant, &entry, sizeof(set_constant));
-        memcpy(float_values, values, sizeof(float_values));
-        result = set_constant(dxvk->d3d9_device, reg, float_values, 1);
+        result = set_constant(dxvk->d3d9_device, reg, converted.f, count);
     }
 
     return vmsvga3d_dxvk_succeeded(result);
@@ -16138,6 +16156,7 @@ bool vmsvga3d_dxvk_shader_constant(VMSVGA3DDxvk *dxvk, uint32_t target,
     (void)dxvk;
     (void)target;
     (void)reg;
+    (void)count;
     (void)values;
     return false;
 #endif

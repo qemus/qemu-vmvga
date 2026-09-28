@@ -15982,8 +15982,9 @@ bool vmsvga3d_dxvk_clear(
             return false;
         }
 
-        result = set_render_target(dxvk->d3d9_device, 0, current_target);
+result = set_render_target(dxvk->d3d9_device, 0, current_target);
         if (!vmsvga3d_dxvk_succeeded(result)) {
+            vmsvga3d_dxvk_d3d9_target_cache_invalidate(dxvk);
             vmsvga3d_dxvk_release(
                 current_target, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
             return false;

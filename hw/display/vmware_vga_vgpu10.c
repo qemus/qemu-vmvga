@@ -6972,8 +6972,7 @@ static bool vmsvga3d_d3d10_input_layout_realize_live(
     }
 
     return vmsvga3d_dxvk_d3d11_input_layout_ensure(
-        s->dxvk, cid, layout_id, shader_id,
-        entry->numDescs != 0 ? elements : NULL, entry->numDescs);
+        s->dxvk, cid, layout_id, shader_id, elements, entry->numDescs);
 }
 
 static void vmsvga3d_d3d10_input_layout_dependency_invalidate_live(

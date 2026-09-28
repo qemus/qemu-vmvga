@@ -8995,6 +8995,7 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     const VMSVGA3DD3D10InputElement *translated = elements;
     VMSVGA3DDxvkD3D11InputElementDesc *native = NULL;
+    VMSVGA3DDxvkD3D11InputElementDesc zero_element = { 0 };
     VMSVGA3DDxvkD3D11CreateInputLayout create_input_layout = NULL;
     VMSVGA3DDxvkShader *shader;
     bool trace_3d;
@@ -9063,8 +9064,8 @@ bool vmsvga3d_dxvk_d3d11_input_layout_ensure(
     }
 
     result = create_input_layout(
-        dxvk->d3d11_device, native, element_count, shader->bytecode,
-        shader->bytecode_size, &native_layout);
+        dxvk->d3d11_device, element_count != 0 ? native : &zero_element,
+        element_count, shader->bytecode, shader->bytecode_size, &native_layout);
 
     VMVGA_TRACE_LOCAL_CACHED(
         trace_3d,
@@ -15895,7 +15896,7 @@ bool vmsvga3d_dxvk_clear(
     bool have_saved_scissor = false;
     bool have_saved_viewport = false;
     bool target_state_saved = true;
-    bool native_state_restored = true;
+    bool target_state_restored = true;
     bool target_cache_saved = false;
     bool state_mutated = false;
     bool success = false;
@@ -15954,76 +15955,41 @@ bool vmsvga3d_dxvk_clear(
 
     /* The normal draw path already keeps the native render-target and
      * depth/stencil bindings cached.  When those cached bindings exactly match
-     * this clear, avoid querying and rebinding the full target set.  The old
-     * path still called SetRenderTarget(0), however, and DXVK 2.7.1 resets both
-     * viewport and scissor to RT0 before its same-target early return.  Rebind
-     * the already-current native RT0 once to preserve those semantics
-     * without disturbing the other MRT/depth bindings. */
+     * this clear, do not query, replace and restore the entire target set.
+     * Keeping the targets bound also means SetRenderTarget cannot implicitly
+     * disturb the viewport, so only the temporary full-target scissor needs to
+     * be saved and restored. */
     if (vmsvga3d_dxvk_d3d9_clear_targets_match(
             dxvk, color_targets, color_levels, target_count, depth_stencil,
             depth_stencil_level)) {
-        void *current_target = NULL;
-        bool restore_ok = true;
+        bool scissor_changed;
 
-        result = get_viewport(dxvk->d3d9_device, &saved_viewport);
-        if (!vmsvga3d_dxvk_succeeded(result)) {
-            return false;
-        }
         result = get_scissor(dxvk->d3d9_device, &saved_scissor);
         if (!vmsvga3d_dxvk_succeeded(result)) {
             return false;
         }
-        result = get_render_target(dxvk->d3d9_device, 0, &current_target);
-        if (!vmsvga3d_dxvk_succeeded(result) || current_target == NULL) {
-            if (current_target != NULL) {
-                vmsvga3d_dxvk_release(
-                    current_target, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+        scissor_changed = saved_scissor.left != clear_scissor->left ||
+                          saved_scissor.top != clear_scissor->top ||
+                          saved_scissor.right != clear_scissor->right ||
+                          saved_scissor.bottom != clear_scissor->bottom;
+        if (scissor_changed) {
+            result = set_scissor(dxvk->d3d9_device, clear_scissor);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                (void)set_scissor(dxvk->d3d9_device, &saved_scissor);
+                return false;
             }
-            return false;
-        }
-
-result = set_render_target(dxvk->d3d9_device, 0, current_target);
-        if (!vmsvga3d_dxvk_succeeded(result)) {
-            vmsvga3d_dxvk_d3d9_target_cache_invalidate(dxvk);
-            vmsvga3d_dxvk_release(
-                current_target, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
-            return false;
-        }
-
-        result = set_scissor(dxvk->d3d9_device, clear_scissor);
-        if (!vmsvga3d_dxvk_succeeded(result)) {
-            bool scissor_restored = vmsvga3d_dxvk_succeeded(
-                set_scissor(dxvk->d3d9_device, &saved_scissor));
-            bool viewport_restored = vmsvga3d_dxvk_succeeded(
-                set_viewport(dxvk->d3d9_device, &saved_viewport));
-
-            if (!scissor_restored || !viewport_restored) {
-                vmsvga3d_dxvk_d3d9_target_cache_invalidate(dxvk);
-            }
-            vmsvga3d_dxvk_release(
-                current_target, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
-            return false;
         }
 
         result = clear(dxvk->d3d9_device, rect_count, rects, flags, color,
                        depth, stencil);
         success = vmsvga3d_dxvk_succeeded(result);
 
-        result = set_scissor(dxvk->d3d9_device, &saved_scissor);
-        if (!vmsvga3d_dxvk_succeeded(result)) {
-            success = false;
-            restore_ok = false;
+        if (scissor_changed) {
+            result = set_scissor(dxvk->d3d9_device, &saved_scissor);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                success = false;
+            }
         }
-        result = set_viewport(dxvk->d3d9_device, &saved_viewport);
-        if (!vmsvga3d_dxvk_succeeded(result)) {
-            success = false;
-            restore_ok = false;
-        }
-        if (!restore_ok) {
-            vmsvga3d_dxvk_d3d9_target_cache_invalidate(dxvk);
-        }
-        vmsvga3d_dxvk_release(
-            current_target, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
         return success;
     }
 
@@ -16117,7 +16083,7 @@ restore:
                                        saved_targets[i]);
             if (!vmsvga3d_dxvk_succeeded(result)) {
                 success = false;
-                native_state_restored = false;
+                target_state_restored = false;
             }
         }
 
@@ -16125,30 +16091,11 @@ restore:
                                    have_saved_depth ? saved_depth_stencil : NULL);
         if (!vmsvga3d_dxvk_succeeded(result)) {
             success = false;
-            native_state_restored = false;
+            target_state_restored = false;
         }
 
-        if (have_saved_scissor) {
-            result = set_scissor(dxvk->d3d9_device, &saved_scissor);
-            if (!vmsvga3d_dxvk_succeeded(result)) {
-                success = false;
-                native_state_restored = false;
-            }
-        }
-        if (have_saved_viewport) {
-            result = set_viewport(dxvk->d3d9_device, &saved_viewport);
-            if (!vmsvga3d_dxvk_succeeded(result)) {
-                success = false;
-                native_state_restored = false;
-            }
-        }
-
-        /* Do not claim the old target bindings are still valid until every
-         * piece of native state disturbed by this helper has been restored.
-         * A failed viewport/scissor restore must force the next draw through
-         * target replay instead of leaving cached bindings active. */
         if (target_cache_saved && target_state_saved &&
-            native_state_restored) {
+            target_state_restored) {
             memcpy(dxvk->d3d9_bound_render_targets, cached_targets,
                    sizeof(cached_targets));
             memcpy(dxvk->d3d9_bound_render_target_levels,
@@ -16160,6 +16107,19 @@ restore:
                 cached_depth_stencil_level;
             dxvk->d3d9_bound_depth_stencil_valid =
                 cached_depth_stencil_valid;
+        }
+
+        if (have_saved_scissor) {
+            result = set_scissor(dxvk->d3d9_device, &saved_scissor);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                success = false;
+            }
+        }
+        if (have_saved_viewport) {
+            result = set_viewport(dxvk->d3d9_device, &saved_viewport);
+            if (!vmsvga3d_dxvk_succeeded(result)) {
+                success = false;
+            }
         }
     }
 

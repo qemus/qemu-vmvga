@@ -3210,7 +3210,7 @@ static bool vmsvga3d_surface_image_layout(
     return true;
 }
 
-static size_t vmsvga3d_surface_memory_size(const struct vmsvga_state_s *s)
+static size_t vmsvga3d_gb_surface_memory_size(const struct vmsvga_state_s *s)
 {
     /* GB surfaces use the advertised guest-backed budget, independently of
      * the legacy dedicated-memory budget and the BAR1 framebuffer size. */
@@ -3226,13 +3226,12 @@ static VMSVGA3DSurface *vmsvga3d_surface_prepare(
     uint32_t multisample_count, SVGA3dMSPattern multisample_pattern,
     SVGA3dTextureFilter autogen_filter,
     uint32_t array_elements, const SVGA3dSize *mip_sizes,
-    uint32_t mip_count)
+    uint32_t mip_count, size_t limit)
 {
     struct vmsvga3d_state_s *state;
     VMSVGA3DSurface *old_surface;
     VMSVGA3DSurface *surface;
     size_t old_bytes;
-    size_t limit;
     uint64_t storage_bytes = 0;
     uint32_t i;
 
@@ -3330,7 +3329,6 @@ static VMSVGA3DSurface *vmsvga3d_surface_prepare(
 
     old_surface = state->surfaces[sid];
     old_bytes = old_surface != NULL ? old_surface->storage_bytes : 0;
-    limit = vmsvga3d_surface_memory_size(s);
 
     if (surface->storage_bytes > limit || state->surface_bytes < old_bytes ||
         state->surface_bytes - old_bytes > limit - surface->storage_bytes) {
@@ -3447,7 +3445,8 @@ static bool vmsvga3d_surface_install(
     surface = vmsvga3d_surface_prepare(s, sid, surface_flags, format, face,
                                        multisample_count, multisample_pattern,
                                        autogen_filter, array_elements,
-                                       mip_sizes, mip_count);
+                                       mip_sizes, mip_count,
+                                       vmsvga_surface_memory_size(s));
     if (surface == NULL) {
         return false;
     }
@@ -3574,7 +3573,7 @@ static VMSVGA3DSurface *vmsvga2d_surface_prepare(
 
     old_surface = state->surfaces[sid];
     old_bytes = old_surface != NULL ? old_surface->storage_bytes : 0;
-    limit = vmsvga3d_surface_memory_size(s);
+    limit = vmsvga3d_gb_surface_memory_size(s);
 
     if (surface->storage_bytes > limit || state->surface_bytes < old_bytes ||
         state->surface_bytes - old_bytes > limit - surface->storage_bytes) {
@@ -3762,7 +3761,8 @@ static bool vmsvga3d_gb_surface_define_live(
     surface = vmsvga3d_surface_prepare(s, sid, surface_flags, format, face,
                                        multisample_count, multisample_pattern,
                                        autogen_filter, array_elements,
-                                       mip_sizes, mip_count);
+                                       mip_sizes, mip_count,
+                                       vmsvga3d_gb_surface_memory_size(s));
     g_free(mip_sizes);
     if (surface == NULL) {
         return false;

@@ -4481,6 +4481,20 @@ bool vmsvga3d_dxvk_d3d11_surface_materialize(
     }
 
     if (!vmsvga3d_dxvk_succeeded(result) || resource == NULL) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "D3D11-DXVK result=FAIL operation=CREATE_RESOURCE sid=%u "
+            "resource=%u size=%ux%ux%u mips=%u arrays=%u bytes=%u format=%u "
+            "usage=%u bind=0x%08x cpu=0x%08x misc=0x%08x "
+            "samples=%u quality=%u hr=0x%08x",
+            surface->sid, resource_desc->resource_dimension,
+            resource_desc->width, resource_desc->height, resource_desc->depth,
+            resource_desc->mip_levels, resource_desc->array_size,
+            resource_desc->byte_width, resource_desc->format,
+            resource_desc->usage, resource_desc->bind_flags,
+            resource_desc->cpu_access_flags, resource_desc->misc_flags,
+            resource_desc->sample_count, resource_desc->sample_quality,
+            (uint32_t)result);
         return false;
     }
 

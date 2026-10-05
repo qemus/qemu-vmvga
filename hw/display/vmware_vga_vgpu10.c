@@ -9507,24 +9507,6 @@ static bool vmsvga3d_d3d10_shader_resources_unbind_modified_live(
     return true;
 }
 
-static bool vmsvga3d_d3d10_entry_is_zero(const void *entry, size_t size)
-{
-    const uint8_t *bytes = entry;
-    size_t i;
-
-    if (entry == NULL) {
-        return false;
-    }
-
-    for (i = 0; i < size; i++) {
-        if (bytes[i] != 0) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
 static void vmsvga3d_d3d10_cotable_sanitize_live(
     SVGACOTableType type, void *entries, uint32_t valid_entries,
     uint32_t capacity_entries)
@@ -10281,6 +10263,7 @@ static bool vmsvga3d_d3d10_so_flush_preceding_conflicts_live(
             entry = vmsvga3d_dx_cotable_entry_ptr(
                 s, cid, SVGA_COTABLE_RTVIEW, id);
             if (entry != NULL &&
+                !vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
                 vmsvga3d_d3d10_so_plan_contains_sid(plan, entry->sid)) {
                 flush_outputs = true;
                 break;
@@ -10301,6 +10284,7 @@ static bool vmsvga3d_d3d10_so_flush_preceding_conflicts_live(
                 entry = vmsvga3d_dx_cotable_entry_ptr(
                     s, cid, SVGA_COTABLE_UAVIEW, id);
                 if (entry != NULL &&
+                    !vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
                     vmsvga3d_d3d10_so_plan_contains_sid(plan, entry->sid)) {
                     flush_outputs = true;
                     break;
@@ -10332,6 +10316,7 @@ static bool vmsvga3d_d3d10_so_flush_preceding_conflicts_live(
             entry = vmsvga3d_dx_cotable_entry_ptr(
                 s, cid, SVGA_COTABLE_UAVIEW, id);
             if (entry != NULL &&
+                !vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
                 vmsvga3d_d3d10_so_plan_contains_sid(plan, entry->sid)) {
                 flush_cs_uavs = true;
                 break;
@@ -10407,6 +10392,7 @@ static bool vmsvga3d_d3d10_so_flush_preceding_conflicts_live(
             entry = vmsvga3d_dx_cotable_entry_ptr(
                 s, cid, SVGA_COTABLE_SRVIEW, id);
             if (entry != NULL &&
+                !vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
                 vmsvga3d_d3d10_so_plan_contains_sid(plan, entry->sid)) {
                 flush_shader_resources = true;
                 break;
@@ -17179,6 +17165,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               entry = vmsvga3d_dx_cotable_entry_ptr(
                   s, cid, SVGA_COTABLE_SRVIEW, plan.ids[i]);
               if (entry != NULL &&
+                  !vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
                   !vmsvga3d_d3d10_deferred_so_realize_before_sid(
                       s, cid, entry->sid, NULL)) {
                   return false;
@@ -17873,6 +17860,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                   entry = vmsvga3d_dx_cotable_entry_ptr(
                       s, cid, SVGA_COTABLE_RTVIEW, plan.ids[i]);
                   if (entry != NULL &&
+                      !vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
                       !vmsvga3d_d3d10_deferred_so_realize_before_sid(
                           s, cid, entry->sid, &so_displaced)) {
                       return false;

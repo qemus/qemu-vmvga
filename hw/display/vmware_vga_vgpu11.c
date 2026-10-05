@@ -2141,6 +2141,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             entry = vmsvga3d_dx_cotable_entry_ptr(
                 s, cid, SVGA_COTABLE_UAVIEW, plan.ids[i]);
             if (entry != NULL &&
+                !vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
                 !vmsvga3d_d3d10_deferred_so_realize_before_sid(
                     s, cid, entry->sid, &so_displaced)) {
                 return false;
@@ -2222,6 +2223,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             entry = vmsvga3d_dx_cotable_entry_ptr(
                 s, cid, SVGA_COTABLE_UAVIEW, plan.ids[i]);
             if (entry != NULL &&
+                !vmsvga3d_d3d10_entry_is_zero(entry, sizeof(*entry)) &&
                 !vmsvga3d_d3d10_deferred_so_realize_before_sid(
                     s, cid, entry->sid, &so_displaced)) {
                 return false;

@@ -10216,77 +10216,6 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
     return true;
 }
 
-bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
-    struct vmsvga_state_s *s, uint32_t cid, SVGA3dSurfaceId sid,
-    bool *displaced_out)
-{
-    VMSVGA3DDXContext *context;
-    VMSVGA3DD3D10SOTargetsPlan restore_plan;
-    const VMSVGA3DD3D10SOTargetsPlan *plan;
-    bool conflicts = false;
-    uint32_t i;
-
-    if (s == NULL) {
-        return false;
-    }
-    if (sid == SVGA3D_INVALID_ID) {
-        return true;
-    }
-
-    context = vmsvga3d_dx_context(s, cid);
-    if (context == NULL) {
-        return false;
-    }
-
-    /* The SO shadow is also the source for STATE_ALL/context-switch replay.
-     * A later input/output binding that aliases an SO target therefore has to
-     * displace that slot in the shadow, not just in the current native state,
-     * or a later full replay would resurrect the older SO binding. */
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (context->shadow.streamOut.targets[i] == sid) {
-            conflicts = true;
-            break;
-        }
-    }
-    if (!conflicts) {
-        return true;
-    }
-
-    /* Preserve guest command order across deferred/restored SO state.  If the
-     * conflicting SO table has not reached the native context yet, realize it
-     * before the later resource-binding command.  That later command can then
-     * win D3D11's hazard resolution in guest order. */
-    if (context->pending_so_targets_valid ||
-        (context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_SOTARGETS) != 0) {
-        if (context->pending_so_targets_valid) {
-            plan = &context->pending_so_targets;
-        } else {
-            if (vmsvga3d_d3d10_so_targets_restore_plan(
-                    context->shadow.streamOut.targets, &restore_plan) ==
-                VMSVGA3D_D3D10_LEVEL_INVALID) {
-                return false;
-            }
-            plan = &restore_plan;
-        }
-
-        if (!vmsvga3d_d3d10_so_targets_bind_live(s, cid, plan)) {
-            return false;
-        }
-        context->pending_so_targets_valid = false;
-        context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
-    }
-
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (context->shadow.streamOut.targets[i] == sid) {
-            context->shadow.streamOut.targets[i] = SVGA3D_INVALID_ID;
-        }
-    }
-    if (displaced_out != NULL) {
-        *displaced_out = true;
-    }
-    return true;
-}
-
 
 static bool vmsvga3d_d3d10_so_targets_unbind_native_live(
     struct vmsvga_state_s *s, uint32_t cid)
@@ -11963,6 +11892,12 @@ static bool vmsvga3d_d3d10_update_subresource_live(
     }
 
     image = &surface->mips[command->subResource];
+    if (vmsvga3d_video_planar(surface->format) &&
+        !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        return vmsvga3d_video_mob_transfer_live(
+            s, &entry, mob, surface, image, command->subResource,
+            &command->box, false, false);
+    }
     if (!vmsvga3d_d3d10_update_box_live(
             surface, image, &command->box, &layout) ||
         !vmsvga3d_d3d10_mob_subresource_layout_live(
@@ -12443,6 +12378,13 @@ static bool vmsvga3d_gb_readback_image_partial_live(
         return true;
     }
 
+    if (vmsvga3d_video_planar(surface->format) &&
+        !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        return vmsvga3d_video_mob_transfer_live(
+            s, &entry, mob, surface, image, subresource, requested_box,
+            true, invert_box);
+    }
+
     if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
         image->data_size == 0 || image->plane_size % image->pitch != 0 ||
         image->data_size % image->plane_size != 0 ||
@@ -12746,6 +12688,12 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
     }
 
     image = &surface->mips[command->subResource];
+    if (vmsvga3d_video_planar(surface->format) &&
+        !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        return vmsvga3d_video_mob_transfer_live(
+            s, &entry, mob, surface, image, command->subResource,
+            NULL, true, false);
+    }
     if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
         image->data_size == 0 || image->plane_size % image->pitch != 0 ||
         image->data_size % image->plane_size != 0 ||
@@ -16918,26 +16866,8 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                   vmsvga3d_dx_shader_type_max(s), count,
                   count != 0 ? ids : NULL,
                   context->cotables[SVGA_COTABLE_SRVIEW].capacity_entries,
-                  &plan) == VMSVGA3D_D3D10_LEVEL_INVALID) {
-              return false;
-          }
-
-          for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
-              SVGACOTableDXSRViewEntry *entry;
-
-              if (plan.ids[i] == SVGA3D_INVALID_ID) {
-                  continue;
-              }
-              entry = vmsvga3d_dx_cotable_entry_ptr(
-                  s, cid, SVGA_COTABLE_SRVIEW, plan.ids[i]);
-              if (entry != NULL &&
-                  !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                      s, cid, entry->sid, NULL)) {
-                  return false;
-              }
-          }
-
-          if (!vmsvga3d_state_dx_apply_shader_resources(s, cid, &plan)) {
+                  &plan) == VMSVGA3D_D3D10_LEVEL_INVALID ||
+              !vmsvga3d_state_dx_apply_shader_resources(s, cid, &plan)) {
               return false;
           }
 
@@ -17135,33 +17065,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                      count * sizeof(buffers[0]));
           }
 
-          {
-              bool so_displaced = false;
-
-              if (vmsvga3d_d3d10_vertex_buffers_set_plan(
-                      command.startBuffer, count, count != 0 ? buffers : NULL,
-                      &plan) == VMSVGA3D_D3D10_LEVEL_INVALID) {
-                  return false;
-              }
-              for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
-                  if (!vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                          s, cid, plan.bindings[i].sid, &so_displaced)) {
-                      return false;
-                  }
-              }
-              if (!vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
-                  return false;
-              }
-              if (so_displaced) {
-                  for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
-                      context->vertex_buffer_modified |=
-                          UINT64_C(1) << (plan.start_buffer + i);
-                  }
-                  if (plan.shadow_update_count != 0) {
-                      context->renderer_dirty |=
-                          VMSVGA3D_DX_CTX_F_STATE_VERTEXBUFFER;
-                  }
-              }
+          if (vmsvga3d_d3d10_vertex_buffers_set_plan(
+                  command.startBuffer, count, count != 0 ? buffers : NULL,
+                  &plan) == VMSVGA3D_D3D10_LEVEL_INVALID ||
+              !vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
+              return false;
           }
 
           if (count != 0) {
@@ -17217,33 +17125,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                   buffers_v2[i].sizeInBytes);
           }
 
-          {
-              bool so_displaced = false;
-
-              if (vmsvga3d_d3d10_vertex_buffers_set_plan(
-                      command.startBuffer, count, count != 0 ? buffers : NULL,
-                      &plan) == VMSVGA3D_D3D10_LEVEL_INVALID) {
-                  return false;
-              }
-              for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
-                  if (!vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                          s, cid, plan.bindings[i].sid, &so_displaced)) {
-                      return false;
-                  }
-              }
-              if (!vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
-                  return false;
-              }
-              if (so_displaced) {
-                  for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
-                      context->vertex_buffer_modified |=
-                          UINT64_C(1) << (plan.start_buffer + i);
-                  }
-                  if (plan.shadow_update_count != 0) {
-                      context->renderer_dirty |=
-                          VMSVGA3D_DX_CTX_F_STATE_VERTEXBUFFER;
-                  }
-              }
+          if (vmsvga3d_d3d10_vertex_buffers_set_plan(
+                  command.startBuffer, count, count != 0 ? buffers : NULL,
+                  &plan) == VMSVGA3D_D3D10_LEVEL_INVALID ||
+              !vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
+              return false;
           }
 
           if (count != 0) {
@@ -17301,33 +17187,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                   updates[i].offset, updates[i].sizeInBytes);
           }
 
-          {
-              bool so_displaced = false;
-
-              if (vmsvga3d_d3d10_vertex_buffers_set_plan(
-                      command.startBuffer, count, count != 0 ? buffers : NULL,
-                      &plan) == VMSVGA3D_D3D10_LEVEL_INVALID) {
-                  return false;
-              }
-              for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
-                  if (!vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                          s, cid, plan.bindings[i].sid, &so_displaced)) {
-                      return false;
-                  }
-              }
-              if (!vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
-                  return false;
-              }
-              if (so_displaced) {
-                  for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
-                      context->vertex_buffer_modified |=
-                          UINT64_C(1) << (plan.start_buffer + i);
-                  }
-                  if (plan.shadow_update_count != 0) {
-                      context->renderer_dirty |=
-                          VMSVGA3D_DX_CTX_F_STATE_VERTEXBUFFER;
-                  }
-              }
+          if (vmsvga3d_d3d10_vertex_buffers_set_plan(
+                  command.startBuffer, count, count != 0 ? buffers : NULL,
+                  &plan) == VMSVGA3D_D3D10_LEVEL_INVALID ||
+              !vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
+              return false;
           }
 
           if (count != 0) {
@@ -17359,21 +17223,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               "offset=%u",
               cid, command.sid, command.format, command.offset);
 
-          {
-              bool so_displaced = false;
-
-              if (vmsvga3d_d3d10_index_buffer_set_plan(
-                      command.sid, command.format, command.offset, &plan) ==
-                      VMSVGA3D_D3D10_LEVEL_INVALID ||
-                  !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                      s, cid, command.sid, &so_displaced) ||
-                  !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
-                  return false;
-              }
-              if (so_displaced) {
-                  context->renderer_dirty |=
-                      VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER;
-              }
+          if (vmsvga3d_d3d10_index_buffer_set_plan(
+                  command.sid, command.format, command.offset, &plan) ==
+                  VMSVGA3D_D3D10_LEVEL_INVALID ||
+              !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
+              return false;
           }
 
           vmsvga3d_d3d10_index_buffer_size_update(
@@ -17398,21 +17252,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               cid, command.sid, command.format, command.offset,
               command.sizeInBytes);
 
-          {
-              bool so_displaced = false;
-
-              if (vmsvga3d_d3d10_index_buffer_set_plan(
-                      command.sid, command.format, command.offset, &plan) ==
-                      VMSVGA3D_D3D10_LEVEL_INVALID ||
-                  !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                      s, cid, command.sid, &so_displaced) ||
-                  !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
-                  return false;
-              }
-              if (so_displaced) {
-                  context->renderer_dirty |=
-                      VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER;
-              }
+          if (vmsvga3d_d3d10_index_buffer_set_plan(
+                  command.sid, command.format, command.offset, &plan) ==
+                  VMSVGA3D_D3D10_LEVEL_INVALID ||
+              !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
+              return false;
           }
 
           vmsvga3d_d3d10_index_buffer_size_update(
@@ -17439,21 +17283,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               "offset=%u size=%u",
               cid, sid, command.format, command.offset, command.sizeInBytes);
 
-          {
-              bool so_displaced = false;
-
-              if (vmsvga3d_d3d10_index_buffer_set_plan(
-                      sid, command.format, command.offset, &plan) ==
-                      VMSVGA3D_D3D10_LEVEL_INVALID ||
-                  !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                      s, cid, sid, &so_displaced) ||
-                  !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
-                  return false;
-              }
-              if (so_displaced) {
-                  context->renderer_dirty |=
-                      VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER;
-              }
+          if (vmsvga3d_d3d10_index_buffer_set_plan(
+                  sid, command.format, command.offset, &plan) ==
+                  VMSVGA3D_D3D10_LEVEL_INVALID ||
+              !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
+              return false;
           }
 
           vmsvga3d_d3d10_index_buffer_size_update(
@@ -17603,43 +17437,14 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               }
           }
 
-          {
-              bool so_displaced = false;
-
-              if (vmsvga3d_d3d10_render_targets_set_plan(
-                      command.depthStencilViewId, count,
-                      count != 0 ? ids : NULL,
-                      context->cotables[SVGA_COTABLE_DSVIEW].capacity_entries,
-                      context->cotables[SVGA_COTABLE_RTVIEW].capacity_entries,
-                      context->render_target_count, &plan) ==
-                  VMSVGA3D_D3D10_LEVEL_INVALID) {
-                  return false;
-              }
-
-              for (i = 0; i < plan.shadow_update_count; i++) {
-                  SVGACOTableDXRTViewEntry *entry;
-
-                  if (plan.ids[i] == SVGA3D_INVALID_ID) {
-                      continue;
-                  }
-                  entry = vmsvga3d_dx_cotable_entry_ptr(
-                      s, cid, SVGA_COTABLE_RTVIEW, plan.ids[i]);
-                  if (entry != NULL &&
-                      !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                          s, cid, entry->sid, &so_displaced)) {
-                      return false;
-                  }
-              }
-
-              if (!vmsvga3d_state_dx_apply_render_targets(s, cid, &plan)) {
-                  return false;
-              }
-              if (so_displaced) {
-                  context->renderer_dirty |=
-                      VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
-              }
-              return true;
-          }
+          return vmsvga3d_d3d10_render_targets_set_plan(
+                     command.depthStencilViewId, count,
+                     count != 0 ? ids : NULL,
+                     context->cotables[SVGA_COTABLE_DSVIEW].capacity_entries,
+                     context->cotables[SVGA_COTABLE_RTVIEW].capacity_entries,
+                     context->render_target_count, &plan) !=
+                     VMSVGA3D_D3D10_LEVEL_INVALID &&
+                 vmsvga3d_state_dx_apply_render_targets(s, cid, &plan);
       }
 
     case SVGA_3D_CMD_DX_SET_PREDICATION: {
@@ -17693,12 +17498,11 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           /* SET_SOTARGETS changes the native hazard boundary immediately, but
-           * binding the new SO table here lets later VB/IB/SRV/RTV commands
-           * make D3D11 silently alter those bindings behind our guest shadow.
-           * Record the exact guest plan first and unbind the previous native SO
-           * table now.  Normally draw setup coalesces and binds the newest plan;
-           * a later overlapping resource-binding command realizes it earlier so
-           * guest command order still decides which binding wins the hazard. */
+           * binding the new SO table here lets later VB/IB/SRV commands make
+           * D3D11 silently alter those bindings behind our guest shadow.
+           * Record the exact guest plan first, unbind the previous native SO
+           * table now, and let draw setup bind the pending new table after the
+           * input state has been realized. */
           return vmsvga3d_state_dx_apply_so_targets(s, cid, &plan) &&
                  (!plan.immediate_bind ||
                   vmsvga3d_d3d10_so_targets_unbind_native_live(s, cid));

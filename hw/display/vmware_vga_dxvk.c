@@ -28,6 +28,7 @@
 #include "qapi/error.h"
 
 #include "include/vmware_vga_vgpu9.h"
+#include "include/vmware_vga_video.h"
 #include "include/vmware_vga_vgpu10.h"
 #include "include/vmware_vga_vgpu11.h"
 #include "include/vmware_vga_dxvk.h"
@@ -471,6 +472,7 @@ struct vmsvga3d_dxvk_surface_s {
 #define VMSVGA3D_DXVK_IDIRECT3D9_RELEASE 2u
 #define VMSVGA3D_DXVK_IDIRECT3D9_CHECK_DEVICE_FORMAT 10u
 #define VMSVGA3D_DXVK_IDIRECT3D9_CHECK_DEPTH_STENCIL_MATCH 12u
+#define VMSVGA3D_DXVK_IDIRECT3D9_CHECK_DEVICE_FORMAT_CONVERSION 13u
 #define VMSVGA3D_DXVK_IDIRECT3D9_CREATE_DEVICE 16u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE 2u
 #define VMSVGA3D_DXVK_IDIRECT3DDEVICE9_CREATE_TEXTURE 23u
@@ -800,6 +802,9 @@ typedef int32_t (*VMSVGA3DDxvkCreateDevice)(
 typedef int32_t (*VMSVGA3DDxvkCheckDeviceFormat)(
     void *d3d9, uint32_t adapter, uint32_t device_type, uint32_t adapter_format,
     uint32_t usage, uint32_t resource_type, uint32_t check_format);
+typedef int32_t (*VMSVGA3DDxvkCheckDeviceFormatConversion)(
+    void *d3d9, uint32_t adapter, uint32_t device_type,
+    uint32_t source_format, uint32_t target_format);
 typedef int32_t (*VMSVGA3DDxvkCheckDepthStencilMatch)(
     void *d3d9, uint32_t adapter, uint32_t device_type, uint32_t adapter_format,
     uint32_t render_target_format, uint32_t depth_stencil_format);
@@ -2750,6 +2755,37 @@ static bool vmsvga3d_dxvk_d3d9_check_format(
 #endif
 }
 
+bool vmsvga3d_dxvk_d3d9_supports_video(
+    const VMSVGA3DDxvk *dxvk, uint32_t format)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkComFunction entry;
+    VMSVGA3DDxvkCheckDeviceFormatConversion check_conversion = NULL;
+
+    if ((format != VMSVGA3D_D3D9_MAKE_FOURCC('U', 'Y', 'V', 'Y') &&
+         format != VMSVGA3D_D3D9_MAKE_FOURCC('Y', 'U', 'Y', '2') &&
+         format != VMSVGA3D_D3D9_MAKE_FOURCC('N', 'V', '1', '2') &&
+         format != VMSVGA3D_D3D9_MAKE_FOURCC('Y', 'V', '1', '2')) ||
+        !vmsvga3d_dxvk_d3d9_check_format(
+            dxvk, format, 0, VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE) ||
+        !vmsvga3d_dxvk_d3d9_check_format(
+            dxvk, format, 0, VMSVGA3D_DXVK_D3D9_RTYPE_SURFACE)) {
+        return false;
+    }
+    entry = vmsvga3d_dxvk_vtable_entry(
+        dxvk->d3d9, VMSVGA3D_DXVK_IDIRECT3D9_CHECK_DEVICE_FORMAT_CONVERSION);
+    memcpy(&check_conversion, &entry, sizeof(check_conversion));
+    return check_conversion != NULL &&
+           check_conversion(dxvk->d3d9, VMSVGA3D_DXVK_D3DADAPTER_DEFAULT,
+               VMSVGA3D_DXVK_D3DDEVTYPE_HAL, format,
+               21 /* D3DFMT_A8R8G8B8 */) >= 0;
+#else
+    (void)dxvk;
+    (void)format;
+    return false;
+#endif
+}
+
 bool vmsvga3d_dxvk_d3d9_supports_intz(const VMSVGA3DDxvk *dxvk)
 {
     const uint32_t intz = VMSVGA3D_D3D9_MAKE_FOURCC('I', 'N', 'T', 'Z');
@@ -2998,6 +3034,27 @@ uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
 
     if (caps == 0 || format == 0 || dxvk == NULL || !dxvk->ready) {
         return 0;
+    }
+
+    /* Qualify video operations against the RGB fallback, which also handles
+     * GPU-written video.  Native input-only YUV is probed separately when
+     * materializing a texture; both paths keep the same 2D guest operations. */
+    if (format == VMSVGA3D_D3D9_MAKE_FOURCC('U', 'Y', 'V', 'Y') ||
+        format == VMSVGA3D_D3D9_MAKE_FOURCC('Y', 'U', 'Y', '2') ||
+        format == VMSVGA3D_D3D9_MAKE_FOURCC('N', 'V', '1', '2') ||
+        format == VMSVGA3D_D3D9_MAKE_FOURCC('Y', 'V', '1', '2')) {
+        format = 21; /* D3DFMT_A8R8G8B8 */
+        if (!vmsvga3d_dxvk_d3d9_check_format(
+                dxvk, format, 0, VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE) ||
+            !vmsvga3d_dxvk_d3d9_check_format(
+                dxvk, format, VMSVGA3D_DXVK_D3DUSAGE_RENDERTARGET,
+                VMSVGA3D_DXVK_D3D9_RTYPE_TEXTURE)) {
+            return 0;
+        }
+        result &= SVGA3DFORMAT_OP_OFFSCREENPLAIN |
+                  SVGA3DFORMAT_OP_CONVERT_TO_ARGB |
+                  SVGA3DFORMAT_OP_NOFILTER | SVGA3DFORMAT_OP_NOALPHABLEND |
+                  SVGA3DFORMAT_OP_NOTEXCOORDWRAPNORMIP;
     }
 
     if ((result & SVGA3DFORMAT_OP_TEXTURE) != 0 &&
@@ -3666,6 +3723,11 @@ static bool vmsvga3d_dxvk_surface_plan_compatible(
 {
     if (surface == NULL || plan == NULL || !surface->d3d9_resident ||
         surface->d3d9_resource == NULL) {
+        return false;
+    }
+
+    if (plan->use != VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET &&
+        surface->d3d9_format != plan->primary.format) {
         return false;
     }
 
@@ -11891,6 +11953,89 @@ static bool vmsvga3d_dxvk_surface_level_acquire(
     return false;
 }
 #endif
+
+bool vmsvga3d_dxvk_surface_upload_video(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    SVGA3dSurfaceFormat format, uint32_t width, uint32_t height,
+    const void *data, uint32_t pitch, uint32_t data_size)
+{
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+    VMSVGA3DDxvkSurfaceLockRect lock_rect = NULL;
+    VMSVGA3DDxvkSurfaceUnlockRect unlock_rect = NULL;
+    VMSVGA3DDxvkUpdateSurface update_surface = NULL;
+    VMSVGA3DDxvkLockedRect locked = { 0 };
+    void *source_surface = NULL;
+    void *destination_surface = NULL;
+    uint64_t locked_size;
+    int32_t result;
+    bool copied;
+    bool success = false;
+
+    if (!vmsvga3d_dxvk_ready(dxvk) || surface == NULL ||
+        !surface->d3d9_resident || !surface->d3d9_has_bounce ||
+        surface->d3d9_usage != 0 || surface->d3d9_levels != 1 ||
+        surface->d3d9_resource_type != VMSVGA3D_D3D9_HOST_RESOURCE_TEXTURE ||
+        !vmsvga3d_video_yuv(format) ||
+        surface->d3d9_format != vmsvga3d_d3d9_surface_format(format) ||
+        !vmsvga3d_dxvk_surface_level_acquire(surface, true, 0,
+                                             &source_surface) ||
+        !vmsvga3d_dxvk_surface_level_acquire(surface, false, 0,
+                                             &destination_surface) ||
+        !vmsvga3d_dxvk_get_method(
+            source_surface, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_LOCK_RECT,
+            &lock_rect, sizeof(lock_rect)) ||
+        !vmsvga3d_dxvk_get_method(
+            source_surface, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_UNLOCK_RECT,
+            &unlock_rect, sizeof(unlock_rect)) ||
+        !vmsvga3d_dxvk_get_method(
+            dxvk->d3d9_device, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_UPDATE_SURFACE,
+            &update_surface, sizeof(update_surface))) {
+        goto out;
+    }
+    result = lock_rect(source_surface, &locked, NULL, 0);
+    if (!vmsvga3d_dxvk_succeeded(result)) {
+        goto out;
+    }
+    /* The converter consumes a full serialized YUV image.  Only its useful
+     * rows are written; DXVK's extra staging rows are not part of the image. */
+    locked_size = locked.pitch > 0 ? (uint64_t)locked.pitch * height : 0;
+    if (vmsvga3d_video_planar(format)) {
+        locked_size += locked_size / 2u;
+    }
+    copied = locked.pitch > 0 && locked_size <= UINT32_MAX &&
+             vmsvga3d_video_copy_to_dxvk(format, width, height, data, pitch,
+                 data_size, locked.bits, (uint32_t)locked.pitch,
+                 (uint32_t)locked_size);
+    result = unlock_rect(source_surface);
+    if (!copied || !vmsvga3d_dxvk_succeeded(result)) {
+        goto out;
+    }
+    result = update_surface(dxvk->d3d9_device, source_surface, NULL,
+                            destination_surface, NULL);
+    success = vmsvga3d_dxvk_succeeded(result);
+
+out:
+    if (destination_surface != NULL) {
+        vmsvga3d_dxvk_release(destination_surface,
+                              VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+    }
+    if (source_surface != NULL) {
+        vmsvga3d_dxvk_release(source_surface,
+                              VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+    }
+    return success;
+#else
+    (void)dxvk;
+    (void)surface;
+    (void)format;
+    (void)width;
+    (void)height;
+    (void)data;
+    (void)pitch;
+    (void)data_size;
+    return false;
+#endif
+}
 
 bool vmsvga3d_dxvk_surface_upload_level(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,

@@ -37,6 +37,7 @@
 #pragma pack(pop)
 #include "include/vmware_vga_3d_state.h"
 #include "include/vmware_vga_vgpu9.h"
+#include "include/vmware_vga_video.h"
 #include "include/vmware_vga_vgpu10.h"
 #include "include/vmware_vga_dxvk.h"
 #include "hw/pci/pci_device.h"
@@ -6703,6 +6704,18 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_surface_copy(
     const SVGA3dCopyBox *boxes, uint32_t box_count,
     const VMSVGA3DD3D9SurfaceCopyPlan *plan)
 {
+    /* Video SurfaceCopy preserves guest bytes, including overlapping
+     * self-copies; it must not become an RGB round trip through StretchRect
+     * or write GPU pixels into an input-only native YUV resource. */
+    if (s != NULL && s->svga3d != NULL &&
+        command->src.sid < SVGA3D_MAX_SURFACE_IDS &&
+        command->dest.sid < SVGA3D_MAX_SURFACE_IDS &&
+        ((s->svga3d->surfaces[command->src.sid] != NULL &&
+          vmsvga3d_video_yuv(s->svga3d->surfaces[command->src.sid]->format)) ||
+         (s->svga3d->surfaces[command->dest.sid] != NULL &&
+          vmsvga3d_video_yuv(s->svga3d->surfaces[command->dest.sid]->format)))) {
+        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
     if (plan->execution == VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED) {
         return vmsvga3d_d3d9_runtime_surface_copy(s, command, boxes, box_count,
                                                   plan);
@@ -6715,6 +6728,17 @@ static VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_try_stretch_blt(
     struct vmsvga_state_s *s, const SVGA3dCmdSurfaceStretchBlt *command,
     const VMSVGA3DD3D9StretchBltPlan *plan)
 {
+    if (s != NULL && s->svga3d != NULL &&
+        command->src.sid < SVGA3D_MAX_SURFACE_IDS &&
+        s->svga3d->surfaces[command->src.sid] != NULL &&
+        vmsvga3d_video_yuv(s->svga3d->surfaces[command->src.sid]->format)) {
+        VMSVGA3DD3D9StretchBltPlan video_plan = *plan;
+
+        video_plan.execution = VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED;
+        video_plan.create_source_texture = true;
+        video_plan.create_destination_texture = true;
+        return vmsvga3d_d3d9_runtime_stretch_blt(s, command, &video_plan);
+    }
     if (plan->execution == VMSVGA3D_D3D9_EXECUTION_GPU_PREFERRED) {
         return vmsvga3d_d3d9_runtime_stretch_blt(s, command, plan);
     }
@@ -6765,6 +6789,91 @@ static void vmsvga3d_clip_surface_copy_box(const SVGA3dCopyBox *box,
     clipped->d = MIN(box->d, max_depth);
 }
 
+static bool vmsvga3d_video_surface_copy_box(
+    VMSVGA3DSurface *source, VMSVGA3DSurfaceImage *source_image,
+    VMSVGA3DSurface *destination, VMSVGA3DSurfaceImage *destination_image,
+    const SVGA3dCopyBox *box, uint8_t *scratch, size_t scratch_size,
+    bool execute, size_t *scratch_needed)
+{
+    VMSVGA3DVideoLayout src;
+    VMSVGA3DVideoLayout dst;
+    uint32_t src_offset[3];
+    uint32_t dst_offset[3];
+    uint32_t bytes[3];
+    uint32_t rows[3];
+    uint32_t plane;
+    size_t temporary_size = 0;
+    size_t temporary_offset = 0;
+    bool same_image = source_image->data == destination_image->data;
+
+    if (source->format != destination->format ||
+        source_image->data == NULL || destination_image->data == NULL ||
+        source_image->size.depth != 1 || destination_image->size.depth != 1 ||
+        box->srcz != 0 || box->z != 0 || box->d != 1 ||
+        !vmsvga3d_video_layout(source->format, source_image->size.width,
+                                 source_image->size.height,
+                                 source_image->pitch, &src) ||
+        !vmsvga3d_video_layout(destination->format,
+                                 destination_image->size.width,
+                                 destination_image->size.height,
+                                 destination_image->pitch, &dst) ||
+        src.size > source_image->data_size ||
+        dst.size > destination_image->data_size) {
+        return false;
+    }
+    for (plane = 0; plane < src.planes; plane++) {
+        uint32_t dst_bytes;
+        uint32_t dst_rows;
+        if (!vmsvga3d_video_plane_box(source->format, &src, plane,
+                                        box->srcx, box->srcy, box->w, box->h,
+                                        &src_offset[plane], &bytes[plane],
+                                        &rows[plane]) ||
+            !vmsvga3d_video_plane_box(destination->format, &dst, plane,
+                                        box->x, box->y, box->w, box->h,
+                                        &dst_offset[plane], &dst_bytes,
+                                        &dst_rows) ||
+            dst_bytes != bytes[plane] || dst_rows != rows[plane]) {
+            return false;
+        }
+        temporary_size += (size_t)bytes[plane] * rows[plane];
+    }
+    if (same_image) {
+        if (scratch_needed != NULL) {
+            *scratch_needed = temporary_size;
+        }
+        if (execute && (scratch == NULL || scratch_size < temporary_size)) {
+            return false;
+        }
+    }
+    if (!execute) {
+        return true;
+    }
+    if (same_image) {
+        for (plane = 0; plane < src.planes; plane++) {
+            uint32_t row;
+            for (row = 0; row < rows[plane]; row++) {
+                memcpy(scratch + temporary_offset,
+                       source_image->data + src_offset[plane] +
+                           (size_t)row * src.pitch[plane], bytes[plane]);
+                temporary_offset += bytes[plane];
+            }
+        }
+    }
+    temporary_offset = 0;
+    for (plane = 0; plane < src.planes; plane++) {
+        uint32_t row;
+        for (row = 0; row < rows[plane]; row++) {
+            const uint8_t *data = same_image ? scratch + temporary_offset :
+                source_image->data + src_offset[plane] +
+                    (size_t)row * src.pitch[plane];
+            memcpy(destination_image->data + dst_offset[plane] +
+                       (size_t)row * dst.pitch[plane], data, bytes[plane]);
+            temporary_offset += bytes[plane];
+        }
+    }
+    return true;
+}
+
 static bool vmsvga3d_surface_copy_box(
     VMSVGA3DSurface *src_surface, VMSVGA3DSurfaceImage *src_image,
     VMSVGA3DSurface *dst_surface, VMSVGA3DSurfaceImage *dst_image,
@@ -6809,6 +6918,13 @@ static bool vmsvga3d_surface_copy_box(
     if (src_surface->multisample_count > 1 ||
         dst_surface->multisample_count > 1) {
         return false;
+    }
+
+    if (vmsvga3d_video_planar(src_surface->format) ||
+        vmsvga3d_video_planar(dst_surface->format)) {
+        return vmsvga3d_video_surface_copy_box(
+            src_surface, src_image, dst_surface, dst_image, &clipped,
+            scratch, scratch_size, execute, scratch_needed);
     }
 
     desc = svga3dsurface_get_desc(src_surface->format);
@@ -9415,6 +9531,82 @@ static bool vmsvga3d_handle_present(struct vmsvga_state_s *s,
     return true;
 }
 
+static bool vmsvga3d_video_surface_dma_box(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, const SVGAGuestImage *guest,
+    SVGA3dTransferType transfer, const SVGA3dCopyBox *box,
+    uint32_t maximum_offset, bool execute)
+{
+    VMSVGA3DVideoLayout host_layout;
+    VMSVGA3DVideoLayout guest_layout;
+    uint32_t guest_pitch = guest->pitch != 0 ? guest->pitch : image->pitch;
+    uint32_t plane;
+    uint32_t pass;
+
+    if (image->data == NULL || image->size.depth != 1 ||
+        box->z != 0 || box->srcz != 0 || box->d != 1 ||
+        (transfer != SVGA3D_WRITE_HOST_VRAM &&
+         transfer != SVGA3D_READ_HOST_VRAM) ||
+        !vmsvga3d_video_layout(surface->format, image->size.width,
+                                 image->size.height, image->pitch, &host_layout) ||
+        !vmsvga3d_video_layout(surface->format, image->size.width,
+                                 image->size.height, guest_pitch, &guest_layout) ||
+        host_layout.size > image->data_size) {
+        return false;
+    }
+
+    /* Validate every plane before the first guest/host write. */
+    for (pass = 0; pass < (execute ? 2u : 1u); pass++) {
+        for (plane = 0; plane < host_layout.planes; plane++) {
+            uint32_t host_offset;
+            uint32_t guest_relative;
+            uint32_t row_bytes;
+            uint32_t guest_row_bytes;
+            uint32_t rows;
+            uint32_t guest_rows;
+            uint32_t row;
+            if (!vmsvga3d_video_plane_box(
+                    surface->format, &host_layout, plane, box->x, box->y,
+                    box->w, box->h, &host_offset, &row_bytes, &rows) ||
+                !vmsvga3d_video_plane_box(
+                    surface->format, &guest_layout, plane, box->srcx, box->srcy,
+                    box->w, box->h, &guest_relative, &guest_row_bytes,
+                    &guest_rows) || row_bytes != guest_row_bytes ||
+                rows != guest_rows) {
+                return false;
+            }
+            for (row = 0; row < rows; row++) {
+                uint64_t relative = (uint64_t)guest_relative +
+                    (uint64_t)row * guest_layout.pitch[plane];
+                uint64_t offset = (uint64_t)guest->ptr.offset + relative;
+                uint8_t *data = image->data + host_offset +
+                    (size_t)row * host_layout.pitch[plane];
+                if (relative > maximum_offset ||
+                    row_bytes > (uint64_t)maximum_offset - relative ||
+                    offset > UINT32_MAX ||
+                    !vmsvga_gmr_validate_range(s, guest->ptr.gmrId,
+                                                 (uint32_t)offset, row_bytes)) {
+                    return false;
+                }
+                if (pass == 0) {
+                    continue;
+                }
+                if (transfer == SVGA3D_WRITE_HOST_VRAM) {
+                    if (!vmsvga_gmr_read(s, guest->ptr.gmrId,
+                                           (uint32_t)offset, data, row_bytes)) {
+                        return false;
+                    }
+                } else if (!vmsvga_gmr_write(s, guest->ptr.gmrId,
+                                                (uint32_t)offset, data,
+                                                row_bytes)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 static bool vmsvga3d_surface_dma_box(struct vmsvga_state_s *s,
                                      VMSVGA3DSurface *surface,
                                      VMSVGA3DSurfaceImage *image,
@@ -9451,6 +9643,12 @@ static bool vmsvga3d_surface_dma_box(struct vmsvga_state_s *s,
 
     if (surface->multisample_count > 1) {
         return false;
+    }
+
+    if (vmsvga3d_video_planar(surface->format)) {
+        return vmsvga3d_video_surface_dma_box(
+            s, surface, image, guest, transfer, &clipped, maximum_offset,
+            execute);
     }
 
     desc = svga3dsurface_get_desc(surface->format);
@@ -10324,6 +10522,161 @@ static bool vmsvga3d_clear_readback_targets(
         return false;
     }
 
+    return true;
+}
+
+/* Guest-backed planar video uses the same Y/UV or Y/V/U storage as legacy
+ * SurfaceDMA.  The generic block-row MOB path is not a planar transfer. */
+static bool vmsvga3d_video_mob_transfer_live(
+    struct vmsvga_state_s *s, const SVGAOTableSurfaceEntry *entry,
+    VMSVGA3DMob *mob, VMSVGA3DSurface *surface,
+    VMSVGA3DSurfaceImage *image, uint32_t subresource,
+    const SVGA3dBox *requested_box, bool readback, bool invert_box)
+{
+    VMSVGA3DVideoLayout host;
+    VMSVGA3DVideoLayout guest;
+    SVGA3dBox box;
+    uint64_t offset = 0;
+    uint32_t flags = le32_to_cpu(entry->surface1Flags);
+    uint32_t levels = le32_to_cpu(entry->numMipLevels);
+    uint32_t plane;
+    uint32_t i;
+    bool full;
+
+    if (levels == 0 || subresource >= surface->mip_count ||
+        image->data == NULL || image->size.depth != 1 ||
+        surface->multisample_count > 1 ||
+        vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface) ||
+        !vmsvga3d_video_layout(surface->format, image->size.width,
+                                 image->size.height, image->pitch, &host) ||
+        host.size > image->data_size) {
+        return false;
+    }
+    for (i = 0; i <= subresource; i++) {
+        VMSVGA3DSurfaceImage *mip = &surface->mips[i];
+        uint32_t pitch = mip->pitch;
+        if ((flags & (uint32_t)SVGA3D_SURFACE_MOB_PITCH) != 0 &&
+            i % levels == 0 && le32_to_cpu(entry->mobPitch) != 0) {
+            pitch = le32_to_cpu(entry->mobPitch);
+        }
+        if ((flags & (uint32_t)SVGA3D_SURFACE_ALIGN16) != 0) {
+            offset = QEMU_ALIGN_UP(offset, UINT64_C(16));
+        }
+        if (mip->size.depth != 1 ||
+            !vmsvga3d_video_layout(surface->format, mip->size.width,
+                                     mip->size.height, pitch, &guest) ||
+            offset > mob->gbo.size ||
+            guest.size > (uint64_t)mob->gbo.size - offset) {
+            return false;
+        }
+        if (i != subresource) {
+            offset += guest.size;
+        }
+    }
+    box = (SVGA3dBox) { .w = image->size.width,
+                       .h = image->size.height, .d = 1 };
+    if (requested_box != NULL) {
+        vmsvga3d_clip_surface_box(requested_box, &image->size, &box);
+    }
+    if (box.w == 0 || box.h == 0 || box.d == 0) {
+        return true;
+    }
+    if (box.z != 0 || box.d != 1) {
+        return false;
+    }
+    full = box.x == 0 && box.y == 0 && box.w == image->size.width &&
+           box.h == image->size.height;
+    /* Validate all requested plane rectangles before reading back or writing. */
+    for (plane = 0; plane < host.planes; plane++) {
+        uint32_t start;
+        uint32_t bytes;
+        uint32_t rows;
+        if (!vmsvga3d_video_plane_box(surface->format, &host, plane,
+                                        box.x, box.y, box.w, box.h,
+                                        &start, &bytes, &rows) ||
+            !vmsvga3d_video_plane_box(surface->format, &guest, plane,
+                                        box.x, box.y, box.w, box.h,
+                                        &start, &bytes, &rows)) {
+            return false;
+        }
+    }
+    if ((readback || !full) &&
+        !vmsvga3d_surface_readback_to_shadow(s, surface, image, subresource)) {
+        return false;
+    }
+    for (plane = 0; plane < host.planes; plane++) {
+        uint32_t start;
+        uint32_t bytes;
+        uint32_t rows;
+        uint32_t first_row;
+        uint32_t x;
+        uint32_t row;
+        uint32_t width = plane == 0 || surface->format == SVGA3D_NV12 ?
+                         image->size.width : image->size.width / 2u;
+        if (!vmsvga3d_video_plane_box(surface->format, &host, plane,
+                                        box.x, box.y, box.w, box.h,
+                                        &start, &bytes, &rows)) {
+            return false;
+        }
+        first_row = (start - host.offset[plane]) / host.pitch[plane];
+        x = (start - host.offset[plane]) % host.pitch[plane];
+        for (row = 0; row < host.rows[plane]; row++) {
+            uint32_t begin[2];
+            uint32_t count[2];
+            uint32_t segments = 0;
+            uint32_t segment;
+            bool inside = row >= first_row && row - first_row < rows;
+            if (!invert_box) {
+                if (!inside) {
+                    continue;
+                }
+                begin[0] = x;
+                count[0] = bytes;
+                segments = 1;
+            } else if (!inside) {
+                begin[0] = 0;
+                count[0] = width;
+                segments = 1;
+            } else {
+                if (x != 0) {
+                    begin[segments] = 0;
+                    count[segments++] = x;
+                }
+                if (x + bytes < width) {
+                    begin[segments] = x + bytes;
+                    count[segments++] = width - x - bytes;
+                }
+            }
+            for (segment = 0; segment < segments; segment++) {
+                uint64_t guest_offset = offset + guest.offset[plane] +
+                    (uint64_t)row * guest.pitch[plane] + begin[segment];
+                uint8_t *data = image->data + host.offset[plane] +
+                    (size_t)row * host.pitch[plane] + begin[segment];
+                if (guest_offset > UINT32_MAX) {
+                    return false;
+                }
+                if (readback) {
+                    if (!vmsvga3d_mob_write(s, mob, (uint32_t)guest_offset,
+                                              data, count[segment])) {
+                        return false;
+                    }
+                } else if (!vmsvga3d_mob_read(s, mob, (uint32_t)guest_offset,
+                                                data, count[segment])) {
+                    return false;
+                }
+            }
+        }
+    }
+    if (!readback) {
+        VMSVGA3DD3D9AccelResult result =
+            vmsvga3d_d3d9_runtime_upload_surface_image(
+                s, surface, image, subresource, 0, image->data_size);
+        if (result == VMSVGA3D_D3D9_ACCEL_FAILED) {
+            /* The guest update is authoritative in the CPU shadow. */
+            vmsvga3d_legacy_surface_evict(s, surface);
+        }
+        (void)vmsvga3d_surface_changed_live(s, surface->sid, subresource, &box);
+    }
     return true;
 }
 

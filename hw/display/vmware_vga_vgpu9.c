@@ -25,6 +25,7 @@
 */
 
 #include "include/vmware_vga_vgpu9.h"
+#include "include/vmware_vga_video.h"
 
 #include <string.h>
 
@@ -600,6 +601,10 @@ SVGA3dSurface1Flags vmsvga3d_d3d9_normalize_surface_flags(
     case SVGA3D_X1R5G5B5:
     case SVGA3D_A1R5G5B5:
     case SVGA3D_A4R4G4B4:
+    case SVGA3D_UYVY:
+    case SVGA3D_YUY2:
+    case SVGA3D_NV12:
+    case SVGA3D_YV12:
         flags |= (SVGA3dSurface1Flags)SVGA3D_SURFACE_HINT_TEXTURE;
         break;
     default:
@@ -641,6 +646,13 @@ uint32_t vmsvga3d_d3d9_actual_format(
 {
     if (caps == NULL) {
         return requested_format;
+    }
+
+    /* The generic planar plan uses BGRA.  Runtime texture materialization
+     * selects native YUV separately after checking the live adapter. */
+    if (requested_format == VMSVGA3D_D3D9_MAKE_FOURCC('N', 'V', '1', '2') ||
+        requested_format == VMSVGA3D_D3D9_MAKE_FOURCC('Y', 'V', '1', '2')) {
+        return D3D9_FMT_A8R8G8B8;
     }
 
     if (requested_format == VMSVGA3D_D3D9_MAKE_FOURCC('U', 'Y', 'V', 'Y') &&
@@ -2274,7 +2286,8 @@ static bool vmsvga3d_d3d9_transfer_surface_info(
 
 static bool vmsvga3d_dxvk_resource_plan(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
-    VMSVGA3DD3D9ResourceUse use, VMSVGA3DD3D9ResourcePlan *plan)
+    VMSVGA3DD3D9ResourceUse use, bool allow_native,
+    VMSVGA3DD3D9ResourcePlan *plan)
 {
     VMSVGA3DD3D9SurfaceInfo info = { 0 };
     VMSVGA3DD3D9ResourceCaps caps = { 0 };
@@ -2283,6 +2296,20 @@ static bool vmsvga3d_dxvk_resource_plan(
         surface->mip_count == 0 || surface->mips == NULL ||
         surface->face[0].numMipLevels == 0 ||
         surface->storage_bytes > UINT32_MAX) {
+        return false;
+    }
+
+    /* Both video representations support a single 2D image.  Do not
+     * route cube, volume, mipmapped or multisampled YUV through this path. */
+    if (vmsvga3d_video_yuv(surface->format) &&
+        (surface->mip_count != 1 || surface->array_elements != 1 ||
+         surface->mips[0].size.depth != 1 ||
+         (surface->mips[0].size.width & 1u) != 0 ||
+         (vmsvga3d_video_planar(surface->format) &&
+          (surface->mips[0].size.height & 1u) != 0) ||
+         surface->multisample_count > 1 ||
+         (surface->surface_flags & (SVGA3D_SURFACE_CUBEMAP |
+          SVGA3D_SURFACE_VOLUME | SVGA3D_SURFACE_AUTOGENMIPMAPS)) != 0)) {
         return false;
     }
 
@@ -2306,23 +2333,122 @@ static bool vmsvga3d_dxvk_resource_plan(
     info.multisample_count = surface->multisample_count;
     info.autogen_filter = surface->autogen_filter;
     info.surface_bytes = (uint32_t)surface->storage_bytes;
+    if (allow_native && vmsvga3d_video_yuv(surface->format) &&
+        use == VMSVGA3D_D3D9_RESOURCE_USE_TEXTURE &&
+        (surface->surface_flags & (SVGA3D_SURFACE_HINT_RENDERTARGET |
+         SVGA3D_SURFACE_HINT_DEPTHSTENCIL)) == 0 &&
+        vmsvga3d_dxvk_d3d9_supports_video(
+            s->dxvk, vmsvga3d_d3d9_surface_format(surface->format))) {
+        memset(plan, 0, sizeof(*plan));
+        plan->use = use;
+        plan->normalized_surface_flags = vmsvga3d_d3d9_normalize_surface_flags(
+            surface->surface_flags, surface->format);
+        plan->post_surface_flags = plan->normalized_surface_flags;
+        plan->requested_format = vmsvga3d_d3d9_surface_format(surface->format);
+        plan->actual_format = plan->requested_format;
+        /* Native video is input-only; do not request speculative render-target
+         * usage or dynamic usage on either side of the full-image upload. */
+        vmsvga3d_d3d9_create_desc(&plan->primary, D3D9_RTYPE_TEXTURE, &info,
+                                  1, 0, plan->actual_format, D3D9_POOL_DEFAULT);
+        plan->bounce = plan->primary;
+        plan->bounce.pool = D3D9_POOL_SYSTEMMEM;
+        plan->has_bounce = true;
+        return true;
+    }
+
+    /* Prefer native A8B8G8R8 storage when supported; otherwise use the
+     * channel-swap conversion at the CPU/native transfer boundary. */
+    /* GPU-written video surfaces and unsupported native formats use the
+     * RGB representation, with CPU conversion at the transfer boundary. */
+    caps.supports_uyvy = false;
+    caps.supports_yuy2 = false;
+    caps.supports_a8b8g8r8 = vmsvga3d_dxvk_d3d9_qualify_format_caps(
+        s->dxvk, D3D9_FMT_A8B8G8R8,
+        SVGA3DFORMAT_OP_TEXTURE | SVGA3DFORMAT_OP_OFFSCREENPLAIN) != 0;
     caps.supports_intz = vmsvga3d_dxvk_d3d9_supports_intz(s->dxvk);
 
-    if (!vmsvga3d_d3d9_resource_plan(&info, use, &caps, plan) ||
-        plan->needs_format_conversion || plan->has_emulated) {
+    if (!vmsvga3d_d3d9_resource_plan(&info, use, &caps, plan)) {
+        return false;
+    }
+    if ((plan->actual_format != plan->requested_format ||
+         plan->needs_format_conversion || plan->has_emulated) &&
+        (plan->actual_format != D3D9_FMT_A8R8G8B8 ||
+         (!vmsvga3d_video_yuv(surface->format) &&
+          surface->format != SVGA3D_R8G8B8A8_UNORM))) {
         return false;
     }
 
     return true;
 }
 
+static bool vmsvga3d_dxvk_video_image(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *dxvk_surface,
+    SVGA3dSurfaceFormat format, uint32_t level,
+    VMSVGA3DSurfaceImage *image, bool readback)
+{
+    uint64_t pitch = (uint64_t)image->size.width * 4u;
+    uint64_t size = pitch * image->size.height;
+    uint8_t *rgb;
+    bool success;
+
+    if (image->data == NULL || image->size.depth != 1 || pitch == 0 ||
+        pitch > UINT32_MAX || size == 0 || size > UINT32_MAX) {
+        return false;
+    }
+    rgb = g_try_malloc((size_t)size);
+    if (rgb == NULL) {
+        return false;
+    }
+    if (readback) {
+        success = vmsvga3d_dxvk_surface_readback_level(
+            dxvk, dxvk_surface, level, rgb, (uint32_t)pitch, image->size.height);
+        if (success) {
+            success = vmsvga3d_video_from_bgra(
+                format, image->size.width, image->size.height,
+                rgb, (uint32_t)pitch, (uint32_t)size, image->data,
+                image->pitch, image->data_size);
+        }
+    } else {
+        success = vmsvga3d_video_to_bgra(
+            format, image->size.width, image->size.height, image->data,
+            image->pitch, image->data_size, rgb, (uint32_t)pitch, (uint32_t)size);
+        if (success) {
+            success = vmsvga3d_dxvk_surface_upload_level(
+                dxvk, dxvk_surface, level, rgb, (uint32_t)pitch,
+                image->size.height, 1, (uint32_t)size);
+        }
+    }
+    g_free(rgb);
+    return success;
+}
+
 static bool vmsvga3d_dxvk_upload_image(VMSVGA3DDxvk *dxvk,
                                         VMSVGA3DDxvkSurface *dxvk_surface,
+                                        SVGA3dSurfaceFormat format,
                                         uint32_t level,
                                         VMSVGA3DSurfaceImage *image)
 {
+    VMSVGA3DD3D9TransferSurface info = { 0 };
     uint32_t planes;
     uint32_t rows;
+
+    if (image == NULL ||
+        !vmsvga3d_dxvk_surface_info(dxvk_surface, &info)) {
+        return false;
+    }
+    if (vmsvga3d_video_yuv(format) &&
+        info.format == vmsvga3d_d3d9_surface_format(format)) {
+        return level == 0 && image->size.depth == 1 &&
+               vmsvga3d_dxvk_surface_upload_video(
+                   dxvk, dxvk_surface, format, image->size.width,
+                   image->size.height, image->data, image->pitch,
+                   image->data_size);
+    }
+    if (info.format == D3D9_FMT_A8R8G8B8 &&
+        (vmsvga3d_video_yuv(format) || format == SVGA3D_R8G8B8A8_UNORM)) {
+        return vmsvga3d_dxvk_video_image(
+            dxvk, dxvk_surface, format, level, image, false);
+    }
 
     if (image == NULL || image->data == NULL || image->pitch == 0 ||
         image->plane_size == 0 || image->data_size == 0 ||
@@ -2343,10 +2469,33 @@ static bool vmsvga3d_dxvk_upload_image(VMSVGA3DDxvk *dxvk,
 }
 
 static bool vmsvga3d_dxvk_readback_image(
-    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *dxvk_surface, uint32_t level,
-    VMSVGA3DSurfaceImage *image)
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *dxvk_surface,
+    SVGA3dSurfaceFormat format, uint32_t level, VMSVGA3DSurfaceImage *image)
 {
+    VMSVGA3DD3D9TransferSurface info = { 0 };
     uint32_t rows;
+
+    if (image == NULL ||
+        !vmsvga3d_dxvk_surface_info(dxvk_surface, &info)) {
+        return false;
+    }
+    if (vmsvga3d_video_yuv(format) &&
+        info.format == vmsvga3d_d3d9_surface_format(format)) {
+        VMSVGA3DVideoLayout layout;
+
+        /* Native YUV is input-only.  All writes originate in this shadow;
+         * DXVK's format converter has no RGB-to-YUV readback operation. */
+        return info.resident && level == 0 && image->data != NULL &&
+               image->size.depth == 1 && info.usage == 0 &&
+               vmsvga3d_video_layout(format, image->size.width,
+                   image->size.height, image->pitch, &layout) &&
+               layout.size <= image->data_size;
+    }
+    if (info.format == D3D9_FMT_A8R8G8B8 &&
+        (vmsvga3d_video_yuv(format) || format == SVGA3D_R8G8B8A8_UNORM)) {
+        return vmsvga3d_dxvk_video_image(
+            dxvk, dxvk_surface, format, level, image, true);
+    }
 
     if (image == NULL || image->data == NULL || image->pitch == 0 ||
         image->plane_size == 0 || image->size.depth != 1 ||
@@ -2397,7 +2546,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_upload_surface_image(
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
 
-    if (!vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, level,
+    if (!vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, surface->format, level,
                                     image)) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
@@ -2431,7 +2580,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_image(
                           : VMSVGA3D_D3D9_ACCEL_FAILED;
     }
 
-    if (!vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, level,
+    if (!vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, surface->format, level,
                                       image)) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
@@ -2464,6 +2613,13 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_readback_surface_rects(
         info.block_width != 1 || info.block_height != 1 ||
         info.block_depth != 1 || info.bytes_per_block != bytes_per_pixel) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
+    }
+
+    /* The rectangle helper copies native bytes directly.  Converted RGBA
+     * must use the full-image readback wrapper so channel order is restored. */
+    if (info.format == D3D9_FMT_A8R8G8B8 &&
+        surface->format == SVGA3D_R8G8B8A8_UNORM) {
+        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
 
     d3d_rects = g_try_new(VMSVGA3DD3D9Rect, rect_count);
@@ -2631,7 +2787,7 @@ static void vmsvga3d_dxvk_sync_surface_from_cpu(struct vmsvga_state_s *s,
         info.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_CUBE_TEXTURE ||
         info.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_VOLUME_TEXTURE) {
         for (level = 0; level < surface->mip_count; level++) {
-            if (!vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, level,
+            if (!vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, surface->format, level,
                                             &surface->mips[level])) {
                 vmsvga3d_legacy_surface_evict(s, surface);
                 return;
@@ -2642,7 +2798,7 @@ static void vmsvga3d_dxvk_sync_surface_from_cpu(struct vmsvga_state_s *s,
 
     if (info.resource_type == VMSVGA3D_D3D9_HOST_RESOURCE_SURFACE &&
         surface->mip_count == 1 &&
-        vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, 0,
+        vmsvga3d_dxvk_upload_image(s->dxvk, surface->dxvk_surface, surface->format, 0,
                                    &surface->mips[0])) {
         return;
     }
@@ -2732,9 +2888,9 @@ out:
     return result;
 }
 
-static bool vmsvga3d_dxvk_materialize_surface(
+static bool vmsvga3d_dxvk_materialize_surface_ex(
     struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
-    VMSVGA3DD3D9ResourceUse use, bool upload_cpu)
+    VMSVGA3DD3D9ResourceUse use, bool upload_cpu, bool allow_native)
 {
     VMSVGA3DD3D9ResourcePlan plan;
     VMSVGA3DD3D9TransferSurface before = { 0 };
@@ -2744,7 +2900,10 @@ static bool vmsvga3d_dxvk_materialize_surface(
     if (s == NULL || surface == NULL || surface->dxvk_surface == NULL ||
         !vmsvga3d_dxvk_handoff_d3d11_to_shadow(s, surface) ||
         !vmsvga3d_d3d9_transfer_surface_info(s, surface, &before) ||
-        !vmsvga3d_dxvk_resource_plan(s, surface, use, &plan)) {
+        !vmsvga3d_dxvk_resource_plan(s, surface, use,
+            allow_native && !(before.resident &&
+                before.format == D3D9_FMT_A8R8G8B8 &&
+                vmsvga3d_video_yuv(surface->format)), &plan)) {
         return false;
     }
 
@@ -2794,7 +2953,19 @@ static bool vmsvga3d_dxvk_materialize_surface(
         break;
     }
 
+    if (compatible && use != VMSVGA3D_D3D9_RESOURCE_USE_DEPTH_TARGET &&
+        before.format != plan.primary.format) {
+        compatible = false;
+    }
+
     if (before.resident && !compatible) {
+        /* Preserve GPU-written RGB contents before changing resource use.
+         * Native input-only video simply retains the authoritative shadow. */
+        if (vmsvga3d_video_yuv(surface->format) &&
+            !vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface,
+                surface->format, 0, &surface->mips[0])) {
+            return false;
+        }
         vmsvga3d_legacy_surface_bindings_dirty(s, surface->sid);
     }
 
@@ -2802,6 +2973,11 @@ static bool vmsvga3d_dxvk_materialize_surface(
                                            &plan) ||
         !vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
         !info.resident) {
+        if (vmsvga3d_video_yuv(surface->format) &&
+            plan.primary.format == plan.requested_format) {
+            return vmsvga3d_dxvk_materialize_surface_ex(
+                s, surface, use, upload_cpu, false);
+        }
         return false;
     }
 
@@ -2831,11 +3007,24 @@ static bool vmsvga3d_dxvk_materialize_surface(
         vmsvga3d_dxvk_sync_surface_from_cpu(s, surface);
         if (!vmsvga3d_d3d9_transfer_surface_info(s, surface, &info) ||
             !info.resident) {
+            if (vmsvga3d_video_yuv(surface->format) &&
+                plan.primary.format == plan.requested_format) {
+                return vmsvga3d_dxvk_materialize_surface_ex(
+                    s, surface, use, upload_cpu, false);
+            }
             return false;
         }
     }
 
     return true;
+}
+
+static bool vmsvga3d_dxvk_materialize_surface(
+    struct vmsvga_state_s *s, VMSVGA3DSurface *surface,
+    VMSVGA3DD3D9ResourceUse use, bool upload_cpu)
+{
+    return vmsvga3d_dxvk_materialize_surface_ex(
+        s, surface, use, upload_cpu, true);
 }
 
 static bool vmsvga3d_dxvk_materialize_texture(struct vmsvga_state_s *s,
@@ -4106,6 +4295,11 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
 
+    if (vmsvga3d_video_yuv(source->format) ||
+        vmsvga3d_video_yuv(destination->format)) {
+        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+    }
+
     if (source == destination) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
@@ -4169,7 +4363,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_copy(
                                        destination_image, &boxes[i], NULL, 0,
                                        true, NULL)) {
             if (!vmsvga3d_dxvk_readback_image(
-                    s->dxvk, destination->dxvk_surface, destination_level,
+                    s->dxvk, destination->dxvk_surface, destination->format, destination_level,
                     destination_image)) {
                 return VMSVGA3D_D3D9_ACCEL_FAILED;
             }
@@ -4339,8 +4533,16 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
 
-    if (plan->create_destination_texture && !destination_info.resident &&
-        !vmsvga3d_dxvk_materialize_texture(s, destination)) {
+    /* StretchRect writes RGB pixels.  A YUV destination must use the
+     * writable RGB representation so readback can convert to guest YUV. */
+    if (vmsvga3d_video_yuv(destination->format)) {
+        if (!vmsvga3d_dxvk_materialize_surface(
+                s, destination, VMSVGA3D_D3D9_RESOURCE_USE_COLOR_TARGET,
+                true)) {
+            return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+        }
+    } else if (plan->create_destination_texture && !destination_info.resident &&
+               !vmsvga3d_dxvk_materialize_texture(s, destination)) {
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
 
@@ -4386,10 +4588,21 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_stretch_blt(
             s->dxvk, source->dxvk_surface, source_level, &source_rect,
             destination->dxvk_surface, destination_level, &destination_rect,
             plan->filter)) {
-        return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+        /* Adapter support is only a hint.  Retry a rejected native video
+         * blit with the existing CPU conversion and RGB resource path. */
+        if (!vmsvga3d_video_yuv(source->format) ||
+            source_info.format != vmsvga3d_d3d9_surface_format(source->format) ||
+            !vmsvga3d_dxvk_materialize_surface_ex(
+                s, source, VMSVGA3D_D3D9_RESOURCE_USE_TEXTURE, true, false) ||
+            !vmsvga3d_dxvk_surface_stretch_rect(
+                s->dxvk, source->dxvk_surface, source_level, &source_rect,
+                destination->dxvk_surface, destination_level,
+                &destination_rect, plan->filter)) {
+            return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
+        }
     }
 
-    if (!vmsvga3d_dxvk_readback_image(s->dxvk, destination->dxvk_surface,
+    if (!vmsvga3d_dxvk_readback_image(s->dxvk, destination->dxvk_surface, destination->format,
                                        destination_level, destination_image)) {
         return VMSVGA3D_D3D9_ACCEL_FAILED;
     }
@@ -4777,7 +4990,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_present(
         return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
     }
 
-    if (!vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, 0, image)) {
+    if (!vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, surface->format, 0, image)) {
         /* Once a surface is GPU-resident its CPU shadow may be stale.  Never fall
          * through and display stale pixels after a failed GPU synchronization. */
         return VMSVGA3D_D3D9_ACCEL_FAILED;
@@ -4857,10 +5070,17 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_dma(
                 return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
             }
         } else if (!vmsvga3d_dxvk_upload_image(
-                       s->dxvk, surface->dxvk_surface, level, image)) {
+                       s->dxvk, surface->dxvk_surface, surface->format, level, image)) {
             /* The CPU shadow already contains the guest write, so dropping a
              * failed GPU copy preserves a correct fallback path. */
             vmsvga3d_legacy_surface_evict(s, surface);
+            if (vmsvga3d_video_yuv(surface->format) &&
+                info.format == vmsvga3d_d3d9_surface_format(surface->format) &&
+                vmsvga3d_dxvk_materialize_surface_ex(
+                    s, surface, VMSVGA3D_D3D9_RESOURCE_USE_TEXTURE,
+                    true, false)) {
+                return VMSVGA3D_D3D9_ACCEL_COMPLETE;
+            }
             return VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;
         }
         return VMSVGA3D_D3D9_ACCEL_COMPLETE;
@@ -4868,7 +5088,7 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_surface_dma(
 
     if (command->transfer == SVGA3D_READ_HOST_VRAM) {
         if (!info.resident ||
-            !vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, level,
+            !vmsvga3d_dxvk_readback_image(s->dxvk, surface->dxvk_surface, surface->format, level,
                                            image)) {
             return info.resident ? VMSVGA3D_D3D9_ACCEL_FAILED
                                  : VMSVGA3D_D3D9_ACCEL_UNAVAILABLE;

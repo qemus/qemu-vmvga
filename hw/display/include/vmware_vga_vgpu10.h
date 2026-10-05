@@ -932,7 +932,7 @@ bool vmsvga3d_present_screen_target_live(
 bool vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid);
 bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
     struct vmsvga_state_s *s, uint32_t cid, SVGA3dSurfaceId sid,
-    bool *realized_out);
+    bool *displaced_out);
 void vmsvga3d_dx_post_draw_live(struct vmsvga_state_s *s, uint32_t cid);
 
 #define VMSVGA3D_D3D10_QUERY_COTABLE_ENTRY_SIZE 16u

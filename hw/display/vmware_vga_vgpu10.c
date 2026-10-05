@@ -10656,6 +10656,7 @@ static bool vmsvga3d_d3d10_recover_gb_surface_live(
     SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES] = {{0}};
     SVGA3dSize base_size;
     SVGA3dSize *mip_sizes;
+    VMSVGA3DSurface *surface;
     SVGA3dSurfaceAllFlags surface_flags;
     SVGA3dSurfaceFormat format;
     uint32_t num_mip_levels;
@@ -10746,16 +10747,18 @@ static bool vmsvga3d_d3d10_recover_gb_surface_live(
      * surfaces have been released.  Do not rewrite the OTable here because it
      * may already contain a MOB binding established after the original DEFINE.
      */
-    vmsvga3d_surface_install(s, sid, surface_flags, format, face,
-                             multisample_count, multisample_pattern,
-                             autogen_filter, array_elements, mip_sizes,
-                             mip_count);
+    surface = vmsvga3d_surface_prepare(s, sid, surface_flags, format, face,
+                                       multisample_count, multisample_pattern,
+                                       autogen_filter, array_elements, mip_sizes,
+                                       mip_count, true,
+                                       vmsvga3d_gb_surface_memory_size(s));
     g_free(mip_sizes);
 
-    recovered = s->svga3d->surfaces[sid] != NULL;
+    recovered = surface != NULL;
     if (recovered) {
-        s->svga3d->surfaces[sid]->multisample_quality = multisample_quality;
-        s->svga3d->surfaces[sid]->buffer_byte_stride = buffer_byte_stride;
+        surface->multisample_quality = multisample_quality;
+        surface->buffer_byte_stride = buffer_byte_stride;
+        vmsvga3d_surface_commit(s, surface);
     }
 
     VMVGA_TRACE_LOCAL(

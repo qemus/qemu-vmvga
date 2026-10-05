@@ -383,6 +383,8 @@ typedef struct vmsvga3d_surface_s {
     uint32_t array_elements;
     uint32_t mip_count;
     size_t storage_bytes;
+    /* Allocation budgets follow the defining command, not backend residency. */
+    bool guest_backed;
     VMSVGA3DSurfaceImage *mips;
     VMSVGA3DDxvkSurface *dxvk_surface;
     /* D3D9 and D3D11 use separate DXVK devices.  Keep the CPU-uploaded
@@ -574,6 +576,8 @@ struct vmsvga3d_state_s {
     uint32_t trace_vgpu9_last_present_sid;
     uint64_t trace_vgpu9_last_present_3d_cmd;
     size_t surface_bytes;
+    size_t legacy_surface_bytes;
+    size_t gb_surface_bytes;
     size_t shader_bytes;
 };
 
@@ -1498,8 +1502,8 @@ static VMSVGA3DMob *vmsvga3d_mob_get(struct vmsvga_state_s *s,
     return g_hash_table_lookup(state->mobs, vmsvga3d_mob_key(mobid));
 }
 
-static bool vmsvga2d_screen_direct_materialize_mob_shadow_live(
-    struct vmsvga_state_s *s, const char *reason)
+static bool vmsvga2d_screen_direct_materialize_mob_shadow_live_mode(
+    struct vmsvga_state_s *s, const char *reason, bool detach)
 {
     struct vmsvga3d_state_s *state;
     VMSVGA3DSurface *surface;
@@ -1524,7 +1528,8 @@ static bool vmsvga2d_screen_direct_materialize_mob_shadow_live(
 
     image = &surface->mips[0];
     if (s->screen_direct_base == image->data) {
-        return vmsvga_screen_direct_detach(s, reason);
+        return detach ? vmsvga_screen_direct_detach(s, reason)
+                      : vmsvga_screen_direct_materialize(s, reason);
     }
 
     if (image->data == NULL || image->size.depth != 1 ||
@@ -1552,7 +1557,15 @@ static bool vmsvga2d_screen_direct_materialize_mob_shadow_live(
         surface->sid, reason != NULL ? reason : "unknown",
         row_bytes * s->screen_height);
 
-    return vmsvga_screen_direct_detach(s, reason);
+    return detach ? vmsvga_screen_direct_detach(s, reason)
+                  : vmsvga_screen_direct_materialize(s, reason);
+}
+
+static bool vmsvga2d_screen_direct_materialize_mob_shadow_live(
+    struct vmsvga_state_s *s, const char *reason)
+{
+    return vmsvga2d_screen_direct_materialize_mob_shadow_live_mode(
+        s, reason, true);
 }
 
 static bool vmsvga2d_mob_owns_direct_scanout_live(
@@ -3210,20 +3223,90 @@ static bool vmsvga3d_surface_image_layout(
     return true;
 }
 
-static void vmsvga3d_surface_install(
+static size_t vmsvga3d_surface_memory_used(
+    const struct vmsvga3d_state_s *state, bool guest_backed)
+{
+    return guest_backed ? state->gb_surface_bytes : state->legacy_surface_bytes;
+}
+
+static bool vmsvga3d_surface_memory_available(
+    const struct vmsvga3d_state_s *state, const VMSVGA3DSurface *surface,
+    const VMSVGA3DSurface *old_surface, size_t limit)
+{
+    size_t used = vmsvga3d_surface_memory_used(state, surface->guest_backed);
+    size_t old_bytes = old_surface != NULL &&
+                       old_surface->guest_backed == surface->guest_backed
+                           ? old_surface->storage_bytes : 0;
+
+    /* A replacement credits only its own budget.  The old surface's other
+     * budget is released at commit, after every fallible step has succeeded. */
+    if (old_surface != NULL &&
+        (state->surface_bytes < old_surface->storage_bytes ||
+         vmsvga3d_surface_memory_used(state, old_surface->guest_backed) <
+             old_surface->storage_bytes)) {
+        return false;
+    }
+
+    return surface->storage_bytes <= limit && used >= old_bytes &&
+           used - old_bytes <= limit - surface->storage_bytes;
+}
+
+static void vmsvga3d_surface_account_remove(
+    struct vmsvga3d_state_s *state, const VMSVGA3DSurface *surface)
+{
+    size_t *used;
+
+    if (surface == NULL) {
+        return;
+    }
+
+    used = surface->guest_backed ? &state->gb_surface_bytes
+                                : &state->legacy_surface_bytes;
+    if (*used >= surface->storage_bytes) {
+        *used -= surface->storage_bytes;
+    } else {
+        *used = 0;
+    }
+    if (state->surface_bytes >= surface->storage_bytes) {
+        state->surface_bytes -= surface->storage_bytes;
+    } else {
+        state->surface_bytes = 0;
+    }
+}
+
+static void vmsvga3d_surface_account_add(
+    struct vmsvga3d_state_s *state, const VMSVGA3DSurface *surface)
+{
+    if (surface->guest_backed) {
+        state->gb_surface_bytes += surface->storage_bytes;
+    } else {
+        state->legacy_surface_bytes += surface->storage_bytes;
+    }
+    state->surface_bytes += surface->storage_bytes;
+}
+
+static size_t vmsvga3d_gb_surface_memory_size(const struct vmsvga_state_s *s)
+{
+    /* GB surfaces use the advertised guest-backed budget, independently of
+     * the legacy dedicated-memory budget and the BAR1 framebuffer size. */
+    return vmsvga_guest_backed_objects_capable(s)
+               ? (size_t)VMSVGA_GBOBJECT_MEM_SIZE_KB * 1024U
+               : vmsvga_surface_memory_size(s);
+}
+
+static VMSVGA3DSurface *vmsvga3d_surface_prepare(
     struct vmsvga_state_s *s, uint32_t sid,
     SVGA3dSurfaceAllFlags surface_flags, SVGA3dSurfaceFormat format,
     const SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES],
     uint32_t multisample_count, SVGA3dMSPattern multisample_pattern,
     SVGA3dTextureFilter autogen_filter,
     uint32_t array_elements, const SVGA3dSize *mip_sizes,
-    uint32_t mip_count)
+    uint32_t mip_count, bool guest_backed, size_t limit)
 {
     struct vmsvga3d_state_s *state;
     VMSVGA3DSurface *old_surface;
     VMSVGA3DSurface *surface;
     size_t old_bytes;
-    size_t limit;
     uint64_t storage_bytes = 0;
     uint32_t i;
 
@@ -3232,7 +3315,7 @@ static void vmsvga3d_surface_install(
                           "SURFACE result=REJECT reason=SID_RANGE sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
-        return;
+        return NULL;
     }
 
     if (!vmsvga3d_surface_faces_valid(surface_flags, face, array_elements,
@@ -3241,7 +3324,7 @@ static void vmsvga3d_surface_install(
                           "SURFACE result=REJECT reason=FACES sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
-        return;
+        return NULL;
     }
 
     if (!vmsvga3d_surface_sizes_valid(surface_flags, format, face, mip_sizes,
@@ -3250,7 +3333,7 @@ static void vmsvga3d_surface_install(
                           "SURFACE result=REJECT reason=SIZES sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
-        return;
+        return NULL;
     }
 
     surface = g_try_new0(VMSVGA3DSurface, 1);
@@ -3259,7 +3342,7 @@ static void vmsvga3d_surface_install(
                           "SURFACE result=REJECT reason=ALLOC_SURFACE sid=%u "
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
-        return;
+        return NULL;
     }
 
     surface->mips = g_try_new0(VMSVGA3DSurfaceImage, mip_count);
@@ -3269,10 +3352,11 @@ static void vmsvga3d_surface_install(
                           "format=%u flags=0x%016" PRIx64 " mips=%u arrays=%u",
                           sid, format, surface_flags, mip_count, array_elements);
         g_free(surface);
-        return;
+        return NULL;
     }
 
     surface->sid = sid;
+    surface->guest_backed = guest_backed;
     surface->surface_flags = surface_flags;
     surface->format = format;
     memcpy(surface->face, face, sizeof(surface->face));
@@ -3294,7 +3378,7 @@ static void vmsvga3d_surface_install(
                 sid, format, surface_flags, i, mip_sizes[i].width,
                 mip_sizes[i].height, mip_sizes[i].depth, multisample_count);
             vmsvga3d_surface_free(surface);
-            return;
+            return NULL;
         }
         storage_bytes += surface->mips[i].data_size;
         if (storage_bytes > SIZE_MAX) {
@@ -3304,7 +3388,7 @@ static void vmsvga3d_surface_install(
                 "format=%u flags=0x%016" PRIx64 " mip=%u bytes=%" PRIu64,
                 sid, format, surface_flags, i, storage_bytes);
             vmsvga3d_surface_free(surface);
-            return;
+            return NULL;
         }
     }
     surface->storage_bytes = (size_t)storage_bytes;
@@ -3316,23 +3400,25 @@ static void vmsvga3d_surface_install(
                           "format=%u flags=0x%016" PRIx64 " bytes=%zu",
                           sid, format, surface_flags, surface->storage_bytes);
         vmsvga3d_surface_free(surface);
-        return;
+        return NULL;
     }
 
     old_surface = state->surfaces[sid];
-    old_bytes = old_surface != NULL ? old_surface->storage_bytes : 0;
-    limit = vmsvga_surface_memory_size(s);
+    old_bytes = old_surface != NULL &&
+                old_surface->guest_backed == surface->guest_backed
+                    ? old_surface->storage_bytes : 0;
 
-    if (surface->storage_bytes > limit || state->surface_bytes < old_bytes ||
-        state->surface_bytes - old_bytes > limit - surface->storage_bytes) {
+    if (!vmsvga3d_surface_memory_available(state, surface, old_surface,
+                                            limit)) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "SURFACE result=REJECT reason=SURFACE_MEMORY sid=%u format=%u "
             "flags=0x%016" PRIx64 " bytes=%zu current=%zu old=%zu limit=%zu",
             sid, format, surface_flags, surface->storage_bytes,
-            state->surface_bytes, old_bytes, limit);
+            vmsvga3d_surface_memory_used(state, surface->guest_backed),
+            old_bytes, limit);
         vmsvga3d_surface_free(surface);
-        return;
+        return NULL;
     }
 
     for (i = 0; i < mip_count; i++) {
@@ -3344,7 +3430,7 @@ static void vmsvga3d_surface_install(
                 "flags=0x%016" PRIx64 " mip=%u bytes=%u",
                 sid, format, surface_flags, i, surface->mips[i].data_size);
             vmsvga3d_surface_free(surface);
-            return;
+            return NULL;
         }
     }
 
@@ -3356,7 +3442,7 @@ static void vmsvga3d_surface_install(
             "format=%u flags=0x%016" PRIx64 " bytes=%zu",
             sid, format, surface_flags, surface->storage_bytes);
         vmsvga3d_surface_free(surface);
-        return;
+        return NULL;
     }
 
     if (old_surface != NULL && sid == state->active_screen_target_sid &&
@@ -3366,18 +3452,55 @@ static void vmsvga3d_surface_install(
                           "sid=%u",
                           sid);
         vmsvga3d_surface_free(surface);
-        return;
+        return NULL;
     }
     if (old_surface != NULL && sid == state->active_screen_target_sid) {
         if (s->screen_direct_active && s->screen_direct_sid == sid &&
-            !vmsvga_screen_direct_detach(s, "surface-redefine")) {
+            !vmsvga_screen_direct_materialize(s, "surface-redefine")) {
             vmsvga3d_surface_free(surface);
-            return;
+            return NULL;
         }
+    }
+
+    return surface;
+}
+
+static void vmsvga3d_surface_direct_scanout_commit(
+    struct vmsvga_state_s *s, uint32_t sid)
+{
+    if (!s->screen_direct_active || s->screen_direct_sid != sid) {
+        return;
+    }
+
+    /* Preparation materialized the pixels while retaining the live binding.
+     * Publication succeeded, so detach without another fallible allocation
+     * and rebind the frontend before the old surface storage is freed. */
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-DIRECT-SCANOUT phase=detach reason=surface-redefine "
+                "sid=%u source=%p\n",
+                sid, (void *)s->screen_direct_base);
+    }
+
+    vmsvga_screen_direct_clear(s);
+    s->svga_surface_bound = false;
+    vmsvga_check_size(s);
+}
+
+static void vmsvga3d_surface_commit(struct vmsvga_state_s *s,
+                                    VMSVGA3DSurface *surface)
+{
+    struct vmsvga3d_state_s *state = s->svga3d;
+    uint32_t sid = surface->sid;
+    VMSVGA3DSurface *old_surface = state->surfaces[sid];
+    bool redefined = old_surface != NULL;
+
+    if (old_surface != NULL && sid == state->active_screen_target_sid) {
+        vmsvga3d_surface_direct_scanout_commit(s, sid);
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
-    state->surface_bytes -= old_bytes;
+    vmsvga3d_surface_account_remove(state, old_surface);
     if (old_surface != NULL) {
         /* VBox redefinition goes through SurfaceDestroy, which also removes the
          * old SID from every legacy context's active texture and render-target
@@ -3394,17 +3517,43 @@ static void vmsvga3d_surface_install(
 
     vmsvga3d_surface_free(old_surface);
     state->surfaces[sid] = surface;
-    state->surface_bytes += surface->storage_bytes;
+    vmsvga3d_surface_account_add(state, surface);
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
         "SURFACE result=OK sid=%u format=%u flags=0x%016" PRIx64 " mips=%u "
         "arrays=%u size=%ux%ux%u samples=%u bytes=%zu total=%zu redefined=%u",
-        sid, format, surface_flags, mip_count, array_elements,
-        mip_count != 0 ? mip_sizes[0].width : 0,
-        mip_count != 0 ? mip_sizes[0].height : 0,
-        mip_count != 0 ? mip_sizes[0].depth : 0, multisample_count,
-        surface->storage_bytes, state->surface_bytes, old_surface != NULL);
+        sid, surface->format, surface->surface_flags, surface->mip_count,
+        surface->array_elements,
+        surface->mip_count != 0 ? surface->mips[0].size.width : 0,
+        surface->mip_count != 0 ? surface->mips[0].size.height : 0,
+        surface->mip_count != 0 ? surface->mips[0].size.depth : 0,
+        surface->multisample_count, surface->storage_bytes,
+        state->surface_bytes, redefined ? 1u : 0u);
+}
+
+static bool vmsvga3d_surface_install(
+    struct vmsvga_state_s *s, uint32_t sid,
+    SVGA3dSurfaceAllFlags surface_flags, SVGA3dSurfaceFormat format,
+    const SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES],
+    uint32_t multisample_count, SVGA3dMSPattern multisample_pattern,
+    SVGA3dTextureFilter autogen_filter,
+    uint32_t array_elements, const SVGA3dSize *mip_sizes,
+    uint32_t mip_count)
+{
+    VMSVGA3DSurface *surface;
+
+    surface = vmsvga3d_surface_prepare(s, sid, surface_flags, format, face,
+                                       multisample_count, multisample_pattern,
+                                       autogen_filter, array_elements,
+                                       mip_sizes, mip_count, false,
+                                       vmsvga_surface_memory_size(s));
+    if (surface == NULL) {
+        return false;
+    }
+
+    vmsvga3d_surface_commit(s, surface);
+    return true;
 }
 
 static VMSVGA3DSurface *vmsvga2d_surface_prepare(
@@ -3476,6 +3625,7 @@ static VMSVGA3DSurface *vmsvga2d_surface_prepare(
     }
 
     surface->sid = sid;
+    surface->guest_backed = true;
     surface->surface_flags = surface_flags;
     surface->format = format;
     memcpy(surface->face, face, sizeof(surface->face));
@@ -3524,17 +3674,20 @@ static VMSVGA3DSurface *vmsvga2d_surface_prepare(
     }
 
     old_surface = state->surfaces[sid];
-    old_bytes = old_surface != NULL ? old_surface->storage_bytes : 0;
-    limit = vmsvga_surface_memory_size(s);
+    old_bytes = old_surface != NULL &&
+                old_surface->guest_backed == surface->guest_backed
+                    ? old_surface->storage_bytes : 0;
+    limit = vmsvga3d_gb_surface_memory_size(s);
 
-    if (surface->storage_bytes > limit || state->surface_bytes < old_bytes ||
-        state->surface_bytes - old_bytes > limit - surface->storage_bytes) {
+    if (!vmsvga3d_surface_memory_available(state, surface, old_surface,
+                                            limit)) {
         VMVGA_TRACE_LOCAL(
             VMVGA_TRACE_3D,
             "2D-SURFACE result=REJECT reason=SURFACE_MEMORY sid=%u format=%u "
             "flags=0x%016" PRIx64 " bytes=%zu current=%zu old=%zu limit=%zu",
             sid, format, surface_flags, surface->storage_bytes,
-            state->surface_bytes, old_bytes, limit);
+            vmsvga3d_surface_memory_used(state, surface->guest_backed),
+            old_bytes, limit);
         vmsvga3d_surface_free(surface);
         return NULL;
     }
@@ -3566,8 +3719,8 @@ static VMSVGA3DSurface *vmsvga2d_surface_prepare(
     }
     if (old_surface != NULL && sid == state->active_screen_target_sid &&
         s->screen_direct_active && s->screen_direct_sid == sid &&
-        !vmsvga2d_screen_direct_materialize_mob_shadow_live(
-            s, "surface-redefine")) {
+        !vmsvga2d_screen_direct_materialize_mob_shadow_live_mode(
+            s, "surface-redefine", false)) {
         vmsvga3d_surface_free(surface);
         return NULL;
     }
@@ -3581,17 +3734,19 @@ static void vmsvga2d_surface_commit(struct vmsvga_state_s *s,
     struct vmsvga3d_state_s *state = s->svga3d;
     uint32_t sid = surface->sid;
     VMSVGA3DSurface *old_surface = state->surfaces[sid];
-    size_t old_bytes = old_surface != NULL ? old_surface->storage_bytes : 0;
     bool redefined = old_surface != NULL;
 
     if (sid == state->active_screen_target_sid) {
+        if (old_surface != NULL) {
+            vmsvga3d_surface_direct_scanout_commit(s, sid);
+        }
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
-    state->surface_bytes -= old_bytes;
+    vmsvga3d_surface_account_remove(state, old_surface);
     vmsvga3d_surface_free(old_surface);
     state->surfaces[sid] = surface;
-    state->surface_bytes += surface->storage_bytes;
+    vmsvga3d_surface_account_add(state, surface);
 
     VMVGA_TRACE_LOCAL(
         VMVGA_TRACE_3D,
@@ -3617,6 +3772,7 @@ static bool vmsvga3d_gb_surface_define_live(
     SVGAOTableSurfaceEntry entry;
     SVGA3dSurfaceFace face[SVGA3D_MAX_SURFACE_FACES] = {{0}};
     SVGA3dSize *mip_sizes;
+    VMSVGA3DSurface *surface;
     uint32_t array_elements;
     uint32_t mip_count;
     uint32_t array_index;
@@ -3654,17 +3810,6 @@ static bool vmsvga3d_gb_surface_define_live(
     entry.multisamplePattern = (uint8_t)multisample_pattern;
     entry.qualityLevel = (uint8_t)multisample_quality;
     entry.bufferByteStride = cpu_to_le16((uint16_t)buffer_byte_stride);
-
-    if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, sid, sizeof(entry),
-                                &entry, sizeof(entry))) {
-        VMVGA_TRACE_LOCAL(
-            VMVGA_TRACE_3D,
-            "GB-SURFACE result=REJECT reason=OTABLE sid=%u format=%u "
-            "flags=0x%016" PRIx64 " mips=%u arrays=%u size=%ux%ux%u",
-            sid, format, surface_flags, num_mip_levels, array_size,
-            base_size->width, base_size->height, base_size->depth);
-        return false;
-    }
 
     if (sid >= SVGA3D_MAX_SURFACE_IDS || num_mip_levels == 0 ||
         num_mip_levels > VMSVGA3D_MAX_MIP_LEVELS ||
@@ -3720,17 +3865,33 @@ static bool vmsvga3d_gb_surface_define_live(
         }
     }
 
-    vmsvga3d_surface_install(s, sid, surface_flags, format, face,
-                             multisample_count, multisample_pattern,
-                             autogen_filter, array_elements,
-                             mip_sizes, mip_count);
-    if (sid < SVGA3D_MAX_SURFACE_IDS && s->svga3d->surfaces[sid] != NULL) {
-        s->svga3d->surfaces[sid]->multisample_quality = multisample_quality;
-        s->svga3d->surfaces[sid]->buffer_byte_stride =
-            (uint16_t)buffer_byte_stride;
-    }
+    surface = vmsvga3d_surface_prepare(s, sid, surface_flags, format, face,
+                                       multisample_count, multisample_pattern,
+                                       autogen_filter, array_elements,
+                                       mip_sizes, mip_count, true,
+                                       vmsvga3d_gb_surface_memory_size(s));
     g_free(mip_sizes);
+    if (surface == NULL) {
+        return false;
+    }
+    surface->multisample_quality = multisample_quality;
+    surface->buffer_byte_stride = (uint16_t)buffer_byte_stride;
 
+    /* Publish only after allocation and fallible screen transitions succeed.
+     * A failed OTable write leaves the old surface and its bindings installed. */
+    if (!vmsvga3d_otable_write(s, SVGA_OTABLE_SURFACE, sid, sizeof(entry),
+                                &entry, sizeof(entry))) {
+        VMVGA_TRACE_LOCAL(
+            VMVGA_TRACE_3D,
+            "GB-SURFACE result=REJECT reason=OTABLE sid=%u format=%u "
+            "flags=0x%016" PRIx64 " mips=%u arrays=%u size=%ux%ux%u",
+            sid, format, surface_flags, num_mip_levels, array_size,
+            base_size->width, base_size->height, base_size->depth);
+        vmsvga3d_surface_free(surface);
+        return false;
+    }
+
+    vmsvga3d_surface_commit(s, surface);
     return true;
 }
 
@@ -3999,11 +4160,7 @@ static void vmsvga2d_surface_destroy_commit_live(struct vmsvga_state_s *s,
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
-    if (state->surface_bytes >= surface->storage_bytes) {
-        state->surface_bytes -= surface->storage_bytes;
-    } else {
-        state->surface_bytes = 0;
-    }
+    vmsvga3d_surface_account_remove(state, surface);
 
     vmsvga3d_surface_free(surface);
     state->surfaces[sid] = NULL;
@@ -4046,11 +4203,7 @@ static void vmsvga3d_surface_destroy_live(struct vmsvga_state_s *s,
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
-    if (state->surface_bytes >= surface->storage_bytes) {
-        state->surface_bytes -= surface->storage_bytes;
-    } else {
-        state->surface_bytes = 0;
-    }
+    vmsvga3d_surface_account_remove(state, surface);
 
     /* Match VBox SurfaceDestroy: remove the SID from every legacy context's
      * active texture and render-target state before destroying the backend

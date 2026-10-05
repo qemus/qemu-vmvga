@@ -10170,21 +10170,32 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
         surface = s->svga3d->surfaces[binding->sid];
         if (surface == NULL || surface->dxvk_surface == NULL ||
             !vmsvga3d_d3d10_surface_info_live(surface, &surface_info) ||
-            !vmsvga3d_dx_resource_plan_live(
-                s, &surface_info,
-                VMSVGA3D_D3D10_RESOURCE_USE_STREAM_OUTPUT_BUFFER,
-                &resource_plan) ||
-            !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface) ||
-            !vmsvga3d_d3d10_initial_subresources_live(
-                surface, &resource_plan.primary, &initial_data,
-                &initial_data_count) ||
-            !vmsvga3d_dxvk_d3d11_surface_materialize(
-                s->dxvk, surface->dxvk_surface, &resource_plan.primary,
-                initial_data, initial_data_count)) {
-            g_free(initial_data);
+            !(surface->surface_flags & SVGA3D_SURFACE_BIND_STREAM_OUTPUT)) {
             return false;
         }
-        g_free(initial_data);
+
+        /* Resident buffers already passed resource creation policy. Keep the
+         * guest surface validation above and native SO binding checks below,
+         * but only prepare a creation plan for a new native resource. */
+        if (!vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+            if (!vmsvga3d_dx_resource_plan_live(
+                    s, &surface_info,
+                    VMSVGA3D_D3D10_RESOURCE_USE_STREAM_OUTPUT_BUFFER,
+                    &resource_plan) ||
+                !vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface) ||
+                !vmsvga3d_d3d10_initial_subresources_live(
+                    surface, &resource_plan.primary, &initial_data,
+                    &initial_data_count) ||
+                !vmsvga3d_dxvk_d3d11_surface_materialize(
+                    s->dxvk, surface->dxvk_surface, &resource_plan.primary,
+                    initial_data, initial_data_count)) {
+                g_free(initial_data);
+                return false;
+            }
+            g_free(initial_data);
+        } else if (!vmsvga3d_d3d10_handoff_d3d9_to_shadow_live(s, surface)) {
+            return false;
+        }
         surfaces[i] = surface->dxvk_surface;
         offsets[i] = binding->offset;
     }
@@ -16567,6 +16578,7 @@ static bool vmsvga3d_d3d10_constant_buffer_live(
 {
     VMSVGA3DDXContext *context = vmsvga3d_dx_context(s, cid);
     uint8_t *upload = NULL;
+    const uint8_t *data;
     bool success;
     uint32_t new_start;
     uint32_t new_end;
@@ -16593,19 +16605,24 @@ static bool vmsvga3d_d3d10_constant_buffer_live(
             return false;
         }
 
-        upload = g_try_malloc0(plan->backend_buffer_size);
-        if (upload == NULL) {
-            return false;
-        }
+        data = surface->mips[0].data + plan->initial_data_offset;
 
-        if (plan->backend_copy_size != 0) {
-            memcpy(upload,
-                   surface->mips[0].data + plan->initial_data_offset,
-                   plan->backend_copy_size);
+        /* CreateBuffer snapshots initial data during this call. Only stage an
+         * upload when the requested range needs zero padding. */
+        if (plan->backend_copy_size < plan->backend_buffer_size) {
+            upload = g_try_malloc0(plan->backend_buffer_size);
+            if (upload == NULL) {
+                return false;
+            }
+
+            if (plan->backend_copy_size != 0) {
+                memcpy(upload, data, plan->backend_copy_size);
+            }
+            data = upload;
         }
 
         success = vmsvga3d_dxvk_d3d11_constant_buffer_define(
-            s->dxvk, cid, plan->stage_index, plan->slot, upload,
+            s->dxvk, cid, plan->stage_index, plan->slot, data,
             plan->backend_buffer_size);
         g_free(upload);
     }

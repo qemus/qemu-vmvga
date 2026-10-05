@@ -10436,7 +10436,9 @@ bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
 {
     VMSVGA3DDXContext *context;
     VMSVGA3DD3D10SOTargetsPlan restore_plan;
+    VMSVGA3DD3D10SOTargetsPlan remaining_plan;
     const VMSVGA3DD3D10SOTargetsPlan *plan;
+    SVGA3dSurfaceId remaining_targets[SVGA3D_DX_MAX_SOTARGETS];
     bool conflicts = false;
     uint32_t i;
 
@@ -10456,10 +10458,12 @@ bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
      * A later input/output binding that aliases an SO target therefore has to
      * displace that slot in the shadow, not just in the current native state,
      * or a later full replay would resurrect the older SO binding. */
+    memcpy(remaining_targets, context->shadow.streamOut.targets,
+           sizeof(remaining_targets));
     for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (context->shadow.streamOut.targets[i] == sid) {
+        if (remaining_targets[i] == sid) {
+            remaining_targets[i] = SVGA3D_INVALID_ID;
             conflicts = true;
-            break;
         }
     }
     if (!conflicts) {
@@ -10488,15 +10492,24 @@ bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
             !vmsvga3d_d3d10_so_targets_bind_live(s, cid, plan)) {
             return false;
         }
-        context->pending_so_targets_valid = false;
-        context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
     }
 
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (context->shadow.streamOut.targets[i] == sid) {
-            context->shadow.streamOut.targets[i] = SVGA3D_INVALID_ID;
-        }
+    /* The active SO table establishes the older SET_SOTARGETS command's
+     * hazard effects.  Remove only the slots displaced by the later command
+     * from the native table before that later binding is replayed.  Surviving
+     * targets are rebound in append mode so their current write positions are
+     * preserved. */
+    if (vmsvga3d_d3d10_so_targets_restore_plan(
+            remaining_targets, &remaining_plan) ==
+            VMSVGA3D_D3D10_LEVEL_INVALID ||
+        !vmsvga3d_d3d10_so_targets_bind_live(s, cid, &remaining_plan)) {
+        return false;
     }
+
+    memcpy(context->shadow.streamOut.targets, remaining_targets,
+           sizeof(context->shadow.streamOut.targets));
+    context->pending_so_targets_valid = false;
+    context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
     if (displaced_out != NULL) {
         *displaced_out = true;
     }

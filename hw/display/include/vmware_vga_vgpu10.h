@@ -28,6 +28,7 @@
 #define HW_DISPLAY_VMWARE_VGA_VGPU10_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "svga3d_dx.h"
@@ -57,6 +58,24 @@ typedef struct vmsvga3d_d3d10_format_s {
 } VMSVGA3DD3D10Format;
 
 #define VMSVGA3D_D3D10_INPUT_SEMANTIC "ATTRIB"
+
+static inline bool vmsvga3d_d3d10_entry_is_zero(const void *entry, size_t size)
+{
+    const uint8_t *bytes = entry;
+    size_t i;
+
+    if (entry == NULL) {
+        return false;
+    }
+
+    for (i = 0; i < size; i++) {
+        if (bytes[i] != 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 typedef struct vmsvga3d_d3d10_input_element_s {
     uint32_t semantic_index;

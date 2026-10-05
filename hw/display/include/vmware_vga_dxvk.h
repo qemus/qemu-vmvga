@@ -117,6 +117,9 @@ void vmsvga3d_dxvk_d3d11_flush(VMSVGA3DDxvk *dxvk);
 /* Intersect a legacy VMware format-op mask with the live D3D9 adapter. */
 uint32_t vmsvga3d_dxvk_d3d9_qualify_format_caps(
     const VMSVGA3DDxvk *dxvk, uint32_t format, uint32_t caps);
+/* True when a native YUV texture can be uploaded and converted to RGB. */
+bool vmsvga3d_dxvk_d3d9_supports_video(
+    const VMSVGA3DDxvk *dxvk, uint32_t format);
 /* True when the live D3D9 adapter supports the INTZ depth texture format. */
 bool vmsvga3d_dxvk_d3d9_supports_intz(const VMSVGA3DDxvk *dxvk);
 /* Keep a canonical VMware DXFMT mask only if the live D3D11 adapter can use it.
@@ -529,6 +532,11 @@ bool vmsvga3d_dxvk_d3d11_set_render_targets(
 void vmsvga3d_dxvk_surface_evict(VMSVGA3DDxvkSurface *surface);
 void vmsvga3d_dxvk_surface_set_renderer(VMSVGA3DDxvkSurface *surface,
                                         VMSVGA3DDxvk *dxvk);
+/* Upload a full video image using DXVK's native YUV lock layout. */
+bool vmsvga3d_dxvk_surface_upload_video(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface,
+    SVGA3dSurfaceFormat format, uint32_t width, uint32_t height,
+    const void *data, uint32_t pitch, uint32_t data_size);
 bool vmsvga3d_dxvk_surface_upload_level(
     VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkSurface *surface, uint32_t level,
     const void *data, uint32_t row_bytes, uint32_t rows,

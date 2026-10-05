@@ -10218,13 +10218,17 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
 
 bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
     struct vmsvga_state_s *s, uint32_t cid, SVGA3dSurfaceId sid,
-    bool *realized_out)
+    bool *displaced_out)
 {
     VMSVGA3DDXContext *context;
     VMSVGA3DD3D10SOTargetsPlan restore_plan;
     const VMSVGA3DD3D10SOTargetsPlan *plan;
+    bool conflicts = false;
     uint32_t i;
 
+    if (displaced_out != NULL) {
+        *displaced_out = false;
+    }
     if (s == NULL) {
         return false;
     }
@@ -10236,43 +10240,53 @@ bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
     if (context == NULL) {
         return false;
     }
-    if (!context->pending_so_targets_valid &&
-        (context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_SOTARGETS) == 0) {
+
+    /* The SO shadow is also the source for STATE_ALL/context-switch replay.
+     * A later input/output binding that aliases an SO target therefore has to
+     * displace that slot in the shadow, not just in the current native state,
+     * or a later full replay would resurrect the older SO binding. */
+    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+        if (context->shadow.streamOut.targets[i] == sid) {
+            conflicts = true;
+            break;
+        }
+    }
+    if (!conflicts) {
         return true;
     }
 
-    if (context->pending_so_targets_valid) {
-        plan = &context->pending_so_targets;
-    } else {
-        if (vmsvga3d_d3d10_so_targets_restore_plan(
-                context->shadow.streamOut.targets, &restore_plan) ==
-            VMSVGA3D_D3D10_LEVEL_INVALID) {
-            return false;
+    /* Preserve guest command order across deferred/restored SO state.  If the
+     * conflicting SO table has not reached the native context yet, realize it
+     * before the later resource-binding command.  That later command can then
+     * win D3D11's hazard resolution in guest order. */
+    if (context->pending_so_targets_valid ||
+        (context->renderer_dirty & VMSVGA3D_DX_CTX_F_STATE_SOTARGETS) != 0) {
+        if (context->pending_so_targets_valid) {
+            plan = &context->pending_so_targets;
+        } else {
+            if (vmsvga3d_d3d10_so_targets_restore_plan(
+                    context->shadow.streamOut.targets, &restore_plan) ==
+                VMSVGA3D_D3D10_LEVEL_INVALID) {
+                return false;
+            }
+            plan = &restore_plan;
         }
-        plan = &restore_plan;
-    }
 
-    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
-        if (!plan->bindings[i].active || plan->bindings[i].sid != sid) {
-            continue;
-        }
-
-        /* Preserve guest command order across deferred SO binds.
-         * If a later resource-binding command aliases a pending SO buffer,
-         * realize the SO table now.  The later command is then replayed after
-         * this call and naturally wins D3D11's hazard resolution.  Unrelated
-         * state still keeps the coalescing optimization. */
         if (!vmsvga3d_d3d10_so_targets_bind_live(s, cid, plan)) {
             return false;
         }
         context->pending_so_targets_valid = false;
         context->renderer_dirty &= ~VMSVGA3D_DX_CTX_F_STATE_SOTARGETS;
-        if (realized_out != NULL) {
-            *realized_out = true;
-        }
-        return true;
     }
 
+    for (i = 0; i < SVGA3D_DX_MAX_SOTARGETS; i++) {
+        if (context->shadow.streamOut.targets[i] == sid) {
+            context->shadow.streamOut.targets[i] = SVGA3D_INVALID_ID;
+        }
+    }
+    if (displaced_out != NULL) {
+        *displaced_out = true;
+    }
     return true;
 }
 
@@ -17125,7 +17139,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           {
-              bool so_realized = false;
+              bool so_displaced = false;
 
               if (vmsvga3d_d3d10_vertex_buffers_set_plan(
                       command.startBuffer, count, count != 0 ? buffers : NULL,
@@ -17134,14 +17148,14 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               }
               for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
                   if (!vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                          s, cid, plan.bindings[i].sid, &so_realized)) {
+                          s, cid, plan.bindings[i].sid, &so_displaced)) {
                       return false;
                   }
               }
               if (!vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
                   return false;
               }
-              if (so_realized) {
+              if (so_displaced) {
                   for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
                       context->vertex_buffer_modified |=
                           UINT64_C(1) << (plan.start_buffer + i);
@@ -17207,7 +17221,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           {
-              bool so_realized = false;
+              bool so_displaced = false;
 
               if (vmsvga3d_d3d10_vertex_buffers_set_plan(
                       command.startBuffer, count, count != 0 ? buffers : NULL,
@@ -17216,14 +17230,14 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               }
               for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
                   if (!vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                          s, cid, plan.bindings[i].sid, &so_realized)) {
+                          s, cid, plan.bindings[i].sid, &so_displaced)) {
                       return false;
                   }
               }
               if (!vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
                   return false;
               }
-              if (so_realized) {
+              if (so_displaced) {
                   for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
                       context->vertex_buffer_modified |=
                           UINT64_C(1) << (plan.start_buffer + i);
@@ -17291,7 +17305,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           {
-              bool so_realized = false;
+              bool so_displaced = false;
 
               if (vmsvga3d_d3d10_vertex_buffers_set_plan(
                       command.startBuffer, count, count != 0 ? buffers : NULL,
@@ -17300,14 +17314,14 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               }
               for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
                   if (!vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                          s, cid, plan.bindings[i].sid, &so_realized)) {
+                          s, cid, plan.bindings[i].sid, &so_displaced)) {
                       return false;
                   }
               }
               if (!vmsvga3d_state_dx_apply_vertex_buffers(s, cid, &plan)) {
                   return false;
               }
-              if (so_realized) {
+              if (so_displaced) {
                   for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
                       context->vertex_buffer_modified |=
                           UINT64_C(1) << (plan.start_buffer + i);
@@ -17349,17 +17363,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               cid, command.sid, command.format, command.offset);
 
           {
-              bool so_realized = false;
+              bool so_displaced = false;
 
               if (vmsvga3d_d3d10_index_buffer_set_plan(
                       command.sid, command.format, command.offset, &plan) ==
                       VMSVGA3D_D3D10_LEVEL_INVALID ||
                   !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                      s, cid, command.sid, &so_realized) ||
+                      s, cid, command.sid, &so_displaced) ||
                   !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
                   return false;
               }
-              if (so_realized) {
+              if (so_displaced) {
                   context->renderer_dirty |=
                       VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER;
               }
@@ -17388,17 +17402,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               command.sizeInBytes);
 
           {
-              bool so_realized = false;
+              bool so_displaced = false;
 
               if (vmsvga3d_d3d10_index_buffer_set_plan(
                       command.sid, command.format, command.offset, &plan) ==
                       VMSVGA3D_D3D10_LEVEL_INVALID ||
                   !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                      s, cid, command.sid, &so_realized) ||
+                      s, cid, command.sid, &so_displaced) ||
                   !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
                   return false;
               }
-              if (so_realized) {
+              if (so_displaced) {
                   context->renderer_dirty |=
                       VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER;
               }
@@ -17429,17 +17443,17 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               cid, sid, command.format, command.offset, command.sizeInBytes);
 
           {
-              bool so_realized = false;
+              bool so_displaced = false;
 
               if (vmsvga3d_d3d10_index_buffer_set_plan(
                       sid, command.format, command.offset, &plan) ==
                       VMSVGA3D_D3D10_LEVEL_INVALID ||
                   !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                      s, cid, sid, &so_realized) ||
+                      s, cid, sid, &so_displaced) ||
                   !vmsvga3d_state_dx_apply_index_buffer(s, cid, &plan)) {
                   return false;
               }
-              if (so_realized) {
+              if (so_displaced) {
                   context->renderer_dirty |=
                       VMSVGA3D_DX_CTX_F_STATE_INDEXBUFFER;
               }
@@ -17593,7 +17607,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
           }
 
           {
-              bool so_realized = false;
+              bool so_displaced = false;
 
               if (vmsvga3d_d3d10_render_targets_set_plan(
                       command.depthStencilViewId, count,
@@ -17615,7 +17629,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                       s, cid, SVGA_COTABLE_RTVIEW, plan.ids[i]);
                   if (entry != NULL &&
                       !vmsvga3d_d3d10_deferred_so_realize_before_sid(
-                          s, cid, entry->sid, &so_realized)) {
+                          s, cid, entry->sid, &so_displaced)) {
                       return false;
                   }
               }
@@ -17623,7 +17637,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
               if (!vmsvga3d_state_dx_apply_render_targets(s, cid, &plan)) {
                   return false;
               }
-              if (so_realized) {
+              if (so_displaced) {
                   context->renderer_dirty |=
                       VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
               }

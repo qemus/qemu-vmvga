@@ -2106,6 +2106,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         const uint32_t header_size = sizeof(command);
         int32_t last_not_null = -1;
         bool modified = false;
+        bool so_realized = false;
         uint32_t bound_count;
         uint32_t count;
         uint32_t i;
@@ -2131,9 +2132,26 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
+        for (i = 0; i < plan.count; i++) {
+            SVGACOTableDXUAViewEntry *entry;
+
+            if (plan.ids[i] == SVGA3D_INVALID_ID) {
+                continue;
+            }
+            entry = vmsvga3d_dx_cotable_entry_ptr(
+                s, cid, SVGA_COTABLE_UAVIEW, plan.ids[i]);
+            if (entry != NULL &&
+                !vmsvga3d_d3d10_deferred_so_realize_before_sid(
+                    s, cid, entry->sid, &so_realized)) {
+                return false;
+            }
+        }
+
         /* Match VirtualBox's DX state tracker: only the supplied prefix is
          * overwritten, cMaxBound never shrinks, and render-target state is
-         * dirtied when either the IDs or splice index change.
+         * dirtied when either the IDs or splice index change.  Realizing an
+         * earlier deferred SO binding can also make D3D11 NULL an unchanged
+         * graphics UAV, so replay the later UAV command in that case too.
          */
         for (i = 0; i < plan.count; i++) {
             if (context->shadow.uaViewIds[i] != plan.ids[i]) {
@@ -2154,7 +2172,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         if (context->uav_max_bound < bound_count) {
             context->uav_max_bound = bound_count;
         }
-        if (modified) {
+        if (modified || so_realized) {
             context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_RENDERTARGET;
         }
 
@@ -2169,6 +2187,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         const uint32_t header_size = sizeof(command);
         int32_t last_not_null = -1;
         bool modified = false;
+        bool so_realized = false;
         uint32_t bound_count;
         uint32_t count;
         uint32_t i;
@@ -2194,8 +2213,25 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
             return false;
         }
 
+        for (i = 0; i < plan.count; i++) {
+            SVGACOTableDXUAViewEntry *entry;
+
+            if (plan.ids[i] == SVGA3D_INVALID_ID) {
+                continue;
+            }
+            entry = vmsvga3d_dx_cotable_entry_ptr(
+                s, cid, SVGA_COTABLE_UAVIEW, plan.ids[i]);
+            if (entry != NULL &&
+                !vmsvga3d_d3d10_deferred_so_realize_before_sid(
+                    s, cid, entry->sid, &so_realized)) {
+                return false;
+            }
+        }
+
         /* Match VirtualBox's DX state tracker.  Changed compute UAV slots
          * are recorded for immediate unbinding, while cMaxBound only grows.
+         * A deferred SO realization can implicitly NULL an unchanged native
+         * UAV as well, so force CSTARGET replay when that happened.
          */
         for (i = 0; i < plan.count; i++) {
             uint32_t slot = plan.start_index + i;
@@ -2215,7 +2251,7 @@ static bool vmsvga3d_d3d11_command(struct vmsvga_state_s *s,
         if (context->cs_uav_max_bound < bound_count) {
             context->cs_uav_max_bound = bound_count;
         }
-        if (modified) {
+        if (modified || so_realized) {
             context->renderer_dirty |= VMSVGA3D_DX_CTX_F_STATE_CSTARGET;
         }
 

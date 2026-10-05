@@ -10216,7 +10216,7 @@ static bool vmsvga3d_d3d10_so_targets_bind_live(
     return true;
 }
 
-static bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
+bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
     struct vmsvga_state_s *s, uint32_t cid, SVGA3dSurfaceId sid,
     bool *realized_out)
 {

@@ -17460,7 +17460,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                       &plan) == VMSVGA3D_D3D10_LEVEL_INVALID) {
                   return false;
               }
-              for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
+              for (i = 0; i < plan.shadow_update_count; i++) {
                   if (!vmsvga3d_d3d10_deferred_so_realize_before_sid(
                           s, cid, plan.bindings[i].sid, &so_displaced)) {
                       return false;
@@ -17470,7 +17470,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                   return false;
               }
               if (so_displaced) {
-                  for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
+                  for (i = 0; i < plan.shadow_update_count; i++) {
                       context->vertex_buffer_modified |=
                           UINT64_C(1) << (plan.start_buffer + i);
                   }
@@ -17544,7 +17544,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                       &plan) == VMSVGA3D_D3D10_LEVEL_INVALID) {
                   return false;
               }
-              for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
+              for (i = 0; i < plan.shadow_update_count; i++) {
                   if (!vmsvga3d_d3d10_deferred_so_realize_before_sid(
                           s, cid, plan.bindings[i].sid, &so_displaced)) {
                       return false;
@@ -17554,7 +17554,7 @@ static bool vmsvga3d_d3d10_command(struct vmsvga_state_s *s,
                   return false;
               }
               if (so_displaced) {
-                  for (uint32_t i = 0; i < plan.shadow_update_count; i++) {
+                  for (i = 0; i < plan.shadow_update_count; i++) {
                       context->vertex_buffer_modified |=
                           UINT64_C(1) << (plan.start_buffer + i);
                   }

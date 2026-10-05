@@ -1498,8 +1498,8 @@ static VMSVGA3DMob *vmsvga3d_mob_get(struct vmsvga_state_s *s,
     return g_hash_table_lookup(state->mobs, vmsvga3d_mob_key(mobid));
 }
 
-static bool vmsvga2d_screen_direct_materialize_mob_shadow_live(
-    struct vmsvga_state_s *s, const char *reason)
+static bool vmsvga2d_screen_direct_materialize_mob_shadow_live_mode(
+    struct vmsvga_state_s *s, const char *reason, bool detach)
 {
     struct vmsvga3d_state_s *state;
     VMSVGA3DSurface *surface;
@@ -1524,7 +1524,8 @@ static bool vmsvga2d_screen_direct_materialize_mob_shadow_live(
 
     image = &surface->mips[0];
     if (s->screen_direct_base == image->data) {
-        return vmsvga_screen_direct_detach(s, reason);
+        return detach ? vmsvga_screen_direct_detach(s, reason)
+                      : vmsvga_screen_direct_materialize(s, reason);
     }
 
     if (image->data == NULL || image->size.depth != 1 ||
@@ -1552,7 +1553,15 @@ static bool vmsvga2d_screen_direct_materialize_mob_shadow_live(
         surface->sid, reason != NULL ? reason : "unknown",
         row_bytes * s->screen_height);
 
-    return vmsvga_screen_direct_detach(s, reason);
+    return detach ? vmsvga_screen_direct_detach(s, reason)
+                  : vmsvga_screen_direct_materialize(s, reason);
+}
+
+static bool vmsvga2d_screen_direct_materialize_mob_shadow_live(
+    struct vmsvga_state_s *s, const char *reason)
+{
+    return vmsvga2d_screen_direct_materialize_mob_shadow_live_mode(
+        s, reason, true);
 }
 
 static bool vmsvga2d_mob_owns_direct_scanout_live(
@@ -3377,13 +3386,35 @@ static VMSVGA3DSurface *vmsvga3d_surface_prepare(
     }
     if (old_surface != NULL && sid == state->active_screen_target_sid) {
         if (s->screen_direct_active && s->screen_direct_sid == sid &&
-            !vmsvga_screen_direct_detach(s, "surface-redefine")) {
+            !vmsvga_screen_direct_materialize(s, "surface-redefine")) {
             vmsvga3d_surface_free(surface);
             return NULL;
         }
     }
 
     return surface;
+}
+
+static void vmsvga3d_surface_direct_scanout_commit(
+    struct vmsvga_state_s *s, uint32_t sid)
+{
+    if (!s->screen_direct_active || s->screen_direct_sid != sid) {
+        return;
+    }
+
+    /* Preparation materialized the pixels while retaining the live binding.
+     * Publication succeeded, so detach without another fallible allocation
+     * and rebind the frontend before the old surface storage is freed. */
+    if (vmsvga_trace_flight_enabled()) {
+        fprintf(stderr,
+                "VMVGA-DIRECT-SCANOUT phase=detach reason=surface-redefine "
+                "sid=%u source=%p\n",
+                sid, (void *)s->screen_direct_base);
+    }
+
+    vmsvga_screen_direct_clear(s);
+    s->svga_surface_bound = false;
+    vmsvga_check_size(s);
 }
 
 static void vmsvga3d_surface_commit(struct vmsvga_state_s *s,
@@ -3396,6 +3427,7 @@ static void vmsvga3d_surface_commit(struct vmsvga_state_s *s,
     bool redefined = old_surface != NULL;
 
     if (old_surface != NULL && sid == state->active_screen_target_sid) {
+        vmsvga3d_surface_direct_scanout_commit(s, sid);
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 
@@ -3614,8 +3646,8 @@ static VMSVGA3DSurface *vmsvga2d_surface_prepare(
     }
     if (old_surface != NULL && sid == state->active_screen_target_sid &&
         s->screen_direct_active && s->screen_direct_sid == sid &&
-        !vmsvga2d_screen_direct_materialize_mob_shadow_live(
-            s, "surface-redefine")) {
+        !vmsvga2d_screen_direct_materialize_mob_shadow_live_mode(
+            s, "surface-redefine", false)) {
         vmsvga3d_surface_free(surface);
         return NULL;
     }
@@ -3633,6 +3665,9 @@ static void vmsvga2d_surface_commit(struct vmsvga_state_s *s,
     bool redefined = old_surface != NULL;
 
     if (sid == state->active_screen_target_sid) {
+        if (old_surface != NULL) {
+            vmsvga3d_surface_direct_scanout_commit(s, sid);
+        }
         vmsvga3d_screen_target_write_tracking_reset_live(s, false);
     }
 

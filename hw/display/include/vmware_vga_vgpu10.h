@@ -28,6 +28,7 @@
 #define HW_DISPLAY_VMWARE_VGA_VGPU10_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "svga3d_dx.h"
@@ -57,6 +58,24 @@ typedef struct vmsvga3d_d3d10_format_s {
 } VMSVGA3DD3D10Format;
 
 #define VMSVGA3D_D3D10_INPUT_SEMANTIC "ATTRIB"
+
+static inline bool vmsvga3d_d3d10_entry_is_zero(const void *entry, size_t size)
+{
+    const uint8_t *bytes = entry;
+    size_t i;
+
+    if (entry == NULL) {
+        return false;
+    }
+
+    for (i = 0; i < size; i++) {
+        if (bytes[i] != 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 typedef struct vmsvga3d_d3d10_input_element_s {
     uint32_t semantic_index;
@@ -930,6 +949,9 @@ VMSVGA3DD3D10Level vmsvga3d_d3d10_triangle_fan_generate_u16(
 bool vmsvga3d_present_screen_target_live(
     struct vmsvga_state_s *s, const SVGA3dRect *rect);
 bool vmsvga3d_dx_pipeline_setup_live(struct vmsvga_state_s *s, uint32_t cid);
+bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
+    struct vmsvga_state_s *s, uint32_t cid, SVGA3dSurfaceId sid,
+    bool *displaced_out);
 void vmsvga3d_dx_post_draw_live(struct vmsvga_state_s *s, uint32_t cid);
 
 #define VMSVGA3D_D3D10_QUERY_COTABLE_ENTRY_SIZE 16u

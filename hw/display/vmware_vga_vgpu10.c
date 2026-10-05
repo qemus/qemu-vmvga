@@ -12179,6 +12179,12 @@ static bool vmsvga3d_d3d10_update_subresource_live(
     }
 
     image = &surface->mips[command->subResource];
+    if (vmsvga3d_video_planar(surface->format) &&
+        !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        return vmsvga3d_video_mob_transfer_live(
+            s, &entry, mob, surface, image, command->subResource,
+            &command->box, false, false);
+    }
     if (!vmsvga3d_d3d10_update_box_live(
             surface, image, &command->box, &layout) ||
         !vmsvga3d_d3d10_mob_subresource_layout_live(
@@ -12659,6 +12665,13 @@ static bool vmsvga3d_gb_readback_image_partial_live(
         return true;
     }
 
+    if (vmsvga3d_video_planar(surface->format) &&
+        !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        return vmsvga3d_video_mob_transfer_live(
+            s, &entry, mob, surface, image, subresource, requested_box,
+            true, invert_box);
+    }
+
     if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
         image->data_size == 0 || image->plane_size % image->pitch != 0 ||
         image->data_size % image->plane_size != 0 ||
@@ -12962,6 +12975,12 @@ static bool vmsvga3d_d3d10_readback_subresource_live(
     }
 
     image = &surface->mips[command->subResource];
+    if (vmsvga3d_video_planar(surface->format) &&
+        !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
+        return vmsvga3d_video_mob_transfer_live(
+            s, &entry, mob, surface, image, command->subResource,
+            NULL, true, false);
+    }
     if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||
         image->data_size == 0 || image->plane_size % image->pitch != 0 ||
         image->data_size % image->plane_size != 0 ||

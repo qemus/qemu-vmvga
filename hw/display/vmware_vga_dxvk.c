@@ -338,14 +338,16 @@ typedef struct vmsvga3d_dxvk_screen_readback_slot_s {
     uint32_t rect_count;
     uint64_t sequence;
     bool pending;
+    bool d3d9_staging_submitted;
     VMSVGA3DD3D9Rect rects[VMSVGA3D_DXVK_SCREEN_READBACK_RECTS];
 } VMSVGA3DDxvkScreenReadbackSlot;
 
 /* D3D9 snapshots are renderer-owned render targets followed by EVENT queries.
  * A target switch can therefore detach every still-in-flight ring slot without
  * touching guest surface contents.  Only the newest cumulative slot is ever
- * copied back to the CPU; the older slots stay alive solely until that newest
- * EVENT proves all preceding StretchRect work has completed. */
+ * copied back to the CPU.  Its EVENT is reissued after the staging transfer
+ * so readiness covers both copies; older slots stay alive until that
+ * second EVENT proves all preceding GPU work has completed. */
 struct vmsvga3d_dxvk_d3d9_retired_screen_readback_s {
     VMSVGA3DDxvkScreenReadbackSlot
         slots[VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS];
@@ -13186,11 +13188,74 @@ static uint32_t vmsvga3d_dxvk_screen_readback_drop_older_slots(
             continue;
         }
         slots[i].pending = false;
+        slots[i].d3d9_staging_submitted = false;
         slots[i].rect_count = 0;
         dropped++;
     }
     return dropped;
 }
+
+#if defined(CONFIG_LINUX) && defined(__ELF__)
+static VMSVGA3DDxvkScreenReadbackPollResult
+vmsvga3d_dxvk_d3d9_screen_readback_staging_poll(
+    VMSVGA3DDxvk *dxvk, VMSVGA3DDxvkScreenReadbackSlot *slot, bool wait)
+{
+    VMSVGA3DDxvkGetRenderTargetData get_render_target_data = NULL;
+    VMSVGA3DDxvkQueryIssue issue = NULL;
+    VMSVGA3DDxvkQueryGetData get_data = NULL;
+    uint32_t query_data = 0;
+    int32_t result;
+
+    if (slot->query == NULL || slot->render_target == NULL ||
+        slot->staging == NULL ||
+        !vmsvga3d_dxvk_get_method(
+            slot->query, VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+            &get_data, sizeof(get_data))) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+    }
+
+    if (!slot->d3d9_staging_submitted) {
+        if (!vmsvga3d_dxvk_get_method(
+                dxvk->d3d9_device,
+                VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_RENDER_TARGET_DATA,
+                &get_render_target_data, sizeof(get_render_target_data)) ||
+            !vmsvga3d_dxvk_get_method(
+                slot->query, VMSVGA3D_DXVK_IDIRECT3DQUERY9_ISSUE,
+                &issue, sizeof(issue))) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+        }
+
+        /* The caller has completed the snapshot EVENT and selected this frame
+         * from the cumulative mailbox.  Queue only its staging transfer, then
+         * reuse the completed EVENT to cover that transfer too.  LockRect must
+         * not run while the second EVENT is pending, even for wait=false. */
+        result = get_render_target_data(dxvk->d3d9_device, slot->render_target,
+                                        slot->staging);
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+        }
+        result = issue(slot->query, VMSVGA3D_DXVK_D3DISSUE_END);
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+        }
+        slot->d3d9_staging_submitted = true;
+    }
+
+    do {
+        result = get_data(slot->query, &query_data, sizeof(query_data),
+                          VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
+        if (result == VMSVGA3D_DXVK_D3D_S_FALSE && wait) {
+            g_thread_yield();
+        }
+    } while (result == VMSVGA3D_DXVK_D3D_S_FALSE && wait);
+    if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+    }
+    return vmsvga3d_dxvk_succeeded(result)
+               ? VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY
+               : VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+}
+#endif
 
 VMSVGA3DDxvkScreenReadbackSubmitResult
 vmsvga3d_dxvk_d3d9_screen_readback_submit(
@@ -13410,6 +13475,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
     if (slot->sequence == 0) {
         slot->sequence = ++surface->d3d9_screen_readback_sequence;
     }
+    slot->d3d9_staging_submitted = false;
     slot->pending = true;
     if (sequence_out != NULL) {
         *sequence_out = slot->sequence;
@@ -13463,7 +13529,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 #if defined(CONFIG_LINUX) && defined(__ELF__)
     VMSVGA3DDxvkScreenReadbackSlot *slot = NULL;
     VMSVGA3DDxvkQueryGetData get_data = NULL;
-    VMSVGA3DDxvkGetRenderTargetData get_render_target_data = NULL;
+    VMSVGA3DDxvkScreenReadbackPollResult staging_poll;
     VMSVGA3DDxvkSurfaceLockRect lock_rect = NULL;
     VMSVGA3DDxvkSurfaceUnlockRect unlock_rect = NULL;
     VMSVGA3DDxvkLockedRect locked = {0};
@@ -13475,6 +13541,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
     uint32_t dropped = 0;
     uint32_t i;
     bool pending = false;
+    bool have_staging;
     int32_t result;
 
     if (rect_count != NULL) {
@@ -13508,10 +13575,28 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
         }
     } else {
-        /* D3D9 readback itself is synchronous, but normal refreshes still avoid
-         * waiting for render completion.  Select the newest event-complete slot
-         * and skip older frames whose damage has been accumulated into it. */
+        /* Finish an already-selected staging transfer before choosing another
+         * frame.  Otherwise newer render-ready snapshots could repeatedly
+         * supersede it and turn a coalesced mailbox into readback work for
+         * every refresh.  A higher min_sequence may deliberately supersede it;
+         * that newer frame's staging EVENT then orders the older transfer. */
         for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+            VMSVGA3DDxvkScreenReadbackSlot *candidate =
+                &surface->d3d9_screen_readback[i];
+
+            if (candidate->pending && candidate->d3d9_staging_submitted &&
+                (min_sequence == 0 || candidate->sequence >= min_sequence) &&
+                (slot == NULL || candidate->sequence > slot->sequence)) {
+                slot = candidate;
+            }
+        }
+
+        /* Without a staging transfer in flight, select the newest render-ready
+         * snapshot and skip older frames accumulated into its damage. */
+        have_staging = slot != NULL;
+
+        for (i = 0; !have_staging &&
+                    i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
             VMSVGA3DDxvkScreenReadbackSlot *candidate =
                 &surface->d3d9_screen_readback[i];
             VMSVGA3DDxvkQueryGetData candidate_get_data = NULL;
@@ -13558,7 +13643,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
     }
 
-    if (wait) {
+    if (wait && !slot->d3d9_staging_submitted) {
         do {
             result = get_data(slot->query, &query_data, sizeof(query_data),
                               VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
@@ -13572,11 +13657,13 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
         }
     }
 
+    staging_poll = vmsvga3d_dxvk_d3d9_screen_readback_staging_poll(
+        dxvk, slot, wait);
+    if (staging_poll != VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY) {
+        return staging_poll;
+    }
+
     if (!vmsvga3d_dxvk_get_method(
-            dxvk->d3d9_device,
-            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_RENDER_TARGET_DATA,
-            &get_render_target_data, sizeof(get_render_target_data)) ||
-        !vmsvga3d_dxvk_get_method(
             slot->staging, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_LOCK_RECT,
             &lock_rect, sizeof(lock_rect)) ||
         !vmsvga3d_dxvk_get_method(
@@ -13585,11 +13672,6 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
     }
 
-    result = get_render_target_data(dxvk->d3d9_device, slot->render_target,
-                                    slot->staging);
-    if (!vmsvga3d_dxvk_succeeded(result)) {
-        return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
-    }
     result = lock_rect(slot->staging, &locked, NULL,
                        VMSVGA3D_DXVK_D3DLOCK_READONLY);
     if (!vmsvga3d_dxvk_succeeded(result) || locked.bits == NULL ||
@@ -13658,6 +13740,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
         surface->sid, slot->sequence, slot->rect_count, wait ? 1u : 0u,
         dropped);
     slot->pending = false;
+    slot->d3d9_staging_submitted = false;
     slot->rect_count = 0;
     return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY;
 #else
@@ -13719,8 +13802,9 @@ vmsvga3d_dxvk_d3d9_screen_readback_discard_completed(
 
     /* The newest EVENT orders every older cumulative StretchRect on the same
      * D3D9 device.  Coalescing does not need any of those pixels, so once that
-     * event completes all cached ring resources can be released without a
-     * synchronous GetRenderTargetData. */
+     * event completes the snapshots no longer need a staging transfer.
+     * An older slot may already have queued staging after this newest render
+     * EVENT, however; check its reissued EVENT before releasing the ring. */
     result = get_data(newest->query, &query_data, sizeof(query_data),
                       VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
     if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
@@ -13728,6 +13812,31 @@ vmsvga3d_dxvk_d3d9_screen_readback_discard_completed(
     }
     if (!vmsvga3d_dxvk_succeeded(result)) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+    }
+
+    for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
+        VMSVGA3DDxvkScreenReadbackSlot *slot =
+            &surface->d3d9_screen_readback[i];
+        VMSVGA3DDxvkQueryGetData staging_get_data = NULL;
+
+        if (!slot->pending || !slot->d3d9_staging_submitted || slot == newest) {
+            continue;
+        }
+        if (slot->query == NULL ||
+            !vmsvga3d_dxvk_get_method(
+                slot->query, VMSVGA3D_DXVK_IDIRECT3DQUERY9_GET_DATA,
+                &staging_get_data, sizeof(staging_get_data))) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+        }
+        result = staging_get_data(
+            slot->query, &query_data, sizeof(query_data),
+            VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
+        if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+        }
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_FAILED;
+        }
     }
 
     completed_sequence = newest->sequence;
@@ -14801,10 +14910,11 @@ vmsvga3d_dxvk_d3d9_screen_readback_retire_latest(
     retired->sid = sid;
     retired->selected_index = selected_index;
 
-    /* Move every in-flight slot, not just the newest one.  The older render
-     * targets may still be referenced by queued StretchRect commands.  The
-     * newest EVENT orders those commands, after which the entire mailbox can
-     * be released safely without ever reading the older snapshots back. */
+    /* Move every in-flight slot, not just the newest one.  Older render
+     * targets or staging buffers may still be referenced by queued copies.
+     * The selected slot's staging EVENT orders those commands, after which
+     * the entire mailbox can be released without starting transfers for
+     * obsolete snapshots. */
     for (i = 0; i < VMSVGA3D_DXVK_SCREEN_READBACK_SLOTS; i++) {
         if (!surface->d3d9_screen_readback[i].pending) {
             continue;
@@ -14897,7 +15007,7 @@ vmsvga3d_dxvk_d3d9_retired_screen_readback_poll(
     VMSVGA3DDxvkD3D9RetiredScreenReadback *retired;
     VMSVGA3DDxvkScreenReadbackSlot *slot;
     VMSVGA3DDxvkQueryGetData get_data = NULL;
-    VMSVGA3DDxvkGetRenderTargetData get_render_target_data = NULL;
+    VMSVGA3DDxvkScreenReadbackPollResult staging_poll;
     VMSVGA3DDxvkSurfaceLockRect lock_rect = NULL;
     VMSVGA3DDxvkSurfaceUnlockRect unlock_rect = NULL;
     VMSVGA3DDxvkLockedRect locked = {0};
@@ -14947,30 +15057,37 @@ vmsvga3d_dxvk_d3d9_retired_screen_readback_poll(
         goto fail;
     }
 
-    if (wait) {
-        do {
+    if (!slot->d3d9_staging_submitted) {
+        if (wait) {
+            do {
+                result = get_data(slot->query, &query_data, sizeof(query_data),
+                                  VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
+                if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
+                    g_thread_yield();
+                }
+            } while (result == VMSVGA3D_DXVK_D3D_S_FALSE);
+        } else {
             result = get_data(slot->query, &query_data, sizeof(query_data),
                               VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
             if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
-                g_thread_yield();
+                return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
             }
-        } while (result == VMSVGA3D_DXVK_D3D_S_FALSE);
-    } else {
-        result = get_data(slot->query, &query_data, sizeof(query_data),
-                          VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
-        if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
-            return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
+        }
+        if (!vmsvga3d_dxvk_succeeded(result)) {
+            goto fail;
         }
     }
-    if (!vmsvga3d_dxvk_succeeded(result)) {
+
+    staging_poll = vmsvga3d_dxvk_d3d9_screen_readback_staging_poll(
+        dxvk, slot, wait);
+    if (staging_poll == VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING) {
+        return staging_poll;
+    }
+    if (staging_poll != VMSVGA3D_DXVK_SCREEN_READBACK_POLL_READY) {
         goto fail;
     }
 
     if (!vmsvga3d_dxvk_get_method(
-            dxvk->d3d9_device,
-            VMSVGA3D_DXVK_IDIRECT3DDEVICE9_GET_RENDER_TARGET_DATA,
-            &get_render_target_data, sizeof(get_render_target_data)) ||
-        !vmsvga3d_dxvk_get_method(
             slot->staging, VMSVGA3D_DXVK_IDIRECT3DSURFACE9_LOCK_RECT,
             &lock_rect, sizeof(lock_rect)) ||
         !vmsvga3d_dxvk_get_method(
@@ -14979,11 +15096,6 @@ vmsvga3d_dxvk_d3d9_retired_screen_readback_poll(
         goto fail;
     }
 
-    result = get_render_target_data(dxvk->d3d9_device, slot->render_target,
-                                    slot->staging);
-    if (!vmsvga3d_dxvk_succeeded(result)) {
-        goto fail;
-    }
     result = lock_rect(slot->staging, &locked, NULL,
                        VMSVGA3D_DXVK_D3DLOCK_READONLY);
     if (!vmsvga3d_dxvk_succeeded(result) || locked.bits == NULL ||

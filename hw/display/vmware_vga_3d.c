@@ -10555,10 +10555,7 @@ static bool vmsvga3d_video_mob_transfer_live(
     for (i = 0; i <= subresource; i++) {
         VMSVGA3DSurfaceImage *mip = &surface->mips[i];
         uint32_t pitch = mip->pitch;
-        if ((flags & (uint32_t)SVGA3D_SURFACE_MOB_PITCH) != 0 &&
-            i % levels == 0 && le32_to_cpu(entry->mobPitch) != 0) {
-            pitch = le32_to_cpu(entry->mobPitch);
-        }
+        /* Planar MOB serialization ignores mobPitch. */
         if ((flags & (uint32_t)SVGA3D_SURFACE_ALIGN16) != 0) {
             offset = QEMU_ALIGN_UP(offset, UINT64_C(16));
         }

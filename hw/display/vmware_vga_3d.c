@@ -10579,7 +10579,7 @@ static bool vmsvga3d_video_mob_transfer_live(
         vmsvga3d_clip_surface_box(requested_box, &image->size, &box);
     }
     if (box.w == 0 || box.h == 0 || box.d == 0) {
-        return true;
+        return false;
     }
     if (box.z != 0 || box.d != 1) {
         return false;

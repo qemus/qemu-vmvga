@@ -12373,16 +12373,16 @@ static bool vmsvga3d_gb_readback_image_partial_live(
         return false;
     }
 
+    /* VirtualBox skips guest-backed transfers for multisampled surfaces. */
+    if (surface->multisample_count > 1) {
+        return true;
+    }
+
     if (vmsvga3d_video_planar(surface->format) &&
         !vmsvga3d_dxvk_d3d11_surface_resident(surface->dxvk_surface)) {
         return vmsvga3d_video_mob_transfer_live(
             s, &entry, mob, surface, image, subresource, requested_box,
             true, invert_box);
-    }
-
-    /* VirtualBox skips guest-backed transfers for multisampled surfaces. */
-    if (surface->multisample_count > 1) {
-        return true;
     }
 
     if (image->data == NULL || image->pitch == 0 || image->plane_size == 0 ||

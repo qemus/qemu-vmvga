@@ -4697,21 +4697,31 @@ VMSVGA3DD3D9AccelResult vmsvga3d_d3d9_runtime_clear(
     }
 
     d3d_flags = vmsvga3d_d3d9_clear_flags(effective_clear_flags);
-    if (d3d_flags == 0 ||
-        !vmsvga3d_dxvk_clear(
+    if (d3d_flags != 0 &&
+        vmsvga3d_dxvk_clear(
             s->dxvk, color_targets, color_levels, depth_stencil,
             depth_stencil_level, d3d_rects, rect_count, &plan->clear_scissor,
             d3d_flags, plan->color, plan->depth, plan->stencil)) {
-        if (skipped_multisample_shadow) {
-            g_free(d3d_rects);
-            return VMSVGA3D_D3D9_ACCEL_FAILED;
-        }
-        vmsvga3d_dxvk_sync_clear_targets_from_cpu(s, command->cid,
-                                                  command->clearFlag);
         g_free(d3d_rects);
         return VMSVGA3D_D3D9_ACCEL_COMPLETE;
     }
 
+    if (d3d_flags != 0) {
+        /* A native clear can fail after temporarily changing D3D9 targets,
+         * viewport or scissor state.  The DXVK-side target-cache invalidation
+         * alone does not make the draw path replay guest state, so treat the
+         * whole native context as suspect and force the next draw through the
+         * pristine-state reset plus full legacy replay. */
+        context->legacy_full_replay = true;
+        state->active_legacy_context_id = SVGA3D_INVALID_ID;
+    }
+
+    if (skipped_multisample_shadow) {
+        g_free(d3d_rects);
+        return VMSVGA3D_D3D9_ACCEL_FAILED;
+    }
+    vmsvga3d_dxvk_sync_clear_targets_from_cpu(s, command->cid,
+                                              command->clearFlag);
     g_free(d3d_rects);
     return VMSVGA3D_D3D9_ACCEL_COMPLETE;
 }

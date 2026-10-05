@@ -13274,7 +13274,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
             }
             result = candidate_get_data(
                 candidate->query, &query_data, sizeof(query_data),
-                VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH);
+                VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
             if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
                 continue;
             }
@@ -13388,9 +13388,10 @@ vmsvga3d_dxvk_d3d9_screen_readback_submit(
         goto fail;
     }
 
-    /* D3D9 has no D3D11-style explicit nonblocking Flush.  Kick submission
-     * exactly once when the slot is queued, then keep ordinary readiness polls
-     * NOFLUSH.  S_FALSE is the expected nonblocking result here. */
+    /* D3D9 may defer this initial flush while earlier submissions are still
+     * in flight.  Readiness polls must keep requesting a flush so a yielded
+     * ScreenTarget switch does not depend on later guest rendering for
+     * progress.  Each GetData call remains nonblocking; S_FALSE is expected. */
     result = get_data(slot->query, &query_data, sizeof(query_data),
                       VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
     if (result != VMSVGA3D_DXVK_D3D_S_FALSE &&
@@ -13530,7 +13531,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_poll(
 
             result = candidate_get_data(
                 candidate->query, &query_data, sizeof(query_data),
-                VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH);
+                VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
             if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
                 continue;
             }
@@ -13721,7 +13722,7 @@ vmsvga3d_dxvk_d3d9_screen_readback_discard_completed(
      * event completes all cached ring resources can be released without a
      * synchronous GetRenderTargetData. */
     result = get_data(newest->query, &query_data, sizeof(query_data),
-                      VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH);
+                      VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
     if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
         return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
     }
@@ -14956,7 +14957,7 @@ vmsvga3d_dxvk_d3d9_retired_screen_readback_poll(
         } while (result == VMSVGA3D_DXVK_D3D_S_FALSE);
     } else {
         result = get_data(slot->query, &query_data, sizeof(query_data),
-                          VMSVGA3D_DXVK_D3DGETDATA_NOFLUSH);
+                          VMSVGA3D_DXVK_D3DGETDATA_FLUSH);
         if (result == VMSVGA3D_DXVK_D3D_S_FALSE) {
             return VMSVGA3D_DXVK_SCREEN_READBACK_POLL_PENDING;
         }

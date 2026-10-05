@@ -10226,9 +10226,6 @@ bool vmsvga3d_d3d10_deferred_so_realize_before_sid(
     bool conflicts = false;
     uint32_t i;
 
-    if (displaced_out != NULL) {
-        *displaced_out = false;
-    }
     if (s == NULL) {
         return false;
     }

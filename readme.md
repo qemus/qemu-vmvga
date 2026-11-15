@@ -76,18 +76,18 @@ sudo reboot
 
 If KVM is built directly into the kernel rather than loaded as a module, add `kvm.enable_vmware_backdoor=1` to the kernel command line instead.
 
-## Recommended drivers 🖥️
+## Recommended drivers 💿
 
 The following VMware SVGA driver versions are recommended when using VMVGA, as they were the only ones used during development and testing:
 
-| Windows version | Recommended driver |
-|---|---|
-| Windows 10 / 11 / Server 2016-2025 | 9.17.11 |
-| Windows 7 / 8 / Server 2008-2012 | 8.17.03 |
-| Windows Vista / Server 2008 | 8.16.01 |
-| Windows XP / Server 2003 | 12.01.08 |
-| Windows 2000 | 11.09.01 |
-| Windows 95 / 98 / ME | 10.7.0 |
+| Windows version | Recommended driver | VMware Tools |
+|---|---|---|
+| Windows 10 / 11 / Server 2016-2025 | 9.17.11 | [13.1.5](https://packages.vmware.com/tools/releases/13.1.5/windows/VMware-tools-windows-13.1.5-25544008.iso) |
+| Windows 7 / 8 / Server 2008-2012 | 8.17.03 | [11.3.5](https://packages.vmware.com/tools/releases/11.3.5/windows/VMware-tools-windows-11.3.5-18557794.iso) |
+| Windows Vista / Server 2008 | 8.16.01 | [10.3.10](https://packages.vmware.com/tools/releases/10.3.10/windows/VMware-tools-windows-10.3.10-12406962.iso) |
+| Windows XP / Server 2003 | 12.01.08 | [10.0.12](https://packages.vmware.com/tools/frozen/windows/winPreVista.iso) |
+| Windows 2000 | 11.09.01 | [10.0.12](https://packages.vmware.com/tools/frozen/windows/winPreVista.iso) |
+| Windows 95 / 98 / ME | 10.7.0 | [7.7.0](https://packages.vmware.com/tools/frozen/windows/winPre2k.iso) |
 
 ## Acknowledgements 🙏
 

@@ -76,6 +76,19 @@ sudo reboot
 
 If KVM is built directly into the kernel rather than loaded as a module, add `kvm.enable_vmware_backdoor=1` to the kernel command line instead.
 
+## Recommended drivers 🖥️
+
+The following VMware SVGA driver versions are recommended when using VMVGA, as they were the only ones used during development and testing:
+
+| Windows version | Recommended driver |
+|---|---|
+| Windows 10 / 11 / Server 2016-2025 | 9.17.11 |
+| Windows 7 / 8 / Server 2008-2012 | 8.17.03 |
+| Windows Vista / Server 2008 | 8.16.01 |
+| Windows XP / Server 2003 | 12.01.08 |
+| Windows 2000 | 11.09.01 |
+| Windows 95 / 98 / ME | 10.7.0 |
+
 ## Acknowledgements 🙏
 
 The implementation is derived from QEMU's VMware SVGA II device originally written by Andrzej Zaborowski and includes later work by [Christopher Eric Lentocha](https://github.com/CE1CECL).
